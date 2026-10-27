@@ -133,25 +133,54 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 | 项目 | Workstation Edition | Max-Q Workstation | Server Edition |
 |---|---|---|---|
 | 架构 | Blackwell (GB202) | Blackwell (GB202) | Blackwell (GB202) |
+| GPC / TPC / SM | 12 / 94 / 188 | 12 / 94 / 188 | 12 / 94 / 188 |
 | CUDA 核心 | 24,064 | 24,064 | 24,064 |
 | Tensor 核心 | 752 (5th Gen) | 752 (5th Gen) | 752 (5th Gen) |
 | RT 核心 | 188 (4th Gen) | 188 (4th Gen) | 188 (4th Gen) |
+| 晶体管 / 面积 / 工艺 | 92.2B / 750mm² / TSMC 4N | 92.2B / 750mm² / TSMC 4N | 92.2B / 750mm² / TSMC 4N |
+| **Boost 频率** | **2617 MHz** | **2280 MHz** | — |
 | 显存 | 96GB GDDR7 ECC | 96GB GDDR7 ECC | 96GB GDDR7 ECC |
 | 位宽 | 512-bit | 512-bit | 512-bit |
+| 显存速率 | 28 Gbps | 28 Gbps | — |
 | **显存带宽** | **1792 GB/s** | **1792 GB/s** | **1597 GB/s** |
-| FP32 | 125 TFLOPS | 110 TFLOPS | 120 TFLOPS |
-| RT Core | 380 TFLOPS | 333 TFLOPS | 355 TFLOPS |
-| FP4 Tensor | 4000 TOPS（稀疏） | 3511 TOPS（稀疏） | 4 PFLOPS |
-| FP8 Tensor | — | — | 2 PFLOPS |
-| TF32 Tensor | — | — | 234 TFLOPS |
+| **L2 缓存** | **128 MB** | **128 MB** | — |
+| L1 / 共享内存 | 24,064 KB | 24,064 KB | — |
+| 寄存器文件 | 48,128 KB | 48,128 KB | — |
+| FP32（非张量） | **126.0 TFLOPS** | **109.7 TFLOPS** | 120 TFLOPS |
+| FP16/BF16（非张量） | 126.0 TFLOPS | 109.7 TFLOPS | — |
+| INT32（非张量） | 126.0 TOPS | 109.7 TOPS | — |
+| RT Core | **381.8 TFLOPS** | **332.6 TFLOPS** | 355 TFLOPS |
+| FP4 Tensor | **2015.2 / 4030.4**（稀疏） | **1755.7 / 3511.4**（稀疏） | 4 PFLOPS（稀疏） |
+| FP8 Tensor | **1007.6 / 2015.2** | **877.9 / 1755.7** | 2 PFLOPS |
+| FP16/BF16 Tensor | **503.8 / 1007.6** | **438.9 / 877.9** | 1 PFLOPS |
+| TF32 Tensor | **251.9 / 503.8** | **219.5 / 438.9** | 234 TFLOPS |
+| INT8 Tensor | **1007.6 / 2015.2** | **877.9 / 1755.7** | — |
+| ROP / 纹理单元 | 192 / 752 | 192 / 752 | — |
+| 像素/纹理填充率 | 502.5 Gpix/s / 1968.0 Gtex/s | 437.8 Gpix/s / 1714.6 Gtex/s | — |
 | **TDP** | **600W（可配置）** | **300W** | **600W（可配置）** |
-| 形态 | 双槽 5.4×12.0" | 双槽 4.4×10.5" | 单槽 FHXL（液冷）/ 双槽 FHFL（空冷） |
-| 散热 | 双流道主动 | 主动 | 被动（依赖机箱风道） |
-| 显示输出 | 4× DP 2.1 | 4× DP 2.1 | **无** |
+| 供电接口 | 1× PCIe CEM5 16pin | 1× PCIe CEM5 16pin | 1× PCIe CEM5 16pin |
+| 形态 | 双槽 5.4×12.0" | 双槽 266.7×111.15×37mm | 双槽 266.70×111.15mm |
+| 散热 | 双流道主动 | 主动 | **被动（依赖机箱风道）** |
+| 显示输出 | 4× DP 2.1b | 4× DP 2.1b | **无** |
+| 视频引擎 | 4× NVENC 9th / 4× NVDEC 6th | 4× NVENC 9th / 4× NVDEC 6th | 4× NVENC 9th / 4× NVDEC 6th |
 | 多卡 | 2 卡 | **4 卡（384GB）** | **8 卡（800GB / 13TB/s）** |
-| MIG | 支持（4 实例） | 支持（4 实例） | 支持（4×24GB） |
+| MIG | 支持（4 实例） | 支持（4 实例） | 支持（4×24GB / 2×48GB / 1×96GB） |
+| **ECC 出厂状态** | — | **默认关闭** | — |
+| **官方质保** | — | **3 年** | — |
+| **推荐电源** | — | **≥700W** | — |
+| **认证系统要求** | — | — | **仅 NVIDIA 认证系统** |
+| **出厂附件** | — | 保修书/快速指南 | **无** |
 
 来源：[src-nvidia-ws-edition][src-nvidia-maxq][src-nvidia-server][e-press-3skus][c-three-skus][c-mem-96gb][c-bw-ws-1792][c-tdp][c-fp32-tflops][c-ai-tops][c-rt-tflops][c-mig4][c-maxq-4gpu][c-server-8gpu]
+
+> **本轮用官方一手文档补齐了此表的 20 余项空缺**（粗体为新增或修正项），来源为 [NVIDIA 架构白皮书 Table 4](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/quadro-product-literature/pdf/NVIDIA-RTX-Blackwell-PRO-GPU-Architecture-v1_1.pdf) [src-nv-arch-wp] 与两份 ELSA 官方数据表 [src-elsa-srv][src-elsa-maxq]。
+>
+> **几个值得单独指出的官方数字**：
+> - **L2 缓存 128MB** [c-l2-cache]：是 RTX 6000 Ada（96MB）的 1.33 倍、RTX A6000（6MB）的 **21 倍**。本报告此前完全缺失此项。
+> - **WS 的 Boost 频率是 2617 MHz** [c-ws-boost-official]，此前只有 Max-Q 的 2280 MHz 记录。
+> - **两款张量性能差距恰好 15%** [c-tensor-spread]（非稀疏），与频率比 2617/2280 = 1.148 吻合——**再次印证同硅不同固件**。
+> - **视频引擎 4× NVENC 9th + 4× NVDEC 6th** [c-video-engines]，比 RTX 6000 Ada 的 3+3 多一路。
+> - **MIG 配置组合** [c-mig-combos]：4×24GB / 2×48GB / 1×96GB——**48GB 只能切两个**。
 
 **注意**：Server 版标称带宽 1597 GB/s 低于另两者的 1792 GB/s——这不是笔误，与其 P0 pstate 和 12,481 MHz 显存时钟一致 [c-vf-skup]。
 
@@ -2388,7 +2417,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **652 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **681 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2488,3 +2517,6 @@ python scripts/validate_research.py research/rtx-pro-6000
 105. [NVIDIA：MIG User Guide —— Getting Started with MIG（RTX PRO Blackwell 附加前提：最低 vBIOS 按 SKU 分列）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/getting-started-with-mig.html)（更新 2026-10-13） — [src-nv-mig-start]
 106. [llama.cpp Discussion #24622：One million tokens prompt club（百万上下文实测与 32 位溢出修复）](https://github.com/ggml-org/llama.cpp/discussions/24622)（至 2026-10-27 仍活跃） — [src-llama-1m]
 107. [Level1Techs：Question regarding MIG support on RTX Pro 6000（40 帖完整时间线，含官方文档笔误确认）](https://forum.level1techs.com/t/question-regarding-mig-support-on-rtx-pro-6000/232627)（2025-06-27 起） — [src-l1t-mig]
+108. [NVIDIA：RTX PRO Blackwell GPU Architecture v1.1（49 页，附录 A 为完整规格表）](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/quadro-product-literature/pdf/NVIDIA-RTX-Blackwell-PRO-GPU-Architecture-v1_1.pdf) — [src-nv-arch-wp]
+109. [ELSA Japan：NVIDIA RTX PRO 6000 Blackwell Server Edition 数据表（2026-04-08）](https://www.elsa-jp.co.jp/wp-content/uploads/2026/04/NVIDIA_RTX_PRO_6000_Server_Edition_Datasheet.pdf) — [src-elsa-srv]
+110. [ELSA Japan：NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition 数据表](https://www.elsa-jp.co.jp/wp-content/uploads/2025/03/Datasheet_NVIDIA_RTX_PRO_6000_Blackwell_Max-Q_Workstation_Edition.pdf) — [src-elsa-maxq]
