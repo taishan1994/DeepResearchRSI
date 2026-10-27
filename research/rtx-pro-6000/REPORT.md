@@ -924,6 +924,32 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 **运营建议**：低并发/单用户场景可放心把功耗墙降到 300W，省电且几乎不掉性能；高并发服务必须保功耗。
 
+#### 6.4.1 学术论文独立验证了 400–600W 的"无差异区"
+
+上面的 500W vs 600W 结论此前只有社区实测支持。现在有了**学术级佐证** [c-arx-cap-academic]。
+
+该研究在 **2× RTX PRO 6000** 上，用 **NVML（GPU）+ Intel RAPL（CPU/DRAM）+ IPMI（整机）三源**同步测量 [e-arx-e-method]，结论是：
+
+> **在内存带宽受限的推理负载下，每卡功耗封顶在 400–600W 之间吞吐保持不变，直到 300W 才急剧下降** [e-arx-e-cap]。
+
+**这与 §6.4 的社区数据完全吻合，且给出了更精确的边界**：不是"500 和 600 差不多"，而是**整个 400–600W 区间都无差异**，断崖点在 **300W**。
+
+**同一篇论文还纠正了一个我此前隐含接受的假设** [c-arx-gpu-only-miss]：
+
+> **只看 GPU 遥测会漏掉整机能耗的 41–45%**。
+
+也就是说，用 `nvidia-smi` 的功耗读数去估算电费或 PUE，**会低估近一半**。必须同时算 CPU/DRAM 与整机电源输入。
+
+**三个对部署决策有直接影响的能耗发现**：
+
+| 发现 | 数据 | 含义 |
+|---|---|---|
+| **智能体的能耗代价** [c-arx-agent-63x] | 顺序智能体工作负载的**每输出 token 系统能耗是饱和服务的 63 倍** | 无批处理 + 跨轮上下文增长 + 工具空闲期三重叠加 |
+| **批处理的能效价值** [c-arx-batch-32x] | 1→16 req/s，系统级能效提升 **3.2 倍**（GPU 功耗趋平台，吞吐继续涨） | 批处理不只是提吞吐，也提能效 |
+| **思考模式的真实成本** [c-arx-think] | 每题多生成 **21–75%** token，但**每 token 能耗差异 <1%** | 成本来自输出量，不来自每 token 效率下降 |
+
+> **可操作的推论** [e-arx-e-advice]：智能体部署的能耗优化重点应是**上下文管理**（摘要、选择性检索），而不是换硬件或调功耗墙。
+
 ### 6.5 散热陷阱
 
 - Server 版在风冷工作站塔式机箱内，**300W 模式不超 83°C，600W 模式可达 90°C** [c-thermal-hostkey]
@@ -1659,9 +1685,21 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 - 小块分配-拷贝操作慢约 **44 倍** [c-cc-alloc]
 - KV-cache 恢复代价 **+131%**，模型加载慢 **34 倍** [c-cc-kv-load]
 
-**好消息是开销可回收** [c-cc-recover]：调度标志回收 57%，工作线程 drain 在高并发下最多回收 **92%**。工程手段包括 FlashInfer 的 CC-safe 自动调优计时、SGLang 的异步 D2H worker、分片 CUDA graph [c-cc-mitigation]。
+**机制现在可以精确定述** [c-arx-cc-mech2]（论文原文）：
+
+> GPU-CC 把主机/设备搬运变成了**串行化、高启动成本的通道**——同一上下文内**安全拷贝无法获得 CUDA 流并发**、**异步传输在运行时边界阻塞**、**小规模跨界要付固定开销**。
+
+这**违背了现代推理运行时的核心假设**：DMA 应当是**廉价、并发、异步**的。vLLM 的整个调度设计建立在这个假设之上，所以机密模式下损失最大的不是算力密集的 GEMM，而是频繁的小块搬运 [e-arx-cc-44x]。
+
+**同一研究还给出了两个额外数据点**：KV 恢复惩罚 **+131%**、模型加载慢 **34 倍** [e-arx-cc-load]。
+
+**好消息是开销可回收** [c-cc-recover]：调度标志回收 57%，工作线程 drain 在高并发下最多回收 **92%** [e-arx-cc-44x]。工程手段包括 FlashInfer 的 CC-safe 自动调优计时、SGLang 的异步 D2H worker、分片 CUDA graph [c-cc-mitigation]。
+
+> **这个 57%/92% 的可回收比例改变了结论的性质**：机密计算的性能损失**不是固定税**，而是**尚未被优化的工程债**。随运行时成熟，它会更接近厂商宣称的数字。
 
 **选型提醒**：多卡机密域（NVLink 加密，最多 8 卡）仅 HGX B200/B300 支持；RTX PRO 6000 是**单卡 CC** [c-cc-scope]。需要多卡机密训练/推理的场景，它不是答案。
+
+**但 Blackwell 已改变了机密租户的边界** [c-arx-cc-tenant]：研究已在 **B300** 上验证了**机密多卡 NVSwitch 租户**——CVM 内 NVLink P2P 达 **510 GB/s**，并支持并发隔离租户 [e-arx-cc-nvlink]。**生产级机密 AI 平台仍缺 fabric 认证环节**，这是最后的缺口。
 
 ---
 
@@ -1993,6 +2031,8 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q40 | 塔式整机能否装 600W 版？ | ⚠️ | §4.9.1 Dell 7875 仅支持双 300W Max-Q |
 | q41 | 多卡集群的官方配比规范？ | ✅ | §4.10 每卡 7 核/128GB、Gen5 x16、400GB/s |
 | q42 | 多卡推理到底有没有收益？ | ⚠️ | §4.10.1 官方说无、实测 3.36×；每卡效率给出裁决依据 |
+| q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
+| q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2003,12 +2043,14 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q40 | 塔式整机能否装 600W 版？ | ⚠️ | §4.9.1 Dell 7875 仅支持双 300W Max-Q |
 | q41 | 多卡集群的官方配比规范？ | ✅ | §4.10 每卡 7 核/128GB、Gen5 x16、400GB/s |
 | q42 | 多卡推理到底有没有收益？ | ⚠️ | §4.10.1 官方说无、实测 3.36×；每卡效率给出裁决依据 |
+| q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
+| q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
 
-**完成度：41/42 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：43/44 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **541 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **554 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2094,3 +2136,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 91. [NVIDIA：RTX PRO AI Factory——网络物理拓扑（含纯推理不需要计算网络的论断）](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/networking-physical-topologies.html)（2026-05-18） — [src-nv-ra-topo]
 92. [NVIDIA：RTX PRO AI Factory——附录 BOM（交换机/线缆/收发器）](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/appendix.html)（2026-05-18） — [src-nv-ra-app]
 93. [NVIDIA：RTX PRO AI Factory——软件栈](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/software.html)（2026-05-18） — [src-nv-ra-sw]
+94. [arXiv 2609.29707：能耗去哪了——Blackwell GPU 上 LLM 智能体推理剖析](https://arxiv.org/abs/2609.29707)（2026-08-31） — [src-arx-energy]
+95. [arXiv 2606.23969：串行化之桥——Blackwell 机密计算下的 LLM 服务性能](https://arxiv.org/abs/2606.23969)（2026-06-22，v2 2026-07-09） — [src-arx-cc]
