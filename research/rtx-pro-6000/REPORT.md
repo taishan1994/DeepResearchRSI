@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：63 ｜ **证据数**：387 ｜ **主张数**：253（高置信 177，争议 1）
+> **来源数**：66 ｜ **证据数**：404 ｜ **主张数**：264（高置信 185，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -150,6 +150,12 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 来源：[src-nvidia-ws-edition][src-nvidia-maxq][src-nvidia-server][e-press-3skus][c-three-skus][c-mem-96gb][c-bw-ws-1792][c-tdp][c-fp32-tflops][c-ai-tops][c-rt-tflops][c-mig4][c-maxq-4gpu][c-server-8gpu]
 
 **注意**：Server 版标称带宽 1597 GB/s 低于另两者的 1792 GB/s——这不是笔误，与其 P0 pstate 和 12,481 MHz 显存时钟一致 [c-vf-skup]。
+
+**三点关于 TDP 与散热的补充**（本轮新增）：
+
+1. **Server 版 TDP 不是固定 600W，而是可在 400W–600W 区间配置** [c-gdep-tdp]。这解释了为什么不同来源对 Server 版功耗给出不同数字——它们测的是不同配置点。
+2. **三者的散热形态完全不同** [c-gdep-cooling]：Max-Q 单风扇鼓风机、WS 双风扇双流道、**Server 无风扇被动散热**。这不是外观差异，是性能约束。
+3. **Server 版被动散热意味着它强依赖机箱风道** [c-gdep-passive]。日本 SI 明确警告"必须依赖服务器机箱的强风道"；16 卡实战 wiki 则实测到塔式机箱把 Server 卡钳制在 85°C 并无法超过 500W。**两个独立来源指向同一物理约束**——这解释了为何本报告多处以"Server 版在塔式机箱中数据受限"作为前提。
 
 ### 3.2 与 RTX 5090 的硬件血缘
 
@@ -730,11 +736,29 @@ Blender 的 Server 版成绩，两个来源相差 **69%**：
 
 **本报告不对该冲突做裁决** [c-blender-conflict]。可能原因：Blender 版本不同、测试场景子集不同、Server 卡在测试机箱内的散热条件不同（被动散热卡对风道极敏感，见 §6.5）。
 
+#### 7.3.1 本轮补充到的冲突元数据（仍不足以裁决）
+
+虽然不能裁决，但可以**把可核对的差异摆出来** [c-blender-conflict-meta]：
+
+| 维度 | Blender Open Data | Drop & Render |
+|---|---|---|
+| 数据性质 | 社区提交聚合 | 农场方自测 |
+| **Blender 版本** | **5.1.1（明确）** [c-blender-version] | **未公布** |
+| 更新日期 | 未标注 | 2026-10-26 [e-dnr-meta] |
+| WS 版 | 18,571 | 16,272 |
+| **Server 版** | **15,821** | **9,382** |
+| RTX 5090 | 16,311 | — |
+
+**关键观察**：两套数据的 **WS 基数本身相差 14%**（18,571 vs 16,272），而 **Server 版相差 69%**。也就是说，差距不是均匀的——Server 版的差异远大于整体口径差异。
+
+**一个未经证实的假设** [c-blender-hypothesis]：Server 版为**无风扇被动散热** [c-gdep-cooling]，若在非服务器机箱内测试会显著降频。16 卡实战 wiki 恰好观察到塔式机箱把 Server 卡钳制在 85°C [c-gdep-passive]。**这可能解释 Drop & Render 的低分，但本报告没有直接证据，不作为结论**。
+
 **采购含义**：若要以 Blender 为主要渲染器，**必须要求供应商在你的场景上实测**，不能引用任一第三方分数。
 
 ### 7.4 视频与专业特性
 
-- **4× 第 9 代 NVENC + 4× 第 6 代 NVDEC**，支持 4:2:2 H.264/HEVC 编解码 [c-nvenc]
+- **4× 第 9 代 NVENC + 6× 第 6 代 NVDEC** [c-nvenc][c-nvdec]——**解码器数量多于编码器**，适合"多路解码 + 少量编码"的转码/分析流水线
+- 支持 4:2:2 H.264/HEVC 编解码
 - 4× DisplayPort 2.1（8K@240Hz / 16K@60Hz）
 - ISV 认证驱动（DCC/CAD 应用）
 
@@ -1430,12 +1454,14 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q26 | RTX 6000D 究竟被砍了什么？ | ✅ | §3.3.1 Tensor Core 实测保留率 |
 | q27 | CAE/CFD 仿真表现如何？ | ✅ | §7.6 Fluent 实测与 NVLink 反例 |
 | q28 | LoRA 微调是否值得？ | ✅ | §8.8 DDP 扩展与四卡反超 |
+| q29 | Blender 冲突能否裁决？ | ⚠️ | §7.3.1 补齐版本元数据，仍按 C3 并列 |
+| q30 | Server 版 TDP 与散热约束？ | ✅ | §3.1 注释（400–600W 可配 + 被动散热） |
 
-**完成度：28/28 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：29/30 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **387 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **404 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1443,7 +1469,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=63, evidence=387, claims=253, claims_high=177, claims_disputed=1`
+当前校验结果：`sources=66, evidence=404, claims=264, claims_high=185, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1481,3 +1507,8 @@ python scripts/validate_research.py research/rtx-pro-6000
 61. [Design & Reuse：Synopsys 部署 RTX PRO Server 于仿真负载](https://www.design-reuse.com/news/202529289-synopsys-deploys-ai-optimized-nvidia-rtx-pro-servers-for-advanced-simulation-workloads) — [src-designreuse-synopsys]
 62. [Exxact：RTX PRO Blackwell LoRA 微调基准](https://www.exxactcorp.com/blog/benchmark/lora-fine-tuning-benchmark-on-nvidia-gpus) — [src-exxact-lora]
 63. [Spheron：RTX PRO 6000 与 H100 微调及云租赁成本对照](https://www.spheron.network/blog/h100-vs-rtx-pro-6000-blackwell-fine-tuning-benchmark-2026/) — [src-spheron-h100]
+### 版本元数据与散热约束（第四轮补充）
+
+64. [GDEP：RTX PRO 6000 Blackwell 三 SKU 对比报告（日文）](https://www.gdep.co.jp/information/news/nvidia-rtx-pro-6000-blackwell_benchmark_report/) — [src-gdep-report]
+65. [Blender Artists：RTX PRO 6000 性能讨论（含 Open Data 5.1.1 版本信息）](https://blenderartists.org/t/rtx-pro-6000-performance/1648521/2)（2026-07-24） — [src-blenderartists]
+66. [Drop & Render：Server Edition 渲染基准（更新于 2026-10-26）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition) — [src-dnr-server]
