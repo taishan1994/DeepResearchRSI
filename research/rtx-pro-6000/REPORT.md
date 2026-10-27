@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：235 ｜ **证据数**：1856 ｜ **主张数**：1330（高置信 1015，争议 6）
+> **来源数**：238 ｜ **证据数**：1871 ｜ **主张数**：1344（高置信 1028，争议 6）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -7367,6 +7367,224 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 | **训练（尤其长序列）** | ⚠️ **0.79–0.91×（更慢）** | ❌ **不要换** |
 | **短任务/一次性生成** | ⚠️ **冷启动慢 2 倍** | ❌ **净亏** |
 
+### 7.11 机器人仿真：96 GB 被吃到只剩 4.5%
+
+**这是本报告此前完全空白的垂直领域（「Isaac」在正文中出现 0 次）。**
+**而它恰恰是 §7.10.1 末尾那条「数据中心卡没有 RT 核心、渲染必须留在 RTX PRO 6000」的服务对象** [c-omni-nv-positioning]。
+
+#### ⭐⭐ 一、一个可下载的官方基准数据集
+
+**数据来源** [c-omni-scale]：NVIDIA 的 omniperf 仓库公开了 **1,216 个基准结果**、**227 次 CI 运行**。
+
+| 项 | 值 |
+|---|---|
+| GPU | **RTX PRO 6000 Blackwell SE** |
+| 报告显存 | **94.97 GB** |
+| CPU | Intel Xeon Gold 5512U（**56 核**） |
+| RAM | **251.36 GB** |
+| 驱动 | **580.126.09** |
+| PyTorch / CUDA | **2.10.0+cu128 / 12.8** |
+| Isaac Lab / Newton | **4.5.20 / 1.0.0** |
+
+> ⭐ **这份数据集的独特价值不在于峰值，而在于同一配置被重复运行多次——**
+> **因此可以直接测出可重复性，而这是本报告其他章节一直缺的那类数据。**
+
+#### ⚠️⚠️ 二、96 GB 被吃到只剩 4.32 GB
+
+**本报告关于「96 GB 是必要而非奢侈」的最强证据** [c-omni-mem-peak]：
+
+| 项 | 值 |
+|---|---|
+| 峰值任务 | **Isaac-Dexsuite-Kuka-Allegro-Lift-v0** |
+| 并行环境数 | **16,384** |
+| 渲染配置 | `newton,newton_renderer,rgb64` |
+| ⚠️ **显存占用** | ⚠️ **90.65 GB** |
+| 总量 | 94.97 GB |
+| ⚠️ **剩余** | ⚠️⚠️ **4.32 GB（4.5%）** |
+
+> ⭐ **推论：若这张卡只有 32 GB（如 RTX 5090），**
+> **同样配置必须把并行环境数降到约六分之一，即 2048 左右。**
+
+#### ⭐ 三、训练能开的环境数只有评测的一半
+
+**环境数只取六档** [c-omni-env-ladder]：
+
+| 工作流 | 最高环境数 |
+|---|---|
+| **纯评测**（`benchmark_non_rl`） | ⭐ **32,768** |
+| ⚠️ **两种 RL 训练**（`rlgames_train`、`rsl_rl_train`） | ⚠️ **16,384** |
+
+> ⭐ **这是本节最实用的容量规划结论：训练的上限是评测上限的一半。**
+
+#### ⚠️ 四、超过一半的基准喂不满这张卡
+
+**GPU 利用率分布** [c-omni-util-low]：
+
+| 分位 | 利用率 |
+|---|---:|
+| p25 | ⚠️ **12.77%** |
+| ⚠️ **中位数** | ⚠️ **34.04%** |
+| p75 | 72.20% |
+| p90 | 91.00% |
+| 最高 | 99.60% |
+
+> ⚠️ **超过一半的机器人仿真基准没能把这张卡喂到 35% 以上。**
+>
+> ⭐ **瓶颈常在 CPU 侧（物理步进、场景图更新），而不在 GPU——**
+> **这意味着「买更快的 GPU」对这类负载的边际收益可能很低。**
+
+#### ⭐⭐ 五、换渲染后端 = 3.8 倍，换卡拿不到
+
+**同一物理（newton）、同一环境数（1024）、同一任务** [c-omni-renderer-gap]：
+
+| 渲染后端 | 吞吐 | 显存 |
+|---|---:|---:|
+| ⭐ **`newton_renderer` rgb** | ⭐ **约 17,923 FPS** | ✅ **1.16–1.46 GB** |
+| `ovrtx_renderer` rgb | 约 5,639 FPS | 3.65 GB |
+| `isaacsim_rtx_renderer` rgb | 约 4,695 FPS | 4.88 GB |
+
+> ⭐ **约 3.8 倍吞吐差、约 3.3 倍显存差，全部来自软件后端选择。**
+>
+> **这是本报告少见的「软件选项比硬件升级更划算」的量化证据。**
+
+#### ⚠️⚠️ 六、中位数 1.06，但 17% 的组相差 2–12 倍
+
+**本节最重要的一条，也是本报告第 3 次遇到同一类陷阱** [c-omni-variance-median-hides]：
+
+| 项 | 值 |
+|---|---|
+| 可重复组（≥3 次运行） | **218** |
+| ⭐ **中位极差比** | ⭐ **1.06×（看起来高度可重复）** |
+| ⚠️⚠️ **极差比 > 2 的组** | ⚠️⚠️ **37 组（17.0%）** |
+| ⚠️⚠️ **最差** | ⚠️⚠️ **12.37×** |
+
+**最差的那一组**：
+
+> `n=16384` 的 `newton,newton_renderer,rgb`，三次运行分别为
+> **136,453 / 528,200 / 1,688,406 FPS**。
+
+> ⚠️ **即「这个基准很稳定」这个结论对 83% 的组成立，对 17% 完全不成立。**
+>
+> ⭐ **这直接呼应 §7.3「一个被中位数掩盖的缺陷」——**
+> **同一个方法论错误在完全不同的数据上再次出现。**
+>
+> **也说明「重复运行三次」本身不足以保证结论稳健，必须看极差而非只看均值。**
+
+#### ⭐ 七、「利用率越高、FPS 越低」的反常关系
+
+**一个可定位的方差案例** [c-omni-variance-case]：
+
+| CI job | 吞吐 | GPU 利用率 |
+|---|---:|---:|
+| `281861474` | **37,437 FPS** | ⚠️ **46.4%** |
+| `281861486` | 17,923 FPS | 68.8% |
+| ⚠️ `281861490` | ⚠️ **5,932 FPS** | ⚠️⚠️ **94.2%** |
+
+> ⭐ **相差 6.3 倍，而利用率方向完全相反：利用率越高、FPS 越低。**
+
+> ⭐ **这个反常关系是本节最有信息量的一点：**
+> **它指向瓶颈不在 GPU 算力，而在 CPU 侧供给或同步开销——**
+> **GPU 在空转等待，所以利用率反而高。**
+
+> ⚠️ **与上一节互补：**
+> 低利用率意味着 GPU 在等 CPU 干活；
+> 高利用率但低 FPS 意味着 GPU 在等同步。
+
+#### ⭐ 八、启动成本却异常稳定
+
+**与本报告多处记录的「冷启动方差大」相反** [c-omni-startup-stable]：
+
+| 分位 | App Launch Time |
+|---|---:|
+| 中位 | **4.64 s** |
+| p90 | **4.72 s** |
+| 最高 | **4.98 s** |
+
+> ⭐ **与 §7.10.1 的 FA4 冷启动（2.79–5.70 s，随后端大幅变化）对比：**
+> **应用启动本身很稳定，波动来自内核 JIT 而非框架加载——**
+> **这进一步支持把「首次生成慢」归因于 CuTe 编译而非 Isaac Sim 本身。**
+
+#### ⚠️⚠️ 九、一个未解决的失败案例：24 FPS 与 0.15 FPS
+
+**这是本报告记录的最严重的「性能不达预期」案例** [c-isaac578-unresolved]：
+
+| 项 | 内容 |
+|---|---|
+| 硬件 | **双 RTX PRO 6000 Max-Q（各约 96 GB）** |
+| CPU / RAM | 2× Xeon Max 9480（224 逻辑核）/ **1 TiB** |
+| 驱动 / CUDA | **590.48.01 / 13.1** |
+| 极简场景 | ⚠️ **单立方体落地，仅约 24 FPS** |
+| ⚠️ 实际负载 | ⚠️⚠️ **约 0.15 FPS，帧时间超 1000 ms** |
+| 版本一致性 | **4.5.0 / 5.0.0 / 5.1.0 全部复现** |
+| 结局 | ⚠️ **关多卡「有改善但不大」；issue 被自动关闭，未解决** |
+
+> ⚠️ **0.15 FPS 意味着这台几十万元的机器在特定负载下不如笔记本。**
+>
+> ⭐ **且它发生在配置完全正确（驱动 590、CUDA 13.1、96 GB×2）的机器上——**
+> **即「配置对了」不保证「性能对了」。**
+
+#### ⚠️⚠️ 十、被 4060 笔记本反超一倍
+
+**同一 issue 里最刺眼的一处对照** [c-isaac578-laptop-beaten]：
+
+> **「一个简单粒子场景，在我的 4060 笔记本上大约跑 30 FPS，**
+> **而在这台工作站上低于 15 FPS。」**
+
+> ⚠️ **一张约 96 GB 的专业卡在一类负载上被一张消费级笔记本 GPU 反超一倍。**
+
+> ⭐ **这与 §7.8「游戏」一节形成呼应：**
+> **专业卡在小场景低负载下并不必然更快，**
+> **因为此时瓶颈在单线程 CPU 与驱动开销，而非 GPU 吞吐。**
+
+> ⚠️ **需要说明：该对照是用户自述、未附独立测量，故本节保留其原话而非转述为定论。**
+
+#### ⚠️ 十一、一个被提出但未证实的假设
+
+**用户自己的观察** [c-isaac578-xeon-unconfirmed]（`medium`）：
+
+> **「很多低 FPS 的案例似乎都涉及 Intel Xeon CPU。Xeon 平台可能是促成因素吗？」**
+
+> ⚠️ **该假设在本 issue 内既未被证实也未被否定。**
+
+> ⭐ **但它与第七节相互呼应：官方基准数据里同样是 Xeon Gold 5512U，**
+> **且出现「利用率越高、FPS 越低」的反常关系——**
+> **两条独立线索都指向 CPU 侧，但都不足以定论。**
+
+#### ⭐ 十二、四条可照抄的排查清单
+
+**维护者给出的方向** [c-isaac578-triage-list]：
+
+| # | 做法 |
+|---|---|
+| ① | 跑 `./isaac-sim.compatibility_check.sh` |
+| ② | **禁用多卡**（`multi_gpu=False`，或 `--/renderer/multiGpu/enabled=false --/physics/cudaDevice=0`） |
+| ③ | ⚠️ **把驱动降级到 580.x** |
+| ④ | **NUMA 绑定**：`numactl --cpunodebind=0 --membind=0` |
+
+> ⚠️ **注意第 ③ 条与 §10.4 的驱动讨论方向相反：**
+> **那里是「新驱动带来新特性」，这里是「新驱动带来性能回退」。**
+
+> ⭐ **第 ④ 条是本报告首次出现的排查项：**
+> **在多路 Xeon 工作站上，跨 NUMA 节点访问显存会显著拖慢仿真。**
+
+#### ⚠️ 十三、许可证的一条边界
+
+**「开源」不等于「可自由再分发」** [c-omni-license-caveat]：
+
+> **Isaac Sim 5.0 在 GitHub 上开放且完全可定制，**
+> **但「对底层 Omniverse Kit 的额外企业支持与商业再分发权需要 Omniverse Enterprise 许可」。**
+
+> ⭐ **这与 §12.9 关于 AI Enterprise 的讨论是同一类：**
+> **软件层的成本往往藏在「看起来免费」的地方。**
+
+#### ⭐ 十四、so what：三条判断
+
+| 问题 | 答案 |
+|---|---|
+| 96 GB 够用吗 | ⚠️ **RL 训练下会被吃到只剩 4.5%——够用，但不宽裕** |
+| 该升级硬件吗 | ⚠️ **先试渲染后端：3.8 倍来自软件** |
+| 基准跑一次能信吗 | ⚠️ **不能——17% 的配置极差超过 2 倍** |
+
 
 ## 8. 训练与微调：被误解的一侧
 
@@ -13263,6 +13481,12 @@ sudo nvidia-bug-report.sh
 
 1. [Nebius：RTX FA4 optimization and FA2 comparison — September 30, 2026](https://raw.githubusercontent.com/nebius/nebius-physical-ai/refs/heads/main/docs/workbench/fa4-rtx-optimization.md) —（2026-09-30）。⭐⭐⭐ 本报告唯一一组同机 FA2 vs FA4 完整对照，含 **108 次完整 SDXL 生成**、88 行逐算子计时与训练侧前反向数据。核心结论：「FA4 在 RTX PRO 6000 上可用，且能在合格的推理调用上胜过 FA2，但它不是通用的应用或训练加速。」⭐ 单算子短 cross-attention **1.76–2.08×**、causal **1.07–1.27×**，而完整 SDXL 仅 **0.4–0.8%**。⭐ 整模型三分辨率：1024² 2.0221→2.0053 s（1.0083×）、1536×1024 3.1432→3.1254 s（1.0057×）、1024×1536 3.1857→3.1727 s（1.0041×）——加速比随分辨率上升而**下降**。⚠️ 每代 4,200 次 attention 调用（140 层），文本编码器与 VAE 仍用原生 attention。⚠️⚠️ **冷启动是 FA4 的净亏项**：首次方形生成 FA2 2.79–3.04 s、默认 FA4 4.41–4.44 s、优化 FA4 5.67–5.70 s（慢约 2 倍）；首次横向生成因新形状还需额外 5.85–5.86 s。⭐⭐ 加速分布规律清晰：短 cross-attention（k=77）1.758–2.079×，而同长度 self-attention（k=q）仅 1.021–1.085×——**被加速的是短 KV cross-attention，不是长序列 self-attention**。⚠️⚠️ **训练侧方向相反**：短序列 s1024 上 FA4 略快（1.121×/1.091×），但长序列 s4096-kv4 **0.905×**、s4096-kv16 **0.792×**，即 FA2 快 1.11–1.26 倍；且新 helper「拒绝梯度」，推理优化无法迁移到训练。⭐ 质量：SSIM 0.9894–0.9937、latent rel-L2 0.0083–0.0150，同后端内像素完全一致（确定性）。⚠️⚠️ **不能挪用 B200 数字**：官方称 B200 上最多 1.3× cuDNN / 2.7× Triton，该文明确「那些对比既不是 RTX PRO 6000 的结果，也不是 FA2 对比」。ⓘ 240 个用例的调优搜索：141 通过、60 资源/布局被拒、**39 数值失败（16.3%）**——原文强调「仅做资源可用性检查不够，某些 Q 放寄存器 + 两段流水线的组合会产生错误输出或 NaN」。⭐ 保留配置：128 线程单流水段，短 cross-attention 用 64×64 tile，部分 self-attention 用 128×64 且 Q 放寄存器，错位输入退回旧私有 tiled API，未列出形状退回原生 FA4。⚠️ 集成边界极窄：显式 `make_inference_attention()`，不改根适配器/训练/其他架构/模型默认值，只暴露 Q/K/V + 布尔 causal + 标准 head-dim 缩放。⭐ 负面结果亦记录：PR #2771 改善了长反向用例但让短用例回退，且长用例仍偏向 FA2，故「该补丁没有任何部分被包含进镜像」 — [src-nebius-fa4opt]
 
+### 机器人仿真与 Isaac（第三十七轮补充）
+
+1. [NVIDIA omniperf：RTX PRO 6000 Blackwell SE 基准数据集（JSON, 1.79 MB）](https://media.githubusercontent.com/media/NVIDIA/omniperf/main/docs/data/rtx_pro_6000.json) —（2026-03-17）。⭐⭐⭐ 本报告数据密度最高的一份来源：**1,216 个基准结果、227 次 CI 运行、399 个 preset 条目**，覆盖 Isaac Sim / Isaac Lab 的物理与渲染后端。硬件身份：RTX PRO 6000 Blackwell SE、报告显存 **94.97 GB**、Xeon Gold 5512U（56 核）、251.36 GB RAM、Ubuntu 22.04.5、驱动 580.126.09、PyTorch 2.10.0+cu128、CUDA 12.8、Isaac Lab 4.5.20、Newton 1.0.0。⚠️⚠️ **显存峰值 90.65 GB**（Isaac-Dexsuite-Kuka-Allegro-Lift-v0、16,384 并行环境、`newton,newton_renderer,rgb64` 的 RSL-RL 训练），相对 94.97 GB 只剩 **4.32 GB（4.5%）**。⭐ 环境数只取 1024/2048/4096/8192/16384/32768 六档；纯评测最高 32,768，而两种 RL 训练最高只到 16,384——**训练上限是评测上限的一半**。⚠️ GPU 利用率 p25 仅 12.77%、中位 **34.04%**、p90 91.00%——过半基准喂不满这张卡。⭐⭐ **渲染后端可带来约 3.8 倍吞吐与 3.3 倍显存差**（同物理同环境数下：newton_renderer rgb ≈17,923 FPS / 1.16–1.46 GB，ovrtx_renderer ≈5,639 FPS / 3.65 GB，isaacsim_rtx_renderer ≈4,695 FPS / 4.88 GB）。⚠️⚠️ **可重复性：218 组可重复配置的中位极差比仅 1.06，但 37 组（17.0%）超过 2 倍、最差 12.37 倍**（n=16384 三次为 136,453 / 528,200 / 1,688,406 FPS）。⚠️ 一个可定位案例：同配置三个 CI job 为 37,437 / 17,923 / 5,932 FPS（差 6.3 倍），而 GPU 利用率是 46.4% / 68.8% / 94.2%——**利用率越高、FPS 越低**，指向 CPU 侧供给或同步开销。⭐ 启动成本却异常稳定：App Launch Time 中位 4.64 s、p90 4.72 s、最高 4.98 s — [src-omniperf-data]
+2. [NVIDIA Technical Blog：Advanced Sensor Physics, Customization, and Model Benchmarking Coming to Isaac Sim and Isaac Lab](https://developer.nvidia.com/blog/advanced-sensor-physics-customization-and-model-benchmarking-coming-to-nvidia-isaac-sim-and-nvidia-isaac-lab/) —（2025-05-18）。⭐ 官方定位表述：「Isaac Sim 与 Lab 将完全兼容运行于 NVIDIA RTX PRO 6000 工作站与服务器，为训练、合成数据生成、机器人学习与仿真等每一种机器人开发工作负载提供单一架构。」⚠️ 许可边界：Isaac Sim 5.0 在 GitHub 开放且完全可定制，但「对底层 Omniverse Kit 的额外企业支持与商业再分发权需要 Omniverse Enterprise 许可」——开源不等于可自由再分发 — [src-nv-isaac-blog]
+3. [GitHub issue isaac-sim/IsaacSim #578：Abnormally low FPS on dual RTX PRO 6000 Blackwell workstation across Isaac Sim 4.5.0, 5.0.0, and 5.1.0](https://github.com/isaac-sim/IsaacSim/issues/578) —（2026-04-11 提出，2026-05-05 自动关闭，**未解决**）。⚠️⚠️ 本报告记录的最严重「性能不达预期」案例：双 RTX PRO 6000 Max-Q（各约 96 GB）+ 2× Xeon Max 9480（224 逻辑核）+ 1 TiB RAM、驱动 590.48.01、CUDA 13.1、Ubuntu 22.04.5，**极简单立方体场景仅约 24 FPS，实际负载掉到约 0.15 FPS（帧时间超 1000 ms）**，且在 Isaac Sim 4.5.0/5.0.0/5.1.0 三版一致复现。关多卡「有改善但不大」。⚠️⚠️ 最刺眼对照：同样简单粒子场景用户报「在 4060 笔记本上约 30 FPS，而在这台工作站上低于 15 FPS」——**专业卡被消费级笔记本 GPU 反超一倍**（用户自述、未附独立测量）。⚠️ 用户提出未证实假设：「很多低 FPS 案例似乎都涉及 Intel Xeon CPU」。⭐ 维护者四条排查方向：① `./isaac-sim.compatibility_check.sh`；② 禁用多卡（`--/renderer/multiGpu/enabled=false --/physics/cudaDevice=0`）；③ 驱动降级到 580.x；④ NUMA 绑定 `numactl --cpunodebind=0 --membind=0` — [src-gh-isaacsim-578]
+
 
 ## 附录 A：子问题完成度
 
@@ -13403,7 +13627,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=235, evidence=1856, claims=1330, claims_high=1015, claims_disputed=6, trace_events=497, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=238, evidence=1871, claims=1344, claims_high=1028, claims_disputed=6, trace_events=506, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
