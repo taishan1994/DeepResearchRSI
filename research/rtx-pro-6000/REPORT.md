@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：209 ｜ **证据数**：1707 ｜ **主张数**：1189（高置信 921，争议 3）
+> **来源数**：210 ｜ **证据数**：1715 ｜ **主张数**：1196（高置信 928，争议 3）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1568,6 +1568,92 @@ TPOT 几乎不变（12.63 → 12.82 ms），说明 **EP 优化的是通信与调
 **引用注意** [c-mlperf-caveat]：白皮书中部分图表是提交截止后的初步结果，**未经 MLCommons 正式验证**。引用时必须区分"已认证"与"未认证"数据点，不能一概当作官方成绩。
 
 Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存带宽敏感），后者是 120B 级大模型（容量敏感），正是该卡最该被检验的两类负载。
+
+#### ⚠️ 4.6.1 但这一节的版本已经落后一轮（本轮修正）
+
+**上面全部内容基于 MLPerf Inference v6.0。而 MLCommons 已于 2026-09-16 发布 v6.1** [c-mlperf-v61-exists]：
+
+| 项 | v6.0（本节原记录） | **v6.1（2026-09-16）** |
+|---|---|---|
+| 参与机构 | — | ⭐ **30 家（历史新高）** |
+| 结果总数 | — | **486 项**（数据中心 + 边缘） |
+| 新增基准 | — | ⚠️ **2 项** |
+
+#### ⭐ 两项新基准，都直指本报告此前未覆盖的负载
+
+**新增基准** [c-mlperf-v61-two-new]：
+
+| 基准 | 内容 | 与本报告的关系 |
+|---|---|---|
+| **端到端 RAG** | 嵌入模型 → 检索器 → 重排序器 → 一个或多个 LLM 的多步流水线 | ⚠️ **正是 §4.16 长上下文路线的替代方案** |
+| **边缘智能体推理** | 多轮、对话历史不断增长、单用户固定内存与功耗 | 本报告完全未涉及 |
+
+> ⭐ **RAG 这项尤其值得注意：§4.16 用整节讨论「587k token 能装但装满不等于答得更好」，而 RAG 恰恰是「不必装满、改走检索」的另一条路。**
+
+#### ⭐ 一个与本报告主线直接相撞的变更
+
+**投机解码成为官方基准支持项** [c-mlperf-v61-specdec]：
+
+> **v6.1 在两项推理基准的交互式场景中支持投机解码，并在 GPT-OSS 任务中增加支持。**
+
+| 含义 | 说明 |
+|---|---|
+| 此前 | 社区优化技巧，**各家实现不一、无法跨系统比较** |
+| **v6.1 起** | ⭐ **官方基准允许，可跨系统比较** |
+
+> ⚠️ **本报告 §4.8、§4.13、§8.9 大量讨论投机解码的收益与反转，但此前不知道它已成为 MLPerf 正式支持项。**
+
+#### ⚠️ 一个必须说清的读法纪律
+
+**v6.1 公布的两个提升数字是「跨版本」的，不是「跨芯片」的** [c-mlperf-rank-within-suite]：
+
+| 基准 | 提升 | 对比对象 |
+|---|---:|---|
+| VLM 单加速器服务器场景 | **2.99×** | **v6.0**（六个月前） |
+| DeepSeek R1 单加速器服务器场景 | **5.7×** | **v5.1**（一年前） |
+
+> ⚠️ **这两个数字描述的是整个生态（硬件 + 软件 + 方法学）的进步，不能当作任何单一加速器的性能增长率。**
+
+> ⭐ **这是本报告反复处理的「聚合数字不能当作个体数字」问题，在基准版本维度上的再现。**
+
+#### ⚠️ 一处整类缺口：MI350P
+
+**本报告的竞品对比只覆盖 RTX 5090、RTX 6000D 与 H100/H200** [c-mlperf-mi350p-first]：
+
+| 加速器 | 形态 | 在本报告中出现次数 |
+|---|---|---:|
+| **AMD Instinct MI350P** | ⚠️ **HBM 的 PCIe 加速卡** | ⚠️ **0** |
+| Intel Arc Pro B70 | 已上市 | 0 |
+
+> ⚠️ **MI350P 与 RTX PRO 6000 同为 PCIe 形态，且带 HBM——这是最该被比较的对手，而本报告从未系统比较过。**
+
+> **其具体 v6.1 数值本轮未能取得，故此处只记录其存在与首次参评，不给出任何性能对比。**
+
+#### ⭐⭐ 一条会改变 §14 观察点排序的事实
+
+**MLPerf Endpoints 将取代 Inference** [c-mlperf-endpoints-supersede]：
+
+| 项 | 状态 |
+|---|---|
+| Endpoints 与 Inference 的关系 | ⚠️ **将在数据中心基准族中取代后者** |
+| v6.1 采用新 API 框架的提交者 | ⭐ **超过 50%** |
+| 新框架性质 | 真正的客户端/服务器架构，通过业界标准 API 与被测系统通信 |
+
+> ⚠️ **即「看 MLPerf Inference 排名」这个动作本身有明确终点。**
+>
+> **本报告此前把 MLPerf 当作长期可跟踪的官方口径，现需改为「过渡期口径」。**
+
+#### 一个规模参照
+
+**v6.1 的规模与本报告的讨论范围** [c-mlperf-scale-record]：
+
+| 对象 | 加速器数量 |
+|---|---:|
+| ⭐ **MLPerf v6.1 最大系统** | **512** |
+| 本报告 §8.9 最大实测拓扑 | **8** |
+| 倍数 | **64×** |
+
+> ⭐ **本报告讨论的多卡配置，处于业界规模的一个极小的下界。**
 
 ### 4.7 llama.cpp / GGUF：此前完全遗漏的第二条软件路径
 
@@ -10976,6 +11062,10 @@ sudo nvidia-bug-report.sh
 
 1. [英伟达瞄准GPU软件订阅收入 黄仁勋提出每块 GPU 每年约 2000 美元](https://wap.seccw.com/Document/detail/id/51627.html) — 深圳市电子商会转述 cnBeta（2026-10-26）。列出 NVIDIA 已公布的 AI Enterprise 许可价（每 GPU 每年 $4,500、五年 $18,000），并记录黄仁勋 2026-10-22 柏林 GTC 提出的「每年约 $2,000」示例——报道自身明确该数字尚未正式公布、不可与既有价格直接比较 — [src-seccw-ai-enterprise-price]
 
+### MLPerf v6.1（第二十轮补充）
+
+1. [MLCommons Sets Participation Record with New MLPerf Inference v6.1 Benchmark Results](https://mlcommons.org/2026/09/mlperf-inference-v6-1-results/) — MLCommons 官方公告（2026-09-16）。记录 v6.1 新增端到端 RAG 与边缘智能体两项基准、投机解码成为官方支持项、30 家提交机构与 486 项结果、VLM 比 v6.0 提升 2.99× 与 DeepSeek R1 比 v5.1 提升 5.7×、MI350P 等五款新硬件首次参评，以及 MLPerf Endpoints 将取代 Inference 的结构性安排 — [src-mlcommons-v61]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -11115,7 +11205,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=209, evidence=1707, claims=1189, claims_high=921, claims_disputed=3, trace_events=425, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=210, evidence=1715, claims=1196, claims_high=928, claims_disputed=3, trace_events=428, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
