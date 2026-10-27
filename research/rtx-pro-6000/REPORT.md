@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：225 ｜ **证据数**：1783 ｜ **主张数**：1266（高置信 971，争议 5）
+> **来源数**：226 ｜ **证据数**：1790 ｜ **主张数**：1271（高置信 971，争议 5）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -11023,6 +11023,92 @@ SemiAnalysis InferenceX 的官方数据页给出了本报告最直接的每美�
 
 > ⭐ **司法审查可以使关税下降——这是本轮唯一一条方向相反的记录。**
 
+#### 12.5.4 涨价的另一半原因：晶圆被转向了
+
+**§12 前面把涨价归因于需求、内存短缺与关税。本轮找到一条方向不同的线索：供给端可能被人为收紧了** [c-gb202-supply-diverted]。
+
+#### ⚠️⚠️ 一、爆料：GB202 不再给 5090
+
+**这是一个此前完全缺失的供应链结构性事实** [c-gb202-5090-eol]：
+
+| 项 | 内容 |
+|---|---|
+| 爆料者一 | **MEGAsizeGPU（@Zed__Wang）**：「No more GB202 for 5090, confirmed」 |
+| 其后续表述 | ⭐ **「all future GB202 supplies are RTX Pro exclusive」** |
+| 爆料者二 | **hongxing2020**：「5090 EOL, 5080 24GB ready」+ 疑似工厂通知 |
+| 通知范围 | ⚠️ **不再销售任何 RTX 5090 型号，含中国市场 D 变体** |
+| 官方确认 | ⚠️ **没有——文章明确写「NVIDIA hasn't confirmed any of this」** |
+
+#### ⭐ 二、为什么这件事在物理上成立
+
+**关键在于这两张卡不是「同架构」，而是「同一颗芯片的不同切法」** [c-gb202-same-die]：
+
+| 产品 | CUDA 核心 | 显存 |
+|---|---:|---:|
+| **GB202（最大 Blackwell 图形芯片）** | — | — |
+| RTX 5090 | 21,760 | 32 GB |
+| ⭐ **RTX PRO 6000** | ⭐ **24,064** | ⭐ **96 GB** |
+| ⭐ **RTX PRO 5500** | **21,760**（= 5090） | ⭐ **84 GB** |
+
+> ⭐ **即 RTX 5090 甚至没有用满 GB202——同一颗 die 装进工作站卡能卖贵得多。**
+>
+> **这让「把晶圆转向专业卡」在工程上完全可行，无需改设计。**
+
+#### ⭐⭐ 三、动机：文章的原话
+
+**这是本轮最有解释力的一句** [c-gb202-supply-diverted]：
+
+> **「NVIDIA would rather put every GB202 it gets into those far pricier workstation cards.」**
+>
+> **（NVIDIA 显然更愿意把它拿到的每一颗 GB202 都装进那些贵得多的工作站卡里。）**
+
+> ⭐ **若爆料成立，本报告 §12 的价格上涨就不只是需求拉动——**
+>
+> **还叠加了一层供给被人为从消费级转向专业级的结构性因素。**
+
+> ⚠️ **但这必须标清楚：这是记者的动机判断，不是 NVIDIA 的声明。**
+>
+> **本报告把它记为「一个能解释现象但未经证实的机制」，不与已证实的价格数据混列。**
+
+#### ⭐ 四、一条正交对照：5090 也在同步大涨
+
+**这提供了一种检验思路** [c-gb202-5090-price-traj]：
+
+| 时间 | RTX 5090 美国价 |
+|---|---|
+| 2025-01 发布 | **$1,999** |
+| 2026-09 德国挂牌 | **> €5,000（较 1 月 +73%）** |
+| 沃尔玛售罄价 | **$4,299** |
+
+> ⭐ **若两张卡同期同向大涨，则「RTX PRO 6000 涨价」更可能是行业性的，而非该型号独有的。**
+>
+> **这与 §12 记录的本卡 +110% 幅度方向一致，但幅度不同——本卡涨得更多。**
+
+#### ⚠️ 五、需求侧的另一半
+
+**一个与 §7.8 互为印证的事实** [c-gb202-ai-bulk-demand]：
+
+> **AI 公司据报在这批卡到达游戏零售渠道之前就已批量扫货；**
+>
+> **文章并称 RTX 5090 对多数人而言早已不是游戏卡。**
+
+> ⚠️ **这与 §7.8「不该买这张卡打游戏」是同一现象的两面：**
+>
+> **消费级旗舰正被 AI 需求吸走，游戏用途已非其定价依据。**
+
+#### ⚠️ 六、这条信息的等级与用法
+
+| 判断 | 状态 |
+|---|---|
+| 5090 涨价事实 | ✅ **可核实（多地挂牌价）** |
+| 5090 停产 | ⚠️ **爆料，官方未确认** |
+| GB202 全部转 RTX Pro | ⚠️ **爆料，官方未确认** |
+| 「NVIDIA 更愿意卖给工作站」 | ⚠️ **记者动机判断** |
+
+> ⚠️ **按 §14 的纪律：爆料级材料只能用来回答「等不等」，不能用来做采购时间表。**
+>
+> **它足以支持「短期降价可能性低」这个判断，不足以支持「某月某日会缺货」。**
+
 
 ### 12.6 采购建议
 
@@ -12164,6 +12250,10 @@ sudo nvidia-bug-report.sh
 1. [GIGAZINE：The most reliable CPUs, GPUs, motherboards, etc. in 2025（转述 Puget Systems 年度可靠性报告）](https://gigazine.net/gsc_news/en/20260205-most-reliable-hardware-2025-puget-systems/) —（2026-02-05）。⭐⭐ 本报告找到的唯一一条关于 RTX PRO 6000 现场故障率的第三方统计：Puget Systems 2025 年度报告指出该高功耗工作站型号「被报告有异常高的故障率」（exceptionally high failure rate），而除它之外 Blackwell 卡仅 1 例故障、Ada Generation 全系合计 4 例；同时给出销量背景——2025 年 Ada 出货量为 Blackwell 的四倍以上。⚠️ 原文站 pugetsystems.com 返回 403，此为二级转述 — [src-gigazine-puget]
 2. [电子工程专辑：哪家硬件最可靠：Intel AMD CPU打平手、NVIDIA公版显卡最稳（同一报告的另一个转述）](https://www.eet-china.com/mp/a472169.html) —（2026-02-02）。⚠️ 中文转述的措辞明显更弱：「唯独高功耗的 RTX Pro 6000 工作站版故障率略高」，用的是「略高」而非「异常高」，且未给任何数量对照。⚠️ 两处转述强度不一致而原文不可得，故本报告将相关判断标为 `disputed` 并保留双方表述；该文同时记录了 Puget 自己的免责声明「鉴于其销售额相对于整个市场而言有限，这些数据并不能反映整个行业的情况」 — [src-eet-puget]
 
+### 供应链与涨价机制（第三十轮补充）
+
+1. [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus) — 转述爆料者 MEGAsizeGPU 与 hongxing2020（2026-10-10）。⭐⭐ 本报告此前完全缺失的供应链结构性事实：GB202 晶圆据报已停止分配给 GeForce RTX 5090，「未来所有 GB202 供给均为 RTX Pro 独占」；另有疑似工厂通知称 NVIDIA 将不再销售任何 RTX 5090（含中国 D 变体）。⭐ 关键芯片事实：GB202 是最大 Blackwell 图形芯片而 RTX 5090 并未用满它，同一颗 die 既驱动 24,064 核的 RTX PRO 6000（96 GB）也驱动 21,760 核的 RTX PRO 5500（84 GB）。⭐ 文章动机解释：「NVIDIA 显然更愿意把它拿到的每一颗 GB202 都装进那些贵得多的工作站卡里」。⚠️ 文章明确写着 NVIDIA 未确认上述任何一点；本报告按爆料级材料处理，只用于「等不等」的判断，不用于采购时间表 — [src-tpu-gb202]
+
 
 ## 附录 A：子问题完成度
 
@@ -12304,7 +12394,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=225, evidence=1783, claims=1266, claims_high=971, claims_disputed=5, trace_events=470, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=226, evidence=1790, claims=1271, claims_high=971, claims_disputed=5, trace_events=473, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
