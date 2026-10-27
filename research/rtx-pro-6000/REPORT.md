@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：183 ｜ **证据数**：1415 ｜ **主张数**：941（高置信 698，争议 1）
+> **来源数**：184 ｜ **证据数**：1425 ｜ **主张数**：948（高置信 705，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -3167,6 +3167,96 @@ llama-bench   -m /vol/release/compact/BTL-3-Compact-AVQ2.gguf   -ngl 99 -p 512 -
 **这是部署时最容易被忽略的坑**：买 Server 版塞进塔式机箱，性能会被机箱风道卡住，不是卡的问题。
 
 ---
+
+### 6.6 300 W 对 600 W 的受控对照：一半功耗只换约 13% 生成性能
+
+**§6.2 的性能-功耗曲线此前缺一组同命令、同模型、仅卡版本不同的对照。本轮找到了。**
+
+#### 一、数据来源
+
+来自 **llama.cpp 官方讨论区 #15396**——**不是二手转述，而是维护者把原始 llama-bench 日志直接贴出**，含命令行、`ggml_cuda_init` 设备识别行、模型体积、参数、逐项 t/s 与标准差、构建号。
+
+**命令行** [e-lc-cmd]：
+
+```bash
+llama-bench -m ./gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf   -t 1 -fa 1 -b 2048 -ub 2048 -p 2048,8192,16384,32768
+```
+
+**设备识别**（两臂唯二差别就在这一行）[e-lc-device]：
+
+| 臂 | 设备行 |
+|---|---|
+| 600 W | `Device 0: NVIDIA RTX PRO 6000 Blackwell **Workstation Edition**, compute capability 12.0, VMM: yes` |
+| **300 W** | `Device 0: NVIDIA RTX PRO 6000 Blackwell **Max-Q** Workstation Edition, compute capability 12.0, VMM: yes` |
+
+#### 二、gpt-oss-20b：286.91 对 249.96
+
+**MXFP4 MoE，11.27 GiB，20.91 B 参数** [c-lc-ws-20b] [c-lc-mq-20b]：
+
+| 测试 | Workstation (600 W) | **Max-Q (300 W)** | 差距 |
+|---|---:|---:|---:|
+| **tg128 生成** | **286.91 ± 0.22** | **249.96 ± 0.99** | **−12.9%** |
+| pp2048 | 11,521.95 ± 26.03 | 9,480.55 ± 44.01 | −17.7% |
+| pp32768 | 8,267.46 ± 15.58 | 7,050.35 ± 12.36 | −14.7% |
+
+> **注意标准差**：Workstation 臂的 tg128 标准差只有 **±0.22**，在 287 tok/s 上是 **0.08%**。
+
+#### 三、gpt-oss-120b：196.31 对 170.62
+
+**MXFP4 MoE，59.02 GiB，116.83 B 参数** [c-lc-120b-pair]：
+
+| 测试 | Workstation (600 W) | **Max-Q (300 W)** | 差距 |
+|---|---:|---:|---:|
+| **tg128 生成** | **196.31** | **170.62 ± 0.47** | **−13.1%** |
+| pp2048 | 5,518.07 ± 31.18 | 4,494.20 ± 20.87 | −18.6% |
+| pp32768 | （该臂未在抓取片段中取得） | 3,718.01 ± 19.67 | — |
+
+> **这是本报告在 llama.cpp 路径上首次拿到 120B 级别的单卡实测** [c-lc-120b-fits-single]。
+>
+> **59.02 GiB 的权重在 96 GB 单卡上全层卸载，不需要 CPU 卸载或多卡切分。**
+
+#### 四、核心结论：一半功耗换约 13%
+
+**两组数字高度一致** [c-lc-15pct-gap]：
+
+| 模型 | 生成差距 |
+|---|---:|
+| 20B | **−12.9%** |
+| 120B | **−13.1%** |
+
+> **即 300 W 相对 600 W，生成性能只损失约 13%，而功耗减半。**
+
+**而贴出数据的人自己也这么想** [e-lc-15pct]：
+
+> **「与 300W Max-Q 版本的性能差异只有约 15%，这太惊人了。我也该开始把 GPU 跑在 300W 省电了。」**
+
+⚠️ **这与 §6.3 的能效最优工作点结论方向一致**，但**给出了更硬的量化锚点**：**13% 性能换 2 倍能效。**
+
+#### 五、一个必须记住的可比性边界
+
+**这些数字对构建号高度敏感** [c-lc-build-sensitive]：
+
+| 臂 | 构建 |
+|---|---|
+| Max-Q | `f08c4c0 (6199)` |
+| Workstation | `a6d3cfe (6205)` |
+
+**讨论区内有人指出**：短短三周内 llama.cpp 的**提示处理提升 40–50%、生成提升 15%**。
+
+> **即两臂虽同讨论区同命令，但构建号不同**——**13% 的差距里可能含少量构建差异，不能当成纯功耗效应。**
+>
+> **这也意味着引用任何 llama.cpp 数字都必须带构建号。**
+
+#### 六、长提示下提示处理本身也会退化
+
+**四个 pp 长度同表给出，可比性高** [c-lc-pp-vs-tg]：
+
+| 模型 | pp2048 | pp32768 | 退化 |
+|---|---:|---:|---:|
+| 20B | 11,521.95 | 8,267.46 | **−28%** |
+| 120B | 5,518.07 | 3,718.01 | **−33%** |
+
+> **即长提示下提示处理本身也会随长度退化约三成**——这不只是生成侧的事。
 
 ### 6.9 FP64 的可选出路：用 INT8 张量核心仿真，快 26 倍且更准
 
@@ -7175,6 +7265,7 @@ sudo nvidia-bug-report.sh
 - [badtheorylabs — BTL-3 Compact: RTX PRO 6000 speed（2026-07-19 实测）](https://huggingface.co/badtheorylabs/BTL-3-Compact/blob/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md) — [src-btl-llamacpp-speed]
 - [Cadence — Cadence Unveils Millennium M2000 Supercomputer with NVIDIA Blackwell Systems（新闻稿 PDF 原文，2025-05-07）](https://www.semiconductorpackagingnews.com/uploads/2/Millennium_Press_Release_5_7_25_FINAL.pdf) — [src-cadence-millennium-pr]
 - [NVIDIA Blog — Cadence Taps NVIDIA Blackwell to Accelerate AI-Driven Engineering Design and Scientific Simulation（2025-05-07）](https://blogs.nvidia.com/blog/cadence-millennium-nvidia-blackwell/) — [src-nvblog-cadence]
+- [llama.cpp Discussion #15396 — gpt-oss guide（含 RTX PRO 6000 Max-Q 与 Workstation 两臂原始 llama-bench 日志）](https://github.com/ggml-org/llama.cpp/discussions/15396) — [src-llamacpp-15396]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -7410,7 +7501,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=183, evidence=1415, claims=941, claims_high=698, claims_disputed=1, trace_events=367, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=184, evidence=1425, claims=948, claims_high=705, claims_disputed=1, trace_events=369, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
