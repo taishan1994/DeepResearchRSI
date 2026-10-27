@@ -2334,6 +2334,72 @@ Synopsys 还给出了两个可引用的数字，但按本报告规则**都标为
 
 **这个 30 的适用范围** [c-avd-density-caveat]：测试用**默认 VSync** 与**自动化 ATS 基准**——ATS 是**认证基准，不是真实混合负载**。**真实工程设计场景（大装配 + 多视口 + 同时渲染）的密度很可能低于 30。**
 
+#### 12.7.1 式修正：30 不是上限，只是被测过的一个点
+
+找到 **Microsoft Learn 官方原文**后，必须修正上一段的表述 [c-msn-correction-notmax]。官方在「Deployment takeaway」里写得很明确：
+
+> *"These results reflect the tested configurations **rather than a maximum supported user count or a sizing recommendation**."*
+
+> **即：30 是被测过的一个配置点，不是支持上限，也不是选型建议。** 我此前把它写成「可支撑最多 30 个」是不准确的——**「最多」二字没有依据**。
+
+#### 官方给出的精确规格
+
+| 项 | 官方值 |
+|---|---|
+| VM SKU | **Standard_NC128ds_xl_RTXPRO6000BSE_v6** |
+| 内存 | **516 GB** |
+| GPU | 1 × 96GB |
+| 系统 | Windows 11 Enterprise 多会话 |
+| 驱动 | **NVIDIA RTX Driver 581.80 或更高** |
+
+**注意 SKU 名里的 `BSE`** [c-msn-vm-sku]——**即 Blackwell Server Edition**。云端虚拟化用的是 **Server 版**，不是 WS 版。
+
+**驱动下限 581.80** [c-msn-driver-floor] 也值得记：它与 §10.4.1.1 的 Dassault 认证版 582.16 同属 **R580 分支**——**这是第三个独立来源指向 R580 作为生产基线**。
+
+#### 一个二手博客没提的负面结果
+
+官方数据里有一项**反向证据** [c-msn-regression]，上一轮的二手转述完全没有提到：
+
+> **30 用户双主机配置下，`BackgroundSettingWireframe` 反而慢 19%**（41.10s → 48.96s）。
+>
+> 15 用户档还有 3 项 ≤2% 的轻微退化：`BackgroundSettingWireframe`、`DeEmphasis`、`DisplaySection`。
+
+**即「加机器一定更快」不成立**——对非 GPU 密集的轻量操作，**跨主机调度开销可能盖过收益**。
+
+#### 完整 ATS 数据揭示的瓶颈结构
+
+官方给了 15 项操作的逐项耗时（秒），这是本报告最细粒度的 CAD 多用户数据：
+
+| ATS 操作 | 15用户/1机 | 30用户/1机 | 30用户/2机 | 30用户改善 |
+|---|---:|---:|---:|---:|
+| **VisualizationPerformance** | 846.54 | **1033.23** | 826.84 | **+20%** |
+| **ExportImage** | 365.72 | **700.23** | 375.08 | **+46%** |
+| FaceAnalysis | 257.17 | 280.09 | 255.43 | +9% |
+| MirrorDisplay | 71.84 | 74.56 | 64.78 | +13% |
+| DeEmphasis | 67.78 | 77.21 | 72.37 | +6% |
+| DisplaySection | 55.22 | 69.24 | 63.43 | +8% |
+| DisplayMode | 35.98 | 44.33 | 36.31 | +18% |
+| LightDirection | 36.56 | 37.53 | 31.03 | +17% |
+| MultipleViews | 33.25 | 44.09 | 37.04 | +16% |
+| SynchronizeViews | 25.94 | 33.43 | 25.73 | +23% |
+| RasterImage | 24.62 | 32.06 | 25.17 | +21% |
+| GridDisplay | 30.91 | 33.07 | 28.27 | +15% |
+| BackgroundSettingWireframe | 29.67 | 41.10 | 48.96 | **−19%** |
+| ListingWindow | 22.88 | 22.50 | 15.35 | **+32%** |
+| HD3D | 21.76 | 23.74 | 20.73 | +13% |
+
+**结构很清楚** [c-msn-worst-case]：**`VisualizationPerformance`（846–1033 秒）与 `ExportImage`（366–700 秒）两项就占了绝大部分总耗时**，而它们**恰恰也是双主机收益最大的两项**（+20% / +46%）。
+
+> **即扩展收益不是平均摊薄，而是精准缓解瓶颈项。** 这对扩容决策是好消息——**加机器的钱花在了真正耗时的地方**。
+
+#### 一个诚实标注的无解项
+
+**Siemens 的 NX on Azure 认证矩阵不公开** [c-msn-cert-scope]。Microsoft 官方文档只写：
+
+> *"Contact the Siemens support team for the latest NX on Azure certification matrix."*
+
+> **即本报告无法核实 Siemens 侧的官方认证状态。** 这是**明确声明的信息缺口**，不是遗漏——我把这一点写进 REPORT 的缺口章节，而不是假装已覆盖。
+
 ### 10.4.2 驱动分支与 EOL：一个此前完全空白的运维维度
 
 本报告多处引用了 `595.x` 驱动，但**从未说明该分支还能用多久**。官方驱动生命周期文档给出了硬数据 [c-drv-branches][c-drv-eol]。
@@ -3407,7 +3473,7 @@ sudo nvidia-bug-report.sh
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **839 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **847 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -3537,3 +3603,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 135. [CIMdata 转述 Synopsys 官方新闻稿：Synopsys 采用 NVIDIA RTX PRO 服务器加速仿真负载](https://www.cimdata.com/en/industry-summary-articles/item/28273-synopsys-embraces-nvidia-rtx-pro-servers-to-accelerate-compute-heavy-simulation-workloads)（2025-08-28） — [src-synopsys-rtxpro]
 136. [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-p8-4k]
 137. [SPEC.org：SPECviewperf 15.0 官方结果 — ThinkStation P3 Tower Gen2 / RTX PRO 6000 / FHD](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P3_TWR_G2_Ultra_9_285K_RTX_PRO_6000_FHD/results.html) — [src-spec-p3-fhd]
+138. [Microsoft Learn：在 Azure 虚拟桌面上使用 RTX PRO 6000 Blackwell 运行 Siemens NX（官方参考架构与完整 ATS 结果）](https://learn.microsoft.com/en-us/industry/manufacturing/architecture/siemens-azure-blackwell)（2026-07-31 更新） — [src-ms-learn-nx]
