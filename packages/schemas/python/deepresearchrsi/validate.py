@@ -133,11 +133,21 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
             errors.append(f"claims.csv[{cid}]: 没有任何证据（不变量 C1）")
         for eid in eids:
             if eid not in evidence_ids:
-                errors.append(f"claims.csv[{cid}]: 引用不存在的 evidence {eid}")
+                hint = "（疑把 claim_id 当成 evidence_id 引用）" if eid.startswith("c-") else ""
+                errors.append(f"claims.csv[{cid}]: 引用不存在的 evidence {eid}{hint}")
+            elif eid.startswith("c-"):
+                errors.append(
+                    f"claims.csv[{cid}]: evidence_ids 中出现 claim 前缀的 id {eid}"
+                )
         ceids = [x.strip() for x in (row.get("counter_evidence_ids") or "").split(";") if x.strip()]
         for eid in ceids:
             if eid not in evidence_ids:
-                errors.append(f"claims.csv[{cid}]: 引用不存在的反证 {eid}")
+                hint = "（疑把 claim_id 当成 evidence_id 引用）" if eid.startswith("c-") else ""
+                errors.append(f"claims.csv[{cid}]: 引用不存在的反证 {eid}{hint}")
+            elif eid.startswith("c-"):
+                errors.append(
+                    f"claims.csv[{cid}]: counter_evidence_ids 中出现 claim 前缀的 id {eid}"
+                )
         _parse_date(row.get("as_of", ""), where=f"claims.csv[{cid}].as_of")
         if row.get("claim_type") == "prediction" and not (row.get("derivation") or "").strip():
             errors.append(f"claims.csv[{cid}]: prediction 缺少 derivation（不变量 C2）")

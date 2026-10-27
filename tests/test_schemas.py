@@ -545,6 +545,41 @@ def test_all_sources_listed_in_references() -> None:
     assert not missing, f"未列入参考文献的来源 ({len(missing)}): {missing[:10]}"
 
 
+def test_evidence_ids_reject_claim_prefix() -> None:
+    """回归：evidence_ids 里混入 c- 前缀（把 claim_id 当 evidence_id）必须被拒绝。
+
+    这一类错误在历史上重复出现过多次，且旧实现的报错只说
+    「引用不存在的 evidence」，无法提示真正的成因。
+    """
+    def _build(root: Path, mode: str) -> None:
+        _write(root, "sources.csv", "source_id,url,fetched_at,trust_tier\n",
+               ["src-a,https://a,2026-10-27T00:00:00+00:00,primary"])
+        _write(root, "evidence.csv", "evidence_id,source_id,quote,stance\n",
+               ["e-a,src-a,原文片段,supports"])
+        header = "claim_id,statement,claim_type,as_of,confidence,evidence_ids,counter_evidence_ids"
+        if mode == "evidence_ids":
+            rows = ["c-a,某事实,spec,2026-10-27,medium,c-a,"]
+        else:
+            rows = ["c-a,某事实,spec,2026-10-27,medium,e-a,",
+                    "c-b,另一个事实,spec,2026-10-27,medium,e-a,c-a"]
+        _write(root, "claims.csv", header + "\n", rows)
+        (root / "REPORT.md").write_text("引用 [c-a] [e-a]。\n", encoding="utf-8")
+
+    for mode in ("evidence_ids", "counter_evidence_ids"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / mode
+            root.mkdir()
+            _build(root, mode)
+            try:
+                validate_research_dir(root)
+            except ValidationError as exc:
+                msg = str(exc)
+                assert "claim_id" in msg or "claim 前缀" in msg, msg
+            else:
+                raise AssertionError(f"{mode} 中的 c- 前缀未被拒绝")
+    return None
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
