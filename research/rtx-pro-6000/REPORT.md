@@ -733,7 +733,70 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 1. **解析器只有一个能用**：`hermes` + `--enable-auto-tool-choice` 可用；`qwen3_coder` **返回空响应**；`qwen3_xml` 把原始 XML 塞进 `content` 而非 `tool_calls` 数组；不启用 `auto` 直接 **400**。
 2. **该组合会导致初始化挂死**（worker 卡在 100% CPU），解法是**确保无孤儿 GPU 进程后用 systemd 干净重启并给足初始化时间**。
 
-**性能结论要打折看** [c-vf-pcie-viable]：该配置达到 **85–95 tok/s**（llama.cpp 基线 67.41），但作者自己标注"仍在用工具调用负载做基准"。**这个数字明显低于 §4.9 的 388 tok/s**——说明**配方差异对结果的影响，可能大于硬件差异**。
+**性能结论要打折看** [c-vf-pcie-viable]：该配置达到 **85–95 tok/s**（llama.cpp 基线 67.41），但作者自己标注"仍在用负载做基准"。**这个数字明显低于 §4.9 的 388 tok/s**——说明**配方差异对结果的影响，可能大于硬件差异**。
+
+### 4.10 官方参考架构：集群配比与一个与实测冲突的论断
+
+前面全部是单机与双卡。**多卡集群有一份一手官方文档**——NVIDIA 的 RTX PRO AI Factory 企业参考架构 [src-nv-ra-comp]。它的价值在于给出了自建者最容易忽略的**硬性配比**。
+
+**规模单位** [c-ra-scale-unit]：**2-8-5-200** 配置 = 2 CPU、8 GPU、5 张 200Gbps 网卡 [e-ra-2-8-5]。**规模单元（SU）是 4 台服务器**，官方给出 **16 节点/128 卡**与 **32 节点/256 卡**两档 [e-ra-sizes]。
+
+**8 卡节点的官方规格** [c-ra-spec-8gpu]：单卡 96GB GDDR7 / 约 1.6TB/s，**8 卡合计 768GB 显存、12.8TB/s 聚合带宽** [e-ra-bw]。
+
+**三条最容易被自建者忽略的配比**：
+
+| 资源 | 官方要求 | 出处 |
+|---|---|---|
+| **CPU** | 每卡**至少 7 个物理核**；MIG 每实例 2 核；虚拟化/OS 每卡**再加 2 核**；RAPIDS ETL 每卡**再加 1 核**。8 卡配置**推荐每路至少 48 核** | [c-ra-cpu-ratio] |
+| **内存** | 每卡**至少 128GB**，均匀分布在所有插槽、每通道至少 1 条 DIMM；8 卡配置**推荐至少 1TB** | [c-ra-ram-ratio] |
+| **PCIe** | 每卡**至少一条 Gen5 x16**；GPU 须均匀分布在插槽与根端口；NIC 与 NVMe 应与 GPU 同交换机/同根复合体 | [c-ra-pcie-rule] |
+
+> **注意 PCIe 那条的例外**：低成本推理服务器若无需额外扇出，**直连 CPU 优于加交换机**。
+
+**网络**：计算网络最低 **200 GB/s**（4×200G 或 2×400G），推荐 **400 GB/s**（4×400G NIC）[c-ra-net-bw]。**注意单位是 GB/s 而非 Gb/s**——这是常见误读。16 节点集群的 BOM 可精确到线缆：128 卡、64 张 B3140H SuperNIC、16 张 B3220 DPU、2 台 SN5610 + 2 台 SN2201 交换机、32 对 OSFP 2x400G 收发器 [c-ra-bom]。
+
+#### 4.10.1 官方说"多卡推理没有收益"——这与本报告实测冲突
+
+这是必须**并列呈现、不做裁决**的口径冲突（C3）。
+
+**NVIDIA 官方的原话** [c-ra-tp-dp]：
+
+> "**tensor parallelism yields less performant results per GPU than running the model on the same GPUs in data parallel mode.** Since there are **no performance gains from running an inference model on multiple GPUs**, either on a single node or across multiple nodes, a compute network is not necessary."
+
+官方据此建议**纯推理集群可以不建东西向计算网络**，单卡可支持约 **70B** 参数模型 [c-ra-70b]。
+
+**而本报告 §4.9.1 的受控实测是**：GPT-OSS-120B 双卡相对单卡，**decode 3.36×、prefill 3.19×**；§4.3.5 的 EP 更带来 **2.30×** 吞吐与 **27×** TTFT 改善。
+
+**如何理解这个冲突（提出假设，不裁决）**：
+
+**先把数学做清楚** [c-pergpu-eff]——把 §4.9.1 的 120B 数据换算成"每卡效率"（即 2× 吞吐倍数 ÷ 2）：
+
+| 场景 | 1× | 2× | 总吞吐倍数 | **每卡效率** | 相对线性 |
+|---|---:|---:|---:|---:|---|
+| Decode 256/1024 | 1,569 | 5,275 | 3.36× | **1.68×** | **超线性** |
+| Prefill 1024/256 | 5,941 | 18,954 | 3.19× | **1.60×** | **超线性** |
+| Equal 256/256 | 8,190 | 11,848 | 1.45× | **0.72×** | **低于线性** |
+
+**这张表说明官方与我都没有全错，也都没有全对**：
+
+- **官方说「per GPU 变差」，在均衡负载下成立**（0.72× < 1.0）
+- **但在 decode / prefill 两个极端，每卡效率反而超过 1**（1.68× / 1.60×）——**官方口径在此不成立**
+- **超线性的原因不是双卡"更高效"，而是单卡被卡住了** [c-pergpu-cause]：单卡在 batch 64 之后**性能反转下跌**（§4.9.1），分母被压低，倍数因此虚高。**这是单卡的病，不是双卡的功。**
+
+**几个可能的解释**：
+
+| 可能解释 | 支持证据 | 状态 |
+|---|---|---|
+| 官方说的是**「每卡平均性能」**而非总吞吐 | 官方措辞确为 “per GPU”；均衡负载实测确为 0.72× | **部分被实测支持** |
+| 官方假设模型**装得进单卡** | 官方同时说"常见模型不超过单卡"、"单卡约 70B" | 与 120B 案例前提不同 |
+| 官方指的是 **DP 副本优于 TP 切分** | §4.5.1 的副本扩展数据支持 DP 更优 | 与实测不矛盾 |
+| 官方口径**未覆盖 MoE + EP** | EP 实测（2026-07）晚于该文档（2026-05） | 时间上可能 |
+
+> **可操作的结论** [c-second-card-rule]：**跑装得进单卡的模型时，官方是对的——用数据并行副本，别用 TP。** 只有当模型**真的装不下**（如 120B 在 96GB 上），或需要 **MoE + EP** 时，多卡才产生真实收益。
+>
+> **这与 §4.9.1 第三个结论完全吻合**：20B 模型双卡只有 1.15×，120B 才有 3.36×。**"第二张卡该不该买"取决于模型是否装得下，而不取决于并发数。**
+
+**还有一条官方警告值得记住** [c-ra-drawback]：**不建计算网络的基础设施无法用于任何混合工作流（含微调）**，后期加装可能伴随**显著停机与重新配置**。这是一个**半不可逆**的架构决策。
 
 ---
 
@@ -1928,6 +1991,8 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q38 | 双卡 192GB 形态的实际产能？ | ✅ | §4.9 TP2 部署单元（388 tok/s @ 4 并发） |
 | q39 | 第二张卡的边际收益有多大？ | ✅ | §4.9.1 受控 1x/2x：decode 3.36×、均衡 1.45× |
 | q40 | 塔式整机能否装 600W 版？ | ⚠️ | §4.9.1 Dell 7875 仅支持双 300W Max-Q |
+| q41 | 多卡集群的官方配比规范？ | ✅ | §4.10 每卡 7 核/128GB、Gen5 x16、400GB/s |
+| q42 | 多卡推理到底有没有收益？ | ⚠️ | §4.10.1 官方说无、实测 3.36×；每卡效率给出裁决依据 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -1936,12 +2001,14 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q38 | 双卡 192GB 形态的实际产能？ | ✅ | §4.9 TP2 部署单元（388 tok/s @ 4 并发） |
 | q39 | 第二张卡的边际收益有多大？ | ✅ | §4.9.1 受控 1x/2x：decode 3.36×、均衡 1.45× |
 | q40 | 塔式整机能否装 600W 版？ | ⚠️ | §4.9.1 Dell 7875 仅支持双 300W Max-Q |
+| q41 | 多卡集群的官方配比规范？ | ✅ | §4.10 每卡 7 核/128GB、Gen5 x16、400GB/s |
+| q42 | 多卡推理到底有没有收益？ | ⚠️ | §4.10.1 官方说无、实测 3.36×；每卡效率给出裁决依据 |
 
-**完成度：39/40 已答（2 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：41/42 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **520 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **541 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2022,3 +2089,8 @@ python scripts/validate_research.py research/rtx-pro-6000
 86. [Akash Network：RTX PRO 6000 vs H100 vs H200 选型指南](https://akash.network/the-bid/rtx-pro-6000-blackwell-vs-h100-vs-h200-2026/)（2026-08-25，更新 2026-10-22） — [src-akash]
 87. [StorageReview：Dell Precision 7875 双 RTX PRO 6000 Max-Q 评测（vLLM 1x/2x 三场景）](https://www.storagereview.com/review/dell-precision-7875-review-threadripper-pro-9995wx-meets-dual-rtx-pro-6000-blackwell-gpus)（2026-03-18） — [src-sr-7875]
 88. [vLLM Forums：RTX 6000 Blackwell 96GB 支持讨论（从跑不起来到双卡 TP2 配方）](https://discuss.vllm.ai/t/support-for-rtx-6000-blackwell-96gb-card/1707)（2025-10-07 起） — [src-vllm-forum]
+89. [NVIDIA：RTX PRO AI Factory 企业参考架构——总览](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/overview.html)（2026-05-18） — [src-nv-ra-ov]
+90. [NVIDIA：RTX PRO AI Factory——组件与 2-8-5-200 配比](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/components.html)（2026-05-18） — [src-nv-ra-comp]
+91. [NVIDIA：RTX PRO AI Factory——网络物理拓扑（含纯推理不需要计算网络的论断）](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/networking-physical-topologies.html)（2026-05-18） — [src-nv-ra-topo]
+92. [NVIDIA：RTX PRO AI Factory——附录 BOM（交换机/线缆/收发器）](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/appendix.html)（2026-05-18） — [src-nv-ra-app]
+93. [NVIDIA：RTX PRO AI Factory——软件栈](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/software.html)（2026-05-18） — [src-nv-ra-sw]
