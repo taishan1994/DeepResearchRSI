@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：168 ｜ **证据数**：1316 ｜ **主张数**：859（高置信 644，争议 1）
+> **来源数**：170 ｜ **证据数**：1330 ｜ **主张数**：869（高置信 654，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2159,6 +2159,121 @@ TTFT P95 只从 198 降到 179 ms（−10%），而 TPOT 降了 41% [c-mtp-ttft-
 | Minima-KV | **GPU 内的保真度状态** |
 
 > **两者可组合：一个 FP8 或 TQ3 页仍可被外部缓存层搬动。**
+
+### 4.16 长上下文的真实上限：587k token 能装，但装满不等于答得更好
+
+§4.15 讲的是**怎么把 KV 压小**。本节补上另一半：**压完之后到底能装多少、装多了会怎样**。
+
+#### 一、能装多少：587,202 token
+
+**单张 96GB RTX PRO 6000**，FP8 KV + NVFP4 MTP sidecar [c-rx-587k-pool]：
+
+| 指标 | 数值 |
+|---|---:|
+| **KV 池** | **587,202 token** |
+| 解码速度（256 → 250K 上下文） | **123–143 tok/s** |
+
+> **这是本报告迄今记录的最大单卡 KV 池**（远超 262,144 的最大模型长度，故是跨请求共享池）。
+
+#### 二、投机解码的草稿头要吃掉多少容量
+
+这是本轮最实用的一个发现 [c-rx-drafter-tax]：
+
+| 配置 | KV 池 | 相对无投机 |
+|---|---:|---:|
+| **完全关闭投机解码** | **800,525** | 100% |
+| MTP K=2 + **BF16** 草稿头 | **315,590** | **39%** |
+| MTP K=2 + **NVFP4** 草稿 sidecar | **534,773** | **67%** |
+
+> **一个 BF16 草稿头就吃掉 61% 的 KV 容量**（800,525 → 315,590）。
+>
+> **换成 NVFP4 sidecar 才回到 67%。所以「要不要开 MTP」在单卡上是容量与延迟的直接权衡。**
+
+#### 三、草稿长度：接受率最高的反而最慢
+
+| K | KV 池 | 接受率 |
+|---:|---:|---|
+| 3 | 516,652 | 44.9% |
+| **2** | **534,773** | **56.2%**（真实 agent 约 **66%**） |
+| 1 | 562,123 | **70.2%**，但**端到端更慢** |
+
+> **K=1 接受率最高却最慢** [c-rx-k-tradeoff]。原因是**每步只草拟一个 token，无法摊薄验证成本**。
+>
+> **所以接受率与吞吐不同向**——这与 §4.8 的「投机解码不总是有效」互相印证，并给出了机制。
+
+#### 四、一个值得信任的信号：作者自己下调了数字
+
+> 原作者**主动勘误**，把原表的 **+69%** 改为 **+57.7%**，并说明原表测于旧构建、日志已丢失、已在当前代码上重跑 [c-rx-self-correction]。
+>
+> **这种对自身数字的下调，是本报告采信该来源的主要理由之一。**
+
+**质量也不是假定的，而是可证伪地检验过的** [c-rx-quality-check]：
+
+| 配置 | teacher-forced 平均对数概率 |
+|---|---:|
+| **FP8 KV** | **−0.4220** |
+| BF16 KV 基线 | −0.4257 |
+
+> **差距在运行间波动范围内** → 只支持「FP8 KV 未降低输出」，不支持更强说法。
+>
+> 作者还指出**该设置下 logits 不可位级复现**，故贪婪哈希比对**不是**有效检验。
+
+#### 五、引擎版本也是个硬门槛
+
+> **51 GB 的 PLE n-gram bank 需经 UVA 卸载到主机内存，且要求 `VLLM_USE_V2_MODEL_RUNNER=1`**——因为 **V1 runner 直接拒绝 PLE 卸载** [c-rx-ple-offload]。
+>
+> **与 §4.8.6 的 KTransformers 不可用同类：引擎能力边界是硬门槛，不是调优问题。**
+
+#### 六、装得多 ≠ 答得好：一个同题同判分的反证
+
+**BEAM 100K（400 题、十项能力）**，同一模型、同题、同判分、同一天 [c-kb-long-context-loses]：
+
+| 方式 | 九能力 | 十能力 |
+|---|---:|---:|
+| **自带 262,144 窗口**（整段历史入 prompt） | **48.6** | **43.7** |
+| **约 7K token 记忆页** | **56.8** | **55.8** |
+| 尺度参照：Qwen3.8-27B 同 7K 页 | 71.1 | 69.3 |
+
+> **逐行配对差值为 +0.082（bootstrap 95% CI +0.036 到 +0.128）。**
+>
+> **「把全部历史塞进长上下文」在这张卡上不是最优解。**
+
+#### 七、但这个结论按能力分裂，不能整体下
+
+**长窗口赢的与记忆页赢的并不相同** [c-kb-ability-split]：
+
+| 能力 | 长窗口 | 记忆页 | 差 |
+|---|---:|---:|---:|
+| **冲突消解** | **0.277** | **0.808** | **+0.531** |
+| 偏好遵循 | 0.695 | 0.869 | +0.174 |
+| 指令遵循 | 0.659 | 0.794 | +0.134 |
+| 时序推理 | 0.281 | 0.359 | +0.078 |
+| 知识更新 | 0.394 | 0.469 | +0.075 |
+| 摘要 | 0.369 | 0.411 | +0.042 |
+| 多会话推理 | **0.471** | 0.425 | **−0.046** |
+| 信息抽取 | **0.602** | 0.550 | **−0.052** |
+| **拒答** | **0.625** | **0.425** | **−0.200** |
+
+> **长窗口在冲突消解上崩了 0.531，却在拒答上赢了 0.200。**
+>
+> **所以「长上下文好不好」不能整体回答——取决于任务类型。**
+
+#### ⚠️ 八、这个对照有混杂因素
+
+**引用时必须说明** [c-kb-confound]：
+
+| 项 | 长窗口臂 | 记忆页臂 |
+|---|---|---|
+| max-model-len | **262,144** | **20,480** |
+| 前缀缓存 | **开** | **关** |
+
+> **因此两臂差异不纯是上下文长度，也包含前缀缓存策略的影响。作者自己点明了这一点。**
+
+#### 九、这两个来源的可复现性差异值得记一笔
+
+**Kolibri 那篇是本报告收录的社区来源中可复现性最高的** [c-kb-reproducible]：完整命令行、KV 类型、注意力后端、温度、种子、并发、批 token 上限、显存利用率、环境变量与内核后端全给，外加 Zenodo 存档的逐行分数与服务脚本。
+
+> **对照 §4.15 那篇自述「未绑定模型版本、引擎 commit、CUDA/驱动/PyTorch 版本」的论文——同为 2026 年 8 月的工作，可复现性差距相当明显。**
 
 ## 5. 与 RTX 5090 的横向对比
 
@@ -6144,6 +6259,8 @@ sudo nvidia-bug-report.sh
 - [arXiv 2606.00516 — Threshold-Based Exclusive Batching for LLM Inference](https://arxiv.org/abs/2606.00516)（2026-05-30） — [src-arxiv-eb]
 - [arXiv 2608.16157 — FreeToken: Efficient Edge-Native MoE Serving with Bandwidth-Adaptive Execution](https://arxiv.org/html/2608.16157)（2026-08-17） — [src-arxiv-freetoken]
 - [arXiv 2608.23834 — Minima-KV: Retention-Preserving KV Cache Compression with Mixed-Format Paged Attention](https://arxiv.org/html/2608.23834)（2026-08-31） — [src-arxiv-minimakv]
+- [HF 讨论区 — Serving notes: single RTX PRO 6000 Blackwell (96 GB)，587k KV tokens at 123–143 tok/s](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/discussions/15)（2026-09-13） — [src-hf-radixark-587k]
+- [HF 讨论区 — Kolibri-1 FP8 on one RTX PRO 6000：BEAM 100K 的 262K 窗口 vs 7K 记忆页](https://huggingface.co/Aleph-Alpha/Kolibri-1/discussions/10)（2026-08-31） — [src-hf-kolibri-beam]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6373,7 +6490,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=168, evidence=1316, claims=859, claims_high=644, claims_disputed=1, trace_events=344, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=170, evidence=1330, claims=869, claims_high=654, claims_disputed=1, trace_events=348, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
