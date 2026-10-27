@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：191 ｜ **证据数**：1631 ｜ **主张数**：1112（高置信 867，争议 3）
+> **来源数**：197 ｜ **证据数**：1643 ｜ **主张数**：1123（高置信 878，争议 3）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -7867,6 +7867,188 @@ pcieport 0000:f0:01.1: AER: device recovery failed
 
 > ⚠️ **共同点：两者都没有「前兆指标」。这类故障无法靠监控预警，只能靠架构容错。**
 
+### 10.13 SM120 上的一组具体崩溃：默认路径是坏的那个
+
+**§10.1–§10.4 讲的是「SM120 与 SM100 分裂」这个结构性事实。本节补五个具体的、带 A/B 的缺陷报告**——**它们合起来给出一个可操作结论：在这张卡上，默认值不可信。**
+
+#### ⚠️ 一、v0.28.0 回归：580 条 Xid 全落在三次崩溃簇内
+
+**最干净的版本归因证据** [c-v28-regression]：
+
+| 版本 | 状态 |
+|---|---|
+| **v0.24.0** | **升级前 30 天零 Xid；回滚后零 Xid** |
+| **v0.28.0** | ⚠️ **三小时内死三次** |
+
+**而时间窗口内的 Xid 分布**：
+
+> **该窗口内全部 580 条 Xid，都落在 v0.28.0 的三次崩溃簇内。**
+
+**崩溃特征** [e-57822-regression]：
+
+| 项 | 值 |
+|---|---|
+| 故障浮现位置 | `async_utils.py:168`（**异步**） |
+| 内核日志 | **Xid 13 warp 异常覆盖整卡** |
+| 崩溃次数 | **3 次 / 3 小时** |
+
+> ⭐ **「580 条 Xid 全落在崩溃簇内」是本报告见到的最干净的版本归因证据。**
+>
+> ⚠️ **与 §4.4.2 的「b12x 版本回归 266 倍」并列时说明：版本锁定不是保守，是必需。**
+
+#### ⚠️ 二、而且与负载无关
+
+**排除资源上限** [c-v28-not-resource]：
+
+| 崩溃时刻 | 值 |
+|---|---|
+| 在跑请求 | **1 个** |
+| KV 缓存占用 | **低于 0.1%** |
+
+> **即不能用「压力太大」解释，也不是显存或并发打满。**
+>
+> ⚠️ **这与 §10.11 的 Xid 8「轻负载也中」同构：两类崩溃都不是容量问题。**
+
+#### ⚠️ 三、「FP8 崩溃」下有两种完全不同的失效模式
+
+**必须区分的两类** [c-fp8-two-failure-modes]：
+
+| 变体 | 行为 |
+|---|---|
+| **本报告：W8A8 per-tensor 静态、无 block structure、无 FP8 KV** | **能干净加载、正常服务约 1 小时后出错** |
+| **block-scaled 变体（#47436、#51884）** | ⚠️ **加载时就确定性失败** |
+
+> **即同一种量化格式的崩溃不能笼统归为一类。**
+>
+> ⚠️ **这与 §4.4.2 的「量化质量是格式 + 构建 + 校准数据 + 哪些层的联合属性」同源——现在连失效模式也是联合属性。**
+
+#### ⭐ 四、FlashInfer：默认后端是坏的那个
+
+**严格的单变量 A/B** [c-flashinfer-ab]：
+
+| 后端 | 结果 |
+|---|---|
+| **FLASHINFER**（**自动选中的默认**） | ⚠️ **3 次运行全部崩溃**：63 请求 / 74 请求 / **第一个 16 token 请求** |
+| **TRITON_ATTN** | ✅ **2 次运行零崩溃**：**413 个真实代理请求、约 1 小时 45 分钟** |
+
+> **杀死 FLASHINFER 的那条 16 token 请求，在 TRITON_ATTN 下正常返回。**
+
+**最小复现的规模**：
+
+| 项 | 值 |
+|---|---|
+| 提示长度 | **16 token** |
+| 上下文 | **无长上下文、无前缀缓存、无工具、无并发、无投机解码、无结构化输出、无多模态** |
+| 崩溃位置 | **简单提示的首个解码步** |
+
+> ⚠️ **「默认后端是坏的那个」是最危险的一种默认值。**
+>
+> **且最小复现只要 16 token，说明与长上下文无关。**
+
+#### ⚠️ 五、三种错误码 = 内存损坏
+
+**同一次 A/B 里的三次崩溃** [c-flashinfer-memory-corruption]：
+
+| Run | 错误 | 出错时 token 数 |
+|---|---|---:|
+| 1 | `an illegal memory access was encountered` | **96,416** |
+| 2 | `operation not supported on global/shared address space` | **39,824** |
+| 3 | `Triton Error [CUDA]: an illegal memory access` | **16** |
+
+> **三种不同错误码 ⇒ 内存损坏以可变方式浮现，而非单一确定性坏内核。**
+>
+> ⚠️ **且 Python 栈都终止在异步同步点（`async_copy_ready_event.synchronize()`）而非出错内核——这解释了为什么这类 bug 的报错位置总是误导性的。**
+
+#### ⚠️ 六、双卡 P2P 上的 NCCL 死锁
+
+**100% 复现** [c-nccl-p2p-hang]：
+
+| 项 | 值 |
+|---|---|
+| 硬件 | **2× RTX PRO 6000 Blackwell** |
+| 测试 | `all_reduce_perf -b 8 -e 512M -f 2 -g 2` |
+| NCCL 版本 | **2.26.5 / 2.27.7 / 2.29.2 三版全挂** |
+| 现象 | **CPU 占满 100%，内存消耗可忽略** |
+
+**唯一有效的开关**：
+
+> **`NCCL_P2P_DISABLE=1`**——**但那会让 vLLM 的张量并行失效（两张卡各拿完整模型）。**
+
+> ⚠️ **这解释了 §10.10 / §11.10 的「开 P2P 更好」为何有例外：在双卡直连场景下 P2P 可能直接不可用，而绕开它的代价是张量并行。**
+
+#### ⚠️ 七、一个只在特定加载机制下出现的死锁
+
+**HAMi + vLLM pynccl** [c-hami-ctypes-deadlock]：
+
+| 项 | 值 |
+|---|---|
+| 配置 | HAMi **v2.9.0**、4× RTX PRO 6000、`--tensor-parallel-size 4` |
+| 最后一行日志 | `vLLM is using nccl==2.28.9` |
+| 现象 | **永久挂死，pod 到不了加载模型** |
+| 根因 | **`LD_PRELOAD` 注入的 `libvgpu.so` 在 `ncclCuMemHostEnable` 路径里拦截 `cuMemCreate` 造成死锁** |
+| 绕行 | **`CUDA_DISABLE_CONTROL=true` 让 `libvgpu.so` 退化为直通** |
+| 修复后耗时 | **0.22 秒** |
+
+> **「0.22 秒」说明正常路径本来就很快——故挂死时没有任何渐进迹象可观察。**
+
+**而故障边界极窄** [c-hami-ctypes-only]：
+
+| 加载方式 | 结果 |
+|---|---|
+| **vLLM pynccl（`ctypes.CDLL`）** | ⚠️ **挂死** |
+| **`torch.distributed` NCCL（C++ 链接）** | ✅ **零绕行正常**（`torchrun` 四卡 AllReduce/AllGather 验证过） |
+
+> **同一个 NCCL C 库、同一硬件、同一个 HAMi，唯一差别是加载机制。**
+>
+> ⚠️ **含义：「torch 能跑」不能推出「vLLM 能跑」。**
+
+#### 八、一个已修复的越界：性能改进揭开正确性缺陷
+
+**Marlin MoE 的 `c_tmp`** [c-marlin-oob-fixed]：
+
+> **SM 12.0a 上 `c_tmp` 造成 CUDA 非法内存访问；修法是 10 行 CUDA 改动（内核启动参数）加一个 CUDA-graphs 回归测试。**
+
+**而它的成因链值得记住**：
+
+> **该 PR 与「启用 sm_120a 原生 cubin」的 #40923 配套——本 PR 修的正是 #40923 揭开的那处越界。**
+
+> ⚠️ **「启用原生 cubin 揭开了一处此前被掩盖的越界」是 SM120 生态的典型形态：每一个性能改进都可能暴露一个新的正确性缺陷。**
+
+#### ⭐ 九、归纳出的部署原则
+
+**五个案例的共性** [c-sm120-bug-pattern]：
+
+| 案例 | 坏的那条 | 好的那条 |
+|---|---|---|
+| FlashInfer | **默认后端** | **显式 `TRITON_ATTN`** |
+| vLLM 版本 | **v0.28.0** | **v0.24.0** |
+| Marlin MoE | **原生 cubin 路径** | **10 行内核参数修正** |
+| NCCL 双卡 | **P2P 启用** | **`NCCL_P2P_DISABLE=1`**（但有代价） |
+| HAMi | **`ctypes` 加载** | **`CUDA_DISABLE_CONTROL=true`** |
+
+> ⭐ **即「默认值」在这张卡上不可信，必须逐项显式指定并做 A/B。**
+
+> ⚠️ **这与 §10.4 的软件栈现状一致，但给出了更硬的操作含义：不是「注意兼容性」，而是「每一项都要有 A/B 记录」。**
+
+#### 十、一个此前缺的判定依据：行重映射的 RMA 阈值
+
+**NVIDIA 官方口径** [c-rowremap-rma]：
+
+> **给出了 ECC 行重映射的阈值文档，用于判断可纠正错误累积到什么程度应当申请更换。**
+
+> ⭐ **本报告此前讨论 ECC 时只说「归零」或「有报错」，缺的正是「累积到多少算该换」这个阈值。**
+
+#### 十一、给部署者的四条硬性建议
+
+| # | 建议 |
+|---|---|
+| 1 | **锁定 vLLM 版本**，且锁定后不要跟随小版本升级——580 条 Xid 的教训 |
+| 2 | **显式指定 `--attention-backend TRITON_ATTN`**，不要用自动选择 |
+| 3 | **每一项非默认路径都做单变量 A/B**，记录坏的那条与好的那条 |
+| 4 | **报错位置不可信**——异步同步点抛出的错误，真正的坏内核在别处 |
+
+> ⚠️ **第四条最反直觉：`async_utils.py:168`、`async_copy_ready_event.synchronize()` 这些位置全都不是真正出错的地方。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -9704,6 +9886,15 @@ sudo nvidia-bug-report.sh
 
 1. [RTX PRO 6000 Blackwell + RTX 5090: Xid 79 fallen off the bus, 7 events, no precursor](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-rtx-5090-xid-79-fallen-off-the-bus-7-events-no-precursor/385851) — NVIDIA Developer Forums，楼主 Jean_The_CAT，2026-10-14 首帖、2026-10-20 三次更新。含 7 次事件完整 kernel 日志、每秒 16 个 PCIe 链路计数器、受害者与幸存者逐项对照、`cublasHgemm` 独立复现程序、以及时钟限制生效的六次对照 — [src-nvforum-xid79]
 
+### SM120 崩溃与 ECC 判定口径（第十二轮补充）
+
+1. [vLLM #57822 — v0.28.0 illegal memory access under production traffic with per-tensor static FP8 (W8A8) on SM120](https://github.com/vllm-project/vllm/issues/57822) — vLLM GitHub Issue，2026-09-20 提报、open。同一主机同一检查点 v0.24.0 稳定而 v0.28.0 三小时崩三次，窗口内 580 条 Xid 全落在崩溃簇内 — [src-vllm-57822]
+2. [vLLM #54225 — FlashInfer attention backend causes CUDA illegal memory access on sm_120 with NVFP4 + fp8 KV cache](https://github.com/vllm-project/vllm/issues/54225) — vLLM GitHub Issue，2026-08-28 提报、open、11 条评论。给出三次运行的三种不同 CUDA 错误码与 FLASHINFER 对 TRITON_ATTN 的单变量 A/B — [src-vllm-54225]
+3. [NCCL #1999 — NCCL hangs during AllReduce with P2P enabled on dual RTX Pro 6000's (Blackwells)](https://github.com/NVIDIA/nccl/issues/1999) — NVIDIA/nccl GitHub Issue，2026-01-26 提报、closed。100% 复现，唯一有效开关 `NCCL_P2P_DISABLE=1` — [src-nccl-1999]
+4. [HAMi #2641 — vLLM pynccl (ctypes-loaded NCCL) hangs at ncclCommInitRank under libvgpu.so on Blackwell](https://github.com/Project-HAMi/HAMi/issues/2641) — Project-HAMi GitHub Issue，2026-08-13 提报、closed。根因定位到 `LD_PRELOAD` 注入的 `libvgpu.so` 拦截 `cuMemCreate`，且只在 ctypes 加载路径出现 — [src-hami-2641]
+5. [vLLM #43730 — Fix CUDA illegal memory access in Marlin MoE c_tmp on SM 12.0a](https://github.com/vllm-project/vllm/pull/43730) — vLLM GitHub PR，2026-09。10 行 CUDA 改动加 CUDA-graphs 回归测试，与启用 sm_120a 原生 cubin 的 #40923 配套 — [src-vllm-43730]
+6. [RMA Policy — Thresholds for Row Remapping](https://docs.nvidia.com/deploy/a100-gpu-mem-error-mgmt/615/rma-policy-thresholds-for-row-remapping.html) — NVIDIA 官方文档。ECC 行重映射的 RMA 判定阈值 — [src-nvidia-rowremap]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -9843,7 +10034,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=191, evidence=1631, claims=1112, claims_high=867, claims_disputed=3, trace_events=383, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=197, evidence=1643, claims=1123, claims_high=878, claims_disputed=3, trace_events=395, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
