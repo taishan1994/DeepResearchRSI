@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：146 ｜ **证据数**：1032 ｜ **主张数**：649（高置信 469，争议 1）
+> **来源数**：148 ｜ **证据数**：1070 ｜ **主张数**：667（高置信 486，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1541,6 +1541,148 @@ Qwen3.5-9B 的 AIME 基线 **87.9%**。把循环状态直接套用现成低比�
 **方法本身是免训练的（training-free）** [c-lq-training-free]——不需要重训或校准数据。
 
 > **注意适用边界**：该方法的收益是「同卡跑更多并发」，**不是「让小卡装下大模型」**。RTX PRO 6000 的 batch 上限仍是 256，容量墙没有被突破。
+
+### 4.11.5 MTP 到底会不会掉精度：第一次有统计检验的答案
+
+§4.13 记录了 MTP 把并发从 32 翻到 64，但当时**无法回答「质量会不会掉」**。这一轮补上了，而且是**用 Welch t 检验**而不是单次跑分 [c-mtpq-no-degrade]。
+
+#### 实验设计
+
+| 项 | SGLang | vLLM |
+|---|---|---|
+| 卡 | 8× Server Edition（98GB） | 4× Server Edition（98GB） |
+| TP | 8 | 4 |
+| 引擎版本 | SGLang 0.5.9 | vLLM |
+| checkpoint | lukealonso 与 nvidia 两个 NVFP4 | nvidia NVFP4 |
+| 重复次数 | 8 | 8 |
+| 基准 | GPQA Diamond（198 题） | GPQA Diamond |
+
+#### 结论一：没有统计显著差异
+
+| checkpoint | MTP ON | MTP OFF | 差值 | t | p |
+|---|---:|---:|---:|---:|---:|
+| lukealonso（SGLang） | 88.28% | 87.53% | **+0.75pp** | 1.41 | >0.05 |
+| nvidia（SGLang） | 87.46% | 86.58% | **+0.88pp** | 1.28 | >0.05 |
+| nvidia（vLLM） | 88.53% | 86.90% | **+1.62pp** | 2.06 | 0.06 |
+
+> **所有配对 p>0.05，无统计显著差异** [c-mtpq-no-degrade]。
+>
+> 更值得注意的是：**四次对照的差值方向全部为正**（MTP 略高）[c-mtpq-delta-direction]。这不能证明 MTP 提升精度（幅度都在噪声内），但**足以否定「MTP 掉精度」这个常见担忧**。
+
+#### 结论二：但也不能说「绝对无损」
+
+作者自己给出了这条限制 [c-mtpq-underpowered]：
+
+> *"with 8 repeats the test lacks power to distinguish differences below ~2pp"*
+
+> **即：只能否定「明显掉精度」，不能断言「绝对无损」。** 这条限制必须与结论一起引用——**否则就把「p>0.05」误读成了「证明无差异」**。
+>
+> 统计上，p>0.05 是「未能拒绝原假设」，不是「证明原假设成立」。**这是一个很容易犯的推理错误，本报告在此显式标注。**
+
+#### 结论三：引擎的影响可能超过 MTP
+
+这条对选型最有用 [c-mtpq-engine-matters]：
+
+| 配置 | GSM8K（思维链） |
+|---|---:|
+| nvidia NVFP4，**vLLM 不开 MTP** | **98.5%** |
+| nvidia NVFP4，**SGLang 开 MTP** | 97.5% |
+
+> **不开 MTP 的 vLLM 反而比开 MTP 的 SGLang 高 1 个百分点。**
+>
+> **含义：纠结「开不开 MTP」之前，先确认引擎选对了。** 引擎这个变量的量级不小于 MTP 开关。
+
+#### 结论四：官方 checkpoint 不一定最好
+
+| checkpoint | GPQA | GSM8K（思维链） | GSM8K（无思维链） |
+|---|---:|---:|---:|
+| **lukealonso** | **88.28%** | **99.0%** | **44%** |
+| nvidia（官方） | 87.46% | 97.5% | 39% |
+
+> lukealonso 版**全面优于官方版** [c-mtpq-checkpoint-matters]。**「官方 checkpoint 最好」是个不成立的假设。**
+
+#### 结论五：用思维链基准测量化质量会掩盖差距
+
+| 模式 | lukealonso | nvidia | 差距 |
+|---|---:|---:|---:|
+| GSM8K 有思维链 | 99.0% | 97.5% | **1.5pp** |
+| GSM8K 无思维链 | 44% | 39% | **5.0pp** |
+
+> **不开思维链时差距放大 3 倍多** [c-mtpq-nothink-gap]。
+>
+> **含义：思维链会「掩盖」量化损失。** 如果你的实际业务是不开思维链的短问答，**用思维链基准选 checkpoint 会踩坑**。
+
+#### 两个可操作的部署检查项
+
+1. **NVFP4 的 DeepGemm 警告** [c-mtpq-deepgemm-warning]：当 checkpoint 的 `scale_fmt` 不是 `ue8m0` 而 DeepGemm 已启用时，**Blackwell 上可能出现精度退化**。这是个具体的检查项。
+2. **`--disable-custom-all-reduce` 第三次出现** [c-mtpq-ar-again]：8 卡 SGLang 配置同样需要它，与 §4.8、§4.11.1 一致。
+
+#### 一处容量校正
+
+该实测记录的卡容量是 **98GB** 而非标称 96GB [c-mtpq-98gb]——与本报告此前记录的「实际可见容量略高于标称」一致。
+
+### 4.11.6 Max-Q 双卡的真实吞吐：单流赢、并发输
+
+§6 已经记录 Max-Q 是 300W 档，但缺少**高质量的双卡实测**。这一轮补上，而且是五轮中位数 + 镜像 digest 可追溯 [c-tp2-maxq-c1]。
+
+#### 单流：vLLM 略胜
+
+| 配置 | C1 输出 tok/s | C1 步进率 | C1 接受长度 |
+|---|---:|---:|---:|
+| 社区 SGLang | 200.83 | 84.33 | 2.377 |
+| LIL vLLM | **211.00** | 88.25 | 2.381 |
+| vLLM + 元数据省略 | **226.87** | **95.85** | 2.369 |
+
+**vLLM 单流快 5.07%，优化后可达 +13%。** [c-tp2-maxq-c1]
+
+#### 并发 8：方向反转
+
+| 配置 | C8 输出 tok/s | C8 步进率 |
+|---|---:|---:|
+| **社区 SGLang** | **891.67** | 383.67 |
+| LIL vLLM | 866.35 | 371.70 |
+| vLLM + 元数据省略 | **907.28** | 387.74 |
+
+> **并发 8 时 SGLang 反而高 2.84%** [c-tp2-maxq-c8]。
+>
+> **「vLLM 更快」只在单流成立。** 这是本报告反复出现的模式——**单流结论不能外推到并发**。
+
+#### 一个被排除的假设
+
+直觉会怀疑是通信后端的问题。但实测 [c-tp2-nccl-nofix]：
+
+> 把 all-reduce 从 B12X 换成 **NCCL** 后，C1 步进率基本不变，**C8 输出反而更低（853.02）** —— **差距来源不是通信后端**。
+
+#### 优化空间的量级
+
+> **仅移除「未使用的注意力元数据计算」这一项**，vLLM 输出在 C1 提升 **7.52%**、C8 提升 **4.72%** [c-tp2-metadata-gain]。
+>
+> **这类「无用功」在部署栈里占的比例比想象中大**，而且不需要改模型或内核。
+
+#### 差异不来自投机解码
+
+> 两引擎的**接受长度几乎相同**（C1：2.377 vs 2.381；C8：2.323 vs 2.331）[c-tp2-accept-len]，说明差异**不来自接受率**，而来自每步的固定开销。
+
+#### 作者主动限定的归因边界
+
+这份实测的严谨之处在于它**明确拒绝过度归因** [c-tp2-scope-deployed]：
+
+> *"These are deployed-stack comparisons, not an isolated vLLM-versus-SGLang kernel comparison: runtime versions, recurrent state precision and cache implementations differ."*
+
+具体差异包括：**vLLM 用 FP32 循环状态、SGLang 用 BF16**，缓存实现也不同。**所以不能把结果读成「引擎 A 优于引擎 B」。**
+
+#### 一个数据读取陷阱
+
+> 该基准的**本地硬件遥测描述的是客户端而非远程服务器**，作者警告不要用 JSON 里的客户端 GPU 清单当作被测硬件 [c-tp2-telemetry-trap]。
+
+**这类「数据文件本身会骗人」的坑，值得在其他基准里也留意。**
+
+#### 环境细节
+
+- 双卡 Max-Q，**标称频率**（未超频），负载下**显存时钟 13365 MHz** [c-tp2-maxq-clk]——与 §6 记录的 Max-Q 标称值一致。
+- 上下文上限 **524288**，TP2 + DCP1，三个 draft token + verifier bonus token。
+- CUDA 13.4.1。
+- KV 配置差异很大：SGLang 用 HiCache **45 GB/rank**、64 最大序列；vLLM 用 **8 GiB GPU KV/rank**、16 最大序列。
 
 ### 4.12 生产级延迟画像：128K 上下文 + 48 并发的真实数字
 
@@ -4238,6 +4380,13 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 独立实测与可复现基准（补充）
+
+- [local-inference-lab / rtx6kpro：MTP Quality Evaluation：MTP 是否影响模型精度（GPQA Diamond / GSM8K，双引擎）](https://github.com/local-inference-lab/rtx6kpro/blob/master/benchmarks/mtp-quality-evaluation.md)（2026-03-13） — [src-6kpro-mtpq]
+- [local-inference-lab / rtx6kpro：Qwen TP2 decode：Max-Q 双卡上社区 SGLang 与 LIL vLLM 的对照](https://github.com/local-inference-lab/rtx6kpro/blob/master/benchmarks/qwen38-tp2-sglang.md)（2026-09-22） — [src-6kpro-tp2maxq]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -4371,7 +4520,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=146, evidence=1032, claims=649, claims_high=469, claims_disputed=1, trace_events=299, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=148, evidence=1070, claims=667, claims_high=486, claims_disputed=1, trace_events=301, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
