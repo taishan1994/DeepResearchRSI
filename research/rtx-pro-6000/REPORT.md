@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：165 ｜ **证据数**：1286 ｜ **主张数**：838（高置信 625，争议 1）
+> **来源数**：166 ｜ **证据数**：1294 ｜ **主张数**：844（高置信 630，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1927,6 +1927,60 @@ TTFT P95 只从 198 降到 179 ms（−10%），而 TPOT 降了 41% [c-mtp-ttft-
 | 多卡 397B AWQ，≥32k | **负收益** | 接受率随上下文下降 + KV 吃紧 |
 
 > **结论：MTP 不是「开了就快」的开关，它的收益随上下文长度和量化格式反向变化。** 上线前必须按自己的实际上下文分布测。
+
+### 4.14 混合批处理的临界点由带宽决定：1.792 TB/s 让阈值从 80% 掉到 20%
+
+**这是本报告此前完全没有的一个维度**：批处理策略（而不是模型、量化、引擎）本身能带来多少性能，以及**为什么它在不同卡上结论相反**。
+
+#### 先看现象
+
+**混合批处理（MB）**——把 prefill 和 decode 塞进同一批——是当前 LLM 推理的默认调度方式，因为它能最大化算力与显存利用率。
+
+但受控实验发现 [c-eb-bandwidth-threshold]：**prefill-decode 干扰会把 MB 的每步边际成本推高到超过纯 decode**。而这个干扰**什么时候开始出现，取决于显存带宽**：
+
+| 硬件 | 带宽 | 干扰出现的门槛（decode token 占批量） |
+|---|---:|---:|
+| **H200** | 4.8 TB/s | **80%** |
+| **RTX PRO 6000** | **1.792 TB/s** | **20%** |
+
+> **同一份软件、同一种负载，阈值差了 4 倍。**
+>
+> **换句话说：在这张卡上，只要批里有 2 成的 decode token，混批就开始亏了；而在 H200 上要等到 8 成。**
+
+#### 所以「该不该混批」不能脱离硬件回答
+
+**改用优化后的独占批处理（EB）——即纯 decode 批**：
+
+| 场景 | 收益 |
+|---|---:|
+| **带宽受限 GPU**（含本卡） | **吞吐最高 +41.9%** |
+| 高带宽硬件 + 更大模型 | **MB 仍占优** |
+
+> **41.9% 是纯调度层的收益**——不动模型、不动量化、不动引擎，属**免费性能** [c-eb-gain-41]。
+
+#### 更好的是：这个决策可以算，不用试
+
+论文给出了 **EB 与 MB 性能交叉的闭式条件**，以及**渐进最优的相位切换阈值**与 **EB 的内存安全批量上限** [c-eb-closedform]。
+
+> **也就是说，选哪种批处理不必靠压测，可以按带宽、模型规模与负载构成直接算出来。**
+
+#### 真实生产流量下，「固定策略」本身就是次优
+
+**EB+ 混合调度器**把上述条件**在线**应用，在分布或并发变化的**非稳态**流量下，**每种设置都取得最高或接近最高的吞吐，相对纯 MB 最多 +36.4%** [c-eb-hybrid-scheduler]。
+
+#### 这解释了本报告此前的几个孤立现象
+
+**把「阈值 20%」回代到已有实测** [c-eb-explains-report]：本报告 §4.12 记录的 **128K 上下文 + 48 并发**、§4.11.6 记录的 **Max-Q 双卡并发落后**——这些场景里的一部分性能损失，**根因可能不是算力不足，而是批内 prefill 干扰**。
+
+> ⚠️ **这是本报告的推断，原论文并未讨论这些具体场景。**
+
+#### ⚠️ 引用边界
+
+| 项 | 说明 |
+|---|---|
+| 对照设定 | H200 4.8 TB/s vs RTX PRO 6000 1.792 TB/s |
+| 摘要未给 | 模型规模、序列长度、实现框架 |
+| **百分比不可跨基线叠加** | 41.9% 与 36.4% 是**相对其自身基线**，不能直接加到本报告其它来源的吞吐上 [c-eb-scope-limit] |
 
 ## 5. 与 RTX 5090 的横向对比
 
@@ -5909,6 +5963,7 @@ sudo nvidia-bug-report.sh
 - [Design & Reuse：Synopsys Deploys AI-Optimized NVIDIA RTX PRO Servers for Advanced Simulation Workloads](https://www.design-reuse.com/news/202529289-synopsys-deploys-ai-optimized-nvidia-rtx-pro-servers-for-advanced-simulation-workloads) — [src-designreuse-synopsys]
 - [TechPowerUp — NVIDIA Readies Rubin-based GeForce RTX 60-series with Massive RT Performance Gains](https://www.techpowerup.com/347848/nvidia-readies-rubin-based-geforce-rtx-60-series-with-massive-rt-performance-gains)（2026-03-30） — [src-tpu-rtx60-rubin]
 - [TechPowerUp — NVIDIA Readies GeForce RTX 5090 SE Graphics Card](https://www.techpowerup.com/350658/nvidia-readies-geforce-rtx-5090-se-graphics-card)（2026-07-10） — [src-tpu-5090-se]
+- [arXiv 2606.00516 — Threshold-Based Exclusive Batching for LLM Inference](https://arxiv.org/abs/2606.00516)（2026-05-30） — [src-arxiv-eb]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6138,7 +6193,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=165, evidence=1286, claims=838, claims_high=625, claims_disputed=1, trace_events=338, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=166, evidence=1294, claims=844, claims_high=630, claims_disputed=1, trace_events=340, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
