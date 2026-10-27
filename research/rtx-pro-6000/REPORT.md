@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：161 ｜ **证据数**：1235 ｜ **主张数**：804（高置信 602，争议 1）
+> **来源数**：162 ｜ **证据数**：1248 ｜ **主张数**：812（高置信 609，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -5023,6 +5023,100 @@ PCIe Gen5 x16 下 [c-p2p-bandwidth]：
 >
 > **选多卡主板时，拓扑形态比交换机品牌更关键。**（标 `medium`：该来源只测了 P2P 带宽，未直接测 TP 推理吞吐。）
 
+### 11.12 一个严格对照实验：root complex 布局对 P2P 毫无影响，对主机内存却是 1.56 倍
+
+上一节讲的是「什么样的流量会让带宽塌陷」。这一节回答一个更基础的问题 [c-rt-p2p-invariant]：
+
+> **8 张卡该怎么分到几个 CPU root complex？这会影响性能吗？**
+
+这个实验的设计很干净 [e-rt-design]：**同一台机器**上把 8 卡分成两组，**只改 root 布局，其它全部相同**。
+
+| 分组 | 布局 |
+|---|---|
+| **A 组** | 8 卡跨**两个** root complex（Q0 四卡 + Q2 四卡） |
+| **B 组** | 8 卡同处**一个** root complex（Q3） |
+
+#### 结论一：P2P 带宽完全不受影响
+
+| 指标 | A 组 | B 组 | 差异 |
+|---|---:|---:|---:|
+| 单对同交换机写 | 56.29 GB/s | 56.27 GB/s | −0.0% |
+| 单对跨交换机写 | 56.27 | 56.28 | +0.0% |
+| 24 对同交换机均值 | 56.26 | 56.26 | +0.0% |
+| 32 对跨交换机均值 | 56.26 | 56.26 | +0.0% |
+| 双向跨交换机 | 109.26 | 109.34 | +0.1% |
+| 全互联聚合（56 并发对） | 179.04 | 179.10 | +0.0% |
+
+> **二十项指标里，所有 P2P 与全互联数字的差异都在 0.1% 以内。**
+>
+> **换句话说：root 布局对 GPU 之间的通信毫无影响。**
+
+#### 结论二：延迟只有 9.4 纳秒的差别
+
+| 指标 | A 组 | B 组 | 差异 |
+|---|---:|---:|---:|
+| 硬件级单程延迟 | 1,072.3 ns | 1,062.2 ns | **−9.4 ns / −0.9%** |
+
+**作者同时纠正了一个测法问题** [c-rt-latency-ns]：
+
+> **用 CPU 流式启动（stream-launched）测会得到 10 微秒级、充满噪声的差异**——那是启动开销，不是链路延迟。
+> **必须用 GPU 常驻 kernel 的 ping-pong 测法。**
+
+#### 结论三：小消息上，同 root 反而更快
+
+| NCCL AllReduce 消息 | A 组 | B 组 | 谁快 |
+|---|---:|---:|---|
+| **4 KB** | 23.93 µs | **17.34 µs** | **B 快 38%** |
+| **16 KB**（Llama 70B b=1 decode） | 18.66 | **17.31** | **B 快 8%** |
+| 256 KB | 25.09 | 24.96 | −0.5%（无差异） |
+| 4 MB | 182.49 | 182.44 | 0% |
+| 1024 MB 总线带宽 | 46.44 GB/s | 46.48 GB/s | +0.1% |
+
+> **这就是「同 root 少一跳 Infinity Fabric」的收益，但它只在小消息区间存在，256 KB 以上就消失了** [c-rt-nccl-smallwin]。
+
+#### 结论四：真正的大差异在主机内存，1.56 倍
+
+**这是整个实验里最大的单项差异** [c-rt-hostdma-56pct]：
+
+| 方向 | A 组（跨 root） | B 组（同 root） | 比值 |
+|---|---:|---:|---:|
+| **H2D 聚合** | **114.10 GB/s** | **73.09 GB/s** | **1.56×** |
+| **D2H 聚合** | **112.77 GB/s** | **72.89 GB/s** | **1.55×** |
+| 每卡 H2D | 14.26 GB/s | 9.14 GB/s | — |
+
+**而且单卡无争用时两者完全一样**（55–56 GB/s 线速）。
+
+> **所以瓶颈不在 PCIe，而在内存通道** [c-rt-hostdma-mechanism]：
+> **A 组的 8 卡跨两个 CPU 象限，每个象限各有独立 IF 链路 + 2 条 DDR5 通道 → 可叠加到 ~114 GB/s。**
+> **B 组的 8 卡全挤在一个象限的单一 IF + 单一 2 通道路径上 → 封顶 ~73 GB/s。**
+
+#### 换算成实际时间
+
+> **70 GB 模型加载**：A 组约 **0.6 秒**（受 PCIe 限制）、B 组约 **1.0 秒**（受内存限制）——**冷启动差 0.4 秒**，模型越大按比例放大 [e-rt-modelload]。
+
+#### 所以选型判据不是「哪个更好」，而是「你的瓶颈在哪」
+
+| 工作负载 | 选 B（同 root）的影响 |
+|---|---|
+| Prefill（大批量/长上下文） | ~0% |
+| 生产批处理 decode（batch ≥ 8） | ~0% |
+| **单流 decode（batch=1，Llama 70B）** | **快 0.5%–2%** |
+| **模型权重重载** | **慢 ~35%** |
+| **稳态 CPU offload** | **慢 35%–50%** |
+| **pinned 内存训练数据管道** | **慢 ~35%** |
+
+> **纯 GPU 常驻推理、热路径不碰主机内存 → 两种布局都行**（B 的延迟优势每 token 不到 1%，淹没在噪声里）。
+>
+> **任何频繁触碰主机内存的工作流 → 必须选跨 root complex 的布局** [c-rt-topology-matters]。
+
+#### 与上一节不矛盾，是不同维度
+
+> §11.11 说跨 root 并发**写**会塌陷，§11.12 说 root 布局对 P2P **没有影响**。**两者都对** [c-rt-revise-11-10]：
+>
+> **塌陷的触发条件是「同源交换机 + 多目的 root」。而 8 卡两交换机分组无论 root 怎么分布，都构造不出这个条件。**
+>
+> **所以「root 布局」与「是否塌陷」是两个正交的维度。**
+
 ## 12. 价格与采购时机
 
 ### 12.1 价格时间线（截至 2026-10-27）
@@ -5714,6 +5808,7 @@ sudo nvidia-bug-report.sh
 - [OTOY — OctaneBench 2025.2 Results（官方结果数据库，含 2x–8x 多 GPU 配置）](https://render.otoy.com/octanebench/results.php)（2026-10-27） — [src-octanebench]
 - [local-inference-lab / rtx6kpro — PCIe Bandwidth & P2P Performance（RTX PRO 6000 多卡 P2P / NCCL 实测汇总）](https://github.com/local-inference-lab/rtx6kpro/blob/main/hardware/pcie-bandwidth.md)（2026-10-27） — [src-rtx6kpro-pcie]
 - [local-inference-lab / rtx6kpro — Collapse Report：PCIe 交换机拓扑下跨交换机 P2P 写带宽塌陷 75–93% 的复现](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/collapse-report.md)（2026-10-27） — [src-6kpro-collapse]
+- [local-inference-lab / rtx6kpro — 8-GPU Group Comparison: Shared vs Separate CPU Root Complexes（root 布局受控对照）](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/wrx90-cpayne-8gpu-root-topology-comparison.md)（2026-10-27） — [src-6kpro-root-topo]
 
 ---
 
@@ -5850,7 +5945,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=161, evidence=1235, claims=804, claims_high=602, claims_disputed=1, trace_events=330, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=162, evidence=1248, claims=812, claims_high=609, claims_disputed=1, trace_events=332, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
