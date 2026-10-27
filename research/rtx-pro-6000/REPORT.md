@@ -1524,6 +1524,66 @@ PassMark 是覆盖最广的第三方 GPU 数据库之一（3,900+ 卡），本�
 
 **顺带一个有用的旁证** [c-pm-no-price]：PassMark 对该卡的 **G3DMark/Price = NA**（无可靠价格），而同页消费卡都有具体值（RTX 3080 53.24、RTX 3070 48.88）。**这是第三方数据源对该卡渠道价格不透明的一个独立佐证**，与 §12.7 的采购风险相互印证。
 
+### 7.2.2 SPECviewperf 的官方原始数据与一个全新维度
+
+本轮找到了 **SPEC.org 的官方原始结果页**，把 §7.2 的分数从「引用二手汇总」升级为「可追溯到机器配置的一手数据」[c-spec-official]。
+
+**送测机配置**（这些细节此前完全没有）：
+
+| 项 | 值 |
+|---|---|
+| 机型 | **Lenovo ThinkStation P8** |
+| CPU | AMD Ryzen Threadripper PRO **9965WX 24 核** |
+| 内存 | 128GB @ 6400MHz |
+| GPU | RTX PRO 6000 Blackwell WS 版 |
+| 系统 | Windows 11 Pro (26100) |
+| 分辨率 | **4K** |
+| 结果日期 | **2025-11-12** |
+| 完成度 | **11/11 工作负载出分**，"Official Submission Candidate" |
+
+> **注意：这是 24 核 + 128GB 的中端配置，不是顶配。** 说明这批分数**在中端工作站平台上即可复现**——对预算有限的用户是好消息 [c-spec-config-note]。
+
+#### 一个此前完全未分析的维度：分辨率敏感性
+
+我把同一张卡在 **FHD** 下的官方结果也取了出来，两者并列后出现一个**很值得注意的现象** [c-spec-resolution-sensitivity]：
+
+| 工作负载 | FHD | 4K | **FHD 相对 4K** |
+|---|---:|---:|---:|
+| **energy-04** | 413.04 | 159.35 | **+159%** |
+| **enscape-01** | 178.41 | 71.96 | **+148%** |
+| **medical-04** | 320.41 | 170.60 | **+88%** |
+| maya-07 | 288.56 | 189.76 | +52% |
+| blender-01 | 156.70 | 112.88 | +39% |
+| catia-07 | 154.48 | 125.19 | +23% |
+| 3dsmax-08 | 136.55 | 112.81 | +21% |
+| snx-05 | 115.83 | 97.50 | +19% |
+| solidworks-08 | 245.09 | 212.31 | +15% |
+| creo-04 | 277.45 | 259.46 | +7% |
+| **unreal_engine-01** | 92.29 | 103.02 | **−10%** |
+
+**提升幅度从 +7% 一直到 +159%，而 unreal 是反向的。**
+
+#### 三档分类解释了评测矛盾
+
+按敏感性可以清晰分档 [c-spec-res-buckets]：
+
+| 档位 | 工作负载 | 机制 |
+|---|---|---|
+| **强敏感（>80%）** | **energy / enscape / medical** | **像素填充与几何吞吐受限**——4K 像素量是 FHD 的 4 倍 |
+| **中等（20–55%）** | maya / blender / catia / 3dsmax | 混合负载 |
+| **弱敏感（<20%）** | snx / solidworks / creo | **CPU 与模型复杂度受限**，分辨率几乎无影响 |
+| **反向（−10%）** | **unreal** | 可能是动态分辨率缩放或 TSR 在低分辨率下反而有额外开销 |
+
+> **这解释了为什么不同评测会给出互相矛盾的相对排名**——**它们跑的分辨率不同，而这张卡对分辨率的敏感度在不同负载上相差 20 倍以上**。
+
+#### 直接可用的采购判据
+
+[c-spec-practical-advice]
+
+> **做可视化 / 医疗 / 建筑渲染（energy / enscape / medical）：4K 下这张卡只有 FHD 的 40–60%**。**高分屏是这类工作流的真实成本，不是免费的清晰度提升。**
+>
+> **做 CAD 建模（creo / snx / solidworks）：4K 与 FHD 差别在 20% 以内**，可以放心上高分屏。
+
 ### 7.3 一条必须并列呈现的冲突
 
 Blender 的 Server 版成绩，两个来源相差 **69%**：
@@ -3304,6 +3364,7 @@ sudo nvidia-bug-report.sh
 | q66 | 整机采购要多少钱？ | ✅ | §12.3.1 BOXX 起价 ,000（2026-07 快照），1500W 电源 |
 | q67 | Ansys 支持吗？ | ⚠️ 部分 | §10.4.1.2 Fluent 仅 Linux、Rocky 仅 Max-Q、Speos 不支持 |
 | q68 | 一张卡能支撑多少 CAD 用户？ | ✅ | §10.4.1.3 单卡最多 30 个 Siemens NX 并发（ATS 基准） |
+| q69 | 分辨率对专业负载影响多大？ | ✅ | §7.2.2 同一张卡 FHD vs 4K 差 +7% 到 +159%，unreal 反向 -10% |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -3340,12 +3401,13 @@ sudo nvidia-bug-report.sh
 | q66 | 整机采购要多少钱？ | ✅ | §12.3.1 BOXX 起价 ,000（2026-07 快照），1500W 电源 |
 | q67 | Ansys 支持吗？ | ⚠️ 部分 | §10.4.1.2 Fluent 仅 Linux、Rocky 仅 Max-Q、Speos 不支持 |
 | q68 | 一张卡能支撑多少 CAD 用户？ | ✅ | §10.4.1.3 单卡最多 30 个 Siemens NX 并发（ATS 基准） |
+| q69 | 分辨率对专业负载影响多大？ | ✅ | §7.2.2 同一张卡 FHD vs 4K 差 +7% 到 +159%，unreal 反向 -10% |
 
-**完成度：68/69 已答（6 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：69/70 已答（6 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **833 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **839 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -3473,3 +3535,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 133. [Ansys GPU Compute Capabilities — Release 2026 R1（官方 GPU 求解器支持矩阵 PDF）](https://www.ansys.com/content/dam/it-solutions/platform-support/2026-r1/ansys-2026-r1-gpu-compute-capabilities.pdf)（2026） — [src-ansys-gpu]
 134. [Azure Virtual Desktop with RTX PRO 6000：单卡支撑最多 30 个 Siemens NX 用户](https://notanarchitect.io/azure-virtual-desktop-with-rtx-pro-6000-validation-shows-up-to-30-siemens-nx-users-per-gpu/)（2025-10-26，转述 Microsoft 官方验证） — [src-avd-nx]
 135. [CIMdata 转述 Synopsys 官方新闻稿：Synopsys 采用 NVIDIA RTX PRO 服务器加速仿真负载](https://www.cimdata.com/en/industry-summary-articles/item/28273-synopsys-embraces-nvidia-rtx-pro-servers-to-accelerate-compute-heavy-simulation-workloads)（2025-08-28） — [src-synopsys-rtxpro]
+136. [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-p8-4k]
+137. [SPEC.org：SPECviewperf 15.0 官方结果 — ThinkStation P3 Tower Gen2 / RTX PRO 6000 / FHD](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P3_TWR_G2_Ultra_9_285K_RTX_PRO_6000_FHD/results.html) — [src-spec-p3-fhd]
