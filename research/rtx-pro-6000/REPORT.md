@@ -652,6 +652,89 @@ Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存
 - **DFlash2 再次被否决** [c-tp2-dflash]：单请求解码提升 4.3%，但实际运行的 4 并发点反而损失 5.5%，且冷 prefill 被砍约三分之一。**与 §4.8、§4.5.1 的结论一致：只在单请求有利。**
 - **工具解析器有具体缺陷** [c-tp2-parser]：SGLang 初始实现把 JSON `null` 编码成字符串 `"null"`，对可空参数会**破坏工具调用协议**。这是智能体场景的隐蔽正确性问题——**不报错，但工具参数错了**。
 
+#### 4.9.1 双卡到底值不值：一份 1×/2× 的受控实测
+
+上面是 TP2 的绝对产能。**这一节回答相对问题：同一台机器上，第二张卡带来多少？**
+
+测试平台是整机形态 [c-7875-maxq-only]：**Dell Precision 7875**，Threadripper PRO 9995WX（96C）、512GB DDR5、**双 RTX PRO 6000 Blackwell Max-Q**、1000W/1350W 电源。vLLM Online Serving，三种负载形态，batch 1→256 [e-7875-vllm]。
+
+**先记住这个采购约束**：该机箱**最多支持两张 300W 双槽全高卡**——塔式双卡整机**只能是 Max-Q**，装不进 600W 工作站版 [e-7875-maxq]。
+
+**GPT-OSS-120B（MoE，需要双卡才有余量）：**
+
+| 负载形态 | 1× | 2× | 倍数 |
+|---|---:|---:|---:|
+| Equal 256/256（batch 256） | 8,190 | 11,848 | **1.45×** |
+| **Prefill 1024/256**（batch 256） | 5,941 | **18,954** | **3.19×** |
+| **Decode 256/1024**（batch 256） | 1,569 | **5,275** | **3.36×** |
+
+**GPT-OSS-20B（单卡已足够）：**
+
+| 负载形态 | 1× | 2× | 倍数 |
+|---|---:|---:|---:|
+| Equal（batch 256） | 19,228 | 22,034 | 1.15× |
+| Prefill（batch 256） | 22,019 | 31,982 | 1.45× |
+| Decode（batch 256） | 6,638 | 9,985 | 1.50× |
+
+**三个必须分开看的结论：**
+
+**第一，双卡的最大收益在 decode 与 prefill，不在均衡负载** [c-7875-decode3x][c-7875-prefill3x]。120B 上 decode 达 **3.36×**、prefill 达 **3.19×**，而均衡负载只有 1.45×。原因是这两种极端负载单卡会撞上不同瓶颈（decode 撞带宽、prefill 撞算力+显存），双卡各解开一个。
+
+**第二，收益强依赖模型大小** [c-7875-modeldep]。同样是 256 并发均衡负载：**120B 提升 45%，20B 只提升 15%**。**小模型单卡已饱和，第二张卡基本浪费。**
+
+**第三，也是最有操作价值的——单卡会出现性能反转** [c-7875-collapse]：120B 的 prefill-heavy 场景，单卡在 batch 32 达到 7,359 后，**batch 64 反而跌到 5,483**，最终 batch 256 只有 5,941；decode-heavy 同样在 batch 64 后**硬性平台化**。
+
+> **这个"掉头向下"的拐点就是必须上双卡的信号。** 它不是慢慢不涨，而是**倒退**——典型的显存/带宽饱和后调度开销反噬。
+
+#### 4.9.2 一份可直接照抄的双卡 TP2 配方（含三个环境变量与五个坑）
+
+同一形态下另有一份**从完全跑不起来到可用**的完整记录，价值在于它记录了失败路径 [c-vf-official-broken]。
+
+**先看坑有多深**：vLLM 官方预编译镜像在 SM120 上——
+
+- **8B FP8 模型占用 92GB 显存**（正常应远低于此）
+- **70B FP4 模型输出完全乱码**——返回"`The the original\nThe the management of the whole\nThe the mill`"这样的重复碎片，`finish_reason: length`，**无任何报错**
+- 显式限制 `--gpu-memory-utilization 0.5` 后，占用正好变成 50GB ——**说明它是在按比例吃显存，而不是按模型大小**
+
+**根因** [c-vf-source-build]：官方镜像与 wheel **往往不含 SM120 的 CUDA 架构或 kernel 支持**，导致回退到低效路径或量化静默失败。解法是源码构建并显式设置：
+
+```bash
+TORCH_CUDA_ARCH_LIST="12.0 12.1"
+```
+
+**可用的双卡配方** [c-vf-2x-recipe]：Qwen3-Next-80B-A3B-FP8、**131K 上下文**、每卡约 40GB 权重、双卡各占 **90GB/96GB**：
+
+```bash
+--quantization fp8 --tensor-parallel-size 2 --disable-custom-all-reduce \
+--max-model-len 131072 --max-num-seqs 16 --enable-chunked-prefill \
+--max-num-batched-tokens 16384 --enable-prefix-caching \
+--tool-call-parser hermes --enable-auto-tool-choice --gpu-memory-utilization 0.88
+```
+
+**三个必需的环境变量** [c-vf-env]（FP8 MoE 在 SM120 上的前提）：
+
+```bash
+VLLM_USE_FLASHINFER_MOE_FP8=1
+VLLM_FLASHINFER_MOE_BACKEND=latency
+VLLM_ATTENTION_BACKEND=FLASH_ATTN
+```
+
+**NCCL 参数与 16 卡现场报告不同，不能照搬** [c-vf-nccl]：
+
+| 规模 | NCCL 参数 |
+|---|---|
+| **本次双卡** | `ALGO=Ring`、`PROTO=Simple`、`MIN_NCHANNELS=4`、`MAX_NCHANNELS=8`、`BUFFSIZE=8388608` |
+| §4.3.3 十六卡 | `NCCL_MIN_NCHANNELS=8` |
+
+> **最优 NCCL 参数随卡数变化**，跨规模照搬会适得其反。
+
+**智能体部署的两个具体障碍** [c-vf-toolparser][c-vf-hang2]：
+
+1. **解析器只有一个能用**：`hermes` + `--enable-auto-tool-choice` 可用；`qwen3_coder` **返回空响应**；`qwen3_xml` 把原始 XML 塞进 `content` 而非 `tool_calls` 数组；不启用 `auto` 直接 **400**。
+2. **该组合会导致初始化挂死**（worker 卡在 100% CPU），解法是**确保无孤儿 GPU 进程后用 systemd 干净重启并给足初始化时间**。
+
+**性能结论要打折看** [c-vf-pcie-viable]：该配置达到 **85–95 tok/s**（llama.cpp 基线 67.41），但作者自己标注"仍在用工具调用负载做基准"。**这个数字明显低于 §4.9 的 388 tok/s**——说明**配方差异对结果的影响，可能大于硬件差异**。
+
 ---
 
 ## 5. 与 RTX 5090 的横向对比
@@ -1843,18 +1926,22 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q36 | 虚拟机直通是否可行？ | ⚠️ | §11.1.1 双重惩罚：P2P 消失 + 链路降到 Gen1 |
 | q37 | PCIe 多卡跑 MoE 的最优并行策略？ | ✅ | §4.3.5 专家并行：吞吐 2.3×、TTFT 27× |
 | q38 | 双卡 192GB 形态的实际产能？ | ✅ | §4.9 TP2 部署单元（388 tok/s @ 4 并发） |
+| q39 | 第二张卡的边际收益有多大？ | ✅ | §4.9.1 受控 1x/2x：decode 3.36×、均衡 1.45× |
+| q40 | 塔式整机能否装 600W 版？ | ⚠️ | §4.9.1 Dell 7875 仅支持双 300W Max-Q |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
 | q36 | 虚拟机直通是否可行？ | ⚠️ | §11.1.1 双重惩罚：P2P 消失 + 链路降到 Gen1 |
 | q37 | PCIe 多卡跑 MoE 的最优并行策略？ | ✅ | §4.3.5 专家并行：吞吐 2.3×、TTFT 27× |
 | q38 | 双卡 192GB 形态的实际产能？ | ✅ | §4.9 TP2 部署单元（388 tok/s @ 4 并发） |
+| q39 | 第二张卡的边际收益有多大？ | ✅ | §4.9.1 受控 1x/2x：decode 3.36×、均衡 1.45× |
+| q40 | 塔式整机能否装 600W 版？ | ⚠️ | §4.9.1 Dell 7875 仅支持双 300W Max-Q |
 
-**完成度：37/38 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：39/40 已答（2 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **497 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **520 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1922,14 +2009,16 @@ python scripts/validate_research.py research/rtx-pro-6000
 75. [Joshua8.AI：为什么投机解码没有加速我的 120B 模型](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
 ### 引擎实测与软件缺陷（第七轮补充）
 
-71. [Joshua8.AI：Blackwell GPU 上的 LLM 运行指南（总览）](https://joshua8.ai/blackwell-inference/) — [src-j8-guide]
-72. [Joshua8.AI：vLLM v0.16.0 在 Blackwell 上吞吐提升至 20%（Max-Q 并发曲线）](https://joshua8.ai/vllm-v016-blackwell-throughput-benchmark/)（2026-02-25） — [src-j8-v016]
-73. [Joshua8.AI：追踪 vLLM 夜构建中 8% 的解码回退](https://joshua8.ai/vllm-nightly-decode-regression-qwen35/)（2026-04-13） — [src-j8-nightly]
-74. [Joshua8.AI：同一张卡快一倍——Qwen3.8-Flash-Next 在 RTX PRO 6000 Max-Q 上的八周](https://joshua8.ai/qwen38-flash-next-penny-royal-rtx-pro-6000/)（2026-10-22） — [src-j8-penny]
-75. [Joshua8.AI：为什么投机解码没有加速我的 120B 模型](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
-77. [Joshua8.AI：在单张 RTX 6000 上运行 MiniMax-M2.5（68 tok/s / 64K 上下文完整配置）](https://joshua8.ai/minimax-m25-rtx-6000-blackwell-sglang-guide/)（2026-02-28） — [src-j8-minimax]
-78. [Joshua8.AI：推理引擎的版本更新真的更快吗（月度同口径对比）](https://joshua8.ai/llm-inference-benchmark-update/)（2026-02-15） — [src-j8-update]
-79. [magik.net：Gen1 启示——一条诊断命令揭开的虚拟化开销（Proxmox 8 卡直通）](https://magik.net/blog/llmopt/seg_3/chunk_2/the_gen1_revelation.html) — [src-magik-gen1]
-80. [HelixML：GLM-5.3-Flash 在 2/4/8 张 RTX PRO 6000 上的 TP2 基准](https://helixml.tech/blog/glm53-flash-tp2-rtx-pro-6000)（2026-09-14） — [src-helix-tp2]
-81. [NVIDIA Developer Forums：专家并行在 6000 Pro PCIe Gen5 与 B200 NVLink 上的对照](https://forums.developer.nvidia.com/t/expert-parallelism-using-6000-pro-pcie-gen5-vs-b200-nvlink/378258)（2026-07-27） — [src-nvf-ep]
-82. [Akash Network：RTX PRO 6000 vs H100 vs H200 选型指南](https://akash.network/the-bid/rtx-pro-6000-blackwell-vs-h100-vs-h200-2026/)（2026-08-25，更新 2026-10-22） — [src-akash]
+76. [Joshua8.AI：Blackwell GPU 上的 LLM 运行指南（总览）](https://joshua8.ai/blackwell-inference/) — [src-j8-guide]
+77. [Joshua8.AI：vLLM v0.16.0 在 Blackwell 上吞吐提升至 20%（Max-Q 并发曲线）](https://joshua8.ai/vllm-v016-blackwell-throughput-benchmark/)（2026-02-25） — [src-j8-v016]
+78. [Joshua8.AI：追踪 vLLM 夜构建中 8% 的解码回退](https://joshua8.ai/vllm-nightly-decode-regression-qwen35/)（2026-04-13） — [src-j8-nightly]
+79. [Joshua8.AI：同一张卡快一倍——Qwen3.8-Flash-Next 在 RTX PRO 6000 Max-Q 上的八周](https://joshua8.ai/qwen38-flash-next-penny-royal-rtx-pro-6000/)（2026-10-22） — [src-j8-penny]
+80. [Joshua8.AI：为什么投机解码没有加速我的 120B 模型](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
+81. [Joshua8.AI：在单张 RTX 6000 上运行 MiniMax-M2.5（68 tok/s / 64K 上下文完整配置）](https://joshua8.ai/minimax-m25-rtx-6000-blackwell-sglang-guide/)（2026-02-28） — [src-j8-minimax]
+82. [Joshua8.AI：推理引擎的版本更新真的更快吗（月度同口径对比）](https://joshua8.ai/llm-inference-benchmark-update/)（2026-02-15） — [src-j8-update]
+83. [magik.net：Gen1 启示——一条诊断命令揭开的虚拟化开销（Proxmox 8 卡直通）](https://magik.net/blog/llmopt/seg_3/chunk_2/the_gen1_revelation.html) — [src-magik-gen1]
+84. [HelixML：GLM-5.3-Flash 在 2/4/8 张 RTX PRO 6000 上的 TP2 基准](https://helixml.tech/blog/glm53-flash-tp2-rtx-pro-6000)（2026-09-14） — [src-helix-tp2]
+85. [NVIDIA Developer Forums：专家并行在 6000 Pro PCIe Gen5 与 B200 NVLink 上的对照](https://forums.developer.nvidia.com/t/expert-parallelism-using-6000-pro-pcie-gen5-vs-b200-nvlink/378258)（2026-07-27） — [src-nvf-ep]
+86. [Akash Network：RTX PRO 6000 vs H100 vs H200 选型指南](https://akash.network/the-bid/rtx-pro-6000-blackwell-vs-h100-vs-h200-2026/)（2026-08-25，更新 2026-10-22） — [src-akash]
+87. [StorageReview：Dell Precision 7875 双 RTX PRO 6000 Max-Q 评测（vLLM 1x/2x 三场景）](https://www.storagereview.com/review/dell-precision-7875-review-threadripper-pro-9995wx-meets-dual-rtx-pro-6000-blackwell-gpus)（2026-03-18） — [src-sr-7875]
+88. [vLLM Forums：RTX 6000 Blackwell 96GB 支持讨论（从跑不起来到双卡 TP2 配方）](https://discuss.vllm.ai/t/support-for-rtx-6000-blackwell-96gb-card/1707)（2025-10-07 起） — [src-vllm-forum]
