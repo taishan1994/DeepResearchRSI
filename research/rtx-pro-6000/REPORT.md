@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：227 ｜ **证据数**：1796 ｜ **主张数**：1277（高置信 971，争议 6）
+> **来源数**：227 ｜ **证据数**：1797 ｜ **主张数**：1280（高置信 974，争议 6）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -97,11 +97,69 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 
 ### 2.2 来源分级
 
-本报告对每条证据标注可信层级，冲突时不强行裁决：
+本报告对每条证据标注可信层级，冲突时不强行裁决。
 
-- **primary（一手）**：NVIDIA 官方产品页、新闻稿、博客 — 规格与厂商声明
-- **secondary（二手独立）**：StorageReview、HOSTKEY、TechnoLynx、社区实测仓库 — 实测数据
-- **tertiary（聚合/转述）**：CG Channel 汇总、中文媒体转述 — 仅用于价格与时间点
+#### ⚠️ 一处必须首先订正的地方
+
+**本节此前用「举例子」的方式说明层级，而所举的例子与实际打分全部对不上** [c-tier-doc-mismatch]：
+
+| 本节此前的举例 | 实际 `source_type` / `trust_tier` |
+|---|---|
+| StorageReview → secondary | ⚠️ **review / primary** |
+| HOSTKEY → secondary | ⚠️ **vendor / primary** |
+| TechnoLynx → secondary | ⚠️ **review / primary** |
+| CG Channel → tertiary | ⚠️ **press / secondary** |
+
+> ⚠️ **即按本节原来的读法，读者会对这四家得出错误的层级印象。**
+>
+> ⭐ **订正的方式不是改数据，而是改说明——因为数据是对的，举例是旧的。**
+
+#### ⭐ 两个维度是正交的，不是一回事
+
+**这是本节此前最根本的一处缺失** [c-tier-orthogonal]：
+
+| 维度 | 回答的问题 |
+|---|---|
+| **`source_type`**（9 类） | **这是谁发布的**（official / review / academic / community / press …） |
+| **`trust_tier`**（3 级） | ⭐ **这个观测是谁做的** |
+
+**实际交叉分布** [e-tier-crosstab]：
+
+| `source_type` | primary | secondary | tertiary |
+|---|---:|---:|---:|
+| academic | **14** | 0 | 0 |
+| community | **63** | 0 | 0 |
+| independent | **35** | 3 | 0 |
+| official | **46** | 0 | 0 |
+| press | 0 | **23** | **5** |
+| retail | 0 | 1 | 0 |
+| review | **10** | 0 | 0 |
+| vendor | **13** | 0 | 1 |
+| vendor-adjacent | 1 | **9** | 3 |
+| **合计** | **182** | **36** | **9** |
+
+> ⭐ **即「媒体」不必然是二手，「评测机构」可以是一手。**
+
+#### ⭐ 三级的实际定义（从数据反推）
+
+**`primary` 的真实判据是「该来源自己产出了这个观测」** [c-tier-primary-definition]：
+
+| 情形 | 层级 |
+|---|---|
+| 厂商测自己的产品 | ✅ **primary** |
+| 评测机构自己跑分 | ✅ **primary** |
+| 学术论文自己的实验 | ✅ **primary** |
+| **社区用户自己的实测** | ✅ **primary** |
+| 媒体转述别人的测试 | ⚠️ **secondary** |
+| 索引/聚合页 | ⚠️ **tertiary** |
+
+> ⚠️ **它不区分「有没有商业利益」，只区分「是不是本人做的」。**
+>
+> ⭐ **这一点很关键：本节此前把 「primary」 描述为「NVIDIA 官方产品页、新闻稿、博客」，**
+> **但实际有 63 条 community 来源被判为 primary——**
+> **说明真正的判据是「自己做的观测」而非「官方发布」。**
+
+> ⚠️ **商业利益的相关性由另一套机制处理：** 服务商与托管商的自测已单独降置信度（见下方方法论警告）。
 
 **明确的方法论警告**：
 - 厂商倍数声明（如"相对 L40S 快 5 倍"）**未公开完整测试条件**，应视为上限而非典型值 [c-vs-l40s]。
@@ -12485,7 +12543,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=227, evidence=1796, claims=1277, claims_high=971, claims_disputed=6, trace_events=476, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=227, evidence=1797, claims=1280, claims_high=974, claims_disputed=6, trace_events=476, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
