@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：222 ｜ **证据数**：1758 ｜ **主张数**：1240（高置信 951，争议 4）
+> **来源数**：222 ｜ **证据数**：1761 ｜ **主张数**：1244（高置信 955，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -188,7 +188,79 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 >
 > ⭐ **保留为 `disputed` 并并列双方证据，不是一种妥协，而是唯一诚实的选择。**
 
-#### ⚠️ 五、这条审计本身的局限
+#### ⚠️ 五、最大的单点：一个来源撑起九分之一的结论
+
+**把 852 条单来源 `high` 按来源聚合后，出现了一个具体的风险点** [c-audit-single-point-11pct]：
+
+| 来源 | 独力支撑的 `high` 主张 | 占全部 951 条 `high` |
+|---|---:|---:|
+| ⚠️ **`src-rtx6kpro-daily-full`** | ⚠️ **109** | ⚠️ **11.5%** |
+| `src-blender-snapshot` | 37 | 3.9% |
+| `src-hf-malaiwah-27b` | 16 | 1.7% |
+| `src-arx-xfp` | 14 | 1.5% |
+| `src-sabareesh-waterblock` | 14 | 1.5% |
+
+> ⚠️ **若该来源的实测有系统性偏差，本报告约九分之一的结论会同时受影响。**
+>
+> **该来源是 local-inference-lab 在 GitHub 上的每日实测摘要（`community` / `primary` / `open`）——**
+>
+> **⭐ 它是可复算的原始数据，而不是观点文章。这正是它能支撑 `high` 的原因，也是风险可控的原因：任何人都能重新下载它核对。**
+
+#### ⭐ 六、一个打破直觉的来源类型分布
+
+**852 条单来源 `high` 按 `source_type` 分布** [c-audit-community-largest]：
+
+| 来源类型 | 条数 | 占比 |
+|---|---:|---:|
+| ⭐ **community** | ⭐ **357** | ⭐ **41.9%** |
+| independent | 188 | 22.1% |
+| official | 160 | 18.8% |
+| academic | 83 | 9.7% |
+| review | 41 | 4.8% |
+| vendor | 20 | 2.3% |
+| vendor-adjacent | 7 | 0.8% |
+| **press** | ⭐ **0** | **0%** |
+| **retail** | ⭐ **0** | **0%** |
+
+> ⭐ **即本报告的高置信结论主要不是建立在厂商文档或论文上，而是建立在社区实测上。**
+>
+> ⭐ **而 `press` 与 `retail` 均为 0——没有一条 `high` 建立在媒体转述或零售页面上。**
+
+> ⚠️ **这需要结合 §2.2 读**：`community` 来源之所以能支撑 `high`，是因为它们多为「**本人实测并公开原始数据**」，而非观点表达。这与「论坛里有人说」是两种东西。
+
+#### ⭐ 七、单点风险被多样性摊薄
+
+**357 条 `community` 主张分布在多少个来源上** [c-audit-community-spread]：
+
+| 项 | 数量 |
+|---|---:|
+| 不同 `community` 来源 | ⭐ **50 个** |
+| 最大的一个 | 109 条 |
+| **其余 49 个合计** | **248 条** |
+
+> ⭐ **社区来源既是最主要的支撑，也是最多样化的支撑。**
+>
+> **109 条集中在一个来源上是显著风险，但另外 248 条分散在 49 个独立来源上——**
+>
+> **单一偏差很难同时污染 50 个互不相识的实测者。**
+
+#### ⚠️ 八、27 条 `high` 来自厂商自述
+
+**一个需要单独标注的类别** [c-audit-vendor-only-27]：
+
+| 类型 | 条数 |
+|---|---:|
+| `vendor` | 20 |
+| `vendor-adjacent` | 7 |
+| **合计** | **27** |
+
+> **这些主张的内容多为官方规格、保修期限、定价与支持矩阵——**
+>
+> ⭐ **即「厂商关于自己产品的陈述」，此类内容由厂商自述是恰当的。**
+>
+> ⚠️ **但一旦涉及「和其它厂商比谁更强」，同样的话就不可信了——这正是 §2.2 与 §9.5 的分级原则。**
+
+#### ⚠️ 九、这条审计本身的局限
 
 **必须说明**：
 
@@ -11878,7 +11950,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=222, evidence=1758, claims=1240, claims_high=951, claims_disputed=4, trace_events=460, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=222, evidence=1761, claims=1244, claims_high=955, claims_disputed=4, trace_events=460, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
