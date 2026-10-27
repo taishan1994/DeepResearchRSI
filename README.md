@@ -57,7 +57,7 @@ python tests/test_schemas.py
 
 | 任务 | 主题 | 规模 |
 |---|---|---|
-| [rtx-pro-6000](./research/rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | 32 来源 / 188 证据 / 120 主张（79 高置信、1 争议） |
+| [rtx-pro-6000](./research/rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **136 来源 / 872 证据 / 573 主张（451 高置信、1 争议）**，71 个子问题 |
 
 该报告的几个结论值得单独一提：
 
@@ -67,6 +67,9 @@ python tests/test_schemas.py
 - **每美元渲染性能排 33 张卡的末位**：RTX 5090 的每美元性能约为它的 3 倍。
 - **训练侧存在序列长度交叉点**：<4K 时比 GH200 快 1.8×，>8K 时慢 1.7–1.8×；优化器卸载在 PCIe 上基本不可用。
 - **一个未被评测覆盖的运维风险**：多名用户报告在役 SW Power Cap 锁频，性能掉到 1/10–1/20，且不产生任何错误日志。
+- **分辨率敏感性相差 20 倍**：同一张卡 4K 相对 FHD 的落差从 +7%（creo）到 +159%（energy），unreal 甚至反向 -10%。高分屏对可视化类负载是真实成本。
+- **ISV 认证必须逐应用、逐 SKU 核对**：Dassault 已认证（WS + Max-Q），Ansys 则是 Fluent 仅 Linux、Rocky 仅 Max-Q、Speos 完全不支持。
+- **官方认证 ≠ 满血运行**：NVIDIA 认证系统清单里明确写着「GPU power is capped based on system capabilities」。
 
 ## 设计红线
 

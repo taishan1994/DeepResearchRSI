@@ -257,6 +257,37 @@ def test_report_header_counts_match_data() -> None:
     assert got == want, f"header counts {got} != actual {want}"
 
 
+def test_docs_quote_real_counts() -> None:
+    """顶层 README / research/README / evals/cases README 若引用规模数字，必须与实际一致。"""
+    import csv as _csv
+    import re as _re
+    target = ROOT / "research" / "rtx-pro-6000"
+    if not target.is_dir():
+        print("  (skip: archive absent)")
+        return
+
+    with (target / "sources.csv").open(encoding="utf-8-sig") as fh:
+        n_src = sum(1 for _ in _csv.DictReader(fh))
+    with (target / "evidence.csv").open(encoding="utf-8-sig") as fh:
+        n_ev = sum(1 for _ in _csv.DictReader(fh))
+    with (target / "claims.csv").open(encoding="utf-8-sig") as fh:
+        n_cl = sum(1 for _ in _csv.DictReader(fh))
+
+    # 匹配形如 "136 来源" / "872 证据" / "573 主张" 的声明
+    pattern = _re.compile(r"(\d+)\s*(来源|证据|主张)")
+    actual = {"来源": n_src, "证据": n_ev, "主张": n_cl}
+
+    for rel in ("README.md", "research/README.md", "evals/cases/README.md"):
+        f = ROOT / rel
+        if not f.exists():
+            continue
+        text = f.read_text(encoding="utf-8")
+        for num, kind in pattern.findall(text):
+            got = int(num)
+            want = actual[kind]
+            assert got == want, f"{rel}: 声明 {got} {kind}，实际 {want}"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:

@@ -80,12 +80,24 @@ GET  /evidence/{id}              证据片段与来源元数据
 research/<slug>/
 ├── brief.yaml        研究简报（问题、范围、截止时点、交付物、子问题）
 ├── sources.csv       来源登记表（ID、URL、类型、日期、抓取时间、可信度）
+├── evidence.csv      证据表（ID、所属文档、来源、原文片段、定位、立场）
 ├── claims.csv        主张表（ID、主张、类型、置信度、支持/反驳证据）
 ├── REPORT.md         最终报告
-└── notes/            过程笔记、原始摘录
+└── notes/            过程笔记、原始摘录（非交付物，见其 README）
 ```
 
-字段定义见 `docs/data-model.md`。`scripts/validate_research.py` 会检查引用闭合性。
+字段定义见 `docs/data-model.md`。目录由 `scripts/new_research.py` 生成，引用闭合性由 `scripts/validate_research.py` 检查。
+
+**四张表的职责边界**（易混淆，明确写出）：
+
+| 文件 | 回答的问题 | 不可省略的字段 |
+|---|---|---|
+| `sources.csv` | 资料**从哪来**、可不可信 | `url`、`fetched_at`（S1）、`trust_tier` |
+| `evidence.csv` | 原文**到底说了什么** | `quote` 必须是原文子串（E1） |
+| `claims.csv` | 我们**据此断定什么** | `evidence_ids`、`prediction` 需 `derivation`（C2） |
+| `REPORT.md` | 怎样**讲给读者** | `[c-*]` / `[e-*]` 引用不得悬空 |
+
+`research/_template/` 是人工阅读用的说明页；**实际脚手架以 `new_research.py` 为准**，二者不要各自维护一份骨架。
 
 ## docs/
 
