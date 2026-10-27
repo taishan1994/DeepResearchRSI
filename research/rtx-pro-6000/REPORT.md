@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：174 ｜ **证据数**：1358 ｜ **主张数**：893（高置信 670，争议 1）
+> **来源数**：177 ｜ **证据数**：1369 ｜ **主张数**：903（高置信 671，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -410,6 +410,118 @@ RTX PRO Blackwell 工作站线的核心规模呈明确阶梯 [c-cg-lineup]：
 > **因此其 928% 等数字应视为方向性证据，而非精确测量。**
 
 **顺带**：游戏侧 PRO 6000 比 5090 快约 5–14%（Ryzen 9800X3D 平台），作者明确表示**这本身不构成购买理由**，并称该卡**不是为游戏准备的**。原始 MSRP 区间 8,000–11,000 美元，发布日 2025-03-18。
+
+### 3.5 改水：一个此前完全空白的工程路径
+
+§3.4 记录了风冷实测：**约 32.5 dBA、核心 82°C、显存约 88°C**。对一张 600W 的卡，水冷是显而易见的下一步。本节补上这条路径——此前「水冷头」「waterblock」「EK」在报告中**各出现 0 次**。
+
+#### 一、成品单槽冷头已经存在
+
+**Alphacool ES 系列** 为 RTX PRO 6000 Blackwell 提供**每个仅占一个扩展槽**的全覆盖水冷头 [c-wc-single-slot-exists]：
+
+| 项 | 规格 |
+|---|---|
+| 冷头 | **镀铬铜全覆盖**（覆盖 GPU、显存、供电） |
+| 流道 | Alphacool 称 **Jet Engine** 技术 |
+| 端子 | **镀铬黄铜，两个 G1/4 螺纹** |
+| 正面 | 碳纤维质感盖板 |
+| 背面 | 铝制背板（额外刚性） |
+| **价格** | **399.98 欧元**（6000 工作站版） |
+
+**同系列另三款** [c-wc-alphacool-spec]：RTX PRO 4500 同为 **399.98 €**；RTX PRO 4000 与 Radeon AI PRO R9700 为 **324.98 €**。
+
+> **覆盖 RTX PRO 4000 / 4500 / 6000 与 AMD Radeon AI PRO R9700**，目标是**多卡密集部署**的工作站与 AI/渲染/仿真系统。
+
+#### 二、Bykski 的两种水路形态
+
+| 形态 | 型号 | 标价 |
+|---|---|---:|
+| **分体式**全覆盖冷头 | N-RTXPRO6000-SR | **$217.33** |
+| **一体式** 360 冷排 | B-FRD-RTXPRO6000-WS | **$379.25** |
+
+> 分体式为**全金属**、可选**带背板** [c-wc-bykski-price]。
+
+#### 三、厂商声称的效果，与本报告风冷实测对照
+
+**Bykski 的厂商口径** [c-wc-vendor-noise-claim]：
+
+| 指标 | 厂商声称（水冷） | 本报告实测（风冷，§3.4） |
+|---|---|---|
+| 噪声 | **< 30 dBA** | **约 32.5 dBA** |
+| 显存温度 | **60–70°C** | **约 88°C** |
+| 降频阈值 | 称 GDDR7 持续 **92°C+** 触发 | — |
+
+> **方向一致（水冷更安静、显存更凉），但幅度未经独立验证。**
+>
+> ⚠️ **这是厂商自述，不是实测**——按不变量 C1 记 `medium`。
+
+#### 四、⚠️ 没有任何独立测量证明它真的有效
+
+**这是本节最重要的一条** [c-wc-no-independent-test]：
+
+> **Igor's Lab 明确声明：本文基于厂商新闻稿、经编辑但未自行测试，所有技术规格由厂商提供；无温度、流量或持续负载行为的对照测量，故关于效率与寿命的说法仍属厂商规格。**
+
+**即：截至该来源发布，水冷头对这张卡的实际降温幅度与系统密度收益，没有独立数据。**
+
+#### 五、厂商资料自身有矛盾，且被媒体点名
+
+**Igor's Lab 主动指出了两处问题** [c-wc-vendor-contradiction]：
+
+| 问题 | 详情 |
+|---|---|
+| **材质矛盾** | 描述写**碳纤维**盖板，材料表却写**铝** |
+| **命名不一致** | 兼容性信息写 `RTX PRO 6000 Blackwell`，商店产品名写 `RTX 6000 Pro Workstation Edition` |
+
+> **按型号采购时必须核对实物与最新文档**——这与 §12.7 的保修归属问题同属采购风险。
+
+#### 六、⚠️ 「单槽」不等于「一定能装满四卡」
+
+**这条是对常见误读的直接纠正** [c-wc-slot-not-compat]：
+
+> **单槽只描述冷头本身占用的空间，并不自动保证与每个机箱、主板或卡版本兼容。**
+>
+> **媒体建议购买前用厂商的 GPU 配置器核对具体卡型号。**
+
+#### 七、⚠️ 冷头价 ≠ 改水总价
+
+**分体水路还需一整套配套件** [c-wc-loop-requirement]：
+
+| 部件 | 厂商建议 |
+|---|---|
+| 冷排 | **至少 360mm**（对应 600W TDP） |
+| 泵 | D5 或 DDC 带水箱 |
+| 接头 | **8–12 个 G1/4** |
+| 管路 | 软管或硬管 |
+| 冷液 | — |
+| 维护 | 称可 24/7 运行，**每 12–18 个月换液** |
+
+> **所以 $217.33 只是冷头，不是改造总价** [c-wc-total-cost]。
+>
+> **本报告 §12 的整卡价与改水总成本必须分开核算。**
+
+#### 八、⚠️ 可得性本身是风险
+
+**抓取时点（2026-10-27）** [c-wc-stock-risk]：
+
+| 产品 | 状态 |
+|---|---|
+| Bykski N-RTXPRO6000-SR | **Sold out** |
+| Bykski B-FRD-RTXPRO6000-WS | **Sold out** |
+| Alphacool ES 6000 版 | **无明确上市日期** |
+
+> **因此改水方案不能作为短期交付路径规划**——与 §12.7 同属「标价不等于可得」。
+
+#### 九、什么时候才值得改水
+
+综合以上，改水的适用条件很窄：
+
+| 场景 | 是否值得 |
+|---|---|
+| **单卡、办公环境、追求安静** | 可能值得（但无独立数据支撑降噪幅度） |
+| **多卡密集、要靠单槽换密度** | **理论收益最大，但兼容性须逐项核对** |
+| **短期交付** | **不值得**（两个 SKU 均缺货） |
+| **预算敏感** | **不值得**（冷头 + 冷排 + 泵 + 接头远超 $217） |
+| **主力生产、不愿承担改水风险** | **不值得**（无独立实测，且厂商资料自相矛盾） |
 
 ### 3.9 ECC 的真实代价：是容量问题，不是带宽问题
 
@@ -6562,6 +6674,9 @@ sudo nvidia-bug-report.sh
 - [GamersNexus — NVIDIA RTX PRO 6000 Blackwell Benchmarks & Tear-Down（含声学与拆解）](https://devtest.gamersnexus.net/gpus/nvidia-rtx-pro-6000-blackwell-benchmarks-tear-down-thermals-gaming-llm-acoustic-tests)（2025-09-25） — [src-gn-teardown]
 - [InferenceHub — RTX PRO 6000 Rental Pricing 2026](https://inferencehub.org/gpus/rtx-pro-6000)（2026-10-27） — [src-inferencehub-pricing]
 - [GPUPerHour — RTX PRO 6000 Blackwell 租赁价格聚合](https://gpuperhour.com/rent/rtx-pro-6000-blackwell)（2026-10-27） — [src-gpuperhour-pricing]
+- [Igor's Lab — Alphacool: 1-Slot Water Coolers for RTX PRO and Radeon AI PRO](https://www.igorslab.de/en/alphacool-announces-1-slot-water-block-rtx-pro-blackwell-radeon-ai-pro/)（2026-10-08） — [src-igorslab-alphacool]
+- [FormulaMod — Bykski RTX PRO 6000 全覆盖水冷头 N-RTXPRO6000-SR](https://www.formulamod.net/products/bykski-gpu-water-block-for-nvidia-rtx-pro-6000-all-metal-structure-water-cooling-cooler-n-rtxpro6000-sr)（2026-10-27） — [src-formulamod-bykski]
+- [FormulaMod — Bykski RTX PRO 6000 600W 一体式水冷 B-FRD-RTXPRO6000-WS](https://www.formulamod.net/products/bykski-all-in-one-gpu-water-cooling-for-nvidia-rtx-pro-6000-water-cooling-system-liquid-cooler-360-radiator-b-frd-rtxpro6000-ws)（2026-10-27） — [src-formulamod-aio]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6797,7 +6912,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=174, evidence=1358, claims=893, claims_high=670, claims_disputed=1, trace_events=349, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=177, evidence=1369, claims=903, claims_high=671, claims_disputed=1, trace_events=355, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
