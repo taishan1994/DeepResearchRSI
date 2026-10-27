@@ -1697,6 +1697,39 @@ Unable to enable MIG Mode for GPU 00000000:01:00.0: Not Supported
 1. **缺零售包装 ≠ 假卡** [c-vbios-bulk]：官方说明这是 **bulk 版**（面向系统集成商，省去拆包与包装处理）。因此 §12.7.2 的验收清单必须修正——**"无彩盒/配件少"本身不构成假卡判据**，需与**封条破损、残留测试针、手工硅脂**等硬物证合并判断。
 2. **MIG 可能不是你要的** [c-vbios-mig-advice]：官方建议，**只是在一张卡上并行跑多个任务并不需要 MIG**——GPU 自身调度即可，甚至可能塞下第 5 个任务。MIG 的真实价值是**可预测的低延迟**与**多租户隔离**（与 §11.1 一致）。
 
+#### 10.4.2 驱动分支与 EOL：一个此前完全空白的运维维度
+
+本报告多处引用了 `595.x` 驱动，但**从未说明该分支还能用多久**。官方驱动生命周期文档给出了硬数据 [c-drv-branches][c-drv-eol]。
+
+**驱动分三支**：
+
+| 分支 | 定位 | 发布节奏 | **支持时长** |
+|---|---|---|---|
+| **NFB**（新特性） | 早期评估新功能 | 每季至少一次 | N/A |
+| **PB**（生产） | 企业/数据中心生产 | 每年两次 | **1 年** |
+| **LTSB**（长期支持） | 需更长支持周期 | 每个架构至少一次 | **3 年** |
+
+> **关键区分**：**LTSB 必然是 PB，但 PB 不一定是 LTSB** [e-drv-ltsb]。
+
+**当前各分支的官方 EOL** [c-drv-eol]：
+
+| 分支 | 类型 | **EOL** | CUDA 上限 |
+|---|---|---|---|
+| R535 | LTSB | **2026-06（已过期）** | CUDA 12 |
+| **R580** | **LTSB** | **2028-06** | CUDA 13 |
+| R595 | **PB** | **2027-03** | CUDA 13 |
+| R610 | NFB | 2026-08 | CUDA 13 |
+
+**这产生一个与实测数据相冲突的部署结论** [c-drv-choice]：
+
+> 截至 2026-10，**长期生产部署应锁 R580 LTSB**（支撑到 2028-06），**而不是本报告多处引用的 R595**——后者是**生产分支，2027-03 即 EOL**，还有约 5 个月。
+
+**这不是说 R595 不能用**，而是说：**本报告里那些"在 595.x 上验证过"的配方，其驱动寿命只剩 5 个月**。把配方搬进长期环境时，必须重新在 R580 上验证。
+
+**CUDA 约束** [c-drv-cuda]：R580 / R595 / R610 均支持 CUDA 13（无需前向兼容包），R535 最高 CUDA 12。
+
+**可自动化** [c-drv-json]：NVIDIA 提供 `releases.json` 供脚本解析（如用 `jq`），可用来构建驱动更新监控与合规检查。
+
 ### 10.5 在役退化风险：这是本报告最需要警示的运维问题
 
 **评测网站在测新卡，但用户论坛在报旧卡性能退化。** 两者不冲突，只是观察窗口不同。
@@ -2394,6 +2427,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
 | q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
 | q50 | 百万 token 上下文可行吗？ | ✅ | §4.8.1 已跑通 1,048,573；真墙是 2^32 溢出 |
+| q51 | 驱动分支与寿命？ | ✅ | §10.4.2 R595 仅到 2027-03，应锁 R580 LTSB 到 2028-06 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2412,12 +2446,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
 | q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
 | q50 | 百万 token 上下文可行吗？ | ✅ | §4.8.1 已跑通 1,048,573；真墙是 2^32 溢出 |
+| q51 | 驱动分支与寿命？ | ✅ | §10.4.2 R595 仅到 2027-03，应锁 R580 LTSB 到 2028-06 |
 
-**完成度：50/51 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：51/52 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **681 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **686 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2520,3 +2555,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 108. [NVIDIA：RTX PRO Blackwell GPU Architecture v1.1（49 页，附录 A 为完整规格表）](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/quadro-product-literature/pdf/NVIDIA-RTX-Blackwell-PRO-GPU-Architecture-v1_1.pdf) — [src-nv-arch-wp]
 109. [ELSA Japan：NVIDIA RTX PRO 6000 Blackwell Server Edition 数据表（2026-04-08）](https://www.elsa-jp.co.jp/wp-content/uploads/2026/04/NVIDIA_RTX_PRO_6000_Server_Edition_Datasheet.pdf) — [src-elsa-srv]
 110. [ELSA Japan：NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition 数据表](https://www.elsa-jp.co.jp/wp-content/uploads/2025/03/Datasheet_NVIDIA_RTX_PRO_6000_Blackwell_Max-Q_Workstation_Edition.pdf) — [src-elsa-maxq]
+111. [NVIDIA：Data Center Drivers —— Driver Lifecycle（NFB / PB / LTSB 三支定义）](https://docs.nvidia.com/datacenter/tesla/drivers/latest/driver-lifecycle.html)（更新 2026-09-09） — [src-nv-drv-life]
+112. [NVIDIA：Data Center Drivers —— Supported Drivers and CUDA Toolkit Versions（各分支 EOL）](https://docs.nvidia.com/datacenter/tesla/drivers/latest/supported-drivers-and-cuda-toolkit-versions.html)（更新 2026-09-09） — [src-nv-drv-matrix]
