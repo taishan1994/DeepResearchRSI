@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：186 ｜ **证据数**：1570 ｜ **主张数**：1069（高置信 825，争议 2）
+> **来源数**：187 ｜ **证据数**：1579 ｜ **主张数**：1076（高置信 832，争议 2）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -7203,6 +7203,141 @@ Video BIOS:   ??.??.??.??.??     GPU Firmware: N/A
 
 ---
 
+### 10.11 Xid 8：一个可稳定复现、无监控预兆、跨 GB20x 的锁定故障
+
+**§10 前面几节记的是 Xid 143、Xid 120、Xid 79。** 本节记一个此前完全缺失的故障模式——**它有三个特征使它比前面几个更麻烦：可一小时复现、遥测毫无预兆、且不限于这张卡。**
+
+#### 一、症状与签名
+
+**每次事件日志完全相同** [c-xid8-exists]：
+
+```
+NVRM: krcWatchdog_IMPL: RC watchdog: GPU is probably locked!
+      Notify Timeout Seconds: 7
+NVRM: Xid (PCI:0000:01:00): 8, pid=<compute pid>,
+      name=<llama-server|python3>, channel <varies>
+```
+
+> **应用收到 `CUDA error: the launch timed out and was terminated`（`cudaErrorLaunchTimeout`）。**
+>
+> **GPU 约 15 秒自行恢复，无需重启，无持久损坏或数据损坏。**
+
+> ⚠️ **这与 Xid 143（内存访问越界）、Xid 120（电源相关）、Xid 79（总线掉线）机制不同。**
+
+#### 二、随机而非输入确定
+
+**一个决定性的观察** [c-xid8-stochastic]：
+
+> **干净重启后重放同一提示，会在不同的解码位置失败。**
+
+> **所以它不是输入触发的 bug，是时间/状态相关的。**
+>
+> **饱和压测下约每 20–45 分钟一次，最可靠复现者是稠密 FP32 训练（GPU 压到 100% 数十分钟）。**
+>
+> **用户已附故障前 1 分钟的完整 `nvidia-bug-report`，并表示可在 1 小时内复现。**
+
+#### 三、八项排除
+
+**可归因面被收得很干净** [c-xid8-not-one-thing]：
+
+| 被排除 | 依据 |
+|---|---|
+| 某一张卡 | **两卡都中** |
+| 插槽 / 主板 | **两种主板设计都中** |
+| 驱动构建 | **595.84 与 595.91.07 都中** |
+| 内核版本 | **7.0.0-31 与 -38 都中** |
+| 显示器 | **三台机器都未接显示器** |
+| 精度路径 | **bf16 与 fp32 都中（见第六节）** |
+| 内核启动速率 | **见下节的 48 小时实验** |
+| PCIe 链路 | **未见 AER 错误与其它 Xid** |
+
+#### ⭐ 四、一个 48 小时受控实验否证了「小内核洪水」假设
+
+**两臂卡时完全相等** [c-xid8-48h-refutes-flood]：
+
+| 臂 | 微批 | 启动速率 | 卡时 | Xid 8 |
+|---|---:|---|---:|---:|
+| **A** | **128** | **约 15 次/秒** | **48.1** | **11** |
+| **B** | **256** | **约一半** | **48.1** | **12** |
+
+> ⭐ **把启动速率减半毫无影响。**
+>
+> **这是本报告记录到的最干净的一次假设否证——两臂卡时完全相等，事件数几乎相同。**
+
+#### ⚠️ 五、轻负载也中，且遥测毫无预兆
+
+**4 卡 Max-Q 的 vLLM 部署** [c-xid8-not-saturation-only]：
+
+| 项 | 值 |
+|---|---|
+| 在飞请求 | **1–2 个** |
+| 单流解码 | **约 150 tok/s** |
+| 长预填充 | **无** |
+| 卡状态 | **SM 0–1500 MHz、约 150 W（300 W 上限）** |
+| 事件 | **9-13 起 5 次，涉及 3 张不同卡，通道 0x5/0x7/0x9** |
+
+**而事件前 10 分钟的 1 Hz 遥测显示**：
+
+| 指标 | 值 |
+|---|---|
+| SM 频率 | 1492 MHz |
+| 功耗 | 150 W |
+| 温度 | **69 ℃** |
+| 性能状态 | P1 |
+| 利用率 | 100% |
+| `clocks_event_reasons` | **0x0** |
+| 链路重传 | **零** |
+| ECC / 行重映射 | **干净** |
+
+> ⚠️ **「锁定前什么都没有变化」——这意味着无法靠监控预警，只能靠检查点与自动续跑。**
+>
+> **同一部署上，改驱动版本、`pcie_aspm=off`、`pcie_port_pm=off`、
+> `NVreg_DynamicPowerManagement=0`、`uvm_disable_hmm=1` 均无效。**
+
+#### ⚠️ 六、范围修正：不止 GB202，而是整个 GB20x
+
+**本报告必须修正二手报道的两个论断** [c-xid8-gb20x-not-gb202]：
+
+| 二手报道的论断 | 一手数据 |
+|---|---|
+| 「GB202 专属」 | ❌ **三台消费级 RTX 5080（GB203）同样复现** |
+| 「仅 FP32」 | ❌ **bf16 自动混合精度也复现** |
+
+**一手数据的量化**：
+
+| 配置 | 卡时 | Xid 8 | 速率 |
+|---|---:|---:|---:|
+| 30M 参数 Transformer | 103.9 | 18 | **0.17 次/卡时** |
+| 119M 参数 Transformer | 96.2 | 23 | **0.24 次/卡时** |
+
+> **即这不是这张卡独有的缺陷，而是 GB20x 这一代的平台层问题。**
+>
+> ⚠️ **本报告据此修正 §10 与 §13 的相关表述：不能说「RTX PRO 6000 有 Xid 8 问题」，应说「GB20x 一代有该问题，PRO 6000 是其中之一」。**
+
+#### 七、目前只有工程应对，没有根因修复
+
+**实用结论** [c-xid8-mitigation-only]：
+
+| 项 | 状态 |
+|---|---|
+| GPU 自身 | **约 15 秒自行恢复，不需重启** |
+| **vLLM worker** | **会死，容器需重启** |
+| 实测可行做法 | **每 10 分钟存检查点并自动续跑** |
+| 驱动 / ASPM / 电源管理 / HMM | **全部无效** |
+| 根因 | **未定位**；怀疑 GSP-RM 与通道调度，但「启动速率」假设已被否证 |
+
+> ⚠️ **与 §10.6 的「PNY 拒绝索赔」并列时，说明这类问题最终由用户承担。**
+
+#### 八、给采购与运维的三条实际建议
+
+| 场景 | 建议 |
+|---|---|
+| **长时训练** | **强制每 10 分钟检查点**；不要假设 GPU 崩溃会立即暴露 |
+| **在线服务** | **容器级自动重启**；单卡故障不能拖垮整个副本 |
+| **监控** | **不要依赖 GPU 遥测预警**——本节数据表明锁定前所有指标正常 |
+
+> ⚠️ **第三条最反直觉：这与其他故障不同，没有任何「前兆指标」可用。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -8892,6 +9027,10 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 故障模式的独立一手记录（第八轮补充）
+
+1. [Recurring Xid 8 (RC watchdog "GPU probably locked") on RTX PRO 6000 Blackwell under sustained compute](https://forums.developer.nvidia.com/t/recurring-xid-8-rc-watchdog-gpu-probably-locked-on-rtx-pro-6000-blackwell-under-sustained-compute-595-84-and-610-43-02-open/382055) — NVIDIA Developer Forums，2026-09-02 首帖、2026-10-24 最后回帖。楼主 francip（RTX PRO 6000 WS 96GB + RTX 4090 对照）、stuwags（4 卡 Max-Q + vLLM TP4/DCP4）、todd71（三台 RTX 5080 对照实验） — [src-nvforum-xid8]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -9031,7 +9170,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=186, evidence=1570, claims=1069, claims_high=825, claims_disputed=2, trace_events=373, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=187, evidence=1579, claims=1076, claims_high=832, claims_disputed=2, trace_events=375, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
