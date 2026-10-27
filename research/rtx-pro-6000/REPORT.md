@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：180 ｜ **证据数**：1399 ｜ **主张数**：927（高置信 687，争议 1）
+> **来源数**：181 ｜ **证据数**：1404 ｜ **主张数**：932（高置信 692，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2808,6 +2808,98 @@ TTFT P95 只从 198 降到 179 ms（−10%），而 TPOT 降了 41% [c-mtp-ttft-
 **Kolibri 那篇是本报告收录的社区来源中可复现性最高的** [c-kb-reproducible]：完整命令行、KV 类型、注意力后端、温度、种子、并发、批 token 上限、显存利用率、环境变量与内核后端全给，外加 Zenodo 存档的逐行分数与服务脚本。
 
 > **对照 §4.15 那篇自述「未绑定模型版本、引擎 commit、CUDA/驱动/PyTorch 版本」的论文——同为 2026 年 8 月的工作，可复现性差距相当明显。**
+
+### 4.17 一份可复现到极致的 llama.cpp 数据点，与一个查不到的框架对比
+
+本节补两个方向：一是**迄今可复现性最完整的 llama.cpp 实测**，二是**一个明确查不到的维度**。
+
+#### 一、数据本身
+
+**测试环境交代得很完整** [c-btl-repro-class]：
+
+| 项 | 值 |
+|---|---|
+| 制品 | `BTL-3-Compact-AVQ2.gguf`，**8,392,369,600 字节** |
+| 卸载 | 全层 `-ngl 99` |
+| KV 类型 | **FP16** |
+| CUDA 架构 | **`sm_120a`** |
+| GPU | **Server Edition**，`nvidia-smi` 报 **97,887 MiB** |
+| 日期 | **2026-07-19** |
+
+**完整命令** [e-btl-cli]：
+
+```bash
+llama-bench   -m /vol/release/compact/BTL-3-Compact-AVQ2.gguf   -ngl 99 -p 512 -n 128 -r 3 -o json
+```
+
+**结果** [c-btl-throughput]：
+
+| 工作负载 | 吞吐 | 标准差 |
+|---|---:|---:|
+| **512 token 提示处理** | **84.70 tok/s** | 0.37 |
+| **128 token 生成** | **43.16 tok/s** | 0.29 |
+
+**逐次采样**（这是它最可贵的地方）：
+
+| | 三次采样 |
+|---|---|
+| 生成 | **42.83 / 43.35 / 43.30** tok/s |
+| 提示处理 | **84.28 / 84.91 / 84.91** tok/s |
+
+> **含模型加载的整个基准体在 41.03 秒内完成。**
+>
+> **这份数据的可复现要素是全档案里最全的** [c-btl-repro-class]——字节数、量化名、全部参数、重复次数、逐次采样、标准差、显存读数、架构、KV 类型、日期，一项不缺。
+
+#### 二、提示处理是生成的两倍——又一次指向带宽
+
+**84.70 ÷ 43.16 ≈ 1.96** [c-btl-prompt-heavy]。
+
+> **在这个 8.4 GB 的 AVQ2 模型上，该卡明显不是算力受限，而是生成阶段受权重带宽限制。**
+>
+> **这与 §4.4.1「位宽收益只在解码受权重带宽限制时体现」是同一条机制**，也与 §4.14「带宽决定批处理策略」同源。
+
+#### ⚠️ 三、它给的消费级卡对比值不能当实测用
+
+**作者对这些值做了严格标注** [c-btl-projection-marked]：
+
+| GPU | 估计生成 | 估计提示处理 |
+|---|---:|---:|
+| RTX 5090 32GB | 39–44 tok/s | 75–88 tok/s |
+| RTX 4090 24GB | 22–28 tok/s | 45–60 tok/s |
+| RTX 4050 Laptop 6GB | **拒绝给出** | **拒绝给出** |
+
+**推算依据**：PRO 6000 与 5090 都标称 **1,792 GB/s** 且同代，故批一解码接近持平是合理假设；4090 为 1,008 GB/s（56.25%）。
+
+**4050 Laptop 被拒绝的理由很干脆**：显存 6 GB **低于 8.39 GB 权重文件**（还没算 KV 与运行时），需 CPU 卸载，不能称为受支持的全 GPU 目标。
+
+> ⚠️ **这些是 `projection` 而非 `measurement`** [c-btl-projection-caveat]：作者自述是按显存带宽为主、再按架构、频率、功耗、核占用与驱动差异放宽的估算，**未给误差范围**。
+>
+> **所以本报告引用 5090 的 llama.cpp 数字时，仍须以 §5 的独立实测为准，不能把 projection 混入实测数据。**
+
+#### ⚠️ 四、一个查不到的维度：MaxText / JAX 训练路径
+
+**本轮专门去查了「同一张卡上 MaxText（JAX/XLA）与 PyTorch 的训练对比」**——这是本报告此前**完全空白**的方向（`MaxText`、`JAX`、`XLA`、`MFU` 在全文各出现 **0 次**）。
+
+**找到的最接近的对象是 PyPI 上的 `slm-parallax` 包**（版本 0.1.1），其摘要明确写着：
+
+> *"Benchmarking MaxText vs PyTorch on NVIDIA Blackwell (RTX PRO 6000 96GB) across BF16, FP8, and NVFP4"*
+
+**它的设计目标正是本文档缺的那块**：在 ~100M 参数 LLaMA、TinyStories 数据集上，用完全相同的模型与三种精度配方（BF16 / FP8 / NVFP4）对比 MaxText 与 PyTorch，并输出吞吐、步延迟、dense TFLOPs、**MFU %**、loss 轨迹、困惑度、量化误差退化与峰值显存。
+
+**但核查后确认：该包只发布框架与命令行，不含任何实测结果。**
+
+| 核查项 | 结果 |
+|---|---|
+| 是否有结果表 | **无** |
+| 是否给出任何 tok/s 或 MFU 数字 | **无** |
+| 是否有 `benchmark_results/report.md` 实例 | **无**（只给了生成命令） |
+| 仓库地址 | `github.com/your-org/slm-parallax` —— **占位地址** |
+
+> **因此本报告不为它建立来源条目，也不引用任何数字。**
+>
+> **这是「查到了对象但没有数据」的一次如实记录**——与第 50 轮核对 arXiv 2606.31796 全文无 RTX/6000/Blackwell 的处理方式一致。
+
+**⚠️ 因此本报告的一个明确缺口是**：**没有 MaxText / JAX / XLA 路径在这张卡上的任何实测数据**。所有训练侧结论（§8）都基于 PyTorch 生态。
 
 ## 5. 与 RTX 5090 的横向对比
 
@@ -6963,6 +7055,7 @@ sudo nvidia-bug-report.sh
 - [Ever Awake (Sabareesh) — 4× RTX PRO 6000 Blackwell on Water, and the One Card That Wouldn't Behave](https://sabareesh.com/posts/blackwell-waterblock/)（2026-06-12） — [src-sabareesh-waterblock]
 - [HYPERPC — AMPERE X ULTRA：4× RTX 6000 Blackwell 计算工作站客户案例](https://hyperpc.ae/project/clients/ampere-x-ultra-for-ai)（2026-10-27） — [src-hyperpc-ampere]
 - [Aquanode — RTX PRO 5000 vs RTX PRO 6000: Specs, VRAM & Price](https://www.aquanode.io/compare/gpu/rtx-pro-5000-vs-rtx-pro-6000)（2026-10-27） — [src-aquanode-compare]
+- [badtheorylabs — BTL-3 Compact: RTX PRO 6000 speed（2026-07-19 实测）](https://huggingface.co/badtheorylabs/BTL-3-Compact/blob/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md) — [src-btl-llamacpp-speed]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -7198,7 +7291,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=180, evidence=1399, claims=927, claims_high=687, claims_disputed=1, trace_events=361, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=181, evidence=1404, claims=932, claims_high=692, claims_disputed=1, trace_events=363, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
