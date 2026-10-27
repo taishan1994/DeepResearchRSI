@@ -1433,6 +1433,40 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 **工作室的最终建议与跑分排序相反** [c-archviz-advice]：主工作站选 5090，加渲染节点选 4090，**只有总平面级超大场景才选 RTX PRO 6000**。这与本报告 §12 的价值排序一致，但给出了更具体的场景边界。
 
+### 7.2.1 PassMark：一个结论方向相反的第三方数据源
+
+PassMark 是覆盖最广的第三方 GPU 数据库之一（3,900+ 卡），本轮首次纳入。**它给出的结论与本报告其余全部来源方向相反** [c-pm-se-loses]。
+
+| GPU | G3D Mark | vs Server 版 |
+|---|---:|---:|
+| GeForce RTX 5090 D | 42,260 | **+35.9%** |
+| **GeForce RTX 5090** | **38,996** | **+25.4%** |
+| **GeForce RTX 4090** | **38,026** | **+22.3%** |
+| **RTX PRO 6000 WS** | **37,589** | **+20.9%** |
+| GeForce RTX 5080 | 35,655 | +14.6% |
+| **RTX PRO 6000 Server** | **31,099** | — |
+| RTX PRO 4500 | 33,318 | +7.1% |
+| L40-48Q | 33,270 | +7.0% |
+
+**先看这个条目本身可不可信** [c-pm-sample-warning]：**样本数只有 5 个**，而最近 5 次基线分数是：
+
+> **43,649 / 29,276 / 39,794 / 553 / 42,223**
+
+**其中 553 显然是异常值**（约为正常值的 1.3%），而 29,276 与 43,649 相差 **49%**。**5 个样本里出现这种分布，说明这个条目尚未收敛**——31,099 这个"平均分"被 553 和 29,276 严重拉低了。
+
+**为什么会与其余来源相反** [c-pm-why-conflict]：PassMark 的 G3D Mark 是**图形 API 负载**（DirectX 9/10/11/12 + GPU Compute），**不是 CUDA/张量负载**。
+
+一个内部矛盾暴露了问题所在：**RTX 4090（上上代消费卡）比 Server 版高 22.3%，而 WS 版只比 Server 版高 20.9%**——也就是说，在 PassMark 的图形负载上，**4090 略优于 WS 版**。
+
+这与本报告的多处记录**都不一致**：
+- §6 的渲染实测：**V-Ray 上 Server 版是第 1 名**（14,827）
+- §1.2 的 3DMark：RTX PRO 6000 比 5090 高 **8–9%**
+- §7.2 的 SPECviewperf：比 RTX 6000 Ada 高 **1.47×**
+
+> **结论：PassMark 的 G3D 与专业渲染/计算负载不是同一坐标系。** 它可以作为「通用图形 API 相对位置」的参考，但**不能用它判断这张卡在专业工作流里的表现**。本报告**并列呈现，不用它覆盖其他来源**。
+
+**顺带一个有用的旁证** [c-pm-no-price]：PassMark 对该卡的 **G3DMark/Price = NA**（无可靠价格），而同页消费卡都有具体值（RTX 3080 53.24、RTX 3070 48.88）。**这是第三方数据源对该卡渠道价格不透明的一个独立佐证**，与 §12.7 的采购风险相互印证。
+
 ### 7.3 一条必须并列呈现的冲突
 
 Blender 的 Server 版成绩，两个来源相差 **69%**：
@@ -2519,6 +2553,31 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 **这是本报告唯一一个"结论可能因供给变化而反转"的地方**。如果 5090 涨到 $8,000，每美元渲染性能的 3 倍优势就缩到 1.8 倍，选型逻辑会明显松动。
 
+#### 12.5.1 重要修正：NVIDIA 已公开否认停产
+
+**上一轮记录此处时只写了传闻，漏掉了一个关键的相反事实** [c-5090-denied]：
+
+> **NVIDIA 高级副总裁 Jeff Fisher 明确表示：RTX 5090 没有停产，会继续出货。**
+
+**截至 2026-10-27，四类信息指向不同方向** [c-5090-status]：
+
+| 信息类型 | 内容 | 方向 |
+|---|---|---|
+| 硅片分配传闻 | GB202 不再分配给 5090，全部给 RTX Pro | 停产 |
+| **官方声明** | **Jeff Fisher：没停产，继续出货** | **否定停产** |
+| 零售商行为 | **Micro Center 已把 5090 标记为 "Not Carried"** | 停产 |
+| 泄漏者时间线 | 2027 年 1 月上半月停产的日期已定 | 停产 |
+
+**这不是"谁对谁错"的问题**——**官方否认与渠道行为可以同时真实**：NVIDIA 可以继续"出货"（不宣布 EOL），同时把硅片优先给更赚钱的产品线，导致零售端自然枯竭。
+
+**传闻本身的可信度也要打折** [c-5090-source-quality]：泄漏者 MLID **名声参差、命中率不稳**（上月还预测错过一次），且时间线来自**单一零售商的转述**。而该报道自己也写了 "should be taken with a healthy dose of salt"。
+
+**商业动机倒是可信的** [c-5090-motive]：同一块 GB202 用在 **96GB RTX PRO 6000（24,064 CUDA）** 和 **RTX PRO 5500（21,760 CUDA + 84GB）** 上，单价远高于 5090——"NVIDIA 宁愿把每颗 GB202 都放进贵得多的专业卡"这个逻辑成立。
+
+**对采购者的实际含义** [c-5090-buyer-implication]：
+
+> **不要基于传闻做紧急决策**，但应把"5090 供应可能收紧"作为比价时的**风险因子**——因为它的现价（>$4,500）已远超首发（$1,999），**这个价差本身就是供需紧张的读数**，不管停不停产。
+
 ### 12.6 采购建议
 
 **这是本报告最需要强调的时点问题**：所有基于 2025 年 $8,500 价位的"性价比"论证**在 2026 年已失效**。当前 $17,999 下：
@@ -2834,6 +2893,8 @@ sudo nvidia-bug-report.sh
 | q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
 | q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
 | q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
+| q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
+| q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2861,12 +2922,14 @@ sudo nvidia-bug-report.sh
 | q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
 | q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
 | q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
+| q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
+| q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
 
-**完成度：59/60 已答（4 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：61/62 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **758 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **770 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2982,3 +3045,6 @@ python scripts/validate_research.py research/rtx-pro-6000
 121. [HPC Technologies：GROMACS Benchmark（Server / Max-Q / RTX 5090 三平台）](https://pub.hpc-technologies.co.jp/hpc-benchmark/gromacs-benchmark/) — [src-hpct-gromacs]
 122. [HPC Technologies：Llama 3 8B LoRA 微调实测（RTX PRO 6000 SE，含 nvidia-smi 截图）](https://pub.hpc-technologies.co.jp/hpc-benchmark/nvidia-rtx-pro-6000-blackwell-server-edition-gpu-llama-finetuning-benchmark/)（2025-09-29） — [src-hpct-lora]
 123. [Blender Artists Community：RTX PRO 6000 Performance（含 Open Data 5.1.1 四卡对照与社区实测反馈）](https://blenderartists.org/t/rtx-pro-6000-performance/1648521)（2026-07-24） — [src-ba-pro6000]
+124. [PassMark Videocard Benchmark：RTX PRO 6000 Blackwell Server Edition（G3D Mark 与横向对比）](http://216.146.218.45/gpu.php?gpu=RTX+PRO+6000+Blackwell+Server+Edition&id=6962)（截至 2026-10-27） — [src-passmark-se]
+125. [TechPowerUp：NVIDIA 已设定 RTX 5090 / 5080 16GB 的一月停产日期（含官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
+126. [TechPowerUp：NVIDIA 据称终止 RTX 5090，GB202 硅片留给工作站卡](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
