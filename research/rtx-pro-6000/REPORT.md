@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：222 ｜ **证据数**：1772 ｜ **主张数**：1254（高置信 964，争议 4）
+> **来源数**：222 ｜ **证据数**：1772 ｜ **主张数**：1257（高置信 967，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -11264,6 +11264,60 @@ sudo nvidia-bug-report.sh
 
 > ⭐ **本报告对这条材料的用法是：可用于提醒读者「这笔钱存在且量级与硬件相当」，不可用于精确的五年预算表。**
 
+#### ⚠️⚠️ 九、其实是五套软件，不是两套
+
+**本节开头的补丁说「只算了两笔软件许可中的一笔」。本轮发现这个说法仍然低估了** [c-ra-five-software-stack]。
+
+**NVIDIA 官方企业参考架构把五套独立软件并列为该平台的关键组件**：
+
+| # | 软件 | 本报告是否算过许可费 |
+|---|---|---|
+| 1 | **NVIDIA AI Enterprise**（含 NIM、NeMo、**Base Command Manager**） | ✅ 本节 |
+| 2 | **NVIDIA vGPU** | ✅ §11.1.6 |
+| 3 | ⚠️ **NVIDIA Omniverse** | ❌ **从未** |
+| 4 | ⚠️ **NVIDIA Run:ai** | ❌ **从未** |
+| 5 | ⚠️ **NVIDIA NetQ** | ❌ **从未** |
+
+> ⚠️ **即此前估算的「五年软件费 = 再买一张卡」，是一个下界，不是全貌。**
+
+#### ⚠️ 十、但这不等于五份账单
+
+**必须立刻加上边界限定** [c-ra-software-not-mandatory]：
+
+> **官方措辞是「关键组件（Key components）」与「软件设计包含」，而非强制许可要求。**
+
+| 软件 | 什么情况下才需要 |
+|---|---|
+| AI Enterprise | 企业级受支持软件栈 |
+| vGPU | **做虚拟化桌面/工作站** |
+| **Omniverse** | **做工业数字孪生 / OpenUSD 流程** |
+| **Run:ai** | **做集群级调度编排** |
+| **NetQ** | **运维 Spectrum-X / Cumulus 网络** |
+
+> ⚠️ **不做虚拟化就不需要 vGPU；不做集群编排就未必需要 Run:ai。**
+>
+> **本报告不应把这五套软件当作必选成本累加——那会得出一个吓人但错误的数字。**
+
+#### ⚠️ 十一、一处本报告自身的记录缺陷
+
+**这个信息其实早就在证据表里了** [c-ra-sw-evidence-uncited]。
+
+| 项 | 状态 |
+|---|---|
+| 证据条目 `e-ra-sw` | ✅ **2026-05-18 就已录入** |
+| 被任何主张引用 | ❌ **零次** |
+| 写入正文 | ❌ **零次** |
+
+> ⚠️ **它躺在证据表里两个多月，而报告正文从未提到过 Run:ai、Omniverse 或 NetQ。**
+
+> ⚠️ **这类缺陷不会被引用闭合校验发现**——因为校验检查的是「引用的 id 是否存在」，而非「证据是否被引用」。
+>
+> ⭐ **本报告现在有 156 条证据从未被任何主张引用。**
+>
+> **「引用了不存在的东西」会被自动拦下；「存在但没被引用」不会。**
+
+
+
 
 ## 13. 争议与证据缺口
 
@@ -12100,7 +12154,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=222, evidence=1772, claims=1254, claims_high=964, claims_disputed=4, trace_events=461, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=222, evidence=1772, claims=1257, claims_high=967, claims_disputed=4, trace_events=462, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
