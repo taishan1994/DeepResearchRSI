@@ -1,4 +1,4 @@
-# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
+﻿# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
 
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
@@ -613,6 +613,53 @@ Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存
 > - **§4.5.1 的 MTP 数据确实是并发 1–32 全面提升**，说明关键在于草稿头质量而非仅并发
 >
 > **可操作的判据**：上投机解码前，先测**草稿接受率**。低于 60% 就别上。
+
+### 4.8.1 百万 token 上下文已经跑通，但真正的墙是 32 位整数溢出
+
+这是本报告此前**完全没有覆盖**的极端场景。有一份专门做百万 token 提示的公开实测记录 [c-1m-feasible]。
+
+**结论先说**：**DeepSeek V4 Flash 在 llama.cpp 上成功生成了第 1,048,573 个 token**——即满 1,048,576 上下文端到端跑通 [e-1m-dsv4ok]。**96GB 显存确实撑得住百万上下文**，前提是模型结构对。
+
+**但长上下文崩溃的真凶不是显存，是 32 位整数溢出** [c-1m-32bit]：
+
+```
+最后完成：245,769 tokens
+下一个 ubatch：245,769 + 16,384 = 262,153
+262,144 x 16,384 = 2^32   <- 正好越界
+```
+
+**崩溃精确发生在 `n_kv x n_ubatch` 越过 2³² 的那一刻。** 该 ubatch 下安全上限是 **n_kv = 262,143**。
+
+`compute-sanitizer` 定位到具体内核 [e-1m-sanitizer]：
+
+```
+Invalid __global__ read of size 4 bytes
+  at __half2::__half2(const __half2&) in cuda_fp16.h:5122
+  Device Frame: flash_attn_mask_to_KV_max<(int)4>(...)
+  Access is 6,992,216,180 bytes before the nearest allocation
+```
+
+**修复只有一行** [c-1m-fix]：把该内核的步长参数从 **32 位 `int` 改为 64 位 `size_t`**。第三方在相同设置下验证：**334,585 个新 token、约 1.5 小时、无崩溃、生成质量无异常** [e-1m-patchok]。已归档为 issue 24912。
+
+**第二道墙是 CUDA VMM 池上限** [c-1m-vmm]：超过即触发 `GGML_ASSERT(pool_size + reserve_size <= CUDA_POOL_VMM_MAX_SIZE)`，实测在 **843,776 token** 处撞上 [e-1m-pool]。**这与整数溢出是两个独立限制，修好一个还会撞另一个。**
+
+**能否跑满百万上下文强依赖模型结构** [c-1m-modeldep]：
+
+| 模型 | 结构 | 结果 |
+|---|---|---|
+| DeepSeek V4 Flash | 有稀疏注意力 / 索引器 | ✅ 1,048,573 token |
+| MiMo V2.5 | 仅交替 SWA 与非 SWA 层 | ❌ 试图为完整上下文分配 KV，单次 **68,625 MiB** → OOM |
+
+**KV 量化不是万能解** [c-1m-kvquant-limit]：即使 K/V 都量化到 `q8_0`、ctx 设到 1,048,576，MiMo V2.5 仍在 prompt 处理阶段撞上 `CUDA illegal memory access`。**量化省显存，但不解决结构性缺陷。**
+
+> **为什么这个 bug 潜伏这么久** [c-1m-testgap]：现有 `test-backend-ops` **在长 KV 场景下自己就会整数溢出**、KQ mask 张量初始化是单线程、且 nmse 阈值过严导致测试根本通不过。修复测试后，`kv=1048576, nb=8192` 单项耗时约 **2,100 秒**。
+>
+> **长上下文是个测试覆盖盲区，不是没人试过。**
+
+**给部署者的判据**：
+1. 先确认**模型是否具备稀疏注意力**——没有的话百万上下文基本无望
+2. 遇到长上下文莫名崩溃，**先查 32 位溢出**（`n_kv x n_ubatch` 是否接近 2³²），而不是先怀疑显存
+3. 即使用了带修复的构建，**CUDA VMM 池上限**仍会在大约 84 万 token 处拦住你
 
 ### 4.9 双卡 TP2：一个可复制的部署单元（192GB 形态）
 
@@ -2276,6 +2323,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q47 | 固件故障有哪些家族？ | ✅ | §10.9 Xid 143：0xbadf4100，可致整机无法 POST |
 | q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
 | q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
+| q50 | 百万 token 上下文可行吗？ | ✅ | §4.8.1 已跑通 1,048,573；真墙是 2^32 溢出 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2293,12 +2341,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q47 | 固件故障有哪些家族？ | ✅ | §10.9 Xid 143：0xbadf4100，可致整机无法 POST |
 | q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
 | q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
+| q50 | 百万 token 上下文可行吗？ | ✅ | §4.8.1 已跑通 1,048,573；真墙是 2^32 溢出 |
 
-**完成度：49/50 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：50/51 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **625 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **637 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2396,3 +2445,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 103. [NVIDIA Developer Forums：Max-Q FLR 在 vfio-pci 释放时失败，需冷断电（GB202 固件缺陷）](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-max-q-10de-2bb4-flr-fails-on-vfio-pci-release-after-kvm-guest-shutdown-gpu-inaccessible-until-cold-power-cycle/386790)（2026-10-25） — [src-nvf-flr]
 104. [NVIDIA：MIG User Guide —— Supported GPUs（三款 RTX PRO 6000 SKU 均支持，最多 4 实例）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/supported-gpus.html)（更新 2026-10-13） — [src-nv-mig-gpus]
 105. [NVIDIA：MIG User Guide —— Getting Started with MIG（RTX PRO Blackwell 附加前提：最低 vBIOS 按 SKU 分列）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/getting-started-with-mig.html)（更新 2026-10-13） — [src-nv-mig-start]
+106. [llama.cpp Discussion #24622：One million tokens prompt club（百万上下文实测与 32 位溢出修复）](https://github.com/ggml-org/llama.cpp/discussions/24622)（至 2026-10-27 仍活跃） — [src-llama-1m]
