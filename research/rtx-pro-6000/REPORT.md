@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：228 ｜ **证据数**：1807 ｜ **主张数**：1289（高置信 974，争议 6）
+> **来源数**：231 ｜ **证据数**：1817 ｜ **主张数**：1297（高置信 982，争议 6）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -10736,6 +10736,143 @@ PCIe Gen5 x16 下 [c-p2p-bandwidth]：
 > **塌陷的触发条件是「同源交换机 + 多目的 root」。而 8 卡两交换机分组无论 root 怎么分布，都构造不出这个条件。**
 >
 > **所以「root 布局」与「是否塌陷」是两个正交的维度。**
+### 11.13 WSL2：96 GB 里有 16 GiB 用不了
+
+**本节此前完全没有 WSL2 维度——正文中「WSL」出现次数为 0。**
+**而这张卡的重要用户群之一，正是在 Windows 工作站上用 WSL2 跑 CUDA 的人。**
+
+#### ⚠️⚠️ 一、16 GiB 去哪了
+
+**核心事实** [c-wsl2-16gib-overhead]：
+
+| 环境 | CUDA 驱动开销 |
+|---|---|
+| **原生 Linux** | ✅ **1–2 GiB** |
+| ⚠️⚠️ **WSL2** | ⚠️ **16 GiB** |
+
+> ⚠️ **同一份代码、同一张卡，相差 8–16 倍。**
+>
+> ⭐ **即「96 GB」在 WSL2 里实际可用约 80 GiB。**
+>
+> **这不是配置问题——报告者试过两个 PyTorch 版本、两个 CUDA 版本、两个驱动，全部复现** [e-wsl2-env-matrix]。
+
+#### ⚠️ 二、失败的样子很反直觉
+
+**报错会自相矛盾** [c-wsl2-oom-paradox]：
+
+> **「CUDA out of memory. Tried to allocate 3.48 GiB.**
+> **GPU 0 has a total capacity of 95.59 GiB of which 50.40 GiB is free.」**
+
+> ⚠️ **50.40 GiB 空闲，却装不下 3.48 GiB。**
+>
+> ⭐ **即失败判据不是「总空闲量」而是「最大连续块」。**
+>
+> **实践中含义：看到「明明还有很多空闲却 OOM」，不要怀疑显存不够，应先怀疑碎片与隐藏开销。**
+
+#### ⚠️⚠️ 三、最坑的一条：官方推荐的开关是有害的
+
+**这是本节最有操作价值的一条** [c-wsl2-expandable-harmful]：
+
+> **PyTorch 的 OOM 报错信息会推荐 `PYTORCH_ALLOC_CONF=expandable_segments:True`。**
+>
+> ⚠️⚠️ **而在这张卡上，这个开关会让 CUDA 驱动直接报错：`CUDA driver error: unknown error`。**
+>
+> **该 issue 的原话是：这个建议「在这款硬件上是有害的」（actively harmful on this hardware）。**
+
+> ⭐ **这与本报告其他三处属同一类：**
+>
+> | 位置 | 优化项本身成了故障源 |
+> |---|---|
+> | **§10.15** | vLLM 0.28.0 回归 |
+> | **§7.9** | prefix caching 产生空音频 |
+> | **本节** | `expandable_segments` 打崩 CUDA 驱动 |
+
+#### ⭐ 四、四层 bug 面：不是某一层的问题
+
+**同一现象在四个项目独立报告** [c-wsl2-four-layer]：
+
+| 层 | Issue |
+|---|---|
+| 推理引擎（vLLM） | **#41619** |
+| 推理引擎（SGLang） | **#24364** |
+| ML 框架（PyTorch 分配器） | **#182286** |
+| **平台（WSL2 GPU 直通）** | **#40401** |
+
+> ⭐ **vLLM 与 SGLang「以相同症状独立复现」，证明这不是某一引擎特有的问题。**
+>
+> **开销来源被指为 WSL2 的「DXGI shim + Hyper-V」。**
+
+> ⭐ **四层独立报告构成本报告少见的「多来源一致」情形——**
+> **与 §2.4 所说 89% 的主张只有单一来源形成对照。**
+
+#### ⭐⭐ 五、根因不在分配器，在 CUDA context 创建
+
+**第二份独立复现把范围收窄了** [c-wsl2-rootcause-context]：
+
+```python
+import torch
+torch.cuda.init()
+x = torch.zeros(10, device="cuda:0")
+```
+
+> ⭐ **仅这三行，就会在固定地址产生约 80 GB 的 `PROT_NONE` 匿名零驻留映射。**
+>
+> ⚠️ **而关闭 `expandable_segments` 对该映射「零影响」——**
+> **故问题在 `libcuda.so` / WSL2 的 GPU-PV（DXG）shim 内部，早于任何 PyTorch 代码。**
+
+> ⚠️ **该报告者自述结论为 tentative（「this looks like」），**
+> **但复现步骤完整、且给出了排除性证据，故本报告接受其为 `high` 并保留「暂定」措辞。**
+
+#### ⚠️ 六、影响不止于 GPU：宿主机也会被拖
+
+**一个 Windows 侧的连带症状** [c-wsl2-commit-charge]：
+
+| 指标 | 观察值 |
+|---|---|
+| `vmmemWSL` 的 **commit charge** | ⚠️ **68–74 GB** |
+| 其 **WorkingSet** | **5–40 GB** |
+| `.wslconfig` 的 `memory=48GB` | ⚠️ **压不住** |
+
+> ⚠️ **即这个开销会穿透 guest 内存上限，影响宿主机稳定性。**
+>
+> **在共享工作站上跑 WSL2 推理时，受害者不止是自己。**
+
+#### ⭐ 七、三个量级：单卡、加 NCCL、复杂多卡
+
+**多卡会放大但非必需** [c-wsl2-nccl-amplify]：
+
+| 情形 | 保留量 |
+|---|---:|
+| 单 GPU、无 NCCL | **~80 GB** |
+| 裸两进程 NCCL init | **~104 GB**（1.30×） |
+| exllamav3 手动放置多卡 | **~137 GB**（1.71×） |
+
+> ⭐ **这与 §11.1.1「直通虚拟机的双重惩罚」是同一类结构性代价，**
+> **只是此处代价出现在操作系统层而非虚拟化层。**
+
+#### ⚠️ 八、为什么是 Qwen3.6 先炸
+
+**一个可预期的触发场景** [c-wsl2-qwen36-trigger]：
+
+> **Qwen3.6 混合 Mamba 模型在 RTX PRO 6000 + WSL2 下会 KV cache 分配失败，**
+> **失败点在 `vllm/v1/worker/gpu_model_runner.py:6537`，分配约 3.48 GiB 连续张量时 OOM。**
+
+> ⭐ **即混合 Mamba 架构对连续大块的需求更高，因而最先撞上这个限制。**
+>
+> **不是模型有问题，是它的分配模式恰好最需要连续块。**
+
+#### ⭐ 九、so what：三条可执行建议
+
+| 你的情况 | 建议 |
+|---|---|
+| 能用原生 Linux | ✅ **用原生 Linux——省下 14–15 GiB 显存** |
+| 必须用 WSL2 | ⚠️ **按 ~80 GiB 规划模型，不要按 96 GB** |
+| 已在 WSL2 遇 OOM | ⚠️ **不要开 `expandable_segments`，它会更糟** |
+| 多卡 + WSL2 | ⚠️ **预留更多，NCCL 会放大到 ~104 GB 起** |
+
+> ⚠️ **另需注意：该 vLLM issue 状态为 closed，但按 §2.4 的纪律，**
+> **issue 状态是流程状态而非技术结论；其余三处同类报告仍为 open。**
+
 
 ## 12. 价格与采购时机
 
@@ -12542,6 +12679,12 @@ sudo nvidia-bug-report.sh
 
 1. [Vast.ai：Everything We Know (and Don't) About the NVIDIA RTX PRO 5500](https://vast.ai/article/everything-we-know-about-the-nvidia-rtx-pro-5500) — Team Vast（2026-10-01）。⭐⭐ 给出 RTX PRO 5500 完整官方规格（GB202、84 GB GDDR7 ECC、**1,398 GB/s**、MIG 最多 2×42 GB、3× NVENC、600 W）与三卡对照表，据此可算出它对 RTX PRO 6000 的带宽劣势为 **−22.0%**（容量只差 +14.3%）；⭐ 并记录 MIG 粒度差异（2×42 GB vs 4×24 GB）。⚠️ 价格未公布（官网 Coming Soon），法国 LDLC 挂牌 €16,439.95，该文推测 $12,000「合理」；⚠️ 明确标注 NVIDIA 官方页未列 CUDA 核心数，21,760 系第三方数字。⭐⭐ 另记录一条本报完全没有的中国需求侧事实：据 The Information 经路透社报道，中国工信部已要求字节跳动、阿里等提交采购 RTX PRO 5500 的计划并打算批准，业界预期该卡可能落在美国出口限制之外；⚠️ 而「字节跳动拟采购 100 万张」一说该文明确标注「仍未获证实」、路透社亦称无法立即确认。⭐ 该文转述 Tom's Hardware 的判断（回收 GB202 做成 PRO 5500 比做成 5090 利润高得多）与本报 §12.5.4 的供应链结论一致；⭐ 并称 RTX PRO 6000 的 $16,000 系「almost double its launch price of $8,565 in March 2025」，为 §12.1.0 的价格口径争议提供了第三个数据点 — [src-vast-pro5500]
 
+### WSL2 与隐藏显存开销（第三十三轮补充）
+
+1. [microsoft/WSL Issue #40401：WSL2 GPU passthrough has 16 GiB CUDA driver overhead on Blackwell sm_120 — blocks PyTorch large allocations](https://github.com/microsoft/WSL/issues/40401) —（2026-05-04，状态 open）。⭐⭐ 指出 WSL2 GPU 直通在这张卡（sm_120）上存在 **16 GiB** 隐藏 CUDA 驱动开销；该 issue 是同一现象的「平台层」报告 — [src-gh-wsl-40401]
+2. [pytorch/pytorch Issue #182286：CUDA caching allocator unable to satisfy 3-18 GiB contiguous allocation despite 50+ GiB free on RTX PRO 6000 Blackwell + WSL2](https://github.com/pytorch/pytorch/issues/182286) —（2026-05-04，状态 open）。⭐⭐⭐ 本报告找到的关于该卡 WSL2 行为最具体的一手记录。决定性对照：「同一份代码、同一张硬件，在原生 Linux 下开销只有 1–2 GiB，而非 16 GiB」（相差 8–16 倍，即 96 GB 实际可用约 80 GiB）。⚠️ 报错自相矛盾：总容量 95.59 GiB、50.40 GiB 空闲，却装不下 3.48 GiB 连续分配。⚠️⚠️ 致命细节：`PYTORCH_ALLOC_CONF=expandable_segments:True` 在 Blackwell 上让 CUDA 驱动直接报错，该 issue 原话称这个由报错信息本身推荐的开关「在这款硬件上是有害的」。⭐ 复现环境：PyTorch 2.10.0+cu128 与 2.11.0+cu130、CUDA 12.8/13.0、驱动 596.36 与 581.80 RTX Enterprise 全部复现。⭐ 评论区第二份独立复现把根因收窄到 CUDA context 创建（仅 `torch.cuda.init()` 即产生约 80 GB 的 `PROT_NONE` 匿名映射），关闭 `expandable_segments` 对此零影响；另记录 `vmmemWSL` commit charge 升至 68–74 GB 而 WorkingSet 低于 5–40 GB，且 `.wslconfig` 的 48 GB 上限压不住；NCCL 会把保留从 ~80 GB 放大到 ~104 GB，exllamav3 场景达 ~137 GB — [src-gh-torch-182286]
+3. [vllm-project/vllm Issue #41619：Qwen3.6 hybrid Mamba models fail KV cache allocation on RTX PRO 6000 Blackwell + WSL2](https://github.com/vllm-project/vllm/issues/41619) —（2026-05-04，状态 closed）。⚠️ 给出具体触发场景：Qwen3.6 混合 Mamba 模型 KV cache 分配失败，失败点 `vllm/v1/worker/gpu_model_runner.py:6537`，分配约 3.48 GiB 连续张量时 OOM。⚠️ 注意 closed 状态不表示问题已解决——按 §2.4 的纪律，issue 状态是流程状态而非技术结论，且其余三处同类报告（WSL #40401、PyTorch #182286、SGLang #24364）仍为 open — [src-gh-vllm-41619]
+
 
 ## 附录 A：子问题完成度
 
@@ -12682,7 +12825,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=228, evidence=1807, claims=1289, claims_high=974, claims_disputed=6, trace_events=478, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=231, evidence=1817, claims=1297, claims_high=982, claims_disputed=6, trace_events=486, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
