@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：49 ｜ **证据数**：290 ｜ **主张数**：190（高置信 121，争议 1）
+> **来源数**：51 ｜ **证据数**：305 ｜ **主张数**：198（高置信 129，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -512,6 +512,69 @@ Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存
 - **vs A6000**：Foster + Partners 报告 Cyclops 光追场景达 **5 倍**、渲染速度 5 倍 [c-vs-a6000-foster]（客户引言，未经独立验证）
 - **vs L40S**：官方声明渲染超 2 倍、agentic LLM 推理最高 5 倍、基因组近 7 倍、文生视频 3.3 倍 [c-vs-l40s]（厂商口径，条件未公开）
 
+### 7.1.1 SPECviewperf 15 官方分项数据（此前声明的缺口，现已补齐）
+
+此前本报告把"SPECviewperf 15 分项"列为缺口。现由 SPEC 官方结果库直接取得原始数据 [c-vp15-official]。
+
+**口径**：LENOVO ThinkStation P8 / Threadripper PRO 9965WX / 128GB / **Windows 11 Pro** / **4K** / SPECviewperf **15.0.1-rc2**，11 项全部产出分数 [e-vp15-config][e-vp15-version]。
+
+| 工作负载 | 分数 | 说明 |
+|---|---:|---|
+| **creo-04** | **259.46** | 最强项 |
+| **solidworks-08** | **212.31** | 显著强于 CATIA/3ds Max [c-vp15-sw-strong] |
+| maya-07 | 189.76 | |
+| medical-04 | 170.60 | |
+| energy-04 | 159.35 | |
+| catia-07 | 125.19 | |
+| 3dsmax-08 | 112.81 | |
+| blender-01 | 112.88 | |
+| unreal_engine-01 | 103.02 | |
+| snx-05 | 97.50 | |
+| **enscape-01** | **71.96** | 最弱项（实时渲染）[c-vp15-weakest] |
+
+**跨主机一致性检验** [c-vp15-consistency]：三台完全不同的主机（Dell Pro Max T2、Lenovo P3 Tower Gen2、Lenovo P8）给出高度一致的结果——3dsmax 108.2–112.8、blender 110.8–112.9、catia 119.1–125.2 [e-vp15-consistency]。**这是本报告所有渲染数据中最可信的一组**，因为它是官方提交、版本与分辨率都明确、且被多方复现。
+
+**相对上一代 RTX 6000 Ada（同为 4K）** [c-vp15-vs-ada]：
+
+| 工作负载 | Blackwell | Ada | 倍数 |
+|---|---:|---:|---:|
+| **enscape-01** | 73.00 | 30.44 | **2.40×** |
+| **blender-01** | 111.56 | 53.03 | **2.10×** |
+| energy-04 | 161.12 | 86.69 | 1.86× |
+| 3dsmax-08 | 110.11 | 81.34 | 1.35× |
+| catia-07 | 122.40 | 93.66 | 1.31× |
+| solidworks-08 | 210.65 | 161.15 | 1.31× |
+| medical-04 | 172.50 | 132.82 | 1.30× |
+| maya-07 | 178.89 | 143.66 | 1.25× |
+| creo-04 | 252.58 | 205.87 | 1.23× |
+| **unreal_engine-01** | 95.33 | 85.56 | **1.11×** |
+| snx-05 | 104.80 | n/a | 不可比 [c-vp15-ada-snx-missing] |
+
+**几何平均 1.47×，中位数仅 1.31×**。这个差距必须被强调：**代际提升完全取决于你用什么软件**——实时渲染（Enscape/Blender）接近翻倍，而 Unreal 几乎没变（1.11×）。
+
+**相对 AMD Radeon AI PRO R9700（同为 4K）** [c-vp15-vs-amd]：
+
+| 工作负载 | P6000 | R9700 | 倍数 |
+|---|---:|---:|---:|
+| enscape-01 | 73.0 | 26.1 | **2.80×** |
+| energy-04 | 161.1 | 59.0 | 2.73× |
+| blender-01 | 111.6 | 52.5 | 2.13× |
+| solidworks-08 | 210.6 | 101.8 | 2.07× |
+| 3dsmax-08 | 110.1 | 59.6 | 1.85× |
+| maya-07 | 178.9 | 102.3 | 1.75× |
+| catia-07 | 122.4 | 81.6 | 1.50× |
+| creo-04 | 252.6 | 169.0 | 1.49× |
+| medical-04 | 172.5 | 131.6 | 1.31× |
+| **unreal_engine-01** | 95.3 | 91.0 | **1.05×** |
+| snx-05 | 104.8 | n/a | 不可比 |
+
+**几何平均 1.79×** [c-vp15-vs-amd]。NVIDIA 在 ISV 应用上的优势依然明显，但**在 Unreal 上几乎打平**——这修正了"专业卡全面碾压"的简化印象。
+
+**一个被复合分掩盖的事实** [c-vp15-subtest-spread]：单项内部子测试差异可达 **10 倍以上**。3dsmax-08 里 Clay 模型 478.41 FPS，而 Project Soane 线框只有 **31.72 FPS**；blender-01 里 X-ray 413.51 FPS，而带阴影着色只有 **33.27 FPS** [e-vp15-subfps][e-vp15-blender-subfps]。
+
+> **实践含义**：如果你的场景恰好是"大模型 + 线框/阴影"这类低分子项，你感受到的性能会远低于复合分暗示的水平。**复合分是加权平均，不要把它当成你的场景的预测值**。
+
+
 ### 7.2 渲染：三个渲染器给出三种排序（本报告最重要的修正）
 
 **没有一个"哪个 SKU 渲染更强"的统一答案**——渲染器差异远大于 SKU 差异 [c-render-workload-dependent]：
@@ -1006,24 +1069,34 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 ### 13.2 证据缺口清单
 
-本报告**未能**取得以下一手资料，已在 §2.3 详列：
+**本轮已关闭的缺口**（第二轮挖掘的成果）：
 
-1. **SPECviewperf 15** 可解析结果页（请求超时；NVIDIA 仅给出"Server 版最高"的结论）
-2. **Puget Systems / Phoronix / TechPowerUp** 完整评测正文（Cloudflare 403）
-3. **SPECworkstation** 分项数据（V-Ray 已由 Drop & Render 补上）
-4. **Max-Q 的实际推理吞吐**（社区仅提供遥测，无 Gflop/s 或 tok/s）
-5. **Comino Grando 4U 液冷整机（8× 768GB）** 的完整评测正文（StorageReview 403）
-6. **Blender Server 版冲突的仲裁**（需要同机同版本同场景的三方复测）
-7. **MLPerf 具体吞吐数字**（Cisco 白皮书正文以图表呈现，可解析文本未含数值表）
+| 原缺口 | 状态 | 来源 |
+|---|---|---|
+| SPECviewperf 15 分项数据 | ✅ **已补齐** | SPEC 官方结果库，11 项分项 + 代际/竞品对比（§7.1.1） |
+| 多卡隐蔽故障模式 | ✅ **已补齐** | P2P 静默损坏（§4.3.1）+ 整芯片复位（§10.7） |
+| vLLM/SGLang 之外的软件路径 | ✅ **已补齐** | llama.cpp/GGUF 实测（§4.7） |
+| 驱动版本与云上可用性 | ✅ **已补齐** | aicr #2446 + CoreWeave/AWS/Akamai（§9.3） |
+
+**仍未取得的资料**：
+
+1. **Puget Systems / Phoronix / TechPowerUp** 完整评测正文（Cloudflare 403 / bot-check）
+2. **SPECworkstation** 分项数据（V-Ray 已由 Drop & Render 补上）
+3. **Max-Q 的实际推理吞吐**（社区仅提供遥测，无 Gflop/s 或 tok/s）
+4. **Comino Grando 4U 液冷整机（8× 768GB）** 的完整评测正文（StorageReview 403）
+5. **Blender Server 版冲突的仲裁**（需要同机同版本同场景的三方复测）
+6. **MLPerf 具体吞吐数字**（Cisco 白皮书正文以图表呈现，可解析文本未含数值表）
+7. **在役退化与整芯片复位的官方定性**（NVIDIA 尚未公开承认或归因）
 
 ### 13.3 对结论稳健性的影响
 
 主要结论（规格、SKU 差异来源、显存容量带、功耗-能效关系、价格时间线、训练交叉点）**均有 ≥2 个独立来源交叉印证**，缺口不改变结论方向。但：
 
-- **专业 CAD/AEC 采购**应补测 SPECviewperf
+- **专业 CAD/AEC 采购**现已可直接引用 §7.1.1 的官方分项数据，无需再自行补测
 - **Blender 渲染采购**必须自行实测（现有两个来源冲突 69%）
 - **大规模部署**应补测自身负载的 MLPerf 类指标
 - **Max-Q 选型**应要求供应商提供实测吞吐
+- **7×24 生产部署**必须规划冗余——整芯片复位无前兆且需断电恢复（§10.7）
 
 ---
 
@@ -1148,12 +1221,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q20 | 驱动与云上可用性？ | ✅ | §9.3 驱动下限 + §9.2 云实例建议 |
 | q21 | 除 vLLM/SGLang 外的软件路径？ | ✅ | §4.7 llama.cpp/GGUF 与双卡部署约束 |
 | q22 | 多卡是否存在隐蔽故障模式？ | ✅ | §4.3.1 P2P 静默损坏 + §10.7 整芯片复位 |
+| q23 | SPECviewperf 15 分项成绩？ | ✅ | §7.1.1 官方 11 项分项 + 代际/竞品对比 |
 
-**完成度：22/22 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：23/23 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **290 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **305 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1161,7 +1235,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=49, evidence=290, claims=190, claims_high=121, claims_disputed=1`
+当前校验结果：`sources=51, evidence=305, claims=198, claims_high=129, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1176,3 +1250,8 @@ python scripts/validate_research.py research/rtx-pro-6000
 47. [NVIDIA Blog：IFA 2026 本地 AI 加速（llama.cpp/vLLM 最高 1.9x）](https://blogs.nvidia.com/blog/local-ai-ifa-next-gen-agents-nv-pair-rtx-spark/)（2026-09-03） — [src-nvidia-ifa]
 48. [Hugging Face：BTL-3 Compact 在 RTX PRO 6000 上的 llama-bench 原始数据](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md)（2026-07-19） — [src-btl-llamacpp]
 49. [Tower2 双卡部署验证记录（切分失败与副本方案）](https://raw.githubusercontent.com/Osmantic/MMBT-Messy-Model-Bench-Tests/refs/heads/main/benchmarks/gemma4-31b-q4/GEMMA4_31B_Q4_VERIFIED_RESULTS.md)（2026-10） — [src-osmantic-tower2]
+
+### SPEC 官方结果（第二轮补充）
+
+50. [SPECviewperf 15 官方结果汇总（含 11 项分项与 FHD/4K）](https://www.spec.org/gwpg/gpc.data/viewperf15/)（更新 2026-04-30） — [src-spec-vp15]
+51. [SPECviewperf 15 单条提交明细：ThinkStation P8 + RTX PRO 6000 @4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-vp15-p8]
