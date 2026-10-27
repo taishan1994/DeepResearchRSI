@@ -1,0 +1,859 @@
+﻿# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
+
+> **状态**：已完成（存在已声明的证据缺口）
+> **信息截止**：2026-10-27
+> **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
+> **来源数**：32 ｜ **证据数**：188 ｜ **主张数**：120（高置信 79，争议 1）
+> **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
+
+---
+
+## 1. 执行摘要
+
+RTX PRO 6000 Blackwell 不是"更快的 RTX 5090"，而是**同一颗 GB202 die 全开 + 三倍显存 + 企业特性**的另一类产品 [c-die][c-mem-96gb]。它的价值曲线在三个维度上分叉：
+
+**① 显存容量是主要卖点，不是算力。**
+96GB GDDR7 ECC 让单卡能舒适承载 20B–35B 模型并保留真实上下文与批量，70B 需量化才能装入 [c-96gb-band]。单卡 llama-3.1-8B 峰值输出约 11,500 tok/s [c-single-gpu-8b-peak]，8k 提示词 prefill 约 170k–220k tok/s [c-prefill-throughput]。**单卡免跨卡通信**把 8B 的 TTFT 压到 205ms，而多卡/跨节点方案在 520–1320ms 区间 [c-ttft-advantage]——这是架构性收益，不是芯片算力优势。
+
+**② 相对 RTX 5090 的领先幅度依负载剧烈变化，区间为 -38% 到 +108%。**
+
+| 负载 | 口径 | PRO 6000 vs 5090 |
+|---|---|---|
+| UL Procyon AI（Llama2） | Workstation，TensorRT | **+21%** [c-vs-5090-procyon-gap] |
+| UL Procyon AI（Phi） | Workstation，TensorRT | **+18%** [c-vs-5090-procyon-gap] |
+| 综合 AI 指数 | LynxBenchAI 26Q3 | **+20%** [c-vs-5090-lynx] |
+| 稠密矩阵乘 FP32 | 同上 | **+108%** [c-vs-5090-fp32] |
+| V-Ray 渲染 | **Server Edition** | **+47%** [c-vray-ratios] |
+| Blender（Drop & Render） | Workstation | **+8%** [c-blender-dr] |
+| OctaneBench 2025 | Workstation | **+1.2%** [c-octane] |
+| 稀疏矩阵乘 FP32 | LynxBenchAI | **-12%** [c-vs-5090-fp32] |
+| **Blender（Drop & Render）** | **Server Edition** | **-38%** [c-blender-dr] |
+
+**关键判断**：理论算力只领先 20%（FP32 126 vs 104.8 TFLOPS）[c-vs-5090-db]，实际差距靠**显存容量与带宽压力**撑开——模型越大、上下文越长，差距越明显（Llama3 仅 +6.5%，Llama2 +21%）[c-vs-5090-procyon-gap]。买它是为了"装得下"，不是为了"算得快"。
+
+**渲染没有统一答案**：V-Ray 上 Server 版拿第一（+47%），Blender 上 Server 版却比 5090 低 38% [c-render-workload-dependent]。必须按渲染器实测。
+
+**③ 三个 SKU 的差异来自固件，不来自硬件。**
+核心规模完全相同（24,064 CUDA / 752 Tensor / 188 RT）[c-cuda-cores-same]，但 V/F 曲线、pstate、显存时钟被固件锁死且用户不可调 [c-vf-skup]。后果反直觉：
+
+- 强制 300W 下，**Server 版比 Workstation 版快 38%** [c-server-low-power-win]
+- Server 版在 300W 能效最高（414 Gflop/s/W，比 WS 同功耗高 38%）[c-server-efficiency]
+- Workstation 版在 600W 时吞吐最高（165,682 Gflop/s），但比 250–350W 损失约 11% 能效 [c-ws-efficiency-flat]
+- **同样的非饱和负载，WS 主动吃满 600W，Server 只取约 390W** [c-ws-uses-watts]
+- 渲染性能因 SKU 与渲染器而剧烈分化：V-Ray 上 Server 版第一，Blender/Octane 上 Workstation 版第一 [c-render-workload-dependent]
+
+**④ 最大的采购风险是价格，不是性能。**
+发布时渠道价约 $8,435–8,565 [c-price-launch]；2026-08 官方调价至 $16,000 [c-price-now]；**2026-10-27 实际街价已达 $17,999** [c-price-17999]，是同期 RTX 5090（$4,996）的 **3.6 倍** [c-price-ratio]。涨价主因是高端 GDDR7 供应紧张 [c-price-cause]。
+
+按每美元渲染性能计，该卡在其基准库的 33 张有价卡片中**排最后一名** [c-value-worst]——纯渲染用途下 RTX 5090 的每美元性能约为它的 **3 倍** [c-render-value]。
+
+**⑤ 训练侧并非全面劣势，取决于序列长度。**
+短序列（<4K）全参 SFT 上，RTX PRO 6000 比 GH200 快最多 1.8 倍；超过约 8K 后 GH200 反超并稳定在 1.7–1.8 倍 [c-ft-crossover]。单卡可完成 GPT-OSS-120B 的 4bit QLoRA 微调 [c-ft-120b-single]，但**优化器卸载在 PCIe 上几乎不可用**（慢 12–25 倍）[c-ft-offload]。
+
+**⑥ 两个跑分看不见、但决定企业采购的维度：MIG 与机密计算。**
+MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%，4 VM +52%）[c-vgpu-sharing]。机密计算方面，厂商称开销仅 1–8% [c-cc-vendor-claim]，学术实测在 **RTX PRO 6000** 上为 **13–27%** [c-cc-academic-gap]；但开销最多可回收 92% [c-cc-recover]，根因是 VM-GPU 桥接而非 GPU 算力 [c-cc-cause]。
+
+**⑦ 一个尚未被评测覆盖、但已有多例报告的运维风险：在役性能退化。**
+多名用户在 NVIDIA 官方论坛报告，长期高负载运行后出现"假高功耗读数"导致的 SW Power Cap 锁频，FP32 掉到正常值的 1/10–1/20 [c-degradation][c-degradation-scale]。该故障**不产生任何错误日志**，多卡训练时只表现为整体变慢 [c-degradation-silent]。厂商尚未公告，样本有限，但采购高负载长期运行场景应提前建立基线跑分与监控 [c-degradation-procurement]。
+
+**一句话选型**：需要 96GB 单卡装大模型 / 长上下文 / 4 路 MIG 隔离 / 微调 100B+ 量化模型 → 值得；纯渲染、双精度 HPC、长序列全参训练 → 不值得（FP64 仅约 2 TFLOPS，1:64）[c-not-for-fp64]。
+
+---
+
+## 2. 范围与方法
+
+### 2.1 研究问题拆分
+
+| # | 子问题 | 状态 |
+|---|---|---|
+| q1 | 三个 SKU 的规格差异究竟是什么？ | ✅ answered |
+| q2 | 同为核心数相同的 GB202，性能差异来自哪里？ | ✅ answered |
+| q3 | 96GB 显存在实际 AI 负载中能承载什么规模？ | ✅ answered |
+| q4 | 相对 RTX 5090 的性能与能效差距有多大？ | ✅ answered |
+| q5 | 在专业图形/渲染上的定位如何？ | ✅ answered |
+| q6 | 600W 是否值得？最优功耗点在哪？ | ✅ answered |
+| q7 | 价格与可获得性如何变化？ | ✅ answered |
+| q8 | 软件栈与生态上有哪些限制？ | ✅ answered |
+| q9 | 与 H100 / L40S / RTX 6000 Ada 的适用边界？ | ✅ answered |
+| q10 | MIG / vGPU 虚拟化下的表现如何？ | ✅ answered |
+| q11 | 机密计算（CC）的性能代价有多大？ | ✅ answered |
+
+### 2.2 来源分级
+
+本报告对每条证据标注可信层级，冲突时不强行裁决：
+
+- **primary（一手）**：NVIDIA 官方产品页、新闻稿、博客 — 规格与厂商声明
+- **secondary（二手独立）**：StorageReview、HOSTKEY、TechnoLynx、社区实测仓库 — 实测数据
+- **tertiary（聚合/转述）**：CG Channel 汇总、中文媒体转述 — 仅用于价格与时间点
+
+**明确的方法论警告**：
+- 厂商倍数声明（如"相对 L40S 快 5 倍"）**未公开完整测试条件**，应视为上限而非典型值 [c-vs-l40s]。
+- 服务商自测（EcoHash）与托管商自测（HOSTKEY）有商业利益相关性，相关主张置信度已降为 medium [c-single-gpu-8b-peak][c-vs-h100-parity]。
+- 不同基准口径不可混用：LynxBenchAI 是稳态吞吐指数，Procyon 是应用级评分，Blender Open Data 是众测渲染分 [e-lynx-method]。
+
+### 2.3 已知证据缺口
+
+以下来源因反爬（Cloudflare 403）或格式限制（PDF）**未能取得正文**，是本报告的明确缺口：
+
+| 目标 | 原因 | 影响 |
+|---|---|---|
+| Puget Systems 内容创作评测 | 403 Just a moment | 缺少 V-Ray/SPECviewperf 完整数据 |
+| Phoronix Linux 性能评测 | 403 | 缺少 Linux 下的横向对比 |
+| TechPowerUp 评测与 GPU 数据库 | 404 / 机器人校验 | 缺少部分规格交叉验证 |
+| SPECviewperf 15 结果页 | 请求超时 | 缺少专业 CAD 视口分项 |
+| MLPerf Inference 官方提交 | PDF 不可解析 | 缺少封闭分区成绩 |
+| GigAGPU / WindowsReport | 403 | 缺少 70B 单卡与 6000D 拆解细节 |
+
+> 这些缺口不改变主要结论（多个独立来源已相互印证），但**若要用于采购决策，建议补测专业应用分项**。
+
+---
+
+## 3. 规格解剖：三个 SKU 到底是什么关系
+
+### 3.1 完整规格对照
+
+| 项目 | Workstation Edition | Max-Q Workstation | Server Edition |
+|---|---|---|---|
+| 架构 | Blackwell (GB202) | Blackwell (GB202) | Blackwell (GB202) |
+| CUDA 核心 | 24,064 | 24,064 | 24,064 |
+| Tensor 核心 | 752 (5th Gen) | 752 (5th Gen) | 752 (5th Gen) |
+| RT 核心 | 188 (4th Gen) | 188 (4th Gen) | 188 (4th Gen) |
+| 显存 | 96GB GDDR7 ECC | 96GB GDDR7 ECC | 96GB GDDR7 ECC |
+| 位宽 | 512-bit | 512-bit | 512-bit |
+| **显存带宽** | **1792 GB/s** | **1792 GB/s** | **1597 GB/s** |
+| FP32 | 125 TFLOPS | 110 TFLOPS | 120 TFLOPS |
+| RT Core | 380 TFLOPS | 333 TFLOPS | 355 TFLOPS |
+| FP4 Tensor | 4000 TOPS（稀疏） | 3511 TOPS（稀疏） | 4 PFLOPS |
+| FP8 Tensor | — | — | 2 PFLOPS |
+| TF32 Tensor | — | — | 234 TFLOPS |
+| **TDP** | **600W（可配置）** | **300W** | **600W（可配置）** |
+| 形态 | 双槽 5.4×12.0" | 双槽 4.4×10.5" | 单槽 FHXL（液冷）/ 双槽 FHFL（空冷） |
+| 散热 | 双流道主动 | 主动 | 被动（依赖机箱风道） |
+| 显示输出 | 4× DP 2.1 | 4× DP 2.1 | **无** |
+| 多卡 | 2 卡 | **4 卡（384GB）** | **8 卡（800GB / 13TB/s）** |
+| MIG | 支持（4 实例） | 支持（4 实例） | 支持（4×24GB） |
+
+来源：[src-nvidia-ws-edition][src-nvidia-maxq][src-nvidia-server][e-press-3skus][c-three-skus][c-mem-96gb][c-bw-ws-1792][c-tdp][c-fp32-tflops][c-ai-tops][c-rt-tflops][c-mig4][c-maxq-4gpu][c-server-8gpu]
+
+**注意**：Server 版标称带宽 1597 GB/s 低于另两者的 1792 GB/s——这不是笔误，与其 P0 pstate 和 12,481 MHz 显存时钟一致 [c-vf-skup]。
+
+### 3.2 与 RTX 5090 的硬件血缘
+
+三者与 RTX 5090 共用 GB202 die（922 亿晶体管 / 750 mm² / L2 128MB）[c-die]，但：
+
+- 核心全开：24,064 vs 21,760 CUDA（+10.6%）[e-cg-lineup]
+- 显存三倍：96GB vs 32GB [e-sr-5090-32gb]
+- 显存带宽相同：均为 1792 GB/s [e-ws-mem-bandwidth]
+- 频率更高：boost 2617 MHz vs 2407 MHz [e-sr-boost-clock]
+- FP32 +20%：126 vs 104.8 TFLOPS [e-sr-fp32-126][c-vs-5090-db]
+- **FP64 惨烈**：1.968 TFLOPS（1:64）[e-sr-fp64-ratio]
+
+这解释了为什么游戏/图形差距小（同带宽、同 die），而大模型差距大（显存容量与容量压力）。
+
+---
+
+## 4. AI 推理性能：96GB 到底买到了什么
+
+### 4.1 单卡容量带
+
+| 卡数 | 可承载模型（NVFP4） | 可承载模型（FP8） |
+|---|---|---|
+| 1× 96GB | Qwen3.5-27B、MiniMax-M2.5-REAP | — |
+| 2× 96GB | MiniMax-M2.5、Qwen3.5-122B | — |
+| 4× 96GB | Qwen3.5-397B、GLM-4.7、MiniMax-M2.5 FP8 | MiniMax-M2.5 |
+| 6× 96GB | GLM-5（TP2 PP3） | — |
+| 8× 96GB | 全部当前模型 | GLM-4.7、Qwen3.5-397B、Kimi K2.5 INT4 |
+
+来源 [e-6k-model-band][e-6k-4x-models][c-not-for-huge-models]
+
+**容量结论**：单卡舒适区是 20B–35B；70B 需量化；235B 级不该考虑单卡 [c-96gb-band]。
+
+### 4.2 单卡实测吞吐
+
+| 模型 | 参数 | TTFT p95 | TPOT | 单流 tok/s | 精度 |
+|---|---|---|---|---|---|
+| Qwen3.6-35B-A3B | 35B MoE (3B 激活) | 170 ms | 4 ms | **~213** | FP8 |
+| Llama-3.1-8B | 8B | 205 ms | 7 ms | ~143 | FP8 |
+| gpt-oss-20b | 20B MoE | 170 ms | 8 ms | ~125 | MXFP4 |
+| Qwen3-Coder-30B-A3B | 30B MoE (3B 激活) | 30 ms | 9 ms | ~111 | BF16 |
+| Qwen3-VL-8B | 8B | 162 ms | 12 ms | ~78 | BF16 |
+
+来源 [e-eco-qwen35-213][c-35b-tps][c-96gb-band]
+
+**MoE 的 token 速率要按"激活参数"理解**：35B MoE 只有 3B 激活，所以 213 tok/s 高于 8B 稠密模型的 143 tok/s。这不是芯片的线性算力体现。
+
+峰值与预填充：
+- llama-3.1-8B 峰值输出约 **11,500 tok/s**；gpt-oss-20b 约 **8,900 tok/s**（单卡）[c-single-gpu-8b-peak]
+- 8k 提示词 prefill 约 **170k–220k tok/s** → 长上下文与 RAG 是该卡最具成本优势的场景 [c-prefill-throughput]
+
+### 4.3 多卡扩展与通信约束
+
+RTX PRO 6000 **没有 NVLink**，多卡走 PCIe 5.0 [c-nvlink-absent]。实测：
+
+- 同交换机/NUMA 内 P2P 延迟 **0.36–0.45 μs**
+- 关闭 P2P 后延迟跳到 **~14 μs**
+- P2P 单向写带宽 ~55–56 GB/s，双向 ~111 GB/s
+
+这对张量并行（TP）的 all-reduce 是硬约束。社区数据：8 卡 NCCL all-reduce 总线带宽 37.6–41.1 GB/s（取决于交换机拓扑与 `NCCL_MIN_NCHANNELS=8`）[e-6k-p2p]。
+
+**实践含义**：能用单卡解决的，不要用多卡；必须多卡时，PCIe switch 拓扑显著优于双路 CPU 直连。
+
+### 4.4 量化格式 × 上下文：最重要的反直觉发现
+
+同一硬件、同一模型（Qwen3.5-397B-A17B）、4× Server Edition TP4 下：
+
+**单流 decode（tok/s），C=1：**
+
+| 量化 + MTP | ctx=0 | 16k | 32k | 64k | 128k | 衰减 |
+|---|---|---|---|---|---|---|
+| AWQ + MTP ON | **147** | 110 | 88 | 61 | **40** | **-73%** |
+| AWQ + MTP OFF | 104 | 104 | 103 | 100 | 96 | -8% |
+| NVFP4 + MTP ON | 127 | 127 | 127 | 128 | 122 | **-4%** |
+| NVFP4 + MTP OFF | 81 | 80 | 80 | 78 | 77 | -5% |
+
+来源 [e-6k-awq-collapse][e-6k-nvfp4-stable][c-awq-longctx-collapse][c-nvfp4-stable]
+
+**这是本报告最重要的工程结论**：
+
+1. **AWQ + MTP 在长上下文会崩塌**。32k 起 MTP 反而**有害**（88 < 103）；128k 时比不用 MTP 慢 2.4 倍。
+2. **NVFP4 + MTP 全程稳定**，128k 仅衰减 4%。
+3. **交叉点在 16k–32k**：短上下文 AWQ 快 16%，长上下文 NVFP4 快 3.1 倍 [c-longctx-choice]。
+4. 根因尚未完全确定，疑与 vLLM 的 AWQ/MTP KV cache 分配与投机 token 接受率交互有关。
+
+**引擎选择同样关键**：128k 上下文下 vLLM 比 SGLang 快 **4.2 倍**（带 MTP）/ **2.2 倍**（不带）[e-6k-vllm-sglang][c-vllm-longctx]。
+
+**投机解码的整体收益**：短上下文 26–57% 吞吐提升 [c-mtp-benefit]；Qwen3.8-27B 上单 token 延迟 22ms→13ms，同延迟预算内并发 32→64 [e-eco-mtp]。且 GPQA Diamond 上无显著精度损失（+0.76pp，p=0.18）[c-mtp-quality]。
+
+### 4.5 并发扩展
+
+4 卡 TP4、Qwen3.5-397B、短上下文：
+
+| 配置 | C=1 | C=8 | C=16 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|---|
+| AWQ + MTP | 147 | 767 | 1163 | 1679 | 2622 | **3519** |
+| NVFP4 + MTP | 127 | 615 | 934 | 1441 | 2283 | 3220 |
+
+来源 [e-6k-concurrency][c-concurrency-scale]
+
+短上下文批处理是 AWQ 的唯一优势区间；长上下文必须切 NVFP4。
+
+---
+
+## 5. 与 RTX 5090 的横向对比
+
+### 5.1 三套独立口径
+
+**口径 A — 应用级（UL Procyon AI Text Generation，TensorRT，同平台）：**
+
+| 模型 | PRO 6000 | RTX 5090 | 差距 |
+|---|---|---|---|
+| Phi | 6,775 | 5,749 | **+17.8%** |
+| Mistral | 7,346 | 6,267 | **+17.2%** |
+| Llama3 | 6,501 | 6,104 | **+6.5%** |
+| Llama2 | 8,008 | 6,591 | **+21.5%** |
+
+来源 [e-sr-procyon-phi][e-sr-procyon-mistral][e-sr-procyon-llama3][e-sr-procyon-llama2][c-vs-5090-procyon]
+
+**注意趋势**：Llama3 只差 6.5%，但 Llama2（更长上下文）差 21.5%。**上下文越长，显存优势越突出** [c-vs-5090-procyon-gap]。
+
+**口径 B — 综合指数（LynxBenchAI 26Q3，固定 PyTorch 模型集，稳态吞吐）：**
+
+| 维度 | 倍数 | PRO 6000 (SE) | RTX 5090 |
+|---|---|---|---|
+| 综合 | **1.20×** | 718.86 | 597.49 |
+| 训练 | 1.14× | 587.80 | 515.26 |
+| 推理 | 1.22× | 1201.04 | 985.84 |
+| 计算 | 1.31× | 366.56 | 279.64 |
+
+来源 [e-lynx-overall][e-lynx-method][c-vs-5090-lynx]
+
+**分项极值**：稠密 FP32 矩阵乘 2.08×（744.41 vs 357.86）[c-vs-5090-fp32]；但**稀疏 FP32 只有 0.88×**（266.83 vs 301.70）——优势并非全面。
+
+**口径 C — 渲染（Blender Open Data 众测）：**
+
+| GPU | 分数 |
+|---|---|
+| RTX PRO 6000 Workstation | **18,571** |
+| GeForce RTX 5090 | 16,311 |
+| RTX PRO 6000 Server | **15,821** |
+| GeForce RTX 4090 | 11,663 |
+
+来源 [e-blender-oden][e-blender-5090][e-blender-se][c-vs-5090-blender][c-blender-ratio]
+
+**反直觉点**：Server 版在 Blender 上**低于**消费级 5090 约 3%。原因是显存时钟 12,481 vs 13,365 MHz 与 P0 pstate [c-vf-skup]。**买 Server 版做渲染是错配**。
+
+### 5.2 差距的真正来源
+
+| 因素 | 贡献 |
+|---|---|
+| 核心数 +10.6%（24,064 vs 21,760） | 线性算力，约 +10% |
+| 频率 +8.7%（2617 vs 2407 MHz） | 叠加后 FP32 达 +20% [c-vs-5090-db] |
+| 显存容量 3×（96 vs 32GB） | **决定"能否装入"，非"多快"** |
+| 显存带宽相同（1792 GB/s） | 短上下文/小模型差距最小的原因 |
+| 无 consumer 驱动限制、ECC、MIG | 稳定性与企业特性，不体现为跑分 |
+
+**结论**：如果你的模型本来就能塞进 32GB，PRO 6000 只快 15–20%（实测口径），价格却是 3–8 倍 [c-vs-5090-15-20]。**溢价买的是"装得下"和"跑得稳"，不是"算得快"**。
+
+---
+
+## 6. 功耗与能效：600W 是否值得
+
+### 6.1 三 SKU 的固件差异（核心发现）
+
+同一颗硅片，三套被固件锁死的参数 [c-vf-skup]：
+
+| 变体 | 功耗范围 | TDP | 散热 | pstate | 显存时钟 |
+|---|---|---|---|---|---|
+| Workstation | 150–600W | 600W | 主动单槽 | **P1** | 13,365 MHz |
+| Server | 300–600W | 600W | 被动 | **P0** | 12,481 MHz |
+| Max-Q | ~250–325W | 300W | 主动双槽 | P1 | **15,865 MHz** |
+
+**这些参数用户不可调** [e-pl-ws-memclock][e-pl-ws-13365][e-pl-se-12481][e-pl-maxq-15865]。
+
+关键机制：**显存时钟在 SKU 内不随功耗墙变化，功耗墙只限制 SM 频率** [c-memclock-invariant]。因此：
+- 计算密集型负载 → 对功耗墙**敏感**
+- 显存带宽密集型（decode、attention）→ 对功耗墙**不敏感**
+
+### 6.2 性能-功耗曲线
+
+张量核心吞吐（gpu_burn -tc，Gflop/s）：
+
+| 功耗墙 | WS 均值 | Server 均值 | Server 相对 |
+|---|---|---|---|
+| 300W | 90,210 | 124,224 | **+38%** |
+| 350W | 105,446 | 134,710 | +28% |
+| 400W | 118,836 | 143,769 | +21% |
+| 450W | 131,127 | 151,414 | +15% |
+| 500W | 142,427 | **157,543** | +11% |
+| 550W | 153,582 | （受冷却限制） | — |
+| **600W** | **163,545** | （受冷却限制） | — |
+
+来源 [e-pl-se-38pct][c-server-low-power-win]
+
+**Server 版在每一个可干净测量的功耗点（≤500W）都更快**，差距从 300W 的 +38% 收窄到 500W 的 +11%。
+
+原因不是硬件，而是**升压哲学**：同一 kernel（BF16 1024² matmul）下，WS 冲到 2805 MHz / 600W，Server 只取 2415 MHz / 390W [e-pl-natural][c-ws-uses-watts]。甚至在功率最接近的 memcopy 上（WS 401W vs Server 365W），**WS 仍高出 17% 频率** [e-pl-memcopy]。
+
+### 6.3 能效最优工作点
+
+| 功耗墙 | WS Gflop/s/W | Server Gflop/s/W |
+|---|---|---|
+| 300W | 301 | **414** |
+| 350W | 305 | 388 |
+| 400W | 297 | 359 |
+| 500W | 285 | 314 |
+| 600W | **274** | — |
+
+来源 [c-server-efficiency][c-ws-efficiency-flat]
+
+**结论**：
+- **Server 版 @ 300W 是全系能效最优**（414 Gflop/s/W）[c-server-efficiency]
+- **WS 版能效在 200–350W 平坦**（~300–305），600W 相比损失约 11% [c-ws-efficiency-flat]
+- 工作站建议跑 300–350W：约 64% 吞吐换一半功耗，温度 47–51°C、噪声低
+
+### 6.4 真实推理负载下的功耗结论
+
+| 对比 | 结果 |
+|---|---|
+| 500W vs 600W | 性能几乎相同 [c-power-500-600] |
+| 300W vs 500W（单用户） | 仅损失 4% |
+| 300W vs 500W（64 并发） | 损失可达 **30%** |
+| 300W（≤4 并发） | 几乎无损失 |
+| Max-Q(300W) vs WS(600W) | prefill 慢约 20%，decode 相近 [c-maxq-ws-diff] |
+
+**运营建议**：低并发/单用户场景可放心把功耗墙降到 300W，省电且几乎不掉性能；高并发服务必须保功耗。
+
+### 6.5 散热陷阱
+
+- Server 版在风冷工作站塔式机箱内，**300W 模式不超 83°C，600W 模式可达 90°C** [c-thermal-hostkey]
+- 该卡被动散热，**依赖服务器机箱风道**；塔式机箱超过 500W 会热降频 [c-thermal-chassis-limit]
+- 视频生成实测：300W→600W 使生成时间从 ~40 分钟降至 ~30 分钟（+25%），但伴随显著温升 [c-thermal-power-gain]
+
+**这是部署时最容易被忽略的坑**：买 Server 版塞进塔式机箱，性能会被机箱风道卡住，不是卡的问题。
+
+---
+
+## 7. 专业图形与渲染
+
+### 7.1 相对上代的定位
+
+- **vs RTX 6000 Ada**：Procyon 各项领先（Llama2 8008 vs 3957，约 2 倍）[e-sr-procyon-llama2]
+- **vs A6000**：Foster + Partners 报告 Cyclops 光追场景达 **5 倍**、渲染速度 5 倍 [c-vs-a6000-foster]（客户引言，未经独立验证）
+- **vs L40S**：官方声明渲染超 2 倍、agentic LLM 推理最高 5 倍、基因组近 7 倍、文生视频 3.3 倍 [c-vs-l40s]（厂商口径，条件未公开）
+
+### 7.2 渲染：三个渲染器给出三种排序（本报告最重要的修正）
+
+**没有一个"哪个 SKU 渲染更强"的统一答案**——渲染器差异远大于 SKU 差异 [c-render-workload-dependent]：
+
+| 渲染器 | Workstation | Server | RTX 5090 | 胜者 |
+|---|---|---|---|---|
+| **V-Ray** | 11,994 | **14,827** | 10,116 | **Server**（比 WS 高 24%，比 5090 高 47%）[c-vray-se-wins][c-vray-ratios] |
+| **Blender**（Drop & Render） | **16,272** | 9,382 | 15,005 | **Workstation**（比 Server 高 73%，比 5090 高 8%）[c-blender-dr] |
+| **OctaneBench 2025** | **1,750** | 1,641 | 1,730 | 三者接近，WS 仅比 5090 高 1.2% [c-octane] |
+
+**V-Ray 上 Server 版拿第一（#1 of 210）**，这与"Server 版不适合渲染"的直觉完全相反 [e-dr-se-vray]。原因是 V-Ray 是计算密集的路径追踪，Server 版在高功耗区可充分发挥。
+
+**Blender 上 Server 版掉到 #17**（9,382 分）[e-dr-se-blender]，而 Workstation 版是 #1（16,272）[e-dr-ws-blender]。
+
+### 7.3 一条必须并列呈现的冲突
+
+Blender 的 Server 版成绩，两个来源相差 **69%**：
+
+| 来源 | Server 版 Blender 分 | 说明 |
+|---|---|---|
+| Blender Open Data（众测） | **15,821** | 社区贡献，样本构成不透明 [e-blender-se] |
+| Drop & Render（自建库） | **9,382** | 农场方自测，标注"3 of 4 benchmarks" [e-dr-se-blender] |
+
+**本报告不对该冲突做裁决** [c-blender-conflict]。可能原因：Blender 版本不同、测试场景子集不同、Server 卡在测试机箱内的散热条件不同（被动散热卡对风道极敏感，见 §6.5）。
+
+**采购含义**：若要以 Blender 为主要渲染器，**必须要求供应商在你的场景上实测**，不能引用任一第三方分数。
+
+### 7.4 视频与专业特性
+
+- **4× 第 9 代 NVENC + 4× 第 6 代 NVDEC**，支持 4:2:2 H.264/HEVC 编解码 [c-nvenc]
+- 4× DisplayPort 2.1（8K@240Hz / 16K@60Hz）
+- ISV 认证驱动（DCC/CAD 应用）
+
+消费级 5090 编码器数量更少、无 ISV 认证。**这是视频工作站的真实差异点**，跑分体现不出来。
+
+### 7.5 整机形态验证
+
+HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可配 **4 张 Max-Q（384GB）** 或 **1 张 600W Workstation 版**，配 2700W 双电源 [e-hpz8-4gpu][e-hpz8-psu]。
+
+这说明 Max-Q 的设计意图不是"单卡最强"，而是**单机显存密度最大化**——4 张 Max-Q 的 384GB 远超任何单卡方案。
+
+---
+
+## 8. 训练与微调：被误解的一侧
+
+### 8.1 相对 H100 的真实位置
+
+常见说法是"不能训练，只能推理"。实测数据更微妙：**结果取决于负载类型与序列长度**。
+
+**硬件底牌对比**（Max-Q vs H100 SXM5）[c-fp64-vs-h100][c-bf16-vs-h100][c-hbm-bw-gap][c-power-vs-h100]：
+
+| 指标 | Max-Q | H100 SXM5 | 谁强 |
+|---|---|---|---|
+| FP64 | 1.7 TFLOPS | **33.5 TFLOPS** | H100 约 **20×** |
+| FP32 | **109.7 TFLOPS** | 66.9 TFLOPS | Max-Q 约 **1.6×** |
+| BF16 张量 | 877.9 TFLOPS | **1978.9 TFLOPS** | H100 约 **2.25×** |
+| FP4 | **3511.4 TFLOPS** | 不支持 | Blackwell 独有 |
+| 显存带宽 | 1792 GB/s | **3352 GB/s** | H100 约 **1.87×** |
+| 显存容量 | **96 GB** | 80 GB | Max-Q |
+| 功耗 | **300 W** | 700 W | Max-Q |
+
+**这张表解释了一切**：Blackwell 在 FP32 与 FP4 上强，在 FP64、BF16 张量与显存带宽上弱。
+
+### 8.2 单卡装得下 120B
+
+单张 Max-Q（96GB）可完成 **GPT-OSS-120B 的 4bit QLoRA 微调**——这在 80GB 的 H100 上无法单卡完成 [c-ft-120b-single]。
+
+配套方法收益：Unsloth 相比标准 LoRA 最多快 3 倍、省约 80% 显存 [c-ft-unsloth]。
+
+### 8.3 对 H100 的胜负取决于负载
+
+| 负载 | 结果 |
+|---|---|
+| 稠密 Qwen3-32B | H100 SXM5 **更快** |
+| MoE GPT-OSS-120B | Max-Q **快约 1.3 倍** |
+
+来源 [c-ft-vs-h100-mixed]
+
+**解释**：后者是 CPU-bound 的 MoE 负载，瓶颈不在 GPU 算力，此时 96GB 容量与 PCIe 上的 host 交互反而成了优势。
+
+### 8.4 序列长度交叉点（训练侧最重要的发现）
+
+全参数 SFT（Qwen3.5 0.8B–9B，batch=1，bf16，梯度检查点，8-bit AdamW）在 RTX PRO 6000 与 GH200 上的对比 [c-ft-crossover]：
+
+| 序列长度 | 胜者 | 幅度 |
+|---|---|---|
+| ≲ 1–4K token | **RTX PRO 6000** | 最多 **1.8×** |
+| ≳ 8K token | **GH200** | 稳定在 **1.7–1.8×** |
+
+**交叉点随模型增大而前移**：9B 约 2K token 就转向 GH200，0.8B 要到 8–12K [c-ft-crossover-model]。
+
+**机制**：短序列是 compute/launch-bound，高频率高 FP32 占优；长序列是 memory-bandwidth-bound，HBM3 的 4.0 TB/s 占优 [c-hbm-bw-gap]。
+
+### 8.5 优化器卸载：PCIe 的硬伤
+
+当 96GB 撞墙时，把优化器状态卸载到主机内存是常规手段。两卡的差距在这里最悬殊 [c-ft-offload]：
+
+| GPU | 卸载代价 | 链路 |
+|---|---|---|
+| GH200 | 短序列损失 20–55%，长序列约 20% | NVLink-C2C **~900 GB/s** |
+| RTX PRO 6000 | 短序列慢 **12–25 倍**，从未恢复到 0.5× 以上 | PCIe 5.0 **~64 GB/s** |
+
+**结论**：在 RTX PRO 6000 上，优化器卸载基本不可用 [e-alio-offload]。这是 PCIe（~64GB/s）与 NVLink-C2C（~900GB/s，14 倍）的差距造成的，不是 GPU 本身的问题 [e-alio-c2c]。
+
+### 8.6 最大可训练序列长度
+
+96GB 下两卡的容量上限**基本相同** [c-ft-maxseq]：
+
+| 模型 | RTX | GH200 |
+|---|---|---|
+| 0.8B | 30,720 | 30,720 |
+| 2B | 28,672 | 27,648 |
+| 4B | 24,576 | 23,552 |
+| 9B | **17,408** | 16,384 |
+
+**这印证了 96GB 是真实可用的训练容量**，不是营销数字。但注意：9B 全参 SFT 在 96GB 上只能到约 17K 序列长度，更长需要卸载（而卸载在 RTX 上不可用）。
+
+### 8.7 训练侧结论
+
+| 场景 | 建议 |
+|---|---|
+| 短序列（<4K）微调、LoRA/QLoRA | ✅ RTX PRO 6000（快 1.8×，且 300W 省电） |
+| 单卡微调 100B+ 模型（量化） | ✅ RTX PRO 6000（96GB 装得下） |
+| 长序列（>8K）全参 SFT | ❌ 用 H100/GH200 |
+| 需要优化器卸载扩展容量 | ❌ 用 GH200（PCIe 卸载不可用） |
+| BF16 为主的常规训练 | ❌ 用 H100（张量性能 2.25×） |
+
+---
+
+## 9. 定位与选型
+
+### 9.1 与 H100 / L40S / 上代的位置
+
+| 对比对象 | 该卡的位置 |
+|---|---|
+| **RTX 5090** | 综合 1.20×，但渲染/稀疏矩阵乘可能落后 [c-vs-5090-lynx][c-render-workload-dependent] |
+| **H100 80GB** | 综合约为 H100 的 **76%**（H100 领先 1.31×）[c-vs-h100-lynx] |
+| **H100（小模型推理）** | 整体表现相当，token 速率约 2× [c-vs-h100-parity] |
+| **H100（短序列微调）** | RTX 领先最多 1.8× [c-ft-crossover] |
+| **H100（长序列训练）** | 落后：BF16 张量 2.25×、带宽 1.87×、FP64 20× 差距 [c-bf16-vs-h100][c-hbm-bw-gap][c-fp64-vs-h100] |
+| **H100（优化器卸载）** | 差距最大，PCIe 上卸载慢 12–25 倍 [c-ft-offload] |
+| **H100（价格）** | 约为其 **1/4**（托管商口径）/ **1/2.9**（日本市场）[c-vs-h100-price][c-ft-h100-price] |
+| **L40S** | 推理最高 5×、渲染 2×+（厂商口径）[c-vs-l40s] |
+| **H100（基因组）** | Parabricks 上反而比 H100 快 1.75× [c-parabricks] |
+| **GH200** | 短序列训练快 1.8×，长序列慢 1.7–1.8× [c-ft-crossover] |
+| **RTX 6000 Ada** | Procyon 约 2× [c-vs-5090-procyon] |
+| **A5000** | token 速率约 2.2×，预处理吞吐约 3.8× [c-vs-a5000] |
+
+**口径张力的诚实呈现**：HOSTKEY 说"H100 整体相当"，LynxBenchAI 说"H100 领先 31%"，Fixstars 说"稠密模型 H100 更快"。三者不矛盾——分别测的是**中小模型推理**、**综合指数**、**稠密模型微调**。**不要跨口径引用** [c-vs-h100-parity][c-vs-h100-lynx][c-ft-vs-h100-mixed]。
+
+### 9.2 决策矩阵
+
+| 你的场景 | 推荐 | 理由 |
+|---|---|---|
+| 单机跑 20–35B 模型，要长上下文 | ✅ **Workstation Edition** | 96GB + 1792 GB/s + 本地显示 [c-96gb-band] |
+| 单机跑 70B（量化后） | ✅ Workstation | 需量化，但装得下 [c-96gb-band] |
+| 单卡微调 100B+（4bit QLoRA） | ✅ Workstation / Max-Q | 96GB 可跑 GPT-OSS-120B [c-ft-120b-single] |
+| 短序列（<4K）全参 SFT | ✅ 任一 | 比 GH200 快最多 1.8× [c-ft-crossover] |
+| 4 卡单机、供电/空间受限 | ✅ **Max-Q** | 300W × 4 = 1200W，384GB [c-maxq-4gpu][c-hpz8-config] |
+| 数据中心多卡推理服务 | ✅ **Server Edition** | 8 卡 800GB，300W 能效最优 [c-server-8gpu][c-server-efficiency] |
+| V-Ray 渲染为主 | ✅ **Server Edition** | V-Ray 排名第一，比 WS 高 24% [c-vray-se-wins] |
+| Blender 渲染为主 | ⚠️ 需实测 | 两来源冲突达 69%，不可盲选 [c-blender-conflict] |
+| 虚拟工作站 / 多租户隔离 | ✅ 任一（MIG） | 4×24GB 完全隔离实例 [c-mig4] |
+| 视频工作站（4:2:2 编解码） | ✅ Workstation | 4× NVENC + ISV 认证 [c-nvenc] |
+| 纯渲染 / 可视化 | ❌ 用 RTX 5090 | 每美元性能约 3 倍 [c-render-value] |
+| 长序列（>8K）全参训练 | ❌ 用 H100/GH200 | GH200 领先 1.7–1.8× [c-ft-crossover] |
+| 需要优化器卸载扩容量 | ❌ 用 GH200 | PCIe 卸载慢 12–25 倍 [c-ft-offload] |
+| 双精度 HPC / 分子动力学 | ❌ 用 H100/H200 | FP64 仅约 2 TFLOPS，比 H100 低 20× [c-fp64-vs-h100] |
+| 235B+ 模型单卡 | ❌ 不可能 | 需 H200 或多卡 [c-not-for-huge-models] |
+
+### 9.3 SKU 选择的三个反直觉提醒
+
+1. **Server 版不是"更强的 Workstation"**，也不是"更弱的"。它固件更保守：低功耗区更强（+38%），高功耗区受限；V-Ray 上第一，Blender 上垫底 [c-server-low-power-win][c-render-workload-dependent]。**必须按具体负载实测**。
+2. **Max-Q 显存时钟最高**（15,865 MHz，高于 WS 的 13,365）[c-vf-skup]。对显存带宽密集的 decode 负载，Max-Q **可能**优于 WS——但**该假设尚未被实测验证**，属待验证推断 [c-maxq-ws-diff]。
+3. **Workstation 版会主动吃满功耗**。同样负载下它比 Server 版多用 1.5–2 倍电 [c-ws-uses-watts]，电费敏感场景需主动设功耗墙。
+
+---
+
+## 10. 软件生态与坑
+
+### 10.1 SM120 与 SM100 的分裂
+
+RTX PRO 6000 用 **SM120**（GB202），数据中心 Blackwell 用 **SM100**。差异：
+
+- SM120 **缺少 tcgen05 / TMEM / 2-CTA** 等特性
+- 但社区内核级分析认为：**这些特性对 SM120 不是必需的**，硬件本身不受限 [e-sm120-tcgen05][c-sm120-software-gap]
+- **真正的瓶颈是软件生态**：主流框架优先为 SM100 优化，SM120 的内核排期靠后 [e-sm120-software][c-sm120-software-gap]
+
+**实际后果**：新模型/新量化格式在 SM120 上往往需要 nightly 构建或补丁（HOSTKEY 测 WAN 2.2 时需 `--pre` 安装 cu129 nightly PyTorch）[c-driver-gap]。
+
+### 10.2 已知具体坑
+
+| 坑 | 说明 | 来源 |
+|---|---|---|
+| AWQ + MTP 长上下文崩塌 | 128k 时 -73%，32k 起 MTP 有害 | [c-awq-longctx-collapse] |
+| SGLang 长上下文劣势 | 128k 下比 vLLM 慢 4.2× | [c-vllm-longctx] |
+| Server 版早期无 Windows 驱动 | Linux 需内核 6+ / GCC 12 | [c-driver-gap] |
+| 塔式机箱散热不足 | Server 版 >500W 降频 | [c-thermal-chassis-limit] |
+| 无 NVLink | 多卡走 PCIe，P2P 关闭时延迟 14μs | [c-nvlink-absent] |
+
+### 10.3 软件栈现状
+
+- **NVFP4 是 SM120 的关键能力**，也是本地推理最重要的优化点 [c-nvfp4-native]
+- 投机解码需要 checkpoint 自带 draft head（Qwen3.5/3.6/3.8 系列支持）[c-mtp-benefit]
+- 训练侧：`gpu_burn` 类合成负载与真实推理对功耗墙的响应完全不同，**不要用合成负载推断推理性能** [c-memclock-invariant]
+
+### 10.4 在役退化风险：这是本报告最需要警示的运维问题
+
+**评测网站在测新卡，但用户论坛在报旧卡性能退化。** 两者不冲突，只是观察窗口不同。
+
+**症状** [c-degradation]：
+- 长期高负载（有报告称 6 个月 80%+ 利用率）后，600W 下最高频率缓慢下降
+- 最终触发软件功耗封顶（SW Power Cap），SM 频率锁在 **580–650 MHz**（正常可到 3090 MHz）
+- FP32 从 110+ TFLOPS 掉到 **6–11 TFLOPS**，即 **1/10 – 1/20** 性能 [c-degradation-scale]
+
+**判定依据（"假高功耗"指纹）** [c-degradation-false-telemetry]：
+- nvidia-smi 报告约 **600W**，但温度仅 **34–36°C** —— 物理上不可能
+- 空闲间隙频率能正常冲到 2600 MHz，一进持续计算就塌回 600 MHz
+- 说明 GPU **能**跑高频，是功耗遥测误判把它压住了
+
+**排除了什么** [c-degradation-not-software]：驱动（三个分支均复现）、内核、主板 BIOS、功耗上限、线缆 sense 引脚全部排除；且发生在**完全未变更的软件栈**上，运行约 8 个月后出现。
+
+**为什么危险** [c-degradation-silent]：
+- **不产生任何错误**：无 Xid、无 ECC 错误、无 PCIe 报错
+- 多卡训练时表现为"健康卡等故障卡同步梯度"，整体变慢但很难归因
+- 采购验收时跑分正常，几个月后才暴露
+
+**证据强度（诚实标注）**：至少 5 名独立用户在 NVIDIA 官方论坛报告同类指纹，其中一人已退回 2 张卡、另有 2 张异常 [c-degradation-multiuser]。但**未见 NVIDIA 官方公告或召回**，样本量有限，不能推断为全批次缺陷 [c-degradation]。
+
+**另有争议点**：温度阈值显示为负值（Shutdown -5°C）是否算 bug。NVIDIA 论坛人员解释这些是相对 T.Limit 的**差值**而非绝对温度，不是缺陷 [c-temp-threshold-dispute]。本报告采信该解释，但**锁频故障本身仍被多方独立复现**，两者是不同问题。
+
+**运维建议** [c-degradation-procurement]：
+
+| 措施 | 说明 |
+|---|---|
+| 要求书面 RMA 政策 | 退化是否在保修范围需事先确认 |
+| 到货即记录基线 | 存 `nvidia-smi -q` 与标准跑分，作为后续对比锚点 |
+| 部署监控告警 | 跟踪 `clocks_event_reasons.sw_power_cap` 与频率/功耗比 |
+| 关注空闲功耗 | 有报告空闲 200–300W 偏高 [c-idle-power-high]，可作为早期信号 |
+| 多卡训练加看门狗 | 检测单卡吞吐偏离集群中位数 |
+
+---
+
+## 11. 虚拟化与机密计算：两个被忽视的企业能力
+
+这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
+
+### 11.1 MIG 多租户：不是"切分显存"，是硬件隔离
+
+MIG 把一张卡在硬件层切成最多 4 个完全隔离的实例（每实例 24GB）[c-mig4]，每个实例有独立的 SM 与存储子系统。
+
+**官方实测收益** [c-vgpu-mig20][c-vgpu-sharing]：
+
+| 配置 | 相对单 VM 的吞吐 |
+|---|---|
+| 2 个 VM | **+34%** |
+| 4 个 VM | **+52%** |
+| MIG vs 时间切片（48GB 档） | **+20%** |
+
+**为什么 MIG 更快而非更慢**：时间切片靠调度器轮转，存在上下文切换与 QoS 抖动；MIG 是物理隔离，延迟与吞吐可预测 [c-vgpu-sharing]。
+
+**厂商演示**：4× MIG 实例同时跑 4 个 1080p 全高《赛博朋克 2077》，相比时间切片基线图形扩展性能 **+60%** [c-mig-multitenant]。
+
+**官方选型结论**：RTX PRO 6000 Server Edition 是高性能 vWS 部署的推荐 GPU（SPECviewperf 15 @ 4K 原生性能最高）[c-vgpu-best]。
+
+### 11.2 机密计算：厂商说 98%，学术说 73–87%
+
+RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 Blackwell 产品 [c-cc-supported]。这是消费级 RTX 5090 完全没有的能力。
+
+**两套数字，必须并列**：
+
+| 来源 | 口径 | CC 开销 |
+|---|---|---|
+| NVIDIA 官方 [c-cc-vendor-claim] | HGX B300 + Qwen3.5-397B FP8，SGLang | **-1% ~ -8%**（保持约 98%） |
+| 学术论文 [c-cc-academic-gap] | **RTX PRO 6000** 与 B300 HGX，Intel TDX + GPU-CC | **-13% ~ -27%**，KV 恢复延迟翻倍以上 |
+
+**两者不矛盾，因为测的不是同一件事**：官方基准在 B300 上、且已应用多项优化；学术论文专门研究了**未优化**状态下的桥接开销 [e-arxiv-platforms]。
+
+**根因已定位** [c-cc-cause]：损失来自 **VM-GPU 机密桥接**的串行化，不是 GPU 计算。B300 上 BF16 matmul 仅降到 **0.998×** [e-arxiv-compute]。具体表现为：
+- 小块分配-拷贝操作慢约 **44 倍** [c-cc-alloc]
+- KV-cache 恢复代价 **+131%**，模型加载慢 **34 倍** [c-cc-kv-load]
+
+**好消息是开销可回收** [c-cc-recover]：调度标志回收 57%，工作线程 drain 在高并发下最多回收 **92%**。工程手段包括 FlashInfer 的 CC-safe 自动调优计时、SGLang 的异步 D2H worker、分片 CUDA graph [c-cc-mitigation]。
+
+**选型提醒**：多卡机密域（NVLink 加密，最多 8 卡）仅 HGX B200/B300 支持；RTX PRO 6000 是**单卡 CC** [c-cc-scope]。需要多卡机密训练/推理的场景，它不是答案。
+
+---
+
+## 12. 价格与采购时机
+
+### 12.1 价格时间线（截至 2026-10-27）
+
+| 时点 | 价格 | 说明 |
+|---|---|---|
+| 2025-03 发布 | 无官方 MSRP | 通过 PNY / TD SYNNEX 分销 [e-press-availability] |
+| 2025-05 上市 | **~$8,435–8,565** | 渠道挂牌价（VideoCardz 转述）[c-price-launch] |
+| 2026-08 | **$16,000** | 官方调价，接近翻倍 [c-price-now] |
+| **2026-10-27** | **$17,999**（≈¥120,058） | 美国 10 家店的典型最低新价 [c-price-17999] |
+| 同期 RTX 5090 | **$4,996**（≈¥33,325） | 美国 17 家店典型最低新价 [c-price-5090-4996] |
+
+**当前价格比 = 3.6 倍** [c-price-ratio]。涨价主因是高端 GDDR7/DRAM 供应紧张，且预期持续多年 [c-price-cause]。
+
+### 12.2 每美元性能：一个残酷的结论
+
+按渲染性能/价格计，RTX PRO 6000 在该基准库 33 张有价卡片中**排最后一名** [c-value-worst]：
+
+| 指标 | RTX PRO 6000 WS | RTX 5090 | 倍数 |
+|---|---|---|---|
+| V-Ray 每 $100 得分 | **66.6** | **202** | **3.0×** [c-render-value] |
+
+**这意味着：纯渲染用途上，RTX 5090 的每美元性能约为 RTX PRO 6000 的 3 倍** [c-render-value]。
+
+这个结论必须在报告里说清楚：RTX PRO 6000 的价值**不在渲染**，而在"渲染 + 大模型同机共存"。如果不需要 96GB 显存跑模型，纯渲染买它是严重浪费。
+
+### 12.3 同代产品价格锚点
+
+| 产品 | 显存 | 价格 |
+|---|---|---|
+| RTX PRO 6000 WS | 96GB | **$17,999**（2026-10） |
+| RTX PRO 5000 72GB | 72GB | $9,999 MSRP / £6,899 街价（2025-12）[c-price-5000-72g] |
+| RTX 5090 | 32GB | **$4,996**（2026-10） |
+
+### 12.4 采购建议
+
+**这是本报告最需要强调的时点问题**：所有基于 2025 年 $8,500 价位的"性价比"论证**在 2026 年已失效**。当前 $17,999 下：
+
+| 情形 | 建议 |
+|---|---|
+| 必须单卡 96GB 跑大模型/长上下文 | 无可替代，接受溢价 |
+| 只需 72GB 容量 | 考虑 RTX PRO 5000 72GB（约一半价格，58% 算力） |
+| 纯渲染/可视化 | ❌ 选 RTX 5090，每美元性能约 3 倍 |
+| 可用多卡替代单卡 | 重新计算总拥有成本（2×5090 的 64GB 仍不及单卡 96GB 的易用性） |
+| 数据中心多卡推理 | 对比 H100/H200 的每 token 成本，而非单卡价格 |
+
+---
+
+## 13. 争议与证据缺口
+
+### 13.1 明确的口径冲突
+
+| 议题 | 说法 A | 说法 B | 处置 |
+|---|---|---|---|
+| vs H100 整体性能 | HOSTKEY：整体相当，token 速率约 2× [c-vs-h100-parity] | LynxBenchAI：H100 领先 31% [c-vs-h100-lynx]；Fixstars：稠密模型 H100 更快 [c-ft-vs-h100-mixed] | **并列呈现**：三者分别测小模型推理、综合指数、稠密微调，不可互相否定 |
+| **Blender 的 Server 版成绩** | Blender Open Data：15,821 [e-blender-se] | Drop & Render：9,382 [e-dr-se-blender] | **标为 disputed，不做裁决** [c-blender-conflict]，差距 69% |
+| vs 5090 差距 | Procyon：+6.5%~21.5% [c-vs-5090-procyon-gap] | Drop & Render Blender：Server 版 -38% [c-blender-dr] | **并列呈现**：前者是 AI 推理，后者是渲染且为不同 SKU |
+| Max-Q 是否适合 decode | 推理：显存时钟最高可能更优 | 无实测吞吐数据 | **标为未验证推断** [c-maxq-ws-diff] |
+| Server 版是否适合渲染 | V-Ray #1（14,827）[c-vray-se-wins] | Blender #17（9,382）[c-blender-dr] | **按渲染器分别结论** [c-render-workload-dependent] |
+
+### 13.2 证据缺口清单
+
+本报告**未能**取得以下一手资料，已在 §2.3 详列：
+
+1. **MLPerf Inference 官方提交**中 RTX PRO 6000 的封闭分区成绩（PDF 不可解析）
+2. **SPECviewperf 15** 可解析结果页（请求超时）
+3. **Puget Systems / Phoronix / TechPowerUp** 完整评测正文（Cloudflare 403）
+4. **SPECworkstation** 分项数据（V-Ray 已由 Drop & Render 补上）
+5. **Max-Q 的实际推理吞吐**（社区仅提供遥测，无 Gflop/s 或 tok/s）
+6. **RTX 6000D（中国特供 84GB）** 的独立验证（仅见拆解报道，未能取得原文）
+7. **Blender Server 版冲突的仲裁**（需要同机同版本同场景的三方复测）
+
+### 13.3 对结论稳健性的影响
+
+主要结论（规格、SKU 差异来源、显存容量带、功耗-能效关系、价格时间线、训练交叉点）**均有 ≥2 个独立来源交叉印证**，缺口不改变结论方向。但：
+
+- **专业 CAD/AEC 采购**应补测 SPECviewperf
+- **Blender 渲染采购**必须自行实测（现有两个来源冲突 69%）
+- **大规模部署**应补测自身负载的 MLPerf 类指标
+- **Max-Q 选型**应要求供应商提供实测吞吐
+
+---
+
+## 14. 下一步观察点
+
+| 观察项 | 为什么重要 | 触发条件 |
+|---|---|---|
+| GDDR7 供应缓解 | 价格可能回落，性价比结论反转 | DRAM 厂商扩产公告 |
+| `RTX 6000D` 国内版本 | 84GB / 削减规格，可能改变国内选型 | 独立评测出现 |
+| SM120 内核优化进展 | 当前软件劣势可能缩小 | vLLM/SGLang 为 SM120 专门优化 |
+| AWQ + MTP 长上下文问题修复 | 可能让 AWQ 重新可用于长上下文 | vLLM issue 关闭 |
+| Max-Q 实测吞吐公布 | 决定它是否真是 decode 最优 SKU | 第三方测试 |
+| Blackwell 后继架构 | 影响现在是否该等 | NVIDIA 路线图 |
+
+---
+
+## 15. 参考文献
+
+### 一手来源（NVIDIA 官方）
+
+1. [RTX PRO 6000 Blackwell Workstation Edition 产品页](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000/) — [src-nvidia-ws-edition]
+2. [RTX PRO 6000 Blackwell Max-Q Workstation Edition 产品页](https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-6000-max-q/) — [src-nvidia-maxq]
+3. [RTX PRO 6000 Blackwell Server Edition 产品页](https://www.nvidia.com/en-us/data-center/rtx-pro-6000-blackwell-server-edition/) — [src-nvidia-server]
+4. [NVIDIA RTX PRO Server 产品页](https://www.nvidia.com/en-us/data-center/products/rtx-pro-server/) — [src-nvidia-rtxpro-server]
+5. [GTC 2025 发布新闻稿](https://nvidianews.nvidia.com/news/nvidia-blackwell-rtx-pro-workstations-servers-agentic-ai)（2025-03-18） — [src-nvidia-press-gtc]
+6. [NVIDIA Blog：Server Edition 技术说明](https://blogs.nvidia.com/blog/rtx-pro-6000-blackwell-server-edition/)（2025-03-18） — [src-nvidia-blog-server]
+
+### 独立评测与实测
+
+7. [StorageReview：RTX PRO 6000 Workstation GPU Review](https://www.storagereview.com/review/nvidia-rtx-pro-6000-workstation-gpu-review-blackwell-architecture-and-96-gb-for-pro-workflows)（2025-10-07） — [src-storagereview-review]
+8. [HOSTKEY：Server Edition Tests & Benchmarks](https://huggingface.co/blog/HOSTKEY/nvidia-rtx-6000-blackwell-server-edition-tests-ben)（2025-08-30） — [src-hostkey-bench]
+9. [TechnoLynx LynxBenchAI：Server Edition vs RTX 5090](https://www.technolynx.com/lynxbench-ai/compare/rtx-pro-6000-blackwell-server-edition-vs-rtx-5090/) — [src-technolynx]
+10. [EcoHash：What 96 GB on one card actually buys you](https://huggingface.co/blog/ecohash-ai/what-96-gb-on-one-card-actually-buys-you)（2026-09-14） — [src-ecohash-96gb]
+
+### 社区实测档案
+
+11. [local-inference-lab/rtx6kpro：RTX 6000 Pro Wiki](https://github.com/local-inference-lab/rtx6kpro) — [src-rtx6kpro-readme]
+12. [Inference Throughput: Qwen3.5-397B Quantizations](https://github.com/local-inference-lab/rtx6kpro/blob/master/benchmarks/inference-throughput/README.md)（2026-03-14） — [src-rtx6kpro-throughput]
+13. [Benchmark Results 汇总](https://github.com/local-inference-lab/rtx6kpro/blob/master/benchmarks/results.md) — [src-rtx6kpro-results]
+14. [Power-Limit Sweep：Workstation vs Server vs Max-Q](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/blackwell-power-limit-sweep.md) — [src-rtx6kpro-power]
+15. [SM120 vs SM100 Architecture](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/sm120-vs-sm100-architecture.md) — [src-rtx6kpro-sm120]
+
+### 媒体与价格
+
+16. [CG Channel：NVIDIA launches 72GB RTX PRO 5000 Blackwell GPU](https://www.cgchannel.com/2025/12/nvidia-launches-new-72gb-rtx-pro-5000-blackwell-gpu/)（2025-12-22） — [src-cgchannel-lineup]
+17. [什么值得买（转快科技）：RTX PRO 6000 涨价至 16000 美元](https://post.smzdm.com/p/a3morm8k/)（2026-08-13） — [src-smzdm-price]
+18. [太平洋科技（转快科技）：RTX PRO 6000 专业卡首测](https://news.pconline.com.cn/1926/19268483.html)（2025-05-16） — [src-pconline]
+19. [Blender Artists Community：RTX PRO 6000 Performance](https://blenderartists.org/t/rtx-pro-6000-performance/1648521/2)（2026-07-24） — [src-blenderartists]
+
+### 渲染基准与训练实测
+
+20. [Drop & Render：RTX PRO 6000 Workstation Edition 渲染基准](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-workstation-edition)（更新 2026-10-26） — [src-dropandrender-ws]
+21. [Drop & Render：RTX PRO 6000 Server Edition 渲染基准](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition)（更新 2026-10-26） — [src-dropandrender-se]
+22. [Drop & Render：RTX 5090 渲染基准](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-5090)（更新 2026-10-26） — [src-dropandrender-5090]
+23. [Fixstars：RTX 6000 Blackwell Max-Q LLM 微调评估](https://blog.us.fixstars.com/evaluating-llm-fine-tuning-efficiency-on-nvidia-rtx-6000-blackwell-max-q/) — [src-fixstars-ft]
+24. [Alio Leuchtmann：RTX PRO 6000 vs GH200 全参 SFT 基准](https://huggingface.co/blog/AlioLeuchtmann/rtx-6000-pro-vs-gh200-sft-benchmark)（2026-06-05） — [src-alio-sft]
+25. [StorageReview：HP Z8 Fury G6i 评测（4× Max-Q 整机）](https://www.storagereview.com/review/hp-z8-fury-g6i-review-one-xeon-up-to-four-blackwell-gpus)（2026-06-23） — [src-sr-hpz8]
+
+### 虚拟化与机密计算
+
+26. [NVIDIA：GPU Performance and Sharing Characteristics（RTX vWS 选型指南）](https://docs.nvidia.com/vgpu/sizing/virtual-workstation/latest/right-gpu.html)（更新 2026-08-19） — [src-nvidia-vgpu-sizing]
+27. [NVIDIA Developer：Hardware-Rooted AI Security That Won't Slow You Down](https://developer.nvidia.com/blog/hardware-rooted-ai-security-that-wont-slow-you-down/)（2026-07-02） — [src-nvidia-cc-blog]
+28. [arXiv:2606.23969：The Serialized Bridge — LLM Serving under Blackwell GPU Confidential Computing](https://arxiv.org/abs/2606.23969)（v2, 2026-07-09） — [src-arxiv-cc]
+29. [IT之家（转 WccfTech）：RTX PRO 6000 演示同时跑 4 个《赛博朋克 2077》](https://www.ithome.com/0/878/374.htm)（2025-08-27） — [src-ithome-mig]
+
+### 稳定性与在役退化（社区故障报告）
+
+30. [NVIDIA Developer Forums：Blackwell Pro 6000 MHz degrading](https://forums.developer.nvidia.com/t/blackwell-pro-6000-mhz-degrading/355157)（2026-02～2026-10） — [src-forum-mhzdeg]
+31. [NVIDIA Developer Forums：PRO 6000 Blackwell WS — SW Power Cap ~600MHz @ 600W/35°C](https://forums.developer.nvidia.com/t/pro-6000-blackwell-ws-sw-power-cap-600-mhz-600-w-35-c-fix-or-rma/376937)（2026-07-15） — [src-forum-swcap]
+32. [NVIDIA Developer Forums：Wrong temperature thresholds causes SW Power Cap, throttled to 510MHz](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-wrong-temperature-thresholds-causes-sw-power-cap-gpu-throttled-to-510mhz-1-6-performance/362488)（2026-03-05） — [src-forum-thresh]
+
+---
+
+## 附录 A：子问题完成度
+
+| # | 问题 | 状态 | 主要依据 |
+|---|---|---|---|
+| q1 | 三 SKU 规格差异 | ✅ | §3.1 规格表，官方三页交叉验证 |
+| q2 | 性能差异来源 | ✅ | §6.1–6.2 功耗扫描，固件 V/F 差异 |
+| q3 | 96GB 能装什么 | ✅ | §4.1–4.2 容量表与实测吞吐 |
+| q4 | vs RTX 5090 | ✅ | §5 三套独立口径（AI/综合/渲染） |
+| q5 | 专业图形定位 | ✅ | §7 三渲染器对比 + 编码器/ISV |
+| q6 | 600W 是否值得 | ✅ | §6.3–6.4 能效曲线与推理实测 |
+| q7 | 价格变化 | ✅ | §12.1 价格时间线至 2026-10-27 |
+| q8 | 软件生态限制 | ✅ | §10 SM120 分裂与具体坑 |
+| q9 | vs H100/L40S/Ada 边界 | ✅ | §8 训练交叉点 + §9.1 全象限对比（MLPerf 封闭分区仍缺，但不影响结论） |
+| q10 | MIG / vGPU 虚拟化 | ✅ | §11.1 官方 SPECviewperf 与共享吞吐数据 |
+| q11 | 机密计算性能代价 | ✅ | §11.2 厂商 1-8% 与学术 13-27% 并列，含回收手段 |
+| q12 | 长期运行是否可靠？ | ✅ | §10.4 社区故障报告与运维建议 |
+
+**完成度：12/12 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+
+## 附录 B：本报告的可复现性
+
+本报告全部数字可追溯到 `evidence.csv` 中的 **188 条**原文片段。校验命令：
+
+```bash
+python scripts/validate_research.py research/rtx-pro-6000
+```
+
+校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
+
+当前校验结果：`sources=32, evidence=188, claims=120, claims_high=79, claims_disputed=1`
+
+**阅读约定**：
+- `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
+- `[e-<id>]` = 证据 ID，指向 `evidence.csv` 中的原文片段
+- `[src-<id>]` = 来源 ID，指向 `sources.csv` 中的 URL 与抓取时间
