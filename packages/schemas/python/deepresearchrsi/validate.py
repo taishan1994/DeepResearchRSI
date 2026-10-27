@@ -213,6 +213,39 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
                 errors.append("run.json: trace seq 必须唯一")
             stats_extra["trace_events"] = len(seqs)
 
+    # 不变量 C1：confidence=high 需要至少一条 trust_tier=primary 的 supports 证据。
+    # 强制阻断。若无一手证据，正确做法是补证据或降为 medium，而不是放宽规则。
+    evidence_owner: dict[str, str] = {}
+    evidence_stance: dict[str, str] = {}
+    for row in evidence:
+        eid = (row.get("evidence_id") or "").strip()
+        evidence_owner[eid] = (row.get("source_id") or "").strip()
+        evidence_stance[eid] = (row.get("stance") or "").strip()
+    source_tier = {
+        (row.get("source_id") or "").strip(): (row.get("trust_tier") or "").strip()
+        for row in sources
+    }
+
+    c1_violations: list[str] = []
+    for row in claims:
+        if (row.get("confidence") or "").strip() != "high":
+            continue
+        cid = (row.get("claim_id") or "").strip()
+        eids = [x.strip() for x in (row.get("evidence_ids") or "").split(";") if x.strip()]
+        ok = any(
+            source_tier.get(evidence_owner.get(e, "")) == "primary"
+            and evidence_stance.get(e) == "supports"
+            for e in eids
+        )
+        if not ok:
+            c1_violations.append(cid)
+    stats_extra["c1_violations"] = len(c1_violations)
+    for cid in c1_violations:
+        errors.append(
+            f"claims.csv[{cid}]: confidence=high 但缺少 trust_tier=primary 的 supports 证据"
+            "（不变量 C1；请补一手证据，或将置信度降为 medium）"
+        )
+
     if errors:
         raise ValidationError("\n".join(f"  - {e}" for e in errors))
 

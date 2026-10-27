@@ -24,7 +24,7 @@ ResearchRun ──> Brief / Plan / Trace / Report ────────┘
 | `updated_at` | date? | 最近更新时间 |
 | `fetched_at` | datetime | 抓取时间（必须有时区） |
 | `language` | str | BCP-47 |
-| `trust_tier` | enum | `primary`（一手）/ `secondary`（二手转述）/ `tertiary`（聚合） |
+| `trust_tier` | enum | `primary`（自行产生观测）/ `secondary`（转述他人）/ `tertiary`（聚合，无原始观测） |
 | `access` | enum | `open` / `paywalled` / `blocked` / `login_required` |
 | `license` | str? | 许可或使用限制 |
 | `notes` | str? | 主观备注，不参与事实判定 |
@@ -74,6 +74,23 @@ ResearchRun ──> Brief / Plan / Trace / Report ────────┘
 | `derivation` | str? | 若为系统推断，写明推导链 |
 
 **不变量 C1**：`confidence=high` 要求至少一条 `trust_tier=primary` 的 `supports` 证据。
+校验器强制执行；不满足时报告必须给出具体 `claim_id`，处置只有两种——补一手证据，或降为 `medium`。
+
+> **`trust_tier` 与 `source_type` 正交，别把权威性当来源性质。**
+>
+> 曾经踩过的坑：把 `independent`（独立评测自跑测量）、`review`（媒体实测）、
+> `community`（社区自跑 benchmark）一律标成 `secondary`，理由隐含是"它们不如官方权威"。
+> 但 `secondary` 的定义是**转述他人数据**，这些来源恰恰是**自己产生了被引用的观测**，
+> 应属 `primary`。错标的直接后果是 451 条高置信主张里有 309 条"违反 C1"——数字看着骇人，
+> 实际是标注口径错了，不是证据不足。
+>
+> 可操作的判据：**这段数据是谁第一次测出来的？**
+> - 自己测的（厂商实验室、独立评测、媒体实测、社区 benchmark、学术论文、官方规格页）→ `primary`
+> - 引用别人测的（新闻转述、博客综述、厂商 PPT 引用第三方数字）→ `secondary`
+> - 只做索引/聚合，无原始观测（榜单站、比价站、导读页）→ `tertiary`
+>
+> 按此判据重新标注后，违规从 309 降到 39；剩下 39 条是真的只有媒体转述支撑，
+> 已如实降为 `medium` 并在 `notes` 记录原因。
 **不变量 C2**：系统推断不得写成来源事实；必须填 `derivation` 并在报告中标注。
 **不变量 C3**：冲突主张并列呈现，不强裁决；`confidence=disputed` 时报告必须展示双方。
 

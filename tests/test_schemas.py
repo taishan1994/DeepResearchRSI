@@ -170,14 +170,14 @@ def test_validator_accepts_clean_archive() -> None:
         _write(
             root,
             "sources.csv",
-            "source_id,url,fetched_at\n",
-            ["src-a,https://a,2026-10-27T00:00:00+00:00"],
+            "source_id,url,fetched_at,trust_tier\n",
+            ["src-a,https://a,2026-10-27T00:00:00+00:00,primary"],
         )
         _write(
             root,
             "evidence.csv",
-            "evidence_id,source_id,quote\n",
-            ["e-a,src-a,原文片段"],
+            "evidence_id,source_id,quote,stance\n",
+            ["e-a,src-a,原文片段,supports"],
         )
         _write(
             root,
@@ -395,6 +395,50 @@ def test_run_rejects_dangling_trace_refs() -> None:
             assert "src-nope" in str(exc), str(exc)
         else:
             raise AssertionError("悬空 source 引用未被拒绝")
+
+
+def test_c1_high_requires_primary_support() -> None:
+    """不变量 C1：high 置信主张必须有 primary 来源的 supports 证据。"""
+    def _build(root: Path, tier: str, stance: str, conf: str) -> None:
+        _write(root, "sources.csv", "source_id,url,fetched_at,trust_tier\n",
+               [f"src-a,https://a,2026-10-27T00:00:00+00:00,{tier}"])
+        _write(root, "evidence.csv", "evidence_id,source_id,quote,stance\n",
+               [f"e-a,src-a,原文片段,{stance}"])
+        _write(root, "claims.csv",
+               "claim_id,statement,claim_type,as_of,confidence,evidence_ids\n",
+               [f"c-a,某事实,spec,2026-10-27,{conf},e-a"])
+        (root / "REPORT.md").write_text("引用 [c-a] [e-a]。\n", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory() as td:
+        # secondary + high -> 必须拒绝
+        root = Path(td) / "a"
+        root.mkdir()
+        _build(root, "secondary", "supports", "high")
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "C1" in str(exc), str(exc)
+        else:
+            raise AssertionError("secondary 证据支撑 high 主张未被拒绝（C1）")
+
+    with tempfile.TemporaryDirectory() as td:
+        # primary 但 stance=context -> 仍必须拒绝（C1 要求 supports）
+        root = Path(td) / "b"
+        root.mkdir()
+        _build(root, "primary", "context", "high")
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "C1" in str(exc), str(exc)
+        else:
+            raise AssertionError("primary 但非 supports 未被拒绝（C1）")
+
+    with tempfile.TemporaryDirectory() as td:
+        # secondary + medium -> 允许
+        root = Path(td) / "c"
+        root.mkdir()
+        _build(root, "secondary", "supports", "medium")
+        validate_research_dir(root)
 
 
 def main() -> int:
