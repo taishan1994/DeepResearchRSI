@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：231 ｜ **证据数**：1817 ｜ **主张数**：1297（高置信 982，争议 6）
+> **来源数**：233 ｜ **证据数**：1829 ｜ **主张数**：1306（高置信 991，争议 6）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -9773,6 +9773,186 @@ Hardware limit: 101376
 | 3 | **报「不支持」时先查共享内存**，再查版本 |
 | 4 | **int32 偏移在 367 万 token 级 KV 池上会静默错写**——这是最该主动打补丁的一类问题 |
 | 5 | **看回归必须看逐配置**，聚合数会同时掩盖 +113% 和 −28% |
+### 10.16 容器化：一个架构列表写错，整条扩展链就带错了 SASS
+
+**§10.13–§10.15 讲的是软件栈里的具体崩溃。本节讲一个更上游的问题：镜像构建阶段就注定跑不起来。**
+**正文此前「Docker」出现次数为 0。**
+
+#### ⚠️⚠️ 一、先把「Blackwell」这个词拆开
+
+**一个基础性的事实** [c-blk-two-majors]：
+
+| 产品 | 家族 | Compute capability | SM 目标 |
+|---|---|---|---|
+| ⭐ **RTX PRO 6000 Blackwell** | **工作站 GB20x** | ⭐ **12.0** | **`sm_120`** |
+| B200 | 数据中心 GB100 | 10.0 | `sm_100` |
+| B300（Blackwell Ultra） | 数据中心 GB300 | 10.3 | `sm_103` |
+
+> ⚠️ **「Blackwell」是一个营销家族，覆盖两个互不兼容的 CUDA major。**
+>
+> **本报告研究的是 `sm_120`——与数据中心 Blackwell 不是同一个目标。**
+
+#### ⭐⭐⭐ 二、SASS 不跨越 CUDA major
+
+**原文把这条称为「最常见的误判来源」** [c-blk-sass-no-cross]：
+
+> **「`sm_120` 二进制不会在 `sm_100`/`sm_103` 上运行，反之亦然。**
+> **在 RTX PRO 6000 上验证通过，对 B200/B300 什么也证明不了——**
+> **这是『Blackwell-ready』这类说法落空最常见的方式。」**
+
+> ⭐ **与本报告 §7.9 记录的 FlashAttention-3 缺席是同一类问题的两个层次：**
+>
+> | 层次 | 内容 |
+> |---|---|
+> | **§7.9** | `sm_120` 没有专门的 kernel |
+> | **本节** | ⚠️ **就算有，也不能跨 major 用** |
+
+#### ⚠️⚠️ 三、最隐蔽的坑：只有一个架构开关是你可控的
+
+**这比 §10.14 的 5 KiB smem 限制更上游** [c-blk-torch-arch-trap]：
+
+| 类型 | 谁决定架构集合 |
+|---|---|
+| **预编译 torch wheel** | ⚠️ **固定 fat-binary，`TORCH_CUDA_ARCH_LIST` 改不动它** |
+| **源码编译扩展** | ✅ 遵守 `TORCH_CUDA_ARCH_LIST` |
+
+**wheel 索引的覆盖范围**：
+
+| 索引 | 含 `sm_120`？ |
+|---|---|
+| **cu128 / cu130** | ✅ **是** |
+| ⚠️ **cu124 / cu126** | ❌ **止于 `sm_90`** |
+
+> ⚠️ **漏掉架构的扩展会在运行时表现为：**
+> **`no kernel image is available for execution on the device`**
+
+> ⭐ **这条给出了 §7.9 那个缺口之外的另一条解释路径：**
+> **问题不一定出在算子本身，也可能出在 wheel 索引选错。**
+
+**一个无需 GPU 的自检命令**：
+
+```bash
+python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.get_arch_list())"
+```
+
+#### ⚠️ 四、一个真实的生产级踩坑
+
+**某基础镜像的教训** [c-blk-arch-list-bug]：
+
+| 项 | 内容 |
+|---|---|
+| 原设置 | ⚠️ **`TORCH_CUDA_ARCH_LIST=10.3`（只有 B300）** |
+| 后果 | ⚠️ **所有继承该 base 的源码编译扩展只带 B300 SASS → 在 RTX PRO 6000 上不可用** |
+| 现设置 | ✅ **`8.0 9.0 10.0 10.3 12.0`** |
+| 断言 | ✅ **wheel 须报告 `sm_80 sm_90 sm_100 sm_120`** |
+
+> ⭐ **一个反直觉的细节：`sm_103` 被故意排除在断言之外——**
+> **因为 stock cu130 wheel 只带 `sm_100` SASS，B300 靠前向兼容到达。**
+> **若断言 `sm_103`，会把一个完全正常的 wheel 判为失败。**
+
+> ⭐ **这与 §7.9 的 sm_120 缺口互为镜像：一个是上游没提供，一个是自己构建时漏了。**
+
+#### ⭐ 五、镜像 tag 应当编码架构
+
+**一个可审计的做法** [e-sm120-arch-in-tag]：
+
+```
+cuda13-b300-sm80-sm90-sm100-sm103-sm120-v2-latest
+```
+
+> ⭐ **把五个架构写进 tag，路由才可审计。**
+>
+> **比「latest」这种 tag 强的地方在于：出问题时能立刻看出这个镜像到底带了哪些 SASS。**
+
+#### ⚠️ 六、但 tag 里有 sm_120 不等于里面有那个修复
+
+**一条可直接移用到本报告方法论的纪律** [c-blk-tag-not-proof]：
+
+> **「下面这些历史 tag 并不证明它们包含 FA4 更新；**
+> **请使用 FA4 证据中的确切 source/image 身份。」**
+
+> ⭐ **这与 §2.4 的「`high` 不等于多来源确认」是同一类纪律：**
+>
+> **一个标签的存在，不等于它声称的内容成立。**
+
+#### ⭐ 七、验证要「正向断言 + 反向断言」
+
+**一个值得照抄的做法** [c-sm120-capability-assert]：
+
+```bash
+python -c "import torch; cap=torch.cuda.get_device_capability(); \
+  print(cap, torch.cuda.get_arch_list()); \
+  assert cap == (12,0), cap"
+```
+
+> ⭐ **该文档同时要求反向验证——对另一个 CUDA major 断言失败，**
+> **以免「在错误的 GPU 家族上通过」被误认为成功。**
+>
+> ⚠️ **这个细节值得单独记住：只做正向断言时，一个啥也没检查的脚本也可能通过。**
+
+#### ⚠️⚠️ 八、最关键的一条：import 成功不算验证
+
+**原文的标题就是结论** [c-blk-import-not-enough]：
+
+> **「A real capability smoke, not a CUDA probe」**
+
+**它抓到的两个真实案例**：
+
+| 案例 | 表现 |
+|---|---|
+| `loop-eval:0.1.1` 的 `sm_120` 回归 | ⚠️ **import 通过，第一个真实 kernel 失败** |
+| 历史性的 FA4 dispatch 失败 | ⚠️ **同上** |
+
+> ⭐ **这把本报告反复出现的「导入成功≠能跑」升级为一条明确的操作规范：**
+> **冒烟测试必须包含一个真实的数值算子。**
+
+#### ⭐⭐⭐ 八之二、附带纠正一条流传的解释
+
+**同一份文档顺手纠了一个错，而这个错与本报告 §7.9 / §10.14 的主题直接相关** [c-blk-tma-correction]：
+
+> **「先前关于 SM120 缺少 TMA 的解释是错误的：**
+> **NVIDIA 为 compute capability 12.0 列出了 TMA。」**
+
+**真实的失败形态与原因** [e-blk-fa4-failure]：
+
+| 项 | 内容 |
+|---|---|
+| 报错 | ⚠️ **`NoneType._trait` in the TMA epilogue** |
+| 触发 commit | `0409f9adcbdebff6cc19eb95f370d40e896980bc` |
+| ⭐ **真实原因** | ⚠️ **SM80 派生的 FA4 kernel 选到了不兼容的 epilogue 路径** |
+| 修复 | ✅ **上游修了 SM120 dispatch 与 backward 初始化** |
+
+> ⚠️⚠️ **这两个解释的差别很大：**
+>
+> | 说法 | 含义 | 后果 |
+> |---|---|---|
+> | 「SM120 缺 TMA」 | ⚠️ **听起来像硬件缺陷** | **等下一代硬件** |
+> | ⭐ **「kernel 选错了 epilogue 路径」** | ✅ **软件 bug** | **升级/打补丁即可** |
+
+> ⭐ **即本条不只是一个技术细节，它改变了对策方向。**
+>
+> **这与 §10.14 的「一个 5 KiB 的差距掀翻四个软件栈」是同一类教训：**
+> **表象像硬件不支持，实为软件没适配对。**
+
+#### ⭐ 九、一条反面的选型确认：数据中心卡没有 RT 核心
+
+**B200/B300 与 H100/H200 一样，没有 RT 核心** [c-blk-dc-no-rt]：
+
+> **渲染类工作必须留在 L40S / RTX PRO 6000 上；**
+> **只有无头、基于状态的训练才适合路由到 B200/B300。**
+
+> ⭐ **这从反面确认了 §7 的结论——**
+> **RTX PRO 6000 的渲染能力不是「强一点」，是数据中心卡根本没有这个单元。**
+
+#### ⭐ 十、so what：四条可执行检查
+
+| 你要做的事 | 检查 |
+|---|---|
+| 选 wheel | ✅ **确认索引是 cu128/cu130，不是 cu124/cu126** |
+| 构建源码扩展 | ✅ **`TORCH_CUDA_ARCH_LIST` 必须含 `12.0`** |
+| 验证镜像 | ⚠️ **跑真实算子，不要只 import** |
+| 跨卡复用镜像 | ⚠️ **`sm_120` 的镜像不能给 B200/B300，反之亦然** |
+
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -12685,6 +12865,11 @@ sudo nvidia-bug-report.sh
 2. [pytorch/pytorch Issue #182286：CUDA caching allocator unable to satisfy 3-18 GiB contiguous allocation despite 50+ GiB free on RTX PRO 6000 Blackwell + WSL2](https://github.com/pytorch/pytorch/issues/182286) —（2026-05-04，状态 open）。⭐⭐⭐ 本报告找到的关于该卡 WSL2 行为最具体的一手记录。决定性对照：「同一份代码、同一张硬件，在原生 Linux 下开销只有 1–2 GiB，而非 16 GiB」（相差 8–16 倍，即 96 GB 实际可用约 80 GiB）。⚠️ 报错自相矛盾：总容量 95.59 GiB、50.40 GiB 空闲，却装不下 3.48 GiB 连续分配。⚠️⚠️ 致命细节：`PYTORCH_ALLOC_CONF=expandable_segments:True` 在 Blackwell 上让 CUDA 驱动直接报错，该 issue 原话称这个由报错信息本身推荐的开关「在这款硬件上是有害的」。⭐ 复现环境：PyTorch 2.10.0+cu128 与 2.11.0+cu130、CUDA 12.8/13.0、驱动 596.36 与 581.80 RTX Enterprise 全部复现。⭐ 评论区第二份独立复现把根因收窄到 CUDA context 创建（仅 `torch.cuda.init()` 即产生约 80 GB 的 `PROT_NONE` 匿名映射），关闭 `expandable_segments` 对此零影响；另记录 `vmmemWSL` commit charge 升至 68–74 GB 而 WorkingSet 低于 5–40 GB，且 `.wslconfig` 的 48 GB 上限压不住；NCCL 会把保留从 ~80 GB 放大到 ~104 GB，exllamav3 场景达 ~137 GB — [src-gh-torch-182286]
 3. [vllm-project/vllm Issue #41619：Qwen3.6 hybrid Mamba models fail KV cache allocation on RTX PRO 6000 Blackwell + WSL2](https://github.com/vllm-project/vllm/issues/41619) —（2026-05-04，状态 closed）。⚠️ 给出具体触发场景：Qwen3.6 混合 Mamba 模型 KV cache 分配失败，失败点 `vllm/v1/worker/gpu_model_runner.py:6537`，分配约 3.48 GiB 连续张量时 OOM。⚠️ 注意 closed 状态不表示问题已解决——按 §2.4 的纪律，issue 状态是流程状态而非技术结论，且其余三处同类报告（WSL #40401、PyTorch #182286、SGLang #24364）仍为 open — [src-gh-vllm-41619]
 
+### 容器化与架构兼容（第三十四轮补充）
+
+1. [Nebius：sm_120 Image Catalog](https://raw.githubusercontent.com/nebius/nebius-physical-ai/refs/heads/main/docs/workbench/sm120-image-catalog.md) —（2026-08-03）。⭐⭐ 一个真实的 sm_120 生产镜像目录，记录为 RTX PRO 6000 Blackwell 验证过的镜像集合。⭐ 镜像 tag 显式编码全部五个架构（`cuda13-b300-sm80-sm90-sm100-sm103-sm120-...`），并带一个 baked same-major `sm_100` → `sm_103` SASS validator；实机冒烟要求断言 `torch.cuda.get_device_capability() == (12, 0)`。⚠️ 明确告诫「历史 tag 并不证明它们包含 FA4 更新」 — [src-nebius-sm120-catalog]
+2. [Nebius：Blackwell datacenter image compatibility (B200 sm_100 / B300 sm_103)](https://raw.githubusercontent.com/nebius/nebius-physical-ai/refs/heads/main/docs/workbench/blackwell-datacenter-image-compatibility.md) —（2026-08-03）。⭐⭐⭐ 本报告找到的关于 Blackwell 架构兼容性最精确的一份工程文档。⭐⭐⭐ 核心规则「SASS 不跨越 CUDA major」，原文称「在 RTX PRO 6000 上验证通过，对 B200/B300 什么也证明不了——这是『Blackwell-ready』落空最常见的方式」；⚠️⚠️ 并指出两个架构开关只有一个可控：预编译 torch wheel 的 fat-binary 集合不受 `TORCH_CUDA_ARCH_LIST` 影响，cu128/cu130 含 `sm_120` 而 cu124/cu126 止于 `sm_90`，漏掉架构会以 `no kernel image is available for execution on the device` 暴露。⭐⭐⭐ 另**纠正了一条流传的解释**：「先前关于 SM120 缺少 TMA 的解释是错误的：NVIDIA 为 compute capability 12.0 列出了 TMA」——真实原因是 SM80 派生的 FA4 kernel 选到了不兼容的 epilogue 路径（报错 `NoneType._trait` in the TMA epilogue），上游随后修复了 SM120 dispatch 与 backward 初始化。⭐ 方法论上提出「A real capability smoke, not a CUDA probe」——必须让真实 kernel 执行，该做法同时抓到 `loop-eval:0.1.1` 的 sm_120 回归与历史性 FA4 dispatch 失败（此前 import 全通过）。⚠️ 另记录一个真实踩坑：某基础镜像曾把 `TORCH_CUDA_ARCH_LIST` 固定为 `10.3`，致所有继承者只带 B300 SASS；且 `sm_103` 被故意排除在断言外（stock cu130 wheel 只带 `sm_100` SASS，B300 靠前向兼容到达）。⭐ 并确认数据中心 Blackwell 无 RT 核心，渲染必须留在 L40S / RTX PRO 6000 — [src-nebius-blackwell-compat]
+
 
 ## 附录 A：子问题完成度
 
@@ -12825,7 +13010,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=231, evidence=1817, claims=1297, claims_high=982, claims_disputed=6, trace_events=486, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=233, evidence=1829, claims=1306, claims_high=991, claims_disputed=6, trace_events=491, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
