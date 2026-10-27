@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：222 ｜ **证据数**：1772 ｜ **主张数**：1257（高置信 967，争议 4）
+> **来源数**：223 ｜ **证据数**：1778 ｜ **主张数**：1262（高置信 971，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -6856,6 +6856,74 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 >
 > **换句话说：这张卡在你的 AI 负载里快多少，有一部分就是这 10.6% 在起作用。**
 
+### 7.9 音频与语音合成：一个此前完全空白的维度
+
+**§7 覆盖了渲染、CAD、CAE、媒体编码、游戏，但从未涉及音频。** 本轮找到了一份真实在跑的一手部署记录 [c-tts-sm120-verified]。
+
+**部署形态**：Fish Audio 开源 TTS 模型 OpenAudio S2-Pro + vLLM-Omni 0.22，作者把 RTX PRO 6000 作为开发机 [e-fish-deps]。
+
+#### ⭐⭐ 一、首音频延迟约 100 ms
+
+**44.1 kHz 单声道、预热后实测** [c-tts-first-audio-100ms]：
+
+| 场景 | TTFA |
+|---|---:|
+| **零样本合成** | ⭐ **~100 ms** |
+| **声音克隆** | **~135 ms** |
+
+> ⭐ **100 ms 已低于人类感知的对话停顿阈值——这是一个可直接对标的交互体验指标，而不是跑分。**
+
+#### ⚠️ 二、并发不呈线性
+
+**一个对容量规划很重要的非线性** [c-tts-rtf-sublinear]：
+
+| 并发 | 实时因子（RTF） |
+|---|---:|
+| 1 路 | ~2.8× |
+| **4 路** | **~7×（聚合）** |
+
+> ⚠️ **并发 ×4，聚合吞吐只 ×2.5。**
+>
+> **即 4 路时已出现明显的边际效率下降——不能按单流 RTF 直接乘并发数来估容量。**
+
+#### ⚠️⚠️ 三、一条解释了很多故障的架构限制
+
+**这是本轮在「为什么某些软件栈在这张卡上跑不起来」这条线上找到的第一个明确原因** [c-sm120-flashattention-gap]：
+
+| 组件 | 状态 |
+|---|---|
+| **FlashAttention-3** | ⚠️ **只有 sm90a（Hopper）与 sm120a（Blackwell-Ultra）kernel，没有 sm_120** |
+| **SGLang** | ⚠️ **在 sm_120 上被阻塞** |
+| RTX PRO 6000 | ⚠️ **正是 sm_120** |
+| ✅ 能跑通的路径 | **vLLM-Omni 的 Triton「fish kvcache」解码路径** |
+
+> ⚠️ **即这张卡不能用 FlashAttention-3，也无法直接跑 SGLang。**
+>
+> ⭐ **这为 §8 与 §10 记录的多起框架级故障提供了一个架构层面的解释方向——**
+>
+> **不是「软件写错了」，而是「软件只给 Hopper 和 Ultra 写了 kernel」。**
+
+#### ⚠️ 四、又一起「优化特性变成正确性问题」
+
+**一个可复现的框架缺陷** [c-tts-prefix-cache-bug]：
+
+> **vLLM-Omni 0.22 的前缀缓存会在该负载下间歇性产生空音频，因此部署方案刻意关闭它。**
+
+> ⚠️ **这与 §10.15 记录的 vLLM 0.28.0 回归属同一类：**
+>
+> **性能优化特性在特定硬件/负载组合下会变成正确性问题。**
+
+#### ⭐ 五、这条信息的边界
+
+| 项 | 状态 |
+|---|---|
+| 是否实测 | ✅ **是，作者开发机** |
+| 是否可复现 | ✅ **公开了完整部署步骤与版本锁定** |
+| 是否多源印证 | ❌ **单一开发者，无第二来源** |
+| 延迟分位数 | ❌ **只给了均值，无 P50/P99** |
+
+> ⚠️ **故本报告把它记为「一个可用且可复现的实测点」，而非「这张卡的 TTS 官方性能」。**
+
 
 ## 8. 训练与微调：被误解的一侧
 
@@ -12014,6 +12082,10 @@ sudo nvidia-bug-report.sh
 ### 证据强度自审计（第二十七轮补充）
 
 1. [本数据集证据强度分布自审计](https://github.com/taishan1994/DeepResearchRSI/blob/main/research/rtx-pro-6000/claims.csv) — 对 `research/rtx-pro-6000` 下 `claims.csv` 与 `evidence.csv` 的逐条统计（2026-10-27）。⚠️ 这不是外部信息源，而是对本报告自身证据结构的度量：1236 条主张中 1100 条（89.0%）仅有单一来源，仅 4 条有四个来源；852 条单来源 `high` 主张的来源层级全部为 `primary`，无一建立在 secondary 或 tertiary 之上 — [src-self-audit-94]
+### 音频与语音合成（第二十八轮补充）
+
+1. [Genesis1231：Self-Hosted Streaming TTS & Voice Cloning on RTX 5090 / RTX PRO 6000](https://github.com/Genesis1231/fish-s2-rtx) — Fish Audio OpenAudio S2-Pro + vLLM-Omni 0.22 部署项目（2026-10-01）。⭐ 本报告在音频/TTS 维度的首个一手实测：RTX PRO 6000（sm_120）预热后首音频延迟零样本约 100 ms、声音克隆约 135 ms；实时因子单流约 2.8×、4 路并发聚合约 7×。⚠️ 同时记录了两条架构限制：FlashAttention-3 只提供 sm90a 与 sm120a kernel、无 sm_120；SGLang 在 sm_120 上被阻塞 — [src-fish-tts]
+
 
 ## 附录 A：子问题完成度
 
@@ -12154,7 +12226,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=222, evidence=1772, claims=1257, claims_high=967, claims_disputed=4, trace_events=462, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=223, evidence=1778, claims=1262, claims_high=971, claims_disputed=4, trace_events=464, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
