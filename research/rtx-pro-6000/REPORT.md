@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：184 ｜ **证据数**：1425 ｜ **主张数**：948（高置信 705，争议 1）
+> **来源数**：185 ｜ **证据数**：1438 ｜ **主张数**：959（高置信 716，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -3257,6 +3257,134 @@ llama-bench -m ./gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf   -t 1 -fa 1 -b 2048 -u
 | 120B | 5,518.07 | 3,718.01 | **−33%** |
 
 > **即长提示下提示处理本身也会随长度退化约三成**——这不只是生成侧的事。
+
+### 6.7 功耗子系统可以拆开调：三个上限、一个下限、两个陷阱
+
+**§4.11.7 记的「150 W 功耗下限」是原厂策略，不是硅片极限。**本节把功耗子系统拆开。
+
+#### 一、Max-Q 的真实窗口不是 300 W
+
+**两个不同的约束** [c-ds-maxq-pl-window]：
+
+| 约束 | 范围 |
+|---|---|
+| **可调范围** | **250–325 W**（`sudo nvidia-smi -pl 325`） |
+| **12VHPWR 感应引脚实际限制** | 2× PCIe 8-pin 转接 → **300 W** |
+
+> ⚠️ **最初称「3×/4× 转接可达 600 W」的说法后来被更正为 325 W。**
+>
+> **即 Max-Q 上不去 600 W，不管线怎么接。**
+
+#### 二、下限可以压到 30 W
+
+**LACT PR #1205** 把任何 NVIDIA GPU 的功耗下限降到 **30 W**（原厂 VBIOS 允许则更低）[c-ds-lact-30w]：
+
+| 版本 | 出厂下限 | **可压到** |
+|---|---|---|
+| **Max-Q** | 250 W | **< 250 W** |
+| **Server Edition** | 400 W | **< 400 W** |
+| **Workstation** | 150 W | **< 150 W** |
+| RTX 5090 | 400 W | **< 400 W** |
+
+> **即 §4.11.7 那个 150 W 是软件策略，不是硬墙。**
+
+#### ⚠️ 三、陷阱一：非原厂锁频与 Xid 120 相关
+
+**两条独立报告指向同一结论** [c-ds-xid120-power] [c-ds-lock-unstable]：
+
+| 现象 | 恢复方式 |
+|---|---|
+| **Xid 120 GSP 内核错误**，锁频 **400 W+** 时相关 | **改回 300 W 后稳定** |
+| 用了 **2–3 个月 LACT 锁频**后 **每 20 小时卡死一次** | **改回原厂 300 W 后清除** |
+| 对照：**450 W 配不同锁频**设置 | **稳定了两周** |
+
+> **结论**：「锁频」本身不是问题，**「锁频加上原厂未验证的参数组合」才是**。
+
+#### ⚠️ 四、陷阱二：第三方调压工具会误报规格
+
+**实测对照** [c-ds-lact-wrong-specs]：
+
+| 项 | LACT 报告 | 实际 |
+|---|---|---|
+| ROP | **112** | **192** |
+| 显存 | GDDR6x 384 位美光 | 报告本身可疑 |
+| 实测读写带宽 | — | **1,649.95 / 1,566.78 GB/s** |
+
+> **带宽实测值本身就否定了报告**——所以**不能用这类工具的读数核对规格**。
+
+#### 五、显存超频 +8%：从正面确认解码受带宽限制
+
+**+6000 显存偏移**通过 pynvml 可获得 **约 +8% 解码** [c-ds-vram-oc-8pct]。
+
+> **这条的价值在于方向**：本报告 §4.4.1 与 §6.6 都是从「位宽收益只在解码受限时出现」间接推断带宽瓶颈，**这条是「加带宽就直接提速」的正面证据**。
+
+#### 六、⚠️ 工作站版与 Max-Q 在 300 W 下并不等价
+
+**同限 300 W 的对照** [c-ds-ws-vs-mq-real]：
+
+| 调整 | 32k 预填充 | 128k 预填充 | 解码 C1/C8 |
+|---|---:|---:|---:|
+| **加核心封顶**（+1000，封顶 2400） | **+2.4%** | **+6.4%** | **+4.8–17.6%** |
+
+> **即工作站版的额外性能部分来自可调时钟余量，而非仅靠功耗。**
+>
+> **这细化了 §6.6「一半功耗换 13%」——同功耗下两版仍有差，但差距来自时钟策略。**
+
+#### 七、一个新的风险规律：烧连接器只在工作站版
+
+**社区报告的分化** [c-ds-burnt-ws-not-mq]：
+
+| 版本 | 烧毁连接器报告 |
+|---|---|
+| **Workstation** | **有** |
+| **Max-Q** | **未见** |
+
+> **与两版功耗上限差异一致（600 W 对 300 W）。**
+>
+> **有用户因此把三张工作站版限到 250 W。**
+>
+> **这与 §10.6 的连接器熔毁记录互相印证，并把个案提升为「按 SKU 分化的风险」**——⚠️ 但**仍是社区报告，不是故障率统计**。
+
+#### ⚠️ 八、陷阱三：混插 x8 会让 peer-DMA 静默搬零字节
+
+**这是本节最重要的一条** [c-ds-x8-peer-dma-zero]：
+
+> **工作站版与 Max-Q 混插在 PCIe 5.0 x8（确认只有 x16 的一半）时：**
+>
+> **`peer-DMA` API 返回成功，但搬运零字节**——**所有 rank 交换回退为主机中转。**
+
+> **即 API 报成功而实际没搬数据，这类失败不会被错误码捕获。**
+>
+> **这是 §11 多卡拓扑讨论里最危险的陷阱：不是带宽下降，是静默归零。**
+
+#### 九、风冷多卡的热耦合可以量化
+
+**两条互补的实测** [c-ds-heat-sandwich]：
+
+| 场景 | 结果 |
+|---|---|
+| WRX90 三卡，底部两张**从不同时活跃** | 仍加热顶层卡；**空闲卡紧邻活跃卡可到 90°C** → 需 `-pl 300W` |
+| 四卡塔式机**重排到槽 1、3（转接）、4、7** | **热浸结束，300 W 下 7×24 保持 80°C 以下** |
+
+> **这与 §3.4 的风冷实测、§3.5 的改水实测构成完整三角**：风冷物理约束 → 改水收益 → 重排槽位的中间方案。
+
+#### 十、300 W 下的跨模型解码表
+
+**同条件（pp 2048 / tg 128、depth 0、单客户端）** [c-ds-300w-catalog]：
+
+| 模型 | 解码 tok/s | 预填充 tok/s |
+|---|---:|---:|
+| **Qwen3.8-Flash-Next** | **125.6** | 7,795 |
+| **GLM-5.3-Flash** | **103.4** | 8,718 |
+| **DeepSeek-V4-Flash** | **102.7** | 6,341 |
+| **Qwen3-235B-A22B** | **84.8** | 4,808 |
+| **GLM-5.3** | **51.7** | 2,200 |
+| **GLM-5.2** | **48.0** | 2,197 |
+| GLM-5.2 **+ MTP** | **102.5** | — |
+
+> **填补了本报告「缺同条件跨模型表」的空白。**
+>
+> **MTP 把 GLM-5.2 从 48.0 提到 102.5——两倍以上。**
 
 ### 6.9 FP64 的可选出路：用 INT8 张量核心仿真，快 26 倍且更准
 
@@ -7266,6 +7394,7 @@ sudo nvidia-bug-report.sh
 - [Cadence — Cadence Unveils Millennium M2000 Supercomputer with NVIDIA Blackwell Systems（新闻稿 PDF 原文，2025-05-07）](https://www.semiconductorpackagingnews.com/uploads/2/Millennium_Press_Release_5_7_25_FINAL.pdf) — [src-cadence-millennium-pr]
 - [NVIDIA Blog — Cadence Taps NVIDIA Blackwell to Accelerate AI-Driven Engineering Design and Scientific Simulation（2025-05-07）](https://blogs.nvidia.com/blog/cadence-millennium-nvidia-blackwell/) — [src-nvblog-cadence]
 - [llama.cpp Discussion #15396 — gpt-oss guide（含 RTX PRO 6000 Max-Q 与 Workstation 两臂原始 llama-bench 日志）](https://github.com/ggml-org/llama.cpp/discussions/15396) — [src-llamacpp-15396]
+- [local-inference-lab/rtx6kpro — Daily Summaries（2026-09 与 2026-10，50 篇 RTX6kPRO Discord 自动汇总）](https://github.com/local-inference-lab/rtx6kpro/tree/master/daily-summaries) — [src-rtx6kpro-daily]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -7501,7 +7630,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=184, evidence=1425, claims=948, claims_high=705, claims_disputed=1, trace_events=369, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=185, evidence=1438, claims=959, claims_high=716, claims_disputed=1, trace_events=371, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
