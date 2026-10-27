@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：214 ｜ **证据数**：1732 ｜ **主张数**：1211（高置信 938，争议 4）
+> **来源数**：215 ｜ **证据数**：1736 ｜ **主张数**：1216（高置信 938，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -6542,6 +6542,95 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 > **因此本报告只能记录「厂商如此声称」，不能给出该卡在 EDA 上的性能结论。**
 >
 > **这与 §3.5 处理 Alphacool 声称的纪律一致。**
+### 7.8 游戏：一个此前完全没问过的问题，以及一个反常识的答案
+
+**本报告写了九万多字，但「这张卡能不能打游戏」一次都没问过** ——「光线追踪」出现 0 次、「Vulkan」0 次、「Steam」0 次、「Game Ready Driver」0 次。
+
+**而这个问题有一个出乎意料的答案。**
+
+#### ⭐ 一、它在游戏里比 RTX 5090 更快
+
+**der8auer 的实测** [c-gaming-beats-5090]：
+
+| 游戏（4K 最高画质） | RTX PRO 6000 相对 RTX 5090 |
+|---|---:|
+| **Cyberpunk 2077**（关闭光追） | ⭐ **+14%**（1% 低帧 **+13%**） |
+| Star Wars Outlaws | **+11%** |
+| Remnant 2 | **+11%** |
+| Assassin's Creed Mirage | **+3%**（作者认为可能是驱动问题） |
+
+> ⭐ **一张 $17,999 的工作站卡，在游戏里赢了消费旗舰。**
+
+#### ⭐⭐ 二、但条件比数字更重要
+
+**这些成绩是在没有 Game Ready Driver 的情况下取得的** [c-gaming-no-grd]：
+
+| 项 | 状态 |
+|---|---|
+| 消费级游戏专项驱动 | ⚠️ **未提供** |
+| 是否仍胜出 | ⭐ **是** |
+
+> ⭐⭐ **即这张专业卡未获消费级驱动的游戏专项优化，却仍然胜出。**
+>
+> **这也留下一个明确的未知：如果 NVIDIA 为其发布 Game Ready 驱动，差距会扩大还是缩小？**
+>
+> **这已成为 §14 的一个可跟踪观察点。**
+
+#### ⚠️ 三、代价是功耗，且几乎等比例
+
+**游戏场景下的能效答案** [c-gaming-power-cost]：
+
+| 项 | 变化 |
+|---|---:|
+| Cyberpunk 2077 性能 | **+14%** |
+| **功耗** | ⚠️ **+15%** |
+
+> ⚠️ **性能与功耗几乎同比例上升——没有免费的性能。**
+>
+> **这与 §6 讨论的「600W 是否值得」在游戏负载下给出了一个具体答案：接近等比例，能效略降但差距很小。**
+
+#### ⭐ 四、为什么能赢：架构上可解释
+
+**不是玄学，是同 die 的规格差异** [c-gaming-die-identity]：
+
+| 项 | RTX 5090 | RTX PRO 6000 |
+|---|---:|---:|
+| GPU | GB202 | ⭐ **同一颗 GB202** |
+| CUDA 核心 | 21,760 | ⭐ **24,064（+10.6%）** |
+| TMU / ROP / Tensor / RT | 较少 | ⭐ **均更多** |
+| 显存 | 32 GB | 96 GB |
+
+> ⭐ **这修正了「专业卡是同芯片降频版」的常见误解。**
+>
+> **本报告 §3.2 已记录「核心全开」，而游戏数据是这一点的独立验证——核心更多的直接后果在游戏帧率上可见。**
+
+#### ⚠️ 五、本节不能回答什么
+
+**一个必须划清的边界** [c-gaming-rt-unknown]：
+
+| 问题 | 状态 |
+|---|---|
+| 整体游戏性能 | ✅ **有数据（+3% 到 +14%）** |
+| **光线追踪性能** | ⚠️ **无答案**——唯一详细数据中 Cyberpunk 2077 明确关闭了光追，其它三款未说明 |
+
+> ⚠️ **尽管它有 188 个第四代 RT 核心，本报告对「光追表现如何」仍一无所知。**
+>
+> **故不能把「整体快 14%」外推为「光追也快」。**
+
+#### ⭐ 六、这条信息对采购判断的真实含义
+
+**必须说清：这不是在建议用这张卡打游戏。**
+
+| 判断 | 说明 |
+|---|---|
+| 能用吗 | ✅ **能，而且比消费旗舰快** |
+| 该买吗 | ⚠️ **不该——同样的游戏性能可以用 $2,000 级别的卡近似获得** |
+| **那为什么值得记录** | ⭐ **因为它是一次「同一颗 die、核心全开」的独立验证** |
+
+> ⭐ **游戏是少数几个能把「24,064 对 21,760 CUDA 核心」这件事单独暴露出来的负载**——它不受显存容量、不受 ECC、不受 MIG 影响。
+>
+> **换句话说：这张卡在你的 AI 负载里快多少，有一部分就是这 10.6% 在起作用。**
+
 
 ## 8. 训练与微调：被误解的一侧
 
@@ -11256,6 +11345,10 @@ sudo nvidia-bug-report.sh
 1. [AMD发布MI350P：四年来首款PCIe Instinct加速卡！144GB显存、600W功耗](http://m.mydrivers.com/newsview/1120792.html) — 快科技（2026-05-08）。记录 MI350P 长度 267mm、被动散热、双槽、16 针供电、600W 可下调 450W、730 亿晶体管、4 颗 XCD；并明确其「直接对标 NVIDIA H200 NVL」（141GB HBM3E、参考售价 3 万至 4 万美元） — [src-mydrivers-mi350p]
 2. [AMD发布MI350P PCIe AI加速卡：CDNA4架构、144GB HBM3E、专攻推理部署](https://ai.zol.com.cn/1177/11772128.html) — 中关村在线（2026-05-08）。独立的第二家中文报道，物理规格与快科技一致（可用于交叉验证 267mm），记录 128 CU / 8192 流处理器 / 512 矩阵核心 / 2200MHz / 4096 位总线 / MXFP6-MXFP4 原生支持与硬件级稀疏加速，同样记录对标 H200 NVL 与 3 万至 4 万美元 — [src-zol-mi350p]
 
+### 游戏性能（第二十三轮补充）
+
+1. [Nvidia RTX Pro 6000 beats the RTX 5090 in gaming](https://www.kitguru.net/components/graphic-cards/joao-silva/nvidia-rtx-pro-6000-beats-the-rtx-5090-in-gaming/) — KitGuru（2025-06-02）。转述 der8auer 的 4K 最高画质实测：Cyberpunk 2077（关闭光追）+14%、1% 低帧 +13%、功耗 +15%；Star Wars Outlaws 与 Remnant 2 各 +11%；Assassin's Creed Mirage +3%；并记录全部成绩是在没有 Game Ready Driver 的情况下取得 — [src-kitguru-gaming]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -11395,7 +11488,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=214, evidence=1732, claims=1211, claims_high=938, claims_disputed=4, trace_events=438, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=215, evidence=1736, claims=1216, claims_high=938, claims_disputed=4, trace_events=441, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
