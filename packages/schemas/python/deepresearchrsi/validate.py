@@ -22,6 +22,20 @@ CLAIM_REF_RE = re.compile(r"\[(c-[a-z0-9-]+)\]")
 SRC_REF_RE = re.compile(r"\[(src-[a-z0-9-]+)\]")
 EVIDENCE_REF_RE = re.compile(r"\[(e-[a-z0-9-]+)\]")
 
+# 与 packages/schemas/json/source.schema.json 的枚举保持一致
+SOURCE_TYPES = {
+    "official",
+    "vendor",
+    "vendor-adjacent",
+    "review",
+    "academic",
+    "community",
+    "press",
+    "retail",
+    "independent",
+}
+TRUST_TIERS = {"primary", "secondary", "tertiary"}
+
 
 class ValidationError(Exception):
     pass
@@ -70,6 +84,17 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
         if not (row.get("fetched_at") or "").strip():
             errors.append(f"sources.csv[{sid}]: fetched_at 为空（不变量 S1）")
         _parse_date(row.get("published_at", ""), where=f"sources.csv[{sid}].published_at")
+        # 枚举校验：与 json/source.schema.json 保持一致
+        stype = (row.get("source_type") or "").strip()
+        if stype and stype not in SOURCE_TYPES:
+            errors.append(
+                f"sources.csv[{sid}]: 非法 source_type {stype!r}（允许 {sorted(SOURCE_TYPES)}）"
+            )
+        tier = (row.get("trust_tier") or "").strip()
+        if tier and tier not in TRUST_TIERS:
+            errors.append(
+                f"sources.csv[{sid}]: 非法 trust_tier {tier!r}（允许 {sorted(TRUST_TIERS)}）"
+            )
 
     evidence_ids: set[str] = set()
     for row in evidence:

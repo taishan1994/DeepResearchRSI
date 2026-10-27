@@ -219,6 +219,26 @@ def test_real_archive_passes() -> None:
     assert stats["claims"] > 0, "真实留档应包含主张"
 
 
+def test_validator_rejects_bad_source_type() -> None:
+    """校验器必须拒绝 schema 枚举之外的 source_type（防止可信度误填进类型列）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "case"
+        root.mkdir()
+        (root / "brief.yaml").write_text("topic: t\n", encoding="utf-8")
+        (root / "sources.csv").write_text(
+            "source_id,url,source_type,publisher,title,published_at,updated_at,"
+            "fetched_at,language,trust_tier,access,license,notes\n"
+            'src-a,https://e.com,secondary,p,t,,,2026-01-01T00:00:00+00:00,en,secondary,open,,\n',
+            encoding="utf-8",
+        )
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "source_type" in str(exc), str(exc)
+        else:
+            raise AssertionError("非法 source_type 未被拒绝")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
