@@ -1,9 +1,9 @@
-# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
+﻿# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
 
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：51 ｜ **证据数**：305 ｜ **主张数**：198（高置信 129，争议 1）
+> **来源数**：57 ｜ **证据数**：344 ｜ **主张数**：226（高置信 155，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -274,6 +274,61 @@ nvidia-smi topo -m
 
 **这是本报告认为最应该加粗的一条**：无 NVLink 卡的 P2P 失败是**静默的**，它不会报错，只会让你的结果变错。
 
+#### 4.3.2 PCIe 链路可能静默抖动（第二个反直觉陷阱）
+
+即使 P2P 配置正确，链路本身也可能不正常——**而且不报任何错**。
+
+**实测**：在 17 卡 c-payne 系统上，**2 分钟内 35 个设备共发生 1415 次 Gen1/Gen2/Gen5 之间重协商** [c-6kw-link-flap]。而单次 `nvidia-smi` 或 `lspci` 快照只会捕捉到其中一个相位，**看起来完全健康**。
+
+**正确做法**：连续采样，而不是看一次
+
+```bash
+watch -n1 'cat /sys/bus/pci/devices/0000:e3:00.0/current_link_speed'
+```
+
+**但锁定速率有陷阱** [c-6kw-link-lock]：`Hardware Autonomous Speed Disable`（Link Control 2, bit 5）会**双向**阻止速率变化。如果在卡恰好处于 Gen2 时锁定它，会把卡**永久困在 Gen2**——有生产卡因此以 Gen2 x16 运行了数小时。必须先确认链路已达最大速率再锁。
+
+**另一个高频陷阱** [c-6kw-aspm]：ASPM 与 PCIe 端口电源管理会导致 **Surprise Link Down**（`aer_uncor_status: 0x00000020`）系统锁死。修复：
+
+```bash
+GRUB_CMDLINE_LINUX_DEFAULT="pcie_aspm=off pcie_port_pm=off"
+```
+
+#### 4.3.3 NCCL 调优能让通信带宽翻倍
+
+默认配置在 PCIe 多卡系统上是**严重次优**的。
+
+**实测** [c-6kw-numachan]：
+
+| 配置 | 8 卡 all-reduce 总线带宽 |
+|---|---:|
+| 默认 | **22.2 GB/s** |
+| `NCCL_MIN_NCHANNELS=8` | **37.6 GB/s** |
+| 同上 + 交换机拓扑 | 39.4–41.1 GB/s |
+
+**一条环境变量就带来 +69%**。这在 TP 推理中直接转化为 decode 吞吐。
+
+**小消息还有额外优化** [c-6kw-ncclxml]：在 AMD Turin 平台提供 NCCL 图 XML，32KB 消息延迟从 48.16μs 降到 26.20μs（**1.84×**），64KB 从 48.69μs 降到 25.59μs（**1.90×**）。小消息正是 decode 阶段 all-reduce 的典型形态。
+
+**自定义 all-reduce 有明确交叉点** [c-6kw-custom-ar]：
+
+| 消息大小 | 自定义 | NCCL | 胜者 |
+|---:|---:|---:|---|
+| 256 B | 7.5 μs | 24.6 μs | 自定义 **3.3×** |
+| 32 KB | 16.5 μs | 24.5 μs | 自定义 1.5× |
+| 64 KB | 25.9 μs | 24.1 μs | 基本持平 |
+| 256 KB | 73.6 μs | 28.0 μs | NCCL **2.6×** |
+
+而且**自定义 all-reduce 只在 PCIe 交换机拓扑下有利**，双路 CPU 无交换机时反而比 NCCL 慢。
+
+**常见死锁的诊断线索** [c-6kw-nccl-deadlock]：GPU 占用 100%、功耗约 140W、显存不增长、进程挂死——这是 `NCCL_P2P_LEVEL` 与拓扑不匹配的典型表现，应从 `4` 改为 `2` 或 `PHB`。
+
+**IOMMU 是多个问题的共同根因** [c-6kw-iommu]：NCCL 死锁与 P2P 锁定的推荐修复都包含 `iommu=off` 以及 `options nvidia_uvm uvm_disable_hmm=1`。这与 §4.3.1 的分析互为印证。
+
+#### 4.3.4 一个电气层面的隐蔽故障
+
+反复掉卡有时不是软件问题 [c-6kw-ground]：一份 16 卡现场报告把问题追到**四个机箱 PSU 的插座未提供保护接地（PE）**。这与 §10.6 的供电熔毁同属供电域——**PCIe 多卡机箱的接地必须由合格电工核验**。
+
 ### 4.4 量化格式 × 上下文：最重要的反直觉发现
 
 同一硬件、同一模型（Qwen3.5-397B-A17B）、4× Server Edition TP4 下：
@@ -312,6 +367,51 @@ nvidia-smi topo -m
 来源 [e-6k-concurrency][c-concurrency-scale]
 
 短上下文批处理是 AWQ 的唯一优势区间；长上下文必须切 NVFP4。
+
+#### 4.5.1 跨用户汇总验证：独立 wiki 的 9 组配置
+
+一个专门追踪该卡的实地 wiki（16 卡机箱实战记录）给出了与上面几乎一致的图景 [c-6kw-rig]，可作独立交叉验证：
+
+**Qwen3.5-397B 单流 decode（tok/s）** [c-6kw-397b-matrix]：
+
+| 卡数 | 量化 | 引擎 | MTP | tok/s |
+|:--:|---|---|---:|---:|
+| 4× | **AWQ-INT4** | SGLang | 5 | **152** |
+| 4× | NVFP4 | SGLang | 5 | 132 |
+| 4× | NVFP4 | vLLM | 2 | 130 |
+| 4× | NVFP4 | vLLM | 无 | 70–86 |
+| 8× | NVFP4 | SGLang | 有 | **350** |
+
+**这印证了 §4.4 的核心判断**：AWQ-INT4 + MTP 在短上下文单流上确实最快（152），NVFP4 紧随（132）。
+
+**MTP 的加速幅度稳定在 +51%～+72%** [c-6kw-mtp]：
+
+| 并发 | 无 MTP | MTP=2 | 提升 |
+|---:|---:|---:|---:|
+| 1 | 85.8 | 130.0 | +51.5% |
+| 10 | 334.3 | 573.5 | +71.6% |
+| 32 | 605.9 | 922.6 | +52.3% |
+
+接收率 **89.2%**，平均接收长度 2.73–3.69 token。峰值 **1127.1 tok/s** @ 50 用户 1K 上下文。
+
+**长上下文下，模型版本比硬件更重要** [c-6kw-longctx]：
+
+| 上下文 | CARVE (tok/s) | NVIDIA 参考 (tok/s) | 胜者 |
+|---:|---:|---:|---|
+| 10K | 76.9 | 92.3 | 参考 +20% |
+| 100K | 74.8 | 73.6 | 基本持平 |
+| 300K | 73.3 | 43.8 | **CARVE +67%** |
+| 500K | 67.0 | 42.2 | **CARVE +59%** |
+
+**交叉点在 100K 附近**。这意味着"选哪个量化版本"在长上下文场景下比"选哪张卡"影响更大——与 §4.4 的结论方向一致但更强。
+
+### 4.5.2 DCP：长上下文的一条生死线（此前完全未涉及）
+
+**Decode Context Parallelism（DCP）** 是把 KV cache 沿序列维切分到多卡的技术。它不是可选项：
+
+> Kimi K2.5 在 150K 上下文下，**无 DCP 仅 6–7 tok/s（不可用），DCP=8 可达 28–35 tok/s** [c-6kw-dcp]
+
+这个 4–5 倍的差距，是"能不能用"与"不能用"的分界。本报告此前所有长上下文数据都是在已启用 DCP 的前提下测得的，这个前提必须写明。
 
 ### 4.6 MLPerf 官方封闭分区数据（此前缺失的第三方口径）
 
@@ -1222,12 +1322,14 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q21 | 除 vLLM/SGLang 外的软件路径？ | ✅ | §4.7 llama.cpp/GGUF 与双卡部署约束 |
 | q22 | 多卡是否存在隐蔽故障模式？ | ✅ | §4.3.1 P2P 静默损坏 + §10.7 整芯片复位 |
 | q23 | SPECviewperf 15 分项成绩？ | ✅ | §7.1.1 官方 11 项分项 + 代际/竞品对比 |
+| q24 | 多卡部署的正确调优方式？ | ✅ | §4.3.2–4.3.4 链路抖动、NCCL、接地 |
+| q25 | 长上下文的关键使能技术？ | ✅ | §4.5.2 DCP 与量化版本选择 |
 
-**完成度：23/23 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：25/25 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **305 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **344 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1235,7 +1337,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=51, evidence=305, claims=198, claims_high=129, claims_disputed=1`
+当前校验结果：`sources=57, evidence=344, claims=226, claims_high=155, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1255,3 +1357,12 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 50. [SPECviewperf 15 官方结果汇总（含 11 项分项与 FHD/4K）](https://www.spec.org/gwpg/gpc.data/viewperf15/)（更新 2026-04-30） — [src-spec-vp15]
 51. [SPECviewperf 15 单条提交明细：ThinkStation P8 + RTX PRO 6000 @4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-vp15-p8]
+
+### 多卡实战 wiki（第二轮补充）
+
+52. [RTX PRO 6000 Blackwell LLM Wiki（16 卡 PCIe 实战）](https://github.com/local-inference-lab/rtx6kpro) — [src-rtx6kpro-wiki]
+53. [跨用户基准汇总（MTP、上下文缩放、NCCL、P2P）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/benchmarks/results.md) — [src-rtx6kpro-bench]
+54. [功耗扫描：Workstation vs Server vs Max-Q（双卡交叉验证）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/hardware/blackwell-power-limit-sweep.md) — [src-rtx6kpro-power]
+55. [PCIe 拓扑与 GPU 互连](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/hardware/topology.md) — [src-rtx6kpro-topo]
+56. [常见问题排查（NCCL/CUDA/SM120/PCIe 稳定性）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/troubleshooting/common-issues.md) — [src-rtx6kpro-issues]
+57. [Blackwell 瓦特-性能交互面板](https://shihanqu.github.io/Blackwell-Wattage-Performance/) — [src-wattage-dash]
