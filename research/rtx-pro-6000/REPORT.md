@@ -690,6 +690,92 @@ Invalid __global__ read of size 4 bytes
 2. 遇到长上下文莫名崩溃，**先查 32 位溢出**（`n_kv x n_ubatch` 是否接近 2³²），而不是先怀疑显存
 3. 即使用了带修复的构建，**CUDA VMM 池上限**仍会在大约 84 万 token 处拦住你
 
+### 4.8.2 四引擎同条件对比：冠军按阶段分裂
+
+这是本报告**第一个把 TRT-LLM、vLLM、llama.cpp 放在同一张卡、同一模型、同一 28K 提示下**的对比 [c-4e-phase-split]。
+
+**测试条件**：RTX PRO 6000（95GB GDDR7、188 SM、~1.79 TB/s），Qwen3-30B-A3B（48 层、128 专家激活 8 个、BF16 权重 57GB），28,002 token 输入 → 512 token 输出，batch 1，greedy，3 次平均 [e-4e-setup]。
+
+| 引擎 | 量化 | TTFT | 总吞吐 | **Decode** | 显存 |
+|---|---|---:|---:|---:|---:|
+| **TRT-LLM 1.2.1** | BF16 | **779 ms** | 133.0 | 166.8 | 93.5 GB |
+| **vLLM 0.23.0** | BF16 | 909 ms | 125.6 | 161.6 | 91.0 GB |
+| llama.cpp | BF16 | 7,196 ms | 50.7 | 176.4 | ~60 GB |
+| llama.cpp | Q8_0 | 3,477 ms | 96.2 | 276.7 | ~34 GB |
+| **llama.cpp** | **Q4_K_M** | 3,576 ms | 101.8 | **351.6** | **~21 GB** |
+
+**两个引擎各拿一个冠军，这不是偶然** [c-4e-phase-split]：
+
+- **Prefill（TTFT）是计算受限** —— TRT-LLM 的融合 MoE GEMM 拿到 **779ms**，比 llama.cpp 快 **4.5–9.2×**
+- **Decode 是内存带宽受限** —— batch 1 下每 token 都要把活跃权重从显存流出一遍，张量核心基本闲置；**决定速度的是每 token 搬运的字节数**，4-bit 比 BF16 少 4×，于是 Q4_K_M 拿到 **351.6 tok/s**，是 TRT-LLM 的 **2.1×**
+
+> **「哪个引擎最快」是错的问题。「在哪个阶段、哪个 batch 下最快」才对。**
+
+**一个反直觉的实测** [c-4e-bf16-prefill-slow]：llama.cpp 的 **BF16 prefill 反而比量化慢**——BF16 **3,894** tok/s，Q8_0 **8,061**，Q4_K_M **7,838**。即使在号称计算受限的 prefill 阶段，**喂给张量核心的带宽仍是瓶颈**，更紧凑的权重让核心吃得更饱。**量化在 prefill 和 decode 两侧都有效。**
+
+**冷启动代价差异巨大** [c-4e-coldstart]：
+
+| 引擎 | 冷启动 | 原因 |
+|---|---:|---|
+| llama.cpp | **~5 s** | 直接 mmap 权重 |
+| TRT-LLM | ~90 s | FlashInfer JIT 编译内核 |
+| **vLLM** | **~455 s（7 分钟）** | `torch.compile` + 419 秒 profiling/warmup |
+
+缓存后 **0.78 秒**（**535×** 加速）。**迭代式实验时，冷启动成本可能主导你真正想看的吞吐数字。**
+
+**长上下文只有 vLLM 能一键开** [c-4e-128k]：通过 `hf_overrides` 的 YaRN（factor 3.2 → 约 131K），TTFT 767ms、decode 154 tok/s。**TRT-LLM 1.x 的 `LLM()` API 不暴露 `rope_scaling`**（必须把 YaRN 烘进 checkpoint 再重建），llama.cpp 需要预烘焙 YaRN 元数据的 GGUF。
+
+**量化同时是密度杠杆** [c-4e-density]：BF16 下两个数据中心引擎都吃 **91–93.5GB**（逼近 95GB 上限），**Q4_K_M 只需约 21GB**——原本勉强装一个 BF16 实例的卡，**能装四个**。
+
+> **必须记住的限定** [c-4e-trtllm-caveat]：TRT-LLM 跑的是 **PyTorch (`_torch`) 后端**而非编译后的 TRT engine 路径，后者预计**还能再快 10–25%**。所以上表 TRT-LLM 的数字是**下界**。另外 32K/128K 两组用的是同一份输入内容（提示构建器上限约 28K）。
+
+**选型表**：
+
+| 场景 | 选 | 理由 |
+|---|---|---|
+| 延迟敏感的对话，≤40K | **TRT-LLM** | 779ms TTFT，prefill 最强 |
+| 长文生成 | **llama.cpp Q4_K_M** | 351 tok/s decode |
+| 128K 上下文、要一个开关搞定 | **vLLM** | 唯一 API 级 YaRN |
+| 显存紧张 / 要多实例 | **llama.cpp Q4_K_M** | 21GB → 可装 4 个 |
+| 快速原型 | **vLLM** | `pip install vllm` 即可 |
+
+### 4.8.3 能效：一组标准化锚点，以及一个量化反面教材
+
+这是本报告此前**完全没有**的维度——用焦耳而非 tok/s 衡量 [c-energy-baseline]。
+
+**FP16 锚点**（Qwen2.5-3B，Server Edition，batch 1，n=10 带标准差）[e-en-e2e]：
+
+| 生成长度 | 能耗 | 吞吐 | 平均功耗 |
+|---|---:|---:|---:|
+| 256 token | **2,660.83 ± 124.87 J/1k tok** | 83.05 tok/s | 221.58 ± 10.12 W |
+| 512 token | **2,709.67 ± 38.22 J/1k tok** | 83.17 tok/s | 225.61 ± 2.90 W |
+
+两个长度结果接近，构成稳定锚点。注意 256-token 组的 CV 约 **4.7%**，高于主榜 <3% 的门槛；512-token 组为 1.4% [e-en-cv]。
+
+**然后是反面教材** [c-bnb-int8-pathological]：**bitsandbytes 0.49.2** 在这张卡上出现严重路径退化。
+
+| 精度 | Prefill 能耗比 | Decode 能耗比 | **Decode 速度比** |
+|---|---:|---:|---:|
+| FP16 | 1.00× | 1.00× | 1.00× |
+| NF4 | 3.25–4.07× | 1.48–2.89× | **0.30–0.39×** |
+| **INT8** | **3.45–5.12×** | **2.54–3.21×** | **0.14–0.16×** |
+
+**INT8 解码速度只有 FP16 的 14–16%。** 而诊断证据最说明问题 [e-ph-power]：
+
+| 精度 | Prefill 功耗 | 占 600W TDP | Decode 功耗 | 占 TDP |
+|---|---|---|---|---:|
+| FP16 | 92–247 W | 15–41% | 141–280 W | 23–47% |
+| NF4 | 114–326 W | 19–54% | 92–318 W | 15–53% |
+| **INT8** | **67–109 W** | **11–18%** | **67–85 W** | **11–14%** |
+
+> **低功耗 + 低吞吐 = 内核没能有效利用 GPU**，而不是算法本身更贵。**这张卡在 INT8 路径下几乎处于闲置状态。**
+
+**一个需要谨慎的观察** [c-quant-prefill-penalty]：量化能耗惩罚在 **prefill 阶段普遍大于 decode**（prefill 2.5–5.1× vs decode 1.5–3.2×），作者推测与反量化在计算密集的并行 token 处理中被放大有关——但明确标注为**观察性结论，非普适机制**。
+
+> **权威限定** [c-energy-caveat]：作者明确声明，这些数字**不应被读作「量化在 Blackwell 上本质需要 2–3 倍能耗」**，它只记录 **bitsandbytes 这一个实现**在该软硬件栈下的行为。**这是实现质量问题，不是量化本身的问题。**
+>
+> 这与本报告 §4.3 的 NVFP4/AWQ 正面结果**不矛盾**：那条路径用的是 vLLM 的原生量化内核，不是 bitsandbytes。
+
 ### 4.9 双卡 TP2：一个可复制的部署单元（192GB 形态）
 
 双卡 192GB 是本报告此前未单独讨论的形态。现在有一份**生产级**的完整配置 [c-tp2-unit]。
@@ -2003,6 +2089,33 @@ MIG 把一张卡在硬件层切成最多 4 个完全隔离的实例（每实例 
 
 **厂商演示**：4× MIG 实例同时跑 4 个 1080p 全高《赛博朋克 2077》，相比时间切片基线图形扩展性能 **+60%** [c-mig-multitenant]。
 
+#### 11.1.0 一个可照抄的生产级混合切片配置
+
+前面讲的是 MIG 能力本身。**NVIDIA 官方 RAG Blueprint 给出了一个真实的 4 卡混合切片配置**，是本报告见到的最具体的生产范例 [c-mig-real-layout]。
+
+**关键前提**：必须把 **GPU Operator 设 `mig-strategy=mixed`**，节点才能**同时**暴露 `nvidia.com/gpu` 与 `nvidia.com/mig-*` 两类资源 [c-mig-mixed-strategy]。**纯 MIG 策略做不到「部分卡整卡、部分卡切片」。**
+
+**4 卡布局** [e-rag-layout]：
+
+| GPU | MIG 状态 | 负载 |
+|---|---|---|
+| **GPU 0, 1** | **不切（整卡）** | 120B LLM，vLLM **TP=2**，FP8 |
+| **GPU 2** | **1× 48GB + 2× 24GB** | OCR（48GB）+ 图形元素 + 页面元素（各 24GB） |
+| **GPU 3** | **4× 24GB** | 表格结构 / 嵌入 VLM / 重排 / 备用 |
+
+具体用的是 `mig-2g.48gb` 与 `mig-1g.24gb` 两种 profile [e-rag-profiles]。**注意这张卡上 48GB 只能切一个 2g 实例，24GB 才能切四个**——与 §3.1 的官方配置组合一致。
+
+**切片后必须下调摄取并发** [c-mig-ingest-tune]：
+
+```yaml
+NV_INGEST_FILES_PER_BATCH: "4"
+NV_INGEST_CONCURRENT_BATCHES: "1"
+NV_INGEST_MAX_UTIL: 8
+MAX_INGEST_PROCESS_WORKERS: 2
+```
+
+> **这个配置的价值在于它展示了真实权衡**：大模型仍要整卡 + TP=2（MIG 切片跑不动 120B），而小的嵌入/重排/OCR 服务则用 24GB 切片塞进同一节点。**不是「全切」也不是「全不切」，而是按负载形状混搭。**
+
 ### 11.1.1 直通虚拟机的双重惩罚：P2P 消失 + 链路降级到 Gen1
 
 上一节讲的是 MIG（硬件分区）。**整卡直通（VFIO passthrough）是另一条路，而它有一个会静默发生的严重陷阱** [c-gen1-cap]。
@@ -2428,6 +2541,9 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
 | q50 | 百万 token 上下文可行吗？ | ✅ | §4.8.1 已跑通 1,048,573；真墙是 2^32 溢出 |
 | q51 | 驱动分支与寿命？ | ✅ | §10.4.2 R595 仅到 2027-03，应锁 R580 LTSB 到 2028-06 |
+| q52 | 哪个引擎最快？ | ✅ | §4.8.2 错问题：prefill 属 TRT-LLM、decode 属 llama.cpp |
+| q53 | 每焦耳能出多少 token？ | ✅ | §4.8.3 FP16 2,660 J/1k；bnb INT8 仅 14–16% FP16 |
+| q54 | MIG 生产怎么配？ | ✅ | §11.1.0 官方 mixed 策略：整卡+切片混搭 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2447,12 +2563,15 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
 | q50 | 百万 token 上下文可行吗？ | ✅ | §4.8.1 已跑通 1,048,573；真墙是 2^32 溢出 |
 | q51 | 驱动分支与寿命？ | ✅ | §10.4.2 R595 仅到 2027-03，应锁 R580 LTSB 到 2028-06 |
+| q52 | 哪个引擎最快？ | ✅ | §4.8.2 错问题：prefill 属 TRT-LLM、decode 属 llama.cpp |
+| q53 | 每焦耳能出多少 token？ | ✅ | §4.8.3 FP16 2,660 J/1k；bnb INT8 仅 14–16% FP16 |
+| q54 | MIG 生产怎么配？ | ✅ | §11.1.0 官方 mixed 策略：整卡+切片混搭 |
 
-**完成度：51/52 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：54/55 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **686 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **708 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2557,3 +2676,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 110. [ELSA Japan：NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition 数据表](https://www.elsa-jp.co.jp/wp-content/uploads/2025/03/Datasheet_NVIDIA_RTX_PRO_6000_Blackwell_Max-Q_Workstation_Edition.pdf) — [src-elsa-maxq]
 111. [NVIDIA：Data Center Drivers —— Driver Lifecycle（NFB / PB / LTSB 三支定义）](https://docs.nvidia.com/datacenter/tesla/drivers/latest/driver-lifecycle.html)（更新 2026-09-09） — [src-nv-drv-life]
 112. [NVIDIA：Data Center Drivers —— Supported Drivers and CUDA Toolkit Versions（各分支 EOL）](https://docs.nvidia.com/datacenter/tesla/drivers/latest/supported-drivers-and-cuda-toolkit-versions.html)（更新 2026-09-09） — [src-nv-drv-matrix]
+113. [Jared Frost：TRT-LLM vs vLLM vs llama.cpp on Blackwell（RTX PRO 6000 四引擎同条件对比）](https://jared-hpc.com/posts/four-inference-engines-blackwell-qwen3-moe/)（2026-06-28） — [src-jf-4eng]
+114. [NVIDIA AI Blueprints：RAG 的 MIG 切片 Helm 配置（RTX PRO 6000 SE 4 卡混合布局）](https://github.com/NVIDIA-AI-Blueprints/rag/blob/main/deploy/helm/mig-slicing/values-mig-rtx6000.yaml) — [src-nv-rag-mig]
+115. [LLM Energy Benchmark：RTX PRO 6000 Blackwell FP16 端到端能效基线](https://hongping-zh.github.io/updates/2026-06-08-rtx-pro6000-fp16-e2e/)（2026-06-08） — [src-energy-e2e]
+116. [LLM Energy Benchmark：RTX PRO 6000 Blackwell 分阶段能耗剖析与后端兼容性](https://hongping-zh.github.io/updates/2026-06-03-rtx-pro6000-blackwell-phase/)（2026-06-03） — [src-energy-phase]
