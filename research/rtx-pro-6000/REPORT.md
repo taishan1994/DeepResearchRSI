@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：134 ｜ **证据数**：867 ｜ **主张数**：570（高置信 450，争议 1）
+> **来源数**：136 ｜ **证据数**：872 ｜ **主张数**：573（高置信 451，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -894,6 +894,25 @@ Invalid __global__ read of size 4 bytes
 **边界在哪**：**>1000 万原子**的超大体系（病毒衣壳、全细胞器）才需要 H200 的 **141GB** 显存与 **4.8 TB/s** 带宽，以及 8 卡 MPI 所需的 NVLink。
 
 **批量筛选场景 NVLink 无关** [c-md-ensemble]：**4× RTX 5090（约 440 ns/day 聚合）超过单张 H200（135.03）3 倍以上**，价格相当或更低——**因为 MD 的并行单位是相互独立的副本**，不依赖卡间互联。这与 §4.9 的「独立副本优于 TP」结论方向一致。
+
+**一个清晰的二分法** [c-md-fast-vs-big]：同一来源把 MD 工作负载分成两类——
+
+| 类别 | 体系规模 | 首选 |
+|---|---|---|
+| **Fast Science** | 蛋白、配体、小膜（**< 100 万原子**） | 高主频卡（5090 / RTX PRO 6000） |
+| **Big Science** | **> 1000 万原子** | H100 / H200 |
+
+> **而这张卡的位置正是「Fast Science 的容量上限」——它有 5090 的主频，却有近 3 倍的显存（96GB vs 32GB）。** 这个定位比单纯说「它能跑 MD」精确得多。
+
+**代际差距的直观量化** [c-md-generational]：**单张 5090（110 ns/day）= 五张 Quadro RTX 5000（~20 ns/day）**。对 2019 年的实验室而言，**一次单卡升级就是 5 倍吞吐**——这解释了为什么这批卡的换代需求如此集中。
+
+> **可信度同前**：以上两点同样出自 ProX PC 的博客，**tertiary / medium**，方向可信、精确值需自行复核。
+
+#### 一条未能获取的资料（明确声明）
+
+本轮试图获取 **STFC 的 NAMD 3.0.2 GPU-offload 性能论文**（`STFC-CONF-2026-003.pdf`，含 stmv benchmark 数据）——**两次下载均在 120 秒后超时，最终 PDF 为 0 页**。
+
+> **该来源标记为 blocked，未归档任何数据。** 这是明确声明的获取失败，不是遗漏。
 
 > **可信度说明**：该数据来自**整机厂商自测**（ProX PC，2026-01-05），**没有公开方法细节**（未说明 AMBER 参数、GPU 服务版本、编译选项），因此标为 **tertiary / medium**。**数量级可信，精确值需自行复核。**
 
@@ -3608,7 +3627,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=134, evidence=867, claims=570, claims_high=450, claims_disputed=1`
+当前校验结果：`sources=136, evidence=872, claims=573, claims_high=451, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -3732,3 +3751,6 @@ python scripts/validate_research.py research/rtx-pro-6000
 137. [SPEC.org：SPECviewperf 15.0 官方结果 — ThinkStation P3 Tower Gen2 / RTX PRO 6000 / FHD](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P3_TWR_G2_Ultra_9_285K_RTX_PRO_6000_FHD/results.html) — [src-spec-p3-fhd]
 138. [Microsoft Learn：在 Azure 虚拟桌面上使用 RTX PRO 6000 Blackwell 运行 Siemens NX（官方参考架构与完整 ATS 结果）](https://learn.microsoft.com/en-us/industry/manufacturing/architecture/siemens-azure-blackwell)（2026-07-31 更新） — [src-ms-learn-nx]
 139. [NVIDIA：List of NVIDIA-Certified Systems（官方认证系统完整清单）](https://docs.nvidia.com/certification-programs/latest/nvidia-certified-systems.html) — [src-nv-cert]
+
+140. [ProX PC：The Biggest Molecular Dynamics Hardware Comparison — 5090 vs Pro 6000 vs H100/H200](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md2]
+141. [STFC ePubs：NAMD 3.0.2 GPU-offload Performance（stmv benchmark）](https://epubs.stfc.ac.uk/manifestation/64246471/STFC-CONF-2026-003.pdf) — **访问失败，未归档数据** — [src-stfc-namd]
