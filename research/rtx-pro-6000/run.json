@@ -2,20 +2,20 @@
   "run_id": "run-rtx-pro-6000-2026-10",
   "slug": "rtx-pro-6000",
   "started_at": "2026-10-27T00:00:00+08:00",
-  "finished_at": "2026-10-31T10:00:00+08:00",
+  "finished_at": "2026-10-31T11:00:00+08:00",
   "as_of": "2026-10-27",
-  "plan_version": 120,
-  "report_version": 120,
+  "plan_version": 121,
+  "report_version": 121,
   "stop_reason": "gap_remaining",
-  "stop_note": "70 个子问题全部 answered。第 120 轮继续处理未归档清单，抓取并归档 troubleshooting/pcie-link-speed-flapping-cpayne.md：新增 1 个来源、10 条证据、10 条主张（来源 245 -> 246，证据 1937 -> 1947，主张 1402 -> 1412，高置信 1081 -> 1091，争议保持 7），新建 §10.17。核心发现：(1) ⚠️⚠️⚠️ 本报告记录的**第一个完全不报错的坑**：此前记录的每一个坑都会报错（Xid、崩溃、掉卡、hang），而这一条是三重静默——有人写了一条 udev 规则在设备枚举瞬间锁 PCIe 链路速率以止住空闲抖动，规则确实生效了，⚠️ 但那条规则无法检查链路实际达到什么速率，而 Hardware Autonomous Speed Disable 会封锁两个方向的移动——那一刻不在 Gen5 的卡永远爬不回来；⭐ 实测后果：GPU e3:00.0 在 **Gen2 ×16** 上跑了**三个半小时的生产训练**（约 8 GB/s 而非 64 GB/s，静默损失 **87.5%**），⚠️ 零日志错误、⚠️ nvidia-smi 全程报告 **100% 利用率**、其余卡全部正常在 Gen5；⭐ 只有逐条走查每个链路的协商速率并与链路能力对照才能发现；⚠️ 连「利用率 100%」都是真的——卡确实在忙，只是在窄链路上忙；(2) ⚠️ 前提是抖动确实严重：35 个设备、2 分钟窗口、卡空闲——共 **1415 次**链路切换（约每秒 12 次重训练），模式为 32 → 5 → 2.5 → 32 GT/s 循环；加锁后同窗口为 0；⚠️ 而单次 nvidia-smi 或 lspci 快照只会抓到循环的一个相位、看起来正常——「这正是这个问题被漏掉的方式」，必须每秒采样 current_link_speed；(3) ⭐⭐ 正确做法的核心是一句话的不变量：「一条链路只有在被验证处于其最大值之后才可加锁，其他情况一律不加锁」；具体规则为——处于最大值则加锁；低于最大值则解锁并给 20 秒自行爬回；仍低且卡空闲则强制父端口重训练后加锁；⚠️ 仍低且卡忙则**保持解锁**、记警告、下轮再试；⭐ 最后一条是全篇关键判断：「Gen2 的卡比抖动的卡更糟，所以降级的链路绝不留着锁；但带负载强制重训练更糟，所以修复要等卡空闲」——这是一个「安全侧不对称」的规则，两个错误方向代价不同，故规则也应不对称；(4) ⭐ 寄存器级细节：「锁」并非某个功能，而是 CAP_EXP+30.w（Link Control 2）bit 5 = Hardware Autonomous Speed Disable；bits 3:0 = 目标速率（5 = Gen5）；CAP_EXP+10.w bit 9 = Hardware Autonomous Width Disable、bit 5 = Retrain Link（自清除只写）、bits 1:0 = ASPM 保持 00；⚠️ 必须在链路两端（GPU 与其父下行端口）都设置；⭐ 判读锁是否生效只需一条命令——CAP_EXP+30.w 读作 0025 为已锁、0005 为未锁；(5) ⚠️ 一个会让自动修复永久空转的口径陷阱：端点的 max_link_width 报告的是「卡」的能力而非实际接了多少 lane；该板上 GPU c5:00.0 报 ×16 但实际坐在 ×4 下行端口上，故 Gen5 ×4 就是它的最大值、它是健康的；⚠️ 必须与 min(端点最大, 端口最大) 比较，若与卡自身最大值比较会让四个设备看起来永久降级，并让任何修复循环永远追着它们跑；⭐ 这是本报告反复出现的「把一个字段当成另一个字段的代理」的又一实例，与第 113 轮「自动补标签比不补更糟」结构相同——基于错误口径的自动化会把错误持续放大；(6) ⚠️ 一条排除误报方向的前提：「空闲的 Blackwell 卡处于 Gen1 是正常的」——这是电源管理不是故障，只有当随后有东西把它锁在那里时才成为问题；⚠️ 且重启后一切失效（PCI 配置空间每次上电都重置）；⭐ 原文点明「这正是那条天真的 udev 规则诱人的原因，也正是它绝不能被用的原因」——即误报（空闲 Gen1 当成故障）+ 自动修复（枚举时加锁）= 真实故障；(7) ⭐⭐ 它和 Surprise Link Down 是同一个因果链：此前 §10 记录过 Surprise Link Down 的内核参数但当作孤立「参数坑」，现在知道每次重协商都重训练链路，⚠️ 而 Gen1↔Gen5 重训练正是这些系统上 Surprise Link Down 的已知触发条件——根端口可能在重训练过程中挂起，表现为 aer_uncor_status 0x00000020 与系统锁死；互补的两半：pcie_aspm=off pcie_port_pm=off 阻止根端口挂起、NVreg_DynamicPowerManagement=0x00 阻止驱动重开 runtime D3、加锁阻止重训练本身；⚠️ 但原文归因警告：参考系统上的 Surprise Link Down 也曾由真实供电故障造成、与链路训练无关——「不要把止抖当作你在追的那个链路断开事件的唯一原因」；(8) ⭐ 附完整实现 scripts/pcie-link-supervisor.py（无外部依赖）与 systemd unit；⚠️ 手工调试前必须先 systemctl stop，因为它每 60 秒复检会撤销手工改动——⭐ 一个会自动纠偏的常驻进程会把手工排查变成竞态，这与 §10.10 的 FLR 缺陷属同一类观察难度的来源：系统在自动做某些事，而观察者以为状态是静止的；(9) ⭐ 速率与带宽对照：Gen1 约 4、Gen2 约 8、Gen3 约 16、Gen4 约 32、Gen5 约 64 GB/s；⭐ 每一代都是 2 倍，故「掉一级」等于减半、「掉三代」等于 1/8——「降一级」听起来轻微、实际是腰斩；(10) ⭐⭐ 本报告的第四种交换机拓扑、也是最高卡数：ASRockRack GENOAD24QM32-2L2T/BCM 单路 SP5、AMD EPYC 带 **8 个 PCIe 根复合体**（00/20/40/60/80/a0/c0/e0）、**17×** RTX PRO 6000 Workstation 96 GB、8× c-payne Microchip Switchtec Gen5（PCI ID 1f18:0101）、每板 1× Gen5 ×16 上行（MCIO + retimer）、内核 7.0.0；⭐ 更值得注意的是那 8 个根复合体——这才是它能带 17 卡的原因，不是靠交换机堆叠，而是 CPU 本身有 8 个独立根复合体。方法学补充：本轮补的这一条，是本报告**故障分类**上的一个新类别。⚠️ 此前的坑都可以这样描述：「发生了什么坏事、它报了什么错」；⭐ 这一条无法这样描述——它没有报错，它的唯一症状是「一张卡比它应该的慢 8 倍，且所有指标都正常」；这就带来一个方法论后果：⚠️ 本报告此前所有的「验证」都依赖某个可观测信号（错误日志、退出码、吞吐量）；⭐ 而对这一类故障，唯一有效的验证是**把每个链路的实际状态与其能力上限逐一对照**——即「验证配置是否如同声称的那样生效」，而不是「验证结果是否看起来正常」。这与第 114 轮那条教训同源：「一个指标可以定义良好、可计算、趋势变坏，却仍然衡量错了对象」——这里更严重，指标连趋势都没变坏。未获取项：rtx6kpro 仍有 14 篇 hardware / troubleshooting / optimization / inference-engines 文档未归档，优先级较高的是 hardware/asrockrack-turin-cpayne-16gpu.md（本篇的姊妹篇、同一块板）、hardware/wrx90-cpayne-16gpu-4switch.md、hardware/nvme-raid-io-optimization.md、optimization/nvfp4-quantization.md、optimization/io-tuning.md、optimization/b12x-dense-fp8-gemm-vs-deepgemm.md；既有未闭合项不变——Game Ready 驱动是否发布、MI350P 零售价、301 关税 2026-11-10 节点后是否再推迟、Section 232 是否覆盖 RTX PRO 6000。",
+  "stop_note": "70 个子问题全部 answered。第 121 轮抓取并归档 hardware/asrockrack-turin-cpayne-16gpu.md：新增 1 个来源、11 条证据、9 条主张（来源 246 -> 247，证据 1947 -> 1958，主张 1412 -> 1421，高置信 1091 -> 1100，争议保持 7），新建 §4.3.8.1 - §4.3.8.9。核心发现：(1) ⭐⭐⭐ 本轮是本报告**最重要的一次对照实验**：同一个 EPYC Turin 家族、同样 4 块交换机、同样 16 张卡，只把交换机从 Broadcom PEX890xx 换成 Microchip Switchtec PM50100——⚠️ 12 种「1 源交换机并发写 2 个不同目标」触发模式**全部不崩溃**（写速全部 53.5–55.3 GB/s，最差读写比仅 0.95×，200 次迭代长跑无漂移）；⭐ 这把 §4.3.8 的结论**从「EPYC 的问题」收窄到「Broadcom 的问题」**：此前无法排除「是不是 EPYC 的 IO Die 在并发 posted write 下有缺陷」，现在有了同 CPU、同卡数、同交换机数量、只换厂商的对照，崩溃不出现，故责任明确落在 Broadcom 交换机的 posted-write 仲裁上；(2) ⚠️ 但必须保留一个限定：这台是「4 根变体」——4 块交换机各落在一个互不相同的根复合体上（00/40/80/e0），而「原始 WRX90 崩溃布局」里 SW3 与 SW4 共享 root e0；⭐ 故严格说本轮排除的是「EPYC + Microchip + 4 路独立根」这个组合，⚠️ 不能完全排除「EPYC + Microchip + 共享根」；照实保留这个限定；(3) ⭐⭐ 一个此前未知的**方向性**发现：读可以显著超过线速——1 源→3 目标的最佳案例聚合读达 **167.6 GB/s**，即单条 Gen5 ×16 的 **3 倍**；⭐ 原文解释「Turin IO Die 的读返回路径可以从三个不同远端根复合体并行拉取」，⚠️ 而写被封在源上行附近（55–72 GB/s）；⭐ 原因在于读写走两条不同路径：写受限于源上行，读的返回数据可直接从各目标所在根复合体并行回来；⚠️ 这对推理有直接含义——张量并行的 all-gather（读）与 reduce-scatter（写）不该用同一个带宽数字估计；(4) ⭐⭐ 同样的「4 路并发写」，这里达到理论上限的 91%：16 卡全互连（240 个方向对）聚合写 **204.4 GB/s**，为 4×56 = 224 GB/s 理论上限的 **91.3%**；⭐ 意义在于它是在崩溃机的同一个「4 路并发写」条件下取得的——⚠️ Broadcom 机上 4 路并发写掉到 2.7 GB/s，而这里达到 91%；⭐ 即「4 路并发」本身不是问题，问题在具体那款交换机如何处理它；(5) ⭐⭐ 读写不对称的归因被一个子实验锁定：交换机内 4 卡全互连（**纯 fabric 路由、完全不经过 CPU 根复合体**）四块交换机结果完全一致——写 163.6/163.6/163.6/163.5、读一律 67.4、读写比 2.43×；⭐ 若只看跨交换机数据（2.52–2.56×）可能归因于 CPU、交换机或拓扑，而交换机内子实验把 CPU 排除了，故归因只能是 Microchip 交换机本身；⭐ 这是本报告在方法上最值得学的一处——「用一个不经过可疑环节的子实验，把该环节排除掉」；(6) ⭐⭐ 与 Threadripper Pro 7955WX 的干净对照（同一批交换机、同样卡数、同样布局、只有主机平台不同）：单对 56.3 vs 约 53、两对上行饱和 **56.4 vs 56.4 完全相同**、8 卡全互连 187–190 vs 约 163（+17%）、⭐ 1 源→3 目标**读最佳 167 vs 84 GB/s（+99%）**；⭐ 即 Turin 的优势集中在读返回路径，写路径几乎持平——与第 (3) 条「读写走不同路径」互相印证；(7) ⚠️ 一个被推翻的假设：§4.3.8 记录 Broadcom 机上 MaxReadReq 被固件锁在 128 B，很容易以为「128 B 就是崩溃原因」；⭐ 但 Microchip 机上同样是 128 B（只读）却不崩溃——故 MaxReadReq=128 B 是这类交换机的共性，**不是本崩溃的充分原因**；⭐ 这是一个典型的「共同因被误认为因」的反例；(8) ⚠️⚠️ 但它同时暴露出 16 卡的两个硬限制：CUDA 层面 `cudaDeviceEnablePeerAccess` **每进程每 GPU 上限 8 个 peer**，故单进程内无法建立完整 16×16 网，9 卡以上必须退化为逐对 P2P 或用 NCCL/IPC 句柄；框架层面 vLLM 在该构建下**在 world size 16 时禁用其 PCIe 自定义 allreduce**（Supported world sizes: [2, 4, 6, 8]）；⚠️ 即「16 卡」不是「8 卡 ×2」，它是一个软件栈支持度明显更差的配置；(9) ⭐⭐ 16 卡买到的是容量，不是速度（Kimi-K2.6、TRITON_MLA、fp8 KV、MTP）：8 卡 KV 预算 357,232 token、ctx0 c=1 解码 125.0 → c=128 为 2510.3 tok/s；16 卡 KV 预算 **1,402,656 token（3.93×）**、ctx0 c=1 解码 **129.6** → c=128 为 **2959.6**；⚠️ 即 KV 涨 3.93 倍，但 c=1 只 +3.7%、c=128 只 +17.9%——⭐ 与本报告 §9.7「扩容在 KV 维度超线性、在延迟维度是负的」完全吻合；⚠️ 且原文点明高并发非线性是因 TP=16 通信代价更高 + 自定义 allreduce 不可用；⭐ 另有一个必须记住的口径：跳跃的单元格是**容量所限而非失败**（128k/C128 在 max_tokens=2048 下约需 17.0M KV token，远超可用的 1.40M）。方法学补充：本轮的核心不是「又找到一台 16 卡机器」，而是**完成了一次真正意义上的对照**。⚠️ 本报告从第 116 轮起就把 Broadcom 崩溃当作「已定位到边界」，但那时的证据只能说明「这个组合会崩」，⭐ 不能说「是交换机而不是 CPU」——因为缺一个「同 CPU、不同交换机」的样本；本轮补上了这个样本，⚠️ 而且它顺带推翻了一个很自然的假设（MaxReadReq=128 B 是原因）。这带来一个可复用的判据：⭐ **「一个变量被锁定」不等于「这个变量是原因」**——只有当「它被解锁后问题消失」时才是原因；⚠️ 而 Broadcom 的 MaxReadReq 恰恰是永远解不开的（固件锁），故它只能是一个候选，⭐ 直到 Microchip 机上出现「同样 128 B 但不崩」的反例，才把它排除。未获取项：rtx6kpro 仍有 13 篇 hardware / troubleshooting / optimization / inference-engines 文档未归档，优先级较高的是 hardware/wrx90-cpayne-16gpu-4switch.md（13 KB，已抓取待读，即本轮这台机器的「原始崩溃布局」姊妹篇）、hardware/wrx90-cpayne-2switch-flat.md、hardware/wrx90-cpayne-8gpu-2vs-per-chip.md、hardware/wrx90-cpayne-microchip-switches.md、optimization/nvfp4-quantization.md、optimization/io-tuning.md；既有未闭合项不变——Game Ready 驱动是否发布、MI350P 零售价、301 关税 2026-11-10 节点后是否再推迟、Section 232 是否覆盖 RTX PRO 6000。",
   "budget": {
     "limits": {
       "max_tool_calls": 120,
       "max_minutes": 60
     },
     "used": {
-      "tool_calls": 246,
-      "sources_fetched": 245,
+      "tool_calls": 247,
+      "sources_fetched": 246,
       "fetch_failures": 1
     }
   },
@@ -2472,6 +2472,16 @@
     },
     {
       "seq": 246,
+      "kind": "fetch",
+      "summary": "抓取 ASRockRack GENOAD24QM32 + EPYC 9575F — 16 卡 4 交换机：崩溃无法复现",
+      "target": "https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/asrockrack-turin-cpayne-16gpu.md",
+      "source_ids": [
+        "src-r6k-asrock-turin16"
+      ],
+      "outcome": "ok"
+    },
+    {
+      "seq": 247,
       "kind": "fetch_failed",
       "summary": "访问失败（blocked）：NAMD 3.0.2 - GPU-offload Performance: stmv benchma",
       "target": "https://epubs.stfc.ac.uk/manifestation/64246471/STFC-CONF-2026-003.pdf",
@@ -2482,7 +2492,7 @@
       "note": "访问失败：两次下载均 120 秒超时，最终 PDF 为 0 页，未归档任何数据"
     },
     {
-      "seq": 247,
+      "seq": 248,
       "kind": "extract",
       "summary": "从 src-0xsero-glm52 抽取 22 条证据",
       "source_ids": [
@@ -2491,7 +2501,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 248,
+      "seq": 249,
       "kind": "extract",
       "summary": "从 src-6kpro-collapse 抽取 15 条证据",
       "source_ids": [
@@ -2500,7 +2510,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 249,
+      "seq": 250,
       "kind": "extract",
       "summary": "从 src-6kpro-mtpq 抽取 20 条证据",
       "source_ids": [
@@ -2509,7 +2519,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 250,
+      "seq": 251,
       "kind": "extract",
       "summary": "从 src-6kpro-root-topo 抽取 13 条证据",
       "source_ids": [
@@ -2518,7 +2528,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 251,
+      "seq": 252,
       "kind": "extract",
       "summary": "从 src-6kpro-tp2maxq 抽取 18 条证据",
       "source_ids": [
@@ -2527,7 +2537,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 252,
+      "seq": 253,
       "kind": "extract",
       "summary": "从 src-aicr-driver 抽取 6 条证据",
       "source_ids": [
@@ -2536,7 +2546,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 253,
+      "seq": 254,
       "kind": "extract",
       "summary": "从 src-akash 抽取 3 条证据",
       "source_ids": [
@@ -2545,7 +2555,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 254,
+      "seq": 255,
       "kind": "extract",
       "summary": "从 src-alio-sft 抽取 8 条证据",
       "source_ids": [
@@ -2554,7 +2564,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 255,
+      "seq": 256,
       "kind": "extract",
       "summary": "从 src-amd-mi350-arch 抽取 7 条证据",
       "source_ids": [
@@ -2563,7 +2573,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 256,
+      "seq": 257,
       "kind": "extract",
       "summary": "从 src-ansys-gpu 抽取 7 条证据",
       "source_ids": [
@@ -2572,7 +2582,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 257,
+      "seq": 258,
       "kind": "extract",
       "summary": "从 src-ansys-roi 抽取 2 条证据",
       "source_ids": [
@@ -2581,7 +2591,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 258,
+      "seq": 259,
       "kind": "extract",
       "summary": "从 src-aquanode-compare 抽取 4 条证据",
       "source_ids": [
@@ -2590,7 +2600,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 259,
+      "seq": 260,
       "kind": "extract",
       "summary": "从 src-archviz 抽取 7 条证据",
       "source_ids": [
@@ -2599,7 +2609,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 260,
+      "seq": 261,
       "kind": "extract",
       "summary": "从 src-arx-cc 抽取 6 条证据",
       "source_ids": [
@@ -2608,7 +2618,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 261,
+      "seq": 262,
       "kind": "extract",
       "summary": "从 src-arx-energy 抽取 7 条证据",
       "source_ids": [
@@ -2617,7 +2627,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 262,
+      "seq": 263,
       "kind": "extract",
       "summary": "从 src-arx-leapquant 抽取 28 条证据",
       "source_ids": [
@@ -2626,7 +2636,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 263,
+      "seq": 264,
       "kind": "extract",
       "summary": "从 src-arx-xfp 抽取 40 条证据",
       "source_ids": [
@@ -2635,7 +2645,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 264,
+      "seq": 265,
       "kind": "extract",
       "summary": "从 src-arxiv-cc 抽取 7 条证据",
       "source_ids": [
@@ -2644,7 +2654,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 265,
+      "seq": 266,
       "kind": "extract",
       "summary": "从 src-arxiv-eb 抽取 8 条证据",
       "source_ids": [
@@ -2653,7 +2663,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 266,
+      "seq": 267,
       "kind": "extract",
       "summary": "从 src-arxiv-energy 抽取 16 条证据",
       "source_ids": [
@@ -2662,7 +2672,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 267,
+      "seq": 268,
       "kind": "extract",
       "summary": "从 src-arxiv-freetoken 抽取 12 条证据",
       "source_ids": [
@@ -2671,7 +2681,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 268,
+      "seq": 269,
       "kind": "extract",
       "summary": "从 src-arxiv-minimakv 抽取 10 条证据",
       "source_ids": [
@@ -2680,7 +2690,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 269,
+      "seq": 270,
       "kind": "extract",
       "summary": "从 src-arxiv-vpcc 抽取 10 条证据",
       "source_ids": [
@@ -2689,7 +2699,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 270,
+      "seq": 271,
       "kind": "extract",
       "summary": "从 src-avd-nx 抽取 5 条证据",
       "source_ids": [
@@ -2698,7 +2708,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 271,
+      "seq": 272,
       "kind": "extract",
       "summary": "从 src-b70-ecc 抽取 10 条证据",
       "source_ids": [
@@ -2707,7 +2717,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 272,
+      "seq": 273,
       "kind": "extract",
       "summary": "从 src-ba-pro6000 抽取 5 条证据",
       "source_ids": [
@@ -2716,7 +2726,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 273,
+      "seq": 274,
       "kind": "extract",
       "summary": "从 src-bb-script 抽取 4 条证据",
       "source_ids": [
@@ -2725,7 +2735,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 274,
+      "seq": 275,
       "kind": "extract",
       "summary": "从 src-benchlife-mi350p 抽取 3 条证据",
       "source_ids": [
@@ -2734,7 +2744,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 275,
+      "seq": 276,
       "kind": "extract",
       "summary": "从 src-blender-issues 抽取 6 条证据",
       "source_ids": [
@@ -2743,7 +2753,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 276,
+      "seq": 277,
       "kind": "extract",
       "summary": "从 src-blender-snapshot 抽取 44 条证据",
       "source_ids": [
@@ -2752,7 +2762,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 277,
+      "seq": 278,
       "kind": "extract",
       "summary": "从 src-blenderartists 抽取 5 条证据",
       "source_ids": [
@@ -2761,7 +2771,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 278,
+      "seq": 279,
       "kind": "extract",
       "summary": "从 src-btl-llamacpp 抽取 5 条证据",
       "source_ids": [
@@ -2770,7 +2780,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 279,
+      "seq": 280,
       "kind": "extract",
       "summary": "从 src-btl-llamacpp-speed 抽取 5 条证据",
       "source_ids": [
@@ -2779,7 +2789,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 280,
+      "seq": 281,
       "kind": "extract",
       "summary": "从 src-c114-price-hike 抽取 5 条证据",
       "source_ids": [
@@ -2788,7 +2798,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 281,
+      "seq": 282,
       "kind": "extract",
       "summary": "从 src-c114-tariff 抽取 3 条证据",
       "source_ids": [
@@ -2797,7 +2807,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 282,
+      "seq": 283,
       "kind": "extract",
       "summary": "从 src-cadence-millennium-pr 抽取 7 条证据",
       "source_ids": [
@@ -2806,7 +2816,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 283,
+      "seq": 284,
       "kind": "extract",
       "summary": "从 src-caih-boxx 抽取 7 条证据",
       "source_ids": [
@@ -2815,7 +2825,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 284,
+      "seq": 285,
       "kind": "extract",
       "summary": "从 src-cgchannel-lineup 抽取 3 条证据",
       "source_ids": [
@@ -2824,7 +2834,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 285,
+      "seq": 286,
       "kind": "extract",
       "summary": "从 src-cisco-mlperf 抽取 6 条证据",
       "source_ids": [
@@ -2833,7 +2843,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 286,
+      "seq": 287,
       "kind": "extract",
       "summary": "从 src-cn-6000d 抽取 15 条证据",
       "source_ids": [
@@ -2842,7 +2852,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 287,
+      "seq": 288,
       "kind": "extract",
       "summary": "从 src-coreweave-rtx 抽取 1 条证据",
       "source_ids": [
@@ -2851,7 +2861,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 288,
+      "seq": 289,
       "kind": "extract",
       "summary": "从 src-designreuse-synopsys 抽取 3 条证据",
       "source_ids": [
@@ -2860,7 +2870,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 289,
+      "seq": 290,
       "kind": "extract",
       "summary": "从 src-dnr-gpu-bench 抽取 4 条证据",
       "source_ids": [
@@ -2869,7 +2879,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 290,
+      "seq": 291,
       "kind": "extract",
       "summary": "从 src-dnr-server 抽取 3 条证据",
       "source_ids": [
@@ -2878,7 +2888,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 291,
+      "seq": 292,
       "kind": "extract",
       "summary": "从 src-dropandrender-5090 抽取 5 条证据",
       "source_ids": [
@@ -2887,7 +2897,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 292,
+      "seq": 293,
       "kind": "extract",
       "summary": "从 src-dropandrender-se 抽取 4 条证据",
       "source_ids": [
@@ -2896,7 +2906,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 293,
+      "seq": 294,
       "kind": "extract",
       "summary": "从 src-dropandrender-ws 抽取 8 条证据",
       "source_ids": [
@@ -2905,7 +2915,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 294,
+      "seq": 295,
       "kind": "extract",
       "summary": "从 src-ds-cert 抽取 7 条证据",
       "source_ids": [
@@ -2914,7 +2924,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 295,
+      "seq": 296,
       "kind": "extract",
       "summary": "从 src-ecohash-96gb 抽取 7 条证据",
       "source_ids": [
@@ -2923,7 +2933,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 296,
+      "seq": 297,
       "kind": "extract",
       "summary": "从 src-ecohash-mtp 抽取 14 条证据",
       "source_ids": [
@@ -2932,7 +2942,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 297,
+      "seq": 298,
       "kind": "extract",
       "summary": "从 src-eet-bis 抽取 9 条证据",
       "source_ids": [
@@ -2941,7 +2951,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 298,
+      "seq": 299,
       "kind": "extract",
       "summary": "从 src-eet-puget 抽取 2 条证据",
       "source_ids": [
@@ -2950,7 +2960,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 299,
+      "seq": 300,
       "kind": "extract",
       "summary": "从 src-elsa-maxq 抽取 8 条证据",
       "source_ids": [
@@ -2959,7 +2969,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 300,
+      "seq": 301,
       "kind": "extract",
       "summary": "从 src-elsa-srv 抽取 7 条证据",
       "source_ids": [
@@ -2968,7 +2978,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 301,
+      "seq": 302,
       "kind": "extract",
       "summary": "从 src-emmy-coder 抽取 12 条证据",
       "source_ids": [
@@ -2977,7 +2987,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 302,
+      "seq": 303,
       "kind": "extract",
       "summary": "从 src-energy-e2e 抽取 3 条证据",
       "source_ids": [
@@ -2986,7 +2996,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 303,
+      "seq": 304,
       "kind": "extract",
       "summary": "从 src-energy-phase 抽取 6 条证据",
       "source_ids": [
@@ -2995,7 +3005,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 304,
+      "seq": 305,
       "kind": "extract",
       "summary": "从 src-ete-ua 抽取 14 条证据",
       "source_ids": [
@@ -3004,7 +3014,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 305,
+      "seq": 306,
       "kind": "extract",
       "summary": "从 src-exxact-fluent 抽取 13 条证据",
       "source_ids": [
@@ -3013,7 +3023,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 306,
+      "seq": 307,
       "kind": "extract",
       "summary": "从 src-exxact-lora 抽取 14 条证据",
       "source_ids": [
@@ -3022,7 +3032,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 307,
+      "seq": 308,
       "kind": "extract",
       "summary": "从 src-fasth3-video 抽取 13 条证据",
       "source_ids": [
@@ -3031,7 +3041,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 308,
+      "seq": 309,
       "kind": "extract",
       "summary": "从 src-fish-tts 抽取 6 条证据",
       "source_ids": [
@@ -3040,7 +3050,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 309,
+      "seq": 310,
       "kind": "extract",
       "summary": "从 src-fixstars-ft 抽取 11 条证据",
       "source_ids": [
@@ -3049,7 +3059,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 310,
+      "seq": 311,
       "kind": "extract",
       "summary": "从 src-flashinfer-sm120 抽取 8 条证据",
       "source_ids": [
@@ -3058,7 +3068,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 311,
+      "seq": 312,
       "kind": "extract",
       "summary": "从 src-formulamod-aio 抽取 1 条证据",
       "source_ids": [
@@ -3067,7 +3077,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 312,
+      "seq": 313,
       "kind": "extract",
       "summary": "从 src-formulamod-bykski 抽取 4 条证据",
       "source_ids": [
@@ -3076,7 +3086,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 313,
+      "seq": 314,
       "kind": "extract",
       "summary": "从 src-forum-fullchip 抽取 15 条证据",
       "source_ids": [
@@ -3085,7 +3095,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 314,
+      "seq": 315,
       "kind": "extract",
       "summary": "从 src-forum-mhzdeg 抽取 3 条证据",
       "source_ids": [
@@ -3094,7 +3104,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 315,
+      "seq": 316,
       "kind": "extract",
       "summary": "从 src-forum-mmufault 抽取 6 条证据",
       "source_ids": [
@@ -3103,7 +3113,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 316,
+      "seq": 317,
       "kind": "extract",
       "summary": "从 src-forum-swcap 抽取 8 条证据",
       "source_ids": [
@@ -3112,7 +3122,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 317,
+      "seq": 318,
       "kind": "extract",
       "summary": "从 src-forum-thresh 抽取 6 条证据",
       "source_ids": [
@@ -3121,7 +3131,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 318,
+      "seq": 319,
       "kind": "extract",
       "summary": "从 src-fp64emu 抽取 24 条证据",
       "source_ids": [
@@ -3130,7 +3140,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 319,
+      "seq": 320,
       "kind": "extract",
       "summary": "从 src-gdep-report 抽取 6 条证据",
       "source_ids": [
@@ -3139,7 +3149,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 320,
+      "seq": 321,
       "kind": "extract",
       "summary": "从 src-gh-isaacsim-578 抽取 5 条证据",
       "source_ids": [
@@ -3148,7 +3158,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 321,
+      "seq": 322,
       "kind": "extract",
       "summary": "从 src-gh-torch-182286 抽取 8 条证据",
       "source_ids": [
@@ -3157,7 +3167,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 322,
+      "seq": 323,
       "kind": "extract",
       "summary": "从 src-gh-vllm-41619 抽取 1 条证据",
       "source_ids": [
@@ -3166,7 +3176,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 323,
+      "seq": 324,
       "kind": "extract",
       "summary": "从 src-gh-wsl-40401 抽取 1 条证据",
       "source_ids": [
@@ -3175,7 +3185,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 324,
+      "seq": 325,
       "kind": "extract",
       "summary": "从 src-gigazine-puget 抽取 3 条证据",
       "source_ids": [
@@ -3184,7 +3194,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 325,
+      "seq": 326,
       "kind": "extract",
       "summary": "从 src-gn-teardown 抽取 13 条证据",
       "source_ids": [
@@ -3193,7 +3203,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 326,
+      "seq": 327,
       "kind": "extract",
       "summary": "从 src-gpu-bus-drops 抽取 8 条证据",
       "source_ids": [
@@ -3202,7 +3212,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 327,
+      "seq": 328,
       "kind": "extract",
       "summary": "从 src-gpuperhour-pricing 抽取 2 条证据",
       "source_ids": [
@@ -3211,7 +3221,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 328,
+      "seq": 329,
       "kind": "extract",
       "summary": "从 src-gw-cn 抽取 2 条证据",
       "source_ids": [
@@ -3220,7 +3230,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 329,
+      "seq": 330,
       "kind": "extract",
       "summary": "从 src-gw-tw 抽取 3 条证据",
       "source_ids": [
@@ -3229,7 +3239,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 330,
+      "seq": 331,
       "kind": "extract",
       "summary": "从 src-hami-2641 抽取 2 条证据",
       "source_ids": [
@@ -3238,7 +3248,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 331,
+      "seq": 332,
       "kind": "extract",
       "summary": "从 src-hami-mig 抽取 18 条证据",
       "source_ids": [
@@ -3247,7 +3257,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 332,
+      "seq": 333,
       "kind": "extract",
       "summary": "从 src-helix-tp2 抽取 12 条证据",
       "source_ids": [
@@ -3256,7 +3266,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 333,
+      "seq": 334,
       "kind": "extract",
       "summary": "从 src-hf-kolibri-beam 抽取 7 条证据",
       "source_ids": [
@@ -3265,7 +3275,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 334,
+      "seq": 335,
       "kind": "extract",
       "summary": "从 src-hf-malaiwah-27b 抽取 16 条证据",
       "source_ids": [
@@ -3274,7 +3284,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 335,
+      "seq": 336,
       "kind": "extract",
       "summary": "从 src-hf-mm35 抽取 10 条证据",
       "source_ids": [
@@ -3283,7 +3293,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 336,
+      "seq": 337,
       "kind": "extract",
       "summary": "从 src-hf-nvfp4-vs-fp8 抽取 8 条证据",
       "source_ids": [
@@ -3292,7 +3302,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 337,
+      "seq": 338,
       "kind": "extract",
       "summary": "从 src-hf-radixark-587k 抽取 7 条证据",
       "source_ids": [
@@ -3301,7 +3311,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 338,
+      "seq": 339,
       "kind": "extract",
       "summary": "从 src-hivenet-5090-vram 抽取 9 条证据",
       "source_ids": [
@@ -3310,7 +3320,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 339,
+      "seq": 340,
       "kind": "extract",
       "summary": "从 src-hostkey-bench 抽取 10 条证据",
       "source_ids": [
@@ -3319,7 +3329,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 340,
+      "seq": 341,
       "kind": "extract",
       "summary": "从 src-hpct-gromacs 抽取 4 条证据",
       "source_ids": [
@@ -3328,7 +3338,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 341,
+      "seq": 342,
       "kind": "extract",
       "summary": "从 src-hpct-lammps 抽取 5 条证据",
       "source_ids": [
@@ -3337,7 +3347,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 342,
+      "seq": 343,
       "kind": "extract",
       "summary": "从 src-hpct-lora 抽取 5 条证据",
       "source_ids": [
@@ -3346,7 +3356,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 343,
+      "seq": 344,
       "kind": "extract",
       "summary": "从 src-hyperpc-ampere 抽取 7 条证据",
       "source_ids": [
@@ -3355,7 +3365,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 344,
+      "seq": 345,
       "kind": "extract",
       "summary": "从 src-iconnect-cowos 抽取 4 条证据",
       "source_ids": [
@@ -3364,7 +3374,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 345,
+      "seq": 346,
       "kind": "extract",
       "summary": "从 src-igorslab-alphacool 抽取 6 条证据",
       "source_ids": [
@@ -3373,7 +3383,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 346,
+      "seq": 347,
       "kind": "extract",
       "summary": "从 src-inferencehub-pricing 抽取 5 条证据",
       "source_ids": [
@@ -3382,7 +3392,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 347,
+      "seq": 348,
       "kind": "extract",
       "summary": "从 src-inferencex-chips 抽取 2 条证据",
       "source_ids": [
@@ -3391,7 +3401,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 348,
+      "seq": 349,
       "kind": "extract",
       "summary": "从 src-inferencex-gb300 抽取 6 条证据",
       "source_ids": [
@@ -3400,7 +3410,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 349,
+      "seq": 350,
       "kind": "extract",
       "summary": "从 src-inferencex-tco 抽取 6 条证据",
       "source_ids": [
@@ -3409,7 +3419,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 350,
+      "seq": 351,
       "kind": "extract",
       "summary": "从 src-ithome-mig 抽取 2 条证据",
       "source_ids": [
@@ -3418,7 +3428,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 351,
+      "seq": 352,
       "kind": "extract",
       "summary": "从 src-j8-eagle3 抽取 3 条证据",
       "source_ids": [
@@ -3427,7 +3437,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 352,
+      "seq": 353,
       "kind": "extract",
       "summary": "从 src-j8-guide 抽取 3 条证据",
       "source_ids": [
@@ -3436,7 +3446,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 353,
+      "seq": 354,
       "kind": "extract",
       "summary": "从 src-j8-minimax 抽取 6 条证据",
       "source_ids": [
@@ -3445,7 +3455,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 354,
+      "seq": 355,
       "kind": "extract",
       "summary": "从 src-j8-nightly 抽取 4 条证据",
       "source_ids": [
@@ -3454,7 +3464,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 355,
+      "seq": 356,
       "kind": "extract",
       "summary": "从 src-j8-penny 抽取 13 条证据",
       "source_ids": [
@@ -3463,7 +3473,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 356,
+      "seq": 357,
       "kind": "extract",
       "summary": "从 src-j8-update 抽取 5 条证据",
       "source_ids": [
@@ -3472,7 +3482,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 357,
+      "seq": 358,
       "kind": "extract",
       "summary": "从 src-j8-v016 抽取 6 条证据",
       "source_ids": [
@@ -3481,7 +3491,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 358,
+      "seq": 359,
       "kind": "extract",
       "summary": "从 src-janction-bench 抽取 10 条证据",
       "source_ids": [
@@ -3490,7 +3500,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 359,
+      "seq": 360,
       "kind": "extract",
       "summary": "从 src-jf-4eng 抽取 8 条证据",
       "source_ids": [
@@ -3499,7 +3509,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 360,
+      "seq": 361,
       "kind": "extract",
       "summary": "从 src-kitguru-gaming 抽取 4 条证据",
       "source_ids": [
@@ -3508,7 +3518,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 361,
+      "seq": 362,
       "kind": "extract",
       "summary": "从 src-kursiv-price 抽取 6 条证据",
       "source_ids": [
@@ -3517,7 +3527,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 362,
+      "seq": 363,
       "kind": "extract",
       "summary": "从 src-l1t-mig 抽取 15 条证据",
       "source_ids": [
@@ -3526,7 +3536,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 363,
+      "seq": 364,
       "kind": "extract",
       "summary": "从 src-llama-1m 抽取 12 条证据",
       "source_ids": [
@@ -3535,7 +3545,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 364,
+      "seq": 365,
       "kind": "extract",
       "summary": "从 src-llamacpp-15396 抽取 10 条证据",
       "source_ids": [
@@ -3544,7 +3554,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 365,
+      "seq": 366,
       "kind": "extract",
       "summary": "从 src-llamacpp-29281 抽取 2 条证据",
       "source_ids": [
@@ -3553,7 +3563,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 366,
+      "seq": 367,
       "kind": "extract",
       "summary": "从 src-llamacpp-29353 抽取 5 条证据",
       "source_ids": [
@@ -3562,7 +3572,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 367,
+      "seq": 368,
       "kind": "extract",
       "summary": "从 src-magik-gen1 抽取 10 条证据",
       "source_ids": [
@@ -3571,7 +3581,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 368,
+      "seq": 369,
       "kind": "extract",
       "summary": "从 src-mlcommons-v61 抽取 8 条证据",
       "source_ids": [
@@ -3580,7 +3590,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 369,
+      "seq": 370,
       "kind": "extract",
       "summary": "从 src-ms-learn-nx 抽取 8 条证据",
       "source_ids": [
@@ -3589,7 +3599,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 370,
+      "seq": 371,
       "kind": "extract",
       "summary": "从 src-mydrivers-mi350p 抽取 3 条证据",
       "source_ids": [
@@ -3598,7 +3608,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 371,
+      "seq": 372,
       "kind": "extract",
       "summary": "从 src-nccl-1999 抽取 1 条证据",
       "source_ids": [
@@ -3607,7 +3617,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 372,
+      "seq": 373,
       "kind": "extract",
       "summary": "从 src-nebius-blackwell-compat 抽取 9 条证据",
       "source_ids": [
@@ -3616,7 +3626,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 373,
+      "seq": 374,
       "kind": "extract",
       "summary": "从 src-nebius-fa4 抽取 13 条证据",
       "source_ids": [
@@ -3625,7 +3635,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 374,
+      "seq": 375,
       "kind": "extract",
       "summary": "从 src-nebius-fa4opt 抽取 14 条证据",
       "source_ids": [
@@ -3634,7 +3644,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 375,
+      "seq": 376,
       "kind": "extract",
       "summary": "从 src-nebius-mig 抽取 10 条证据",
       "source_ids": [
@@ -3643,7 +3653,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 376,
+      "seq": 377,
       "kind": "extract",
       "summary": "从 src-nebius-sm120-catalog 抽取 3 条证据",
       "source_ids": [
@@ -3652,7 +3662,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 377,
+      "seq": 378,
       "kind": "extract",
       "summary": "从 src-nodemall 抽取 6 条证据",
       "source_ids": [
@@ -3661,7 +3671,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 378,
+      "seq": 379,
       "kind": "extract",
       "summary": "从 src-nv-arch-wp 抽取 14 条证据",
       "source_ids": [
@@ -3670,7 +3680,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 379,
+      "seq": 380,
       "kind": "extract",
       "summary": "从 src-nv-cert 抽取 6 条证据",
       "source_ids": [
@@ -3679,7 +3689,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 380,
+      "seq": 381,
       "kind": "extract",
       "summary": "从 src-nv-drv-life 抽取 3 条证据",
       "source_ids": [
@@ -3688,7 +3698,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 381,
+      "seq": 382,
       "kind": "extract",
       "summary": "从 src-nv-drv-life2 抽取 3 条证据",
       "source_ids": [
@@ -3697,7 +3707,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 382,
+      "seq": 383,
       "kind": "extract",
       "summary": "从 src-nv-drv-matrix 抽取 2 条证据",
       "source_ids": [
@@ -3706,7 +3716,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 383,
+      "seq": 384,
       "kind": "extract",
       "summary": "从 src-nv-isaac-blog 抽取 2 条证据",
       "source_ids": [
@@ -3715,7 +3725,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 384,
+      "seq": 385,
       "kind": "extract",
       "summary": "从 src-nv-mig-gpus 抽取 2 条证据",
       "source_ids": [
@@ -3724,7 +3734,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 385,
+      "seq": 386,
       "kind": "extract",
       "summary": "从 src-nv-mig-start 抽取 6 条证据",
       "source_ids": [
@@ -3733,7 +3743,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 386,
+      "seq": 387,
       "kind": "extract",
       "summary": "从 src-nv-ra-app 抽取 4 条证据",
       "source_ids": [
@@ -3742,7 +3752,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 387,
+      "seq": 388,
       "kind": "extract",
       "summary": "从 src-nv-ra-comp 抽取 6 条证据",
       "source_ids": [
@@ -3751,7 +3761,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 388,
+      "seq": 389,
       "kind": "extract",
       "summary": "从 src-nv-ra-ov 抽取 3 条证据",
       "source_ids": [
@@ -3760,7 +3770,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 389,
+      "seq": 390,
       "kind": "extract",
       "summary": "从 src-nv-ra-sw 抽取 1 条证据",
       "source_ids": [
@@ -3769,7 +3779,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 390,
+      "seq": 391,
       "kind": "extract",
       "summary": "从 src-nv-ra-topo 抽取 7 条证据",
       "source_ids": [
@@ -3778,7 +3788,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 391,
+      "seq": 392,
       "kind": "extract",
       "summary": "从 src-nv-rag-mig 抽取 5 条证据",
       "source_ids": [
@@ -3787,7 +3797,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 392,
+      "seq": 393,
       "kind": "extract",
       "summary": "从 src-nv-vgpu-pricing 抽取 6 条证据",
       "source_ids": [
@@ -3796,7 +3806,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 393,
+      "seq": 394,
       "kind": "extract",
       "summary": "从 src-nv-vgpu19 抽取 7 条证据",
       "source_ids": [
@@ -3805,7 +3815,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 394,
+      "seq": 395,
       "kind": "extract",
       "summary": "从 src-nvblog-cadence 抽取 4 条证据",
       "source_ids": [
@@ -3814,7 +3824,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 395,
+      "seq": 396,
       "kind": "extract",
       "summary": "从 src-nvf-450w 抽取 6 条证据",
       "source_ids": [
@@ -3823,7 +3833,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 396,
+      "seq": 397,
       "kind": "extract",
       "summary": "从 src-nvf-brick 抽取 6 条证据",
       "source_ids": [
@@ -3832,7 +3842,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 397,
+      "seq": 398,
       "kind": "extract",
       "summary": "从 src-nvf-ep 抽取 6 条证据",
       "source_ids": [
@@ -3841,7 +3851,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 398,
+      "seq": 399,
       "kind": "extract",
       "summary": "从 src-nvf-flr 抽取 10 条证据",
       "source_ids": [
@@ -3850,7 +3860,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 399,
+      "seq": 400,
       "kind": "extract",
       "summary": "从 src-nvf-maxqvb 抽取 2 条证据",
       "source_ids": [
@@ -3859,7 +3869,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 400,
+      "seq": 401,
       "kind": "extract",
       "summary": "从 src-nvf-mig44 抽取 4 条证据",
       "source_ids": [
@@ -3868,7 +3878,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 401,
+      "seq": 402,
       "kind": "extract",
       "summary": "从 src-nvf-migreq 抽取 5 条证据",
       "source_ids": [
@@ -3877,7 +3887,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 402,
+      "seq": 403,
       "kind": "extract",
       "summary": "从 src-nvf-silent 抽取 15 条证据",
       "source_ids": [
@@ -3886,7 +3896,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 403,
+      "seq": 404,
       "kind": "extract",
       "summary": "从 src-nvf-support 抽取 8 条证据",
       "source_ids": [
@@ -3895,7 +3905,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 404,
+      "seq": 405,
       "kind": "extract",
       "summary": "从 src-nvf-vbios 抽取 14 条证据",
       "source_ids": [
@@ -3904,7 +3914,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 405,
+      "seq": 406,
       "kind": "extract",
       "summary": "从 src-nvf-warranty 抽取 3 条证据",
       "source_ids": [
@@ -3913,7 +3923,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 406,
+      "seq": 407,
       "kind": "extract",
       "summary": "从 src-nvforum-powercap 抽取 5 条证据",
       "source_ids": [
@@ -3922,7 +3932,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 407,
+      "seq": 408,
       "kind": "extract",
       "summary": "从 src-nvforum-xid79 抽取 15 条证据",
       "source_ids": [
@@ -3931,7 +3941,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 408,
+      "seq": 409,
       "kind": "extract",
       "summary": "从 src-nvforum-xid8 抽取 9 条证据",
       "source_ids": [
@@ -3940,7 +3950,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 409,
+      "seq": 410,
       "kind": "extract",
       "summary": "从 src-nvidia-blog-server 抽取 4 条证据",
       "source_ids": [
@@ -3949,7 +3959,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 410,
+      "seq": 411,
       "kind": "extract",
       "summary": "从 src-nvidia-cc-blog 抽取 5 条证据",
       "source_ids": [
@@ -3958,7 +3968,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 411,
+      "seq": 412,
       "kind": "extract",
       "summary": "从 src-nvidia-ifa 抽取 2 条证据",
       "source_ids": [
@@ -3967,7 +3977,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 412,
+      "seq": 413,
       "kind": "extract",
       "summary": "从 src-nvidia-maxq 抽取 8 条证据",
       "source_ids": [
@@ -3976,7 +3986,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 413,
+      "seq": 414,
       "kind": "extract",
       "summary": "从 src-nvidia-press-gtc 抽取 7 条证据",
       "source_ids": [
@@ -3985,7 +3995,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 414,
+      "seq": 415,
       "kind": "extract",
       "summary": "从 src-nvidia-rowremap 抽取 8 条证据",
       "source_ids": [
@@ -3994,7 +4004,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 415,
+      "seq": 416,
       "kind": "extract",
       "summary": "从 src-nvidia-rtxpro-server 抽取 3 条证据",
       "source_ids": [
@@ -4003,7 +4013,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 416,
+      "seq": 417,
       "kind": "extract",
       "summary": "从 src-nvidia-server 抽取 9 条证据",
       "source_ids": [
@@ -4012,7 +4022,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 417,
+      "seq": 418,
       "kind": "extract",
       "summary": "从 src-nvidia-vgpu-sizing 抽取 6 条证据",
       "source_ids": [
@@ -4021,7 +4031,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 418,
+      "seq": 419,
       "kind": "extract",
       "summary": "从 src-nvidia-ws-edition 抽取 9 条证据",
       "source_ids": [
@@ -4030,7 +4040,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 419,
+      "seq": 420,
       "kind": "extract",
       "summary": "从 src-octanebench 抽取 10 条证据",
       "source_ids": [
@@ -4039,7 +4049,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 420,
+      "seq": 421,
       "kind": "extract",
       "summary": "从 src-odmark 抽取 7 条证据",
       "source_ids": [
@@ -4048,7 +4058,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 421,
+      "seq": 422,
       "kind": "extract",
       "summary": "从 src-omniperf-b200 抽取 7 条证据",
       "source_ids": [
@@ -4057,7 +4067,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 422,
+      "seq": 423,
       "kind": "extract",
       "summary": "从 src-omniperf-data 抽取 8 条证据",
       "source_ids": [
@@ -4066,7 +4076,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 423,
+      "seq": 424,
       "kind": "extract",
       "summary": "从 src-omniperf-l40 抽取 4 条证据",
       "source_ids": [
@@ -4075,7 +4085,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 424,
+      "seq": 425,
       "kind": "extract",
       "summary": "从 src-osmantic-tower2 抽取 6 条证据",
       "source_ids": [
@@ -4084,7 +4094,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 425,
+      "seq": 426,
       "kind": "extract",
       "summary": "从 src-passmark-se 抽取 5 条证据",
       "source_ids": [
@@ -4093,7 +4103,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 426,
+      "seq": 427,
       "kind": "extract",
       "summary": "从 src-pconline 抽取 2 条证据",
       "source_ids": [
@@ -4102,7 +4112,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 427,
+      "seq": 428,
       "kind": "extract",
       "summary": "从 src-pny-se-spec 抽取 7 条证据",
       "source_ids": [
@@ -4111,7 +4121,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 428,
+      "seq": 429,
       "kind": "extract",
       "summary": "从 src-provantage-fake 抽取 7 条证据",
       "source_ids": [
@@ -4120,7 +4130,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 429,
+      "seq": 430,
       "kind": "extract",
       "summary": "从 src-proxpc-md 抽取 4 条证据",
       "source_ids": [
@@ -4129,7 +4139,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 430,
+      "seq": 431,
       "kind": "extract",
       "summary": "从 src-proxpc-md2 抽取 5 条证据",
       "source_ids": [
@@ -4138,7 +4148,16 @@
       "outcome": "ok"
     },
     {
-      "seq": 431,
+      "seq": 432,
+      "kind": "extract",
+      "summary": "从 src-r6k-asrock-turin16 抽取 11 条证据",
+      "source_ids": [
+        "src-r6k-asrock-turin16"
+      ],
+      "outcome": "ok"
+    },
+    {
+      "seq": 433,
       "kind": "extract",
       "summary": "从 src-r6k-esc8000 抽取 9 条证据",
       "source_ids": [
@@ -4147,7 +4166,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 432,
+      "seq": 434,
       "kind": "extract",
       "summary": "从 src-r6k-gpu-configs 抽取 13 条证据",
       "source_ids": [
@@ -4156,7 +4175,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 433,
+      "seq": 435,
       "kind": "extract",
       "summary": "从 src-r6k-linkspeed 抽取 10 条证据",
       "source_ids": [
@@ -4165,7 +4184,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 434,
+      "seq": 436,
       "kind": "extract",
       "summary": "从 src-r6k-nccl-tuning 抽取 12 条证据",
       "source_ids": [
@@ -4174,7 +4193,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 435,
+      "seq": 437,
       "kind": "extract",
       "summary": "从 src-r6k-oneshot 抽取 5 条证据",
       "source_ids": [
@@ -4183,7 +4202,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 436,
+      "seq": 438,
       "kind": "extract",
       "summary": "从 src-r6k-pex-bugrep 抽取 5 条证据",
       "source_ids": [
@@ -4192,7 +4211,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 437,
+      "seq": 439,
       "kind": "extract",
       "summary": "从 src-rrd-ecc 抽取 4 条证据",
       "source_ids": [
@@ -4201,7 +4220,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 438,
+      "seq": 440,
       "kind": "extract",
       "summary": "从 src-rtx6k-plsweep 抽取 18 条证据",
       "source_ids": [
@@ -4210,7 +4229,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 439,
+      "seq": 441,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-bench 抽取 13 条证据",
       "source_ids": [
@@ -4219,7 +4238,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 440,
+      "seq": 442,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-daily 抽取 13 条证据",
       "source_ids": [
@@ -4228,7 +4247,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 441,
+      "seq": 443,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-daily-full 抽取 132 条证据",
       "source_ids": [
@@ -4237,7 +4256,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 442,
+      "seq": 444,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-issues 抽取 12 条证据",
       "source_ids": [
@@ -4246,7 +4265,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 443,
+      "seq": 445,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-pcie 抽取 12 条证据",
       "source_ids": [
@@ -4255,7 +4274,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 444,
+      "seq": 446,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-power 抽取 20 条证据",
       "source_ids": [
@@ -4264,7 +4283,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 445,
+      "seq": 447,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-readme 抽取 3 条证据",
       "source_ids": [
@@ -4273,7 +4292,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 446,
+      "seq": 448,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-results 抽取 6 条证据",
       "source_ids": [
@@ -4282,7 +4301,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 447,
+      "seq": 449,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-sm120 抽取 2 条证据",
       "source_ids": [
@@ -4291,7 +4310,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 448,
+      "seq": 450,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-throughput 抽取 6 条证据",
       "source_ids": [
@@ -4300,7 +4319,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 449,
+      "seq": 451,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-topo 抽取 13 条证据",
       "source_ids": [
@@ -4309,7 +4328,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 450,
+      "seq": 452,
       "kind": "extract",
       "summary": "从 src-rtx6kpro-wiki 抽取 2 条证据",
       "source_ids": [
@@ -4318,7 +4337,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 451,
+      "seq": 453,
       "kind": "extract",
       "summary": "从 src-sabareesh-waterblock 抽取 19 条证据",
       "source_ids": [
@@ -4327,7 +4346,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 452,
+      "seq": 454,
       "kind": "extract",
       "summary": "从 src-seccw-ai-enterprise-price 抽取 6 条证据",
       "source_ids": [
@@ -4336,7 +4355,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 453,
+      "seq": 455,
       "kind": "extract",
       "summary": "从 src-self-audit-94 抽取 6 条证据",
       "source_ids": [
@@ -4345,7 +4364,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 454,
+      "seq": 456,
       "kind": "extract",
       "summary": "从 src-sglang-17908 抽取 4 条证据",
       "source_ids": [
@@ -4354,7 +4373,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 455,
+      "seq": 457,
       "kind": "extract",
       "summary": "从 src-sglang-24361 抽取 3 条证据",
       "source_ids": [
@@ -4363,7 +4382,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 456,
+      "seq": 458,
       "kind": "extract",
       "summary": "从 src-sglang-26928 抽取 6 条证据",
       "source_ids": [
@@ -4372,7 +4391,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 457,
+      "seq": 459,
       "kind": "extract",
       "summary": "从 src-sglang-34027 抽取 2 条证据",
       "source_ids": [
@@ -4381,7 +4400,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 458,
+      "seq": 460,
       "kind": "extract",
       "summary": "从 src-slac-s3df 抽取 11 条证据",
       "source_ids": [
@@ -4390,7 +4409,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 459,
+      "seq": 461,
       "kind": "extract",
       "summary": "从 src-smzdm-price 抽取 3 条证据",
       "source_ids": [
@@ -4399,7 +4418,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 460,
+      "seq": 462,
       "kind": "extract",
       "summary": "从 src-spec-p3-fhd 抽取 2 条证据",
       "source_ids": [
@@ -4408,7 +4427,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 461,
+      "seq": 463,
       "kind": "extract",
       "summary": "从 src-spec-p8-4k 抽取 4 条证据",
       "source_ids": [
@@ -4417,7 +4436,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 462,
+      "seq": 464,
       "kind": "extract",
       "summary": "从 src-spec-vp15 抽取 9 条证据",
       "source_ids": [
@@ -4426,7 +4445,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 463,
+      "seq": 465,
       "kind": "extract",
       "summary": "从 src-spec-vp15-p8 抽取 6 条证据",
       "source_ids": [
@@ -4435,7 +4454,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 464,
+      "seq": 466,
       "kind": "extract",
       "summary": "从 src-spheron-h100 抽取 3 条证据",
       "source_ids": [
@@ -4444,7 +4463,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 465,
+      "seq": 467,
       "kind": "extract",
       "summary": "从 src-sr-7875 抽取 11 条证据",
       "source_ids": [
@@ -4453,7 +4472,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 466,
+      "seq": 468,
       "kind": "extract",
       "summary": "从 src-sr-hpz8 抽取 3 条证据",
       "source_ids": [
@@ -4462,7 +4481,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 467,
+      "seq": 469,
       "kind": "extract",
       "summary": "从 src-storagereview 抽取 17 条证据",
       "source_ids": [
@@ -4471,7 +4490,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 468,
+      "seq": 470,
       "kind": "extract",
       "summary": "从 src-storagereview-review 抽取 16 条证据",
       "source_ids": [
@@ -4480,7 +4499,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 469,
+      "seq": 471,
       "kind": "extract",
       "summary": "从 src-synopsys-rtxpro 抽取 7 条证据",
       "source_ids": [
@@ -4489,7 +4508,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 470,
+      "seq": 472,
       "kind": "extract",
       "summary": "从 src-technolynx 抽取 5 条证据",
       "source_ids": [
@@ -4498,7 +4517,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 471,
+      "seq": 473,
       "kind": "extract",
       "summary": "从 src-tpu-5090-eol 抽取 5 条证据",
       "source_ids": [
@@ -4507,7 +4526,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 472,
+      "seq": 474,
       "kind": "extract",
       "summary": "从 src-tpu-5090-se 抽取 5 条证据",
       "source_ids": [
@@ -4516,7 +4535,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 473,
+      "seq": 475,
       "kind": "extract",
       "summary": "从 src-tpu-5090-silicon 抽取 2 条证据",
       "source_ids": [
@@ -4525,7 +4544,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 474,
+      "seq": 476,
       "kind": "extract",
       "summary": "从 src-tpu-eol 抽取 7 条证据",
       "source_ids": [
@@ -4534,7 +4553,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 475,
+      "seq": 477,
       "kind": "extract",
       "summary": "从 src-tpu-gb202 抽取 7 条证据",
       "source_ids": [
@@ -4543,7 +4562,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 476,
+      "seq": 478,
       "kind": "extract",
       "summary": "从 src-tpu-melt 抽取 6 条证据",
       "source_ids": [
@@ -4552,7 +4571,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 477,
+      "seq": 479,
       "kind": "extract",
       "summary": "从 src-tpu-rtx60-rubin 抽取 9 条证据",
       "source_ids": [
@@ -4561,7 +4580,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 478,
+      "seq": 480,
       "kind": "extract",
       "summary": "从 src-trtllm-11932 抽取 2 条证据",
       "source_ids": [
@@ -4570,7 +4589,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 479,
+      "seq": 481,
       "kind": "extract",
       "summary": "从 src-trtllm-12704 抽取 2 条证据",
       "source_ids": [
@@ -4579,7 +4598,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 480,
+      "seq": 482,
       "kind": "extract",
       "summary": "从 src-trtllm-15634 抽取 8 条证据",
       "source_ids": [
@@ -4588,7 +4607,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 481,
+      "seq": 483,
       "kind": "extract",
       "summary": "从 src-unsloth-p2p 抽取 6 条证据",
       "source_ids": [
@@ -4597,7 +4616,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 482,
+      "seq": 484,
       "kind": "extract",
       "summary": "从 src-vast-pro5500 抽取 9 条证据",
       "source_ids": [
@@ -4606,7 +4625,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 483,
+      "seq": 485,
       "kind": "extract",
       "summary": "从 src-vgpu-validated 抽取 5 条证据",
       "source_ids": [
@@ -4615,7 +4634,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 484,
+      "seq": 486,
       "kind": "extract",
       "summary": "从 src-vllm-43730 抽取 1 条证据",
       "source_ids": [
@@ -4624,7 +4643,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 485,
+      "seq": 487,
       "kind": "extract",
       "summary": "从 src-vllm-54225 抽取 3 条证据",
       "source_ids": [
@@ -4633,7 +4652,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 486,
+      "seq": 488,
       "kind": "extract",
       "summary": "从 src-vllm-57822 抽取 4 条证据",
       "source_ids": [
@@ -4642,7 +4661,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 487,
+      "seq": 489,
       "kind": "extract",
       "summary": "从 src-vllm-forum 抽取 12 条证据",
       "source_ids": [
@@ -4651,7 +4670,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 488,
+      "seq": 490,
       "kind": "extract",
       "summary": "从 src-wattage-dash 抽取 1 条证据",
       "source_ids": [
@@ -4660,7 +4679,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 489,
+      "seq": 491,
       "kind": "extract",
       "summary": "从 src-zol-6000d 抽取 11 条证据",
       "source_ids": [
@@ -4669,7 +4688,7 @@
       "outcome": "ok"
     },
     {
-      "seq": 490,
+      "seq": 492,
       "kind": "extract",
       "summary": "从 src-zol-mi350p 抽取 4 条证据",
       "source_ids": [
@@ -4678,201 +4697,207 @@
       "outcome": "ok"
     },
     {
-      "seq": 491,
+      "seq": 493,
       "kind": "claim_added",
       "summary": "2024-08-01 新增 7 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 492,
+      "seq": 494,
       "kind": "claim_added",
       "summary": "2025-05-18 新增 2 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 493,
+      "seq": 495,
       "kind": "claim_added",
       "summary": "2025-06-02 新增 5 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 494,
+      "seq": 496,
       "kind": "claim_added",
       "summary": "2025-10-27 新增 1 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 495,
+      "seq": 497,
       "kind": "claim_added",
       "summary": "2025-12-04 新增 3 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 496,
+      "seq": 498,
       "kind": "claim_added",
       "summary": "2026-02-02 新增 1 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 497,
+      "seq": 499,
       "kind": "claim_added",
       "summary": "2026-02-05 新增 3 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 498,
+      "seq": 500,
       "kind": "claim_added",
       "summary": "2026-03-17 新增 65 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 499,
+      "seq": 501,
       "kind": "claim_added",
       "summary": "2026-04-20 新增 11 条主张",
       "outcome": "ok"
     },
     {
-      "seq": 500,
-      "kind": "claim_added",
-      "summary": "2026-05-04 新增 5 条主张",
-      "outcome": "ok"
-    },
-    {
-      "seq": 501,
-      "kind": "claim_added",
-      "summary": "2026-05-05 新增 4 条主张",
-      "outcome": "ok"
-    },
-    {
       "seq": 502,
       "kind": "claim_added",
-      "summary": "2026-05-08 新增 7 条主张",
+      "summary": "2026-04-30 新增 9 条主张",
       "outcome": "ok"
     },
     {
       "seq": 503,
       "kind": "claim_added",
-      "summary": "2026-05-18 新增 3 条主张",
+      "summary": "2026-05-04 新增 5 条主张",
       "outcome": "ok"
     },
     {
       "seq": 504,
       "kind": "claim_added",
-      "summary": "2026-06-01 新增 4 条主张",
+      "summary": "2026-05-05 新增 4 条主张",
       "outcome": "ok"
     },
     {
       "seq": 505,
       "kind": "claim_added",
-      "summary": "2026-06-13 新增 5 条主张",
+      "summary": "2026-05-08 新增 7 条主张",
       "outcome": "ok"
     },
     {
       "seq": 506,
       "kind": "claim_added",
-      "summary": "2026-07-11 新增 3 条主张",
+      "summary": "2026-05-18 新增 3 条主张",
       "outcome": "ok"
     },
     {
       "seq": 507,
       "kind": "claim_added",
-      "summary": "2026-07-28 新增 5 条主张",
+      "summary": "2026-06-01 新增 4 条主张",
       "outcome": "ok"
     },
     {
       "seq": 508,
       "kind": "claim_added",
-      "summary": "2026-08-03 新增 9 条主张",
+      "summary": "2026-06-13 新增 5 条主张",
       "outcome": "ok"
     },
     {
       "seq": 509,
       "kind": "claim_added",
-      "summary": "2026-08-13 新增 6 条主张",
+      "summary": "2026-07-11 新增 3 条主张",
       "outcome": "ok"
     },
     {
       "seq": 510,
       "kind": "claim_added",
-      "summary": "2026-08-17 新增 8 条主张",
+      "summary": "2026-07-28 新增 5 条主张",
       "outcome": "ok"
     },
     {
       "seq": 511,
       "kind": "claim_added",
-      "summary": "2026-09-08 新增 16 条主张",
+      "summary": "2026-08-03 新增 9 条主张",
       "outcome": "ok"
     },
     {
       "seq": 512,
       "kind": "claim_added",
-      "summary": "2026-09-09 新增 10 条主张",
+      "summary": "2026-08-13 新增 6 条主张",
       "outcome": "ok"
     },
     {
       "seq": 513,
       "kind": "claim_added",
-      "summary": "2026-09-16 新增 7 条主张",
+      "summary": "2026-08-17 新增 8 条主张",
       "outcome": "ok"
     },
     {
       "seq": 514,
       "kind": "claim_added",
-      "summary": "2026-09-28 新增 12 条主张",
+      "summary": "2026-09-08 新增 16 条主张",
       "outcome": "ok"
     },
     {
       "seq": 515,
       "kind": "claim_added",
-      "summary": "2026-09-30 新增 12 条主张",
+      "summary": "2026-09-09 新增 10 条主张",
       "outcome": "ok"
     },
     {
       "seq": 516,
       "kind": "claim_added",
-      "summary": "2026-10-01 新增 20 条主张",
+      "summary": "2026-09-16 新增 7 条主张",
       "outcome": "ok"
     },
     {
       "seq": 517,
       "kind": "claim_added",
-      "summary": "2026-10-10 新增 5 条主张",
+      "summary": "2026-09-28 新增 12 条主张",
       "outcome": "ok"
     },
     {
       "seq": 518,
       "kind": "claim_added",
-      "summary": "2026-10-20 新增 6 条主张",
+      "summary": "2026-09-30 新增 12 条主张",
       "outcome": "ok"
     },
     {
       "seq": 519,
       "kind": "claim_added",
-      "summary": "2026-10-26 新增 7 条主张",
+      "summary": "2026-10-01 新增 20 条主张",
       "outcome": "ok"
     },
     {
       "seq": 520,
       "kind": "claim_added",
-      "summary": "2026-10-27 新增 964 条主张",
+      "summary": "2026-10-10 新增 5 条主张",
       "outcome": "ok"
     },
     {
       "seq": 521,
       "kind": "claim_added",
-      "summary": "2026-10-28 新增 195 条主张",
+      "summary": "2026-10-20 新增 6 条主张",
       "outcome": "ok"
     },
     {
       "seq": 522,
       "kind": "claim_added",
-      "summary": "2026-10-29 新增 1 条主张",
+      "summary": "2026-10-26 新增 7 条主张",
       "outcome": "ok"
     },
     {
       "seq": 523,
+      "kind": "claim_added",
+      "summary": "2026-10-27 新增 964 条主张",
+      "outcome": "ok"
+    },
+    {
+      "seq": 524,
+      "kind": "claim_added",
+      "summary": "2026-10-28 新增 195 条主张",
+      "outcome": "ok"
+    },
+    {
+      "seq": 525,
+      "kind": "claim_added",
+      "summary": "2026-10-29 新增 1 条主张",
+      "outcome": "ok"
+    },
+    {
+      "seq": 526,
       "kind": "validate",
-      "summary": "validate_research.py 通过：246 来源 / 1947 证据 / 1412 主张；70/70 子问题已答",
+      "summary": "validate_research.py 通过：247 来源 / 1958 证据 / 1421 主张；70/70 子问题已答",
       "outcome": "ok"
     }
   ],
