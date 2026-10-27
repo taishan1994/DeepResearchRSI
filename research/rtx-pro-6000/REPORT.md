@@ -2151,6 +2151,129 @@ Unable to enable MIG Mode for GPU 00000000:01:00.0: Not Supported
 
 > **教训：仅凭一次关键词检索就断言「未获认证」会得出完全错误的结论。** 必须以制造商 + 型号 + 驱动版本多字段交叉核对。
 
+### 10.4.1.2 Ansys 官方支持矩阵：一个远比 Dassault 严格的图景
+
+上一节 Dassault 给出的是「已认证」的好消息。**Ansys 完全不同**——我核了 **Ansys GPU Compute Capabilities Release 2026 R1** 官方 PDF（6 页，逐应用列出已实测认证的型号）。
+
+**先说清「未列入」的含义** [c-ansys-not-cert-equals-works]：Ansys 原文写的是「**The cards listed below have been tested by Ansys, Inc. to verify support**」——**这是「已实测验证支持」的白名单，不是「不支持」的黑名单**。未列入 = **没有厂商背书**，不等于不能跑，但出问题缺乏支持依据。
+
+#### Fluent：只认证了 Linux
+
+[c-ansys-fluent-scope]
+
+| 应用 | 该卡被认证的平台 |
+|---|---|
+| **Fluent GPU Solver** | **仅 Linux x64 + Red Hat 9.6** |
+
+**没有 Windows 条目**。同一张表里，RTX 6000 Ada 有 Windows 11 加多个 Linux 发行版——**Blackwell 6000 的支持面明显更窄**。
+
+> 这对 Windows 工作站用户是关键约束：**Fluent GPU 求解在 Windows 上没有官方认证**。
+
+#### Rocky：只认证了 Max-Q 版
+
+一个容易踩的坑 [c-ansys-rocky-sku-split]：
+
+| 应用 | 被认证的 SKU |
+|---|---|
+| **Rocky（DEM）** | **RTX PRO 6000 Max-Q**（Windows x64 + Windows 11 + Rocky Linux） |
+
+> **不是标准 WS 版，也不是 Server 版——只有 Max-Q。**
+>
+> **即同一个应用对不同 SKU 的认证状态不同。买错 SKU 会直接失去认证。**
+
+#### Speos：完全不支持这张卡
+
+这是最有实际价值的发现 [c-ansys-speos-gap]：
+
+| 应用 | 列表中的 Blackwell 型号 |
+|---|---|
+| **Speos GPU Solver** | RTX PRO **4000** / RTX PRO **5000** |
+| **Speos HPC** | **无任何 Blackwell**（最新只到 RTX 6000 Ada） |
+
+**而 Ansys 同时强调** [e-ansys-speos-note]：*"Speos is best optimized on RTX GPUs because it supports RT-core acceleration."*
+
+> **即：最需要 RT 加速的那个应用，恰恰不支持这张 RT 最强的卡。**
+>
+> 这是一个真正反直觉的组合——**核心竞争力（188 个 RT Core）在 Speos 上无处发挥，因为软件根本没认证它。**
+
+#### ISV 维度的核心结论
+
+把 Ansys 与 Dassault 并列 [c-ansys-vs-dassault]：
+
+| ISV | RTX PRO 6000 的状态 |
+|---|---|
+| **Dassault（CATIA/SolidWorks 系）** | ✅ 已认证（WS + Max-Q，驱动 582.16） |
+| **Ansys Fluent** | ⚠️ **仅 Linux + Red Hat 9.6** |
+| **Ansys Rocky** | ⚠️ **仅 Max-Q 版** |
+| **Ansys Speos / Speos HPC** | ❌ **不支持** |
+
+> **「这卡有 ISV 认证」这种笼统说法没有意义。必须逐应用、逐 SKU 核对。**
+>
+> 同一张卡在两家 ISV 处得到截然不同的待遇，**这不是卡的优劣，而是各 ISV 的验证进度与产品策略不同**。
+
+### 10.4.1.2.1 一处必须并列的冲突：Speos 到底支不支持
+
+上一节得出「**Speos 不支持这张卡**」。本轮发现**一个方向相反的官方表述**，必须并列 [c-syn-speos-conflict]。
+
+**Synopsys 官方新闻稿（2025-08-28）** 把 **Ansys Speos** 明确列入「运行在 RTX PRO 服务器上的产品清单」，并写明：
+
+> *"Featuring **188 RT cores** for modeling light and electromagnetic wave behavior, NVIDIA RTX PRO 6000 Blackwell GPUs enhance the efficiency of **Perceive EM** for radar signal simulation and **Speos** for optical light study."*
+
+| 来源 | 时间 | 对 Speos 的表述 |
+|---|---|---|
+| **Synopsys 新闻稿** | 2025-08 | ✅ 已采用，明确受益于 188 个 RT 核 |
+| **Ansys 2026 R1 认证矩阵** | 2026 | ❌ Speos / Speos HPC 均未列入 |
+
+#### 这个冲突不必裁决，可以解释
+
+两者的**时间与性质都不同** [c-syn-conflict-resolution]：
+
+- Synopsys 用的是 **"adopting"、"expected to support"**——**前瞻性表述**（产品路线与商业承诺）
+- Ansys 用的是 **"has been tested"**——**已完成实测验证**（硬件白名单）
+
+> **结论：Speos 在 RTX PRO 6000 上处于「厂商说会支持、但尚未完成实测认证」的状态。**
+>
+> **这正是选型时最危险的状态**——不是不支持，也不是已支持，而是「在路上」。如果你现在就要用 Speos 跑生产，**不能把这个声明当作已可用**。
+
+#### 顺带：两个厂商性能声明
+
+Synopsys 还给出了两个可引用的数字，但按本报告规则**都标为厂商上界**：
+
+| 声明 | 数值 | 限定 |
+|---|---|---|
+| **Lumerical FDTD** | 比 **L40S** 快最多 **2×** | 厂商预期（"could achieve"），非第三方实测 |
+| **Fluent 容量** | 可容纳最多 **2×** 网格单元数 | 同样是厂商声明 |
+
+**第二个数字值得单独说** [c-syn-fluent-2x-cells]：它比的是**能算多大的模型**，而不是算多快。**96GB 在 CAE 上的第一价值是「能不能算」，第二才是「算多快」**——这与本报告 §8 的 CAE 速度实测是互补视角。
+
+**Server 版定位的又一印证** [c-syn-server-positioning]：Synopsys 把 RTX PRO Server 描述为「**a new category of enterprise data center infrastructure**」（一类新的企业数据中心基础设施），而非工作站配件——与 §10.4.1.1 中「Server 版不在 Windows 工作站 ISV 列表」的事实一致。
+
+### 10.4.1.3 一张卡能支撑多少 CAD 用户：30 个
+
+这是本报告唯一的**多用户密度实测**，来自 Microsoft 对 Siemens NX 的官方验证 [c-avd-30-users]。
+
+**测试环境**：Azure **Standard NC128ds_v6**（128 vCPU / 512GB RAM / **96GB VRAM**）
+
+**结论**：
+
+> **单张 RTX PRO 6000 可支撑最多 30 个并发 Siemens NX 用户**，在 15 与 30 用户两档密度下**渲染稳定、无崩溃、认证套件全部 PASS**。
+
+**架构** [c-avd-timeslice]：**vGPU 时间片共享**（time-slicing），经 Azure 控制面连接，配集中式 Siemens 许可服务器。
+
+> **注意：这是 time-slicing，不是 MIG 硬切分**——与本报告 §11.1 的 MIG 方案是**两条不同路线**。前者灵活但有争抢，后者隔离但有实例数限制。
+
+**扩展到两台主机的收益** [c-avd-scaling]（30 用户规模）：
+
+| 任务 | 改善 |
+|---|---:|
+| Export Image | **~46%** |
+| Listing Window | ~32% |
+| Visualization Performance | ~20% |
+
+> **这么大的扩展收益说明：30 用户已接近单卡饱和点。** 能撑 30 个不等于 30 个都舒服。
+
+**这个 30 的适用范围** [c-avd-density-caveat]：测试用**默认 VSync** 与**自动化 ATS 基准**——ATS 是**认证基准，不是真实混合负载**。**真实工程设计场景（大装配 + 多视口 + 同时渲染）的密度很可能低于 30。**
+
 ### 10.4.2 驱动分支与 EOL：一个此前完全空白的运维维度
 
 本报告多处引用了 `595.x` 驱动，但**从未说明该分支还能用多久**。官方驱动生命周期文档给出了硬数据 [c-drv-branches][c-drv-eol]。
@@ -3179,6 +3302,8 @@ sudo nvidia-bug-report.sh
 | q64 | 每 token 成本比 H100/GB300 如何？ | ✅ | §12.2.1 $/chip/hr 最低但每 token 最贵，差 10-18 倍 |
 | q65 | 有 ISV 官方认证吗？ | ✅ | §10.4.1.1 Dassault 已认证，驱动 582.16，Server 版未列入 |
 | q66 | 整机采购要多少钱？ | ✅ | §12.3.1 BOXX 起价 ,000（2026-07 快照），1500W 电源 |
+| q67 | Ansys 支持吗？ | ⚠️ 部分 | §10.4.1.2 Fluent 仅 Linux、Rocky 仅 Max-Q、Speos 不支持 |
+| q68 | 一张卡能支撑多少 CAD 用户？ | ✅ | §10.4.1.3 单卡最多 30 个 Siemens NX 并发（ATS 基准） |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -3213,12 +3338,14 @@ sudo nvidia-bug-report.sh
 | q64 | 每 token 成本比 H100/GB300 如何？ | ✅ | §12.2.1 $/chip/hr 最低但每 token 最贵，差 10-18 倍 |
 | q65 | 有 ISV 官方认证吗？ | ✅ | §10.4.1.1 Dassault 已认证，驱动 582.16，Server 版未列入 |
 | q66 | 整机采购要多少钱？ | ✅ | §12.3.1 BOXX 起价 ,000（2026-07 快照），1500W 电源 |
+| q67 | Ansys 支持吗？ | ⚠️ 部分 | §10.4.1.2 Fluent 仅 Linux、Rocky 仅 Max-Q、Speos 不支持 |
+| q68 | 一张卡能支撑多少 CAD 用户？ | ✅ | §10.4.1.3 单卡最多 30 个 Siemens NX 并发（ATS 基准） |
 
-**完成度：66/67 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：68/69 已答（6 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **814 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **833 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -3343,3 +3470,6 @@ python scripts/validate_research.py research/rtx-pro-6000
 130. [NVIDIA Virtual GPU Software：VMware vSphere 已验证平台（含 RTX PRO 6000 Server Edition）](https://docs.nvidia.com/vgpu/latest/grid-vgpu-release-notes-vmware-vsphere/validated-platforms.html) — [src-vgpu-validated]
 131. [Dassault Systèmes：Windows 11 64-bit 认证工作站列表（含 RTX PRO 6000 Blackwell）](https://media.3ds.com/support/certified_hardware/Windows_11_64-bit.html)（截至 2026-07 认证） — [src-ds-cert]
 132. [CompareAIHardware：BOXX APEXX 8R（1× RTX PRO 6000 Blackwell）整机规格与起价](https://compareaihardware.com/ai-workstation/boxx-apexx-8r-1x-rtx-pro-6000-blackwell)（2026-07-23 核实） — [src-caih-boxx]
+133. [Ansys GPU Compute Capabilities — Release 2026 R1（官方 GPU 求解器支持矩阵 PDF）](https://www.ansys.com/content/dam/it-solutions/platform-support/2026-r1/ansys-2026-r1-gpu-compute-capabilities.pdf)（2026） — [src-ansys-gpu]
+134. [Azure Virtual Desktop with RTX PRO 6000：单卡支撑最多 30 个 Siemens NX 用户](https://notanarchitect.io/azure-virtual-desktop-with-rtx-pro-6000-validation-shows-up-to-30-siemens-nx-users-per-gpu/)（2025-10-26，转述 Microsoft 官方验证） — [src-avd-nx]
+135. [CIMdata 转述 Synopsys 官方新闻稿：Synopsys 采用 NVIDIA RTX PRO 服务器加速仿真负载](https://www.cimdata.com/en/industry-summary-articles/item/28273-synopsys-embraces-nvidia-rtx-pro-servers-to-accelerate-compute-heavy-simulation-workloads)（2025-08-28） — [src-synopsys-rtxpro]
