@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：210 ｜ **证据数**：1715 ｜ **主张数**：1196（高置信 928，争议 3）
+> **来源数**：212 ｜ **证据数**：1725 ｜ **主张数**：1204（高置信 934，争议 3）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -7152,6 +7152,102 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 | **机架供电受限** | ⚠️ **H100**（约 1.5 倍每瓦） |
 
 > ⭐ **第三条最容易被忽略：如果机房功率已经到顶，「更便宜」的卡可能装不下。**
+### 9.5 一张此前完全没比较过的卡：AMD Instinct MI350P
+
+**§9.4 把 RTX PRO 6000 与 H100 按路径比较过。但 H100 是 OAM/SXM 形态，与这张卡的 PCIe 形态并不真正同台。真正同台的是 MI350P** [c-mi350p-exists]：
+
+| 项 | RTX PRO 6000 | **AMD Instinct MI350P** |
+|---|---|---|
+| 形态 | PCIe 双槽 | ⭐ **同为 PCIe 双槽、全高全长** |
+| 主机链路 | PCIe 5.0 x16 | **PCIe Gen 5 x16** |
+| 架构 | Blackwell (GB202) | **CDNA 4** |
+| 单机上限 | — | **每台最多 8 张** |
+
+> ⭐ **硬件媒体对它的定位描述很直接：这款产品「非常明显地是锁定 NVIDIA RTX Pro 6000」。**
+
+#### ⭐ 一、存储与带宽：MI350P 全面占优
+
+| 项 | RTX PRO 6000 | MI350P | 差距 |
+|---|---:|---:|---|
+| 容量 | 96 GB GDDR7 ECC | ⭐ **144 GB HBM3E** | **+50%** |
+| 峰值带宽 | 1.792 TB/s | ⭐ **4 TB/s** | ⭐ **2.23×** |
+| 缓存 | — | 128 MB Infinity Cache | — |
+
+> ⚠️ **两者内存类型不同（GDDR7 对 HBM3E），带宽差距主要来自类型而非位宽** [c-mi350p-mem-bw]。
+>
+> ⭐ **这直接影响本报告 §4.14 的结论：那张表说「1.792 TB/s 让混批阈值从 80% 掉到 20%」——而在 4 TB/s 的卡上，这个阈值会回到接近 H200 的位置。**
+
+#### ⭐⭐ 二、精度维度：两张卡各自占优，不存在全面优劣
+
+**这是本节最重要的发现** [c-mi350p-fp64-gap] [c-mi350p-fp32-gap]：
+
+| 精度 | RTX PRO 6000 | MI350P | 谁强 |
+|---|---:|---:|---|
+| **FP64**（矩阵/矢量） | **1.968 TF** | ⭐ **36 TF** | ⚠️ **MI350P 强 18.3×** |
+| **FP32**（矩阵/矢量） | ⭐ **126.0 TF** | 72 TF | ⭐ **RTX PRO 6000 强 1.75×** |
+| FP16 矩阵 | — | 1.15 PF（稀疏 2.3 PF） | — |
+| MXFP6 / MXFP4 | — | ⭐ **4.6 PF** | — |
+| INT8 | — | 2.3 POPs | — |
+
+**低精度一侧的对比需要单独说明** [c-mi350p-low-precision-gap]：
+
+> **本报告 §4.4.6 讨论过 FP6/FP4 路径，但只有实测 KLD 与吞吐，没有同口径的峰值理论 PF 数字，因此无法与 MI350P 的 4.6 PF 直接比较。**
+
+> ⭐⭐ **注意这两行的方向完全相反：FP64 上 MI350P 领先一个数量级，FP32 上 RTX PRO 6000 领先 75%。**
+
+> ⚠️ **所以「哪张更强」这个问题没有答案，只有「哪个精度档更重要」有答案。**
+
+**这与 §9.4 的结论是一致的，而非矛盾**：
+
+| §9.4 说 | §9.5 补充 |
+|---|---|
+| 对 H100，FP64 差约 15 倍 → 该选 H100 | ⭐ **在 PCIe 形态内，同样存在一个 FP64 强 18.3 倍的选择** |
+| 「该卡不适合 FP64」 | ⭐ **这个判断不因竞品出现而改变，反而被加强** |
+
+#### ⚠️ 三、分区能力：一处 RTX PRO 6000 的真实优势
+
+| 项 | RTX PRO 6000 | MI350P |
+|---|---|---|
+| 计算分区 | 最多 **4 个 MIG 实例** | **最多 4 个计算分区** |
+| 内存分区 | ⭐ **4× 24 GB 硬隔离，带 QoS** | ⚠️ **单一 NPS1，144 GB 不能硬切** |
+
+> ⚠️ **即 MI350P 的 144 GB 不能在内存上硬隔离成四份** [c-mi350p-partition-diff]。
+>
+> **在需要严格多租户隔离的场景（§11 讨论的虚拟化），这是 RTX PRO 6000 的一处真实优势。**
+
+#### ⭐ 四、一个意外的相似：功耗档位几乎重合
+
+| 项 | RTX PRO 6000 | MI350P |
+|---|---|---|
+| 最大功耗 | 600 W | **600 W TBP** |
+| 可下配 | 400–600 W（Server） | ⭐ **450 W** |
+| 供电接口 | PCIe CEM5 16-pin | ⭐ **12V-2×6** |
+
+> ⭐ **两者功耗预算几乎相同，且都支持向下配置** [c-mi350p-power-same]。
+>
+> **这意味着 §6 的全部功耗与能效结论在换卡后仍需重算，但重算的起点是同一个。**
+
+#### ⚠️ 五、一条不采用的证据
+
+**AMD 在 Advancing AI 2026 上提供了两卡在多个语言模型的 Tokens/Sec 对比** [c-mi350p-vendor-bench-caveat]。
+
+> ⚠️ **但那是厂商自选模型、自选配置的对比。本报告未取得其具体数值，故不引用任何结论。**
+
+> **这条记录的作用是「说明存在这样一份对比」，而不是「转述它的结论」——沿用本报告对厂商自测口径的一贯处理方式。**
+
+#### ⚠️ 六、本节仍未解决的问题
+
+| 问题 | 状态 |
+|---|---|
+| MI350P 的**实际零售价** | ⚠️ **未取得** |
+| MI350P 在 vLLM/SGLang 上的**实测吞吐** | ⚠️ **未取得** |
+| ROCm 与 CUDA 的**迁移成本** | ⚠️ **未量化** |
+| MI350P 在 MLPerf v6.1 的**具体成绩** | ⚠️ **未取得**（§4.6.1 只记录了它首次参评） |
+
+> ⚠️ **所以本节能回答的是「这两张卡在哪些维度上差多少」（全部为官方规格，可独立核对），不能回答「该买哪张」。**
+
+> ⭐ **而后者恰恰是读者最想知道的——这正是本节作为「已识别但未完成」的记录存在的原因。**
+
 
 ## 10. 软件生态与坑
 
@@ -11066,6 +11162,11 @@ sudo nvidia-bug-report.sh
 
 1. [MLCommons Sets Participation Record with New MLPerf Inference v6.1 Benchmark Results](https://mlcommons.org/2026/09/mlperf-inference-v6-1-results/) — MLCommons 官方公告（2026-09-16）。记录 v6.1 新增端到端 RAG 与边缘智能体两项基准、投机解码成为官方支持项、30 家提交机构与 486 项结果、VLM 比 v6.0 提升 2.99× 与 DeepSeek R1 比 v5.1 提升 5.7×、MI350P 等五款新硬件首次参评，以及 MLPerf Endpoints 将取代 Inference 的结构性安排 — [src-mlcommons-v61]
 
+### AMD Instinct MI350P（第二十一轮补充）
+
+1. [AMD Instinct MI350 Series microarchitecture](https://rocm.docs.amd.com/en/latest/reference/gpu-arch/mi350.html) — AMD ROCm 官方文档。MI350P 完整规格：4 个 XCD / 128 CU、144GB HBM3E、4 TB/s 峰值带宽、128MB Infinity Cache、600W 可配置 450W、全高全长双槽 PCIe Gen 5 x16、每台最多 8 张、FP64 36 TF / FP32 72 TF / MXFP6-MXFP4 4.6 PF / INT8 2.3 POPs、单一 NPS1 内存分区、CDNA4 原生支持 OCP MX 微缩放格式 — [src-amd-mi350-arch]
+2. [鎖定 NVIDIA RTX Pro 6000 96GB，AMD Instinct MI350P PCIe 運算卡提供 144GB HBM3e 記憶體](https://benchlife.info/amd-instinct-m350p-wtih-cdna-4-and-144gb-hbm3e/) — BenchLife.info（2026-07-24）。明确 MI350P「非常明显地是锁定 NVIDIA RTX Pro 6000」，记录 12V-2×6 供电、600W TBP 可下配 450W、PCIe 5.0，以及 AMD 在 Advancing AI 2026 提供的两卡多语言模型 Tokens/Sec 对比（本报告未采用其数值） — [src-benchlife-mi350p]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -11205,7 +11306,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=210, evidence=1715, claims=1196, claims_high=928, claims_disputed=3, trace_events=428, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=212, evidence=1725, claims=1204, claims_high=934, claims_disputed=3, trace_events=433, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
