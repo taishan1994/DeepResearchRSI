@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：197 ｜ **证据数**：1643 ｜ **主张数**：1123（高置信 878，争议 3）
+> **来源数**：203 ｜ **证据数**：1658 ｜ **主张数**：1134（高置信 889，争议 3）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -8049,6 +8049,209 @@ pcieport 0000:f0:01.1: AER: device recovery failed
 
 > ⚠️ **第四条最反直觉：`async_utils.py:168`、`async_copy_ready_event.synchronize()` 这些位置全都不是真正出错的地方。**
 
+### 10.14 一个 5 KiB 的差距，和它掀翻的四个软件栈
+
+**§10.13 列了五个「默认值不可信」的案例。本节给出它们的共同根因——而且这个根因不是软件 bug，是硬件参数。**
+
+#### ⭐⭐ 一、核心事实
+
+**SM120 与 SM100 的共享内存差 2.28 倍** [c-smem-hard-difference]：
+
+| 芯片 | 代表产品 | **共享内存** |
+|---|---|---:|
+| **SM120**（消费/工作站 Blackwell） | RTX 5090、**RTX PRO 6000** | **约 100 KB** |
+| **SM100**（数据中心 Blackwell） | B100、B200 | **约 228 KB** |
+
+**而现有代码路径的假设**：
+
+> **对 compute capability ≥ 9 的卡，一律使用 Hopper 尺寸的块（128、64），需要约 106 KB。**
+
+**于是刚好越界**：
+
+```
+triton.runtime.errors.OutOfResources: out of resource: shared memory
+Required: 106496
+Hardware limit: 101376
+```
+
+> ⭐ **需求 106,496 字节，硬件上限 101,376 字节——差 5,120 字节，即 5 KiB。**
+>
+> ⚠️ **一个 5 KiB 的差距，让整条内核路径直接不可用。**
+
+#### ⭐ 二、同一个根因，四个出口
+
+**四起表象完全不同的事故** [c-smem-cross-stack]：
+
+| 软件栈 | 表象 | 触发点 |
+|---|---|---|
+| **SGLang 注意力块** | ⚠️ **第一个请求后立即崩溃** | 块尺寸 128/64 需 106 KB |
+| **TensorRT-LLM CUTLASS MoE** | ⚠️ **`gemm2` 的 16 个候选 tactic 全失败** | TMA WS grouped GEMM tile 超限 |
+| **TensorRT-LLM `TRTLLMGenFusedMoE`** | ⚠️ **直接报「不支持 SM120 及以上」** | 后端级拒绝 |
+| **GB10（SM121）Qwen3.6 NVFP4** | ⚠️ **性能被阻塞** | 99 KiB 设备无合适 tile |
+
+> ⭐ **即「SM120 不兼容」不是一个问题，而是同一个根因的多个出口。**
+
+> ⚠️ **这使「换个后端试试」这种常规绕行策略在这条路径上完全失效** [c-trt-moe-double-fail]。
+
+#### ⚠️ 三、两个后端双双失败，而 B200 上正常
+
+**同模型、不同卡** [c-trt-moe-double-fail]：
+
+| 后端 | SM120 上的结果 |
+|---|---|
+| **`TRTLLM`** | ⚠️ **`NotImplementedError: TRTLLMGenFusedMoE does not support SM120 and above`** |
+| **`CUTLASS`** | ⚠️ **`Assertion failed: Failed to initialize cutlass TMA WS grouped gemm`**（`gemm2` 的 **16/16** 候选失败） |
+| 同一模型在 **B200（SM100）** | ✅ **正常** |
+
+#### ⚠️ 四、但「修复已合入」不等于「有效」
+
+**一条修复不可传递的实证** [c-fix-not-transitive]：
+
+| 项 | 状态 |
+|---|---|
+| **PR #5823**（ix moe regression for sm120） | ✅ **2025 年 7 月已合并**，且应当包含在 **1.3.0rc4** 里 |
+| 实际结果 | ⚠️ **问题依旧** |
+| **Issue #7484** | ⚠️ 报同样的 TRTLLMGenFusedMoE 错误，**仍未解决** |
+| **v0.20.0 发行说明** | 写了「Fix MOE FP4 on SM120」与「Add RTX Pro 6000 support on single GPU」 |
+
+> ⚠️ **即发行说明写了不代表你装的那个版本就有，也不代表对你的模型架构生效。**
+>
+> ⚠️ **这与 §4.4.2 的「同一构建号不同版本 KLD 差 266 倍」是同一种「版本号不可信」。**
+
+#### ⭐ 五、正确的修法模式：运行时查询，编译期不硬编码
+
+**两个独立项目得出了同一个答案** [c-smem-fix-pattern]：
+
+| 项目 | 修法 |
+|---|---|
+| **TensorRT-LLM** | 用 **`cudaDevAttrMaxSharedMemoryPerBlockOptin`** 过滤候选 tactic；为 **99 KiB 设备**保留较小回退 tile |
+| **SGLang** | 用 **`CUDA_CAPABILITY[0] == 12`** 显式检测，改用与 Ampere 一致的 **(64,64)/(32,64)/(32,32)** |
+
+> ⭐ **TensorRT-LLM 的 PR 明确写了刻意不硬编码 GB10 特有行为，而是用运行时设备属性。**
+
+> ⭐ **「运行时查询而非编译期硬编码」是本报告多次见到的好实践。**
+
+**修好之后能跑多快**（8× Server Edition）[e-smem-perf]：
+
+| 模型 | 量化 | 吞吐 |
+|---|---|---:|
+| Kimi K2-Thinking | **NVFP4** | **5,816 tok/s** @ 并发 2048 |
+| Kimi K2.5 | **INT4（AWQ）** | **985 tok/s** @ 并发 1000 |
+
+> ⚠️ **但作者自己对该 5,816 存疑，注明「这是总量吗？据我所知输出是 1.6k」。按 §4.4.7 的口径规则，本报告把它标为待核。**
+
+#### ⚠️ 六、物理含义：这是天花板，不是调优问题
+
+**必须说清楚的一句话** [c-smem-physical-ceiling]：
+
+> **SM120 在需要大共享内存的内核上存在天花板，不是调优问题而是不可逾越。**
+
+> ⚠️ **任何「按 CPU/GPU 代号推断能力」的做法在 Blackwell 上必然出错——SM120 与 SM100 同代，但共享内存差 2.28 倍。**
+
+> ⭐ **这与 §5.4 的「SM120 无 TMEM、无 `tcgen05.mma`、只有 99 KB smem」是同一族事实的不同侧面。**
+
+#### ⚠️ 七、另一种失效：int32 回绕造成的**静默错写**
+
+**SGLang 的 `_page_split_kernel`** [c-int32-silent-corruption]：
+
+| 项 | 值 |
+|---|---|
+| 类型 | **`page_idx * src_stride0` 是 int32 乘法** |
+| 回绕点 | **`page_idx ≈ 57,359`**（dst 侧更早） |
+| 偏移落点 | **目标缓冲约 2 GiB 之外** |
+| 若未映射 | 非法内存访问崩溃 |
+| **若已映射** | ⚠️ **静默错写相邻 GPU 分配（权重、KV、其它暂存）** |
+
+> ⚠️ **后者没有任何错误信号。**
+
+> ⚠️ **「无错误信号的错写」比崩溃危险得多——这与 §10.6 的「450 W 下 80/80 静默 CUDA 损坏 vs 600 W 下 27/80」是同一种失效类别。**
+
+**而修复的性价比极高** [c-int32-trigger-scale]：
+
+| 项 | 值 |
+|---|---|
+| 触发规模 | 每 rank **约 367 万 token** 的 KV 池 |
+| 修法 | **`program_id` 提升为 int64** |
+| **代价** | **内核时间差 < 1%**（128 / 2,048 / 14,340 页三次运行） |
+| 原因 | 每线程每页约 **37 KB** 的内存拷贝面前，一次加宽标量运算只是噪声 |
+
+> ⭐ **「修复代价 1% 而后果是静默错写」是本报告见到性价比最高的一个补丁。**
+
+**验证方式也值得记**：作者用独立 Triton 内核加真实 dst 侧步长常数 **37,440 字节**隔离验证——未打补丁版本在 `page_idx=57,359/57,360` 处**精确回绕到预测的负值**，边界以下则正确。
+
+#### ⚠️ 八、性能回归的不对称性本身就是信息
+
+**llama.cpp 的一次精确回归** [c-llamacpp-sparse-asymmetry]：
+
+| 路径 | 变化 |
+|---|---|
+| **`FLASH_ATTN_EXT` 稀疏路径**（11 个配置中位数） | ⚠️ **+64%** |
+| 其中最差 | ⚠️ **+113%** |
+| **58 个 dense 解码配置** | ✅ **仅 +0.1%** |
+| **29 个批处理配置** | ✅ **仅 +0.3%** |
+
+> ⚠️ **「整体没变」与「某条路径崩了 2 倍」可以同时成立。**
+
+**逐配置明细**（`us/run`，b11047 → b11062）[e-llamacpp-table]：
+
+| hsk | nh | kv | n_kv_max | 旧 | 新 | 变化 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 512 | 1 | 49152 | 2048 | 25.80 | **55.01** | ⚠️ **+113%** |
+| 512 | 1 | 32768 | 512 | 18.29 | **37.58** | ⚠️ **+106%** |
+| 576 | 1 | 49152 | 2048 | 29.17 | **58.83** | ⚠️ **+102%** |
+| 576 | 1 | 32768 | 512 | 21.78 | **41.60** | +91% |
+| 512 | 1 | 16384 | 512 | 13.58 | 23.27 | +71% |
+| 256 | 2 | 32768 | 2048 | 22.55 | 36.97 | +64% |
+| 576 | 1 | 16384 | 512 | 17.12 | 27.14 | +59% |
+| 256 | 2 | 16384 | 2048 | 15.03 | 22.53 | +50% |
+| 512 | 1 | 4096 | 512 | 10.21 | 12.64 | +24% |
+| 576 | 1 | 4096 | 512 | 13.59 | 16.18 | +19% |
+| 256 | 2 | 4096 | 2048 | 16.45 | **11.81** | ⭐ **−28%** |
+
+> ⭐ **注意最后一行：同一个提交在一个配置上反而快了 28%。**
+>
+> ⚠️ **这不是噪声，而是说明该提交改变了稀疏路径的算法结构——有得有失。**
+
+> ⭐ **这是本报告「聚合数掩盖分布」元教训的又一个实例；这次被掩盖的是稀疏注意力这条具体路径。**
+
+#### ⚠️ 九、非确定性的小时级崩溃
+
+**SGLang 的 NGRAM 路径** [c-ngram-nondeterministic]：
+
+| 项 | 值 |
+|---|---|
+| 组合 | **NGRAM 投机解码 + flashinfer 注意力 + CUDA graph 重放** |
+| 崩溃位置 | **`flashinfer.prefill.plan`** 内、`init_forward_metadata_replay_cuda_graph` |
+| 来源 | **目标 worker 的 `replay_prepare`**（NGRAM 校验步），**不是** EAGLE 草稿路径 |
+| 频率 | ⚠️ **每个 GPU 实例连续批处理每 2–5 小时一次** |
+| 确定性 | ⚠️ **非确定性** |
+
+> ⚠️ **「非确定性 + 小时级间隔」使它在开发环境里极难复现，而在生产上必然暴露。**
+
+#### ⚠️ 十、「能跑」是一组特定组合，不是默认行为
+
+**在 SM120 上跑通一个模型要叠的规避项** [c-sm120-workaround-stack]：
+
+| 参数 | 被迫设置 | 原因 |
+|---|---|---|
+| `cuda_graph_max_bs` | **512 → 128** | 避免 flashinfer prefill 工作区溢出 |
+| `fp8_gemm_runner_backend` | **`cutlass`** | DeepGEMM 在 sm_120 上对 `ue8m0` 告警 |
+| `--attention-backend` | **留空（自动选 flashinfer）** | **FA3 在 sm_120 加载时断言失败** |
+
+> ⚠️ **即「能跑」是这三个选择协同的结果。缺一项就不跑。**
+
+> ⭐ **这与 §10.13 的「默认值不可信」同源，但更具体：不是「某项」不可信，而是「一组参数必须协同指定」。**
+
+#### 十一、给部署者的结论
+
+| # | 结论 |
+|---|---|
+| 1 | **SM120 的 100 KB 是硬件天花板**，任何需要 >101,376 字节共享内存的内核在这张卡上永远不可用 |
+| 2 | **不要按「Blackwell」推断能力**——SM120 与 SM100 是两个不同的资源档位 |
+| 3 | **报「不支持」时先查共享内存**，再查版本 |
+| 4 | **int32 偏移在 367 万 token 级 KV 池上会静默错写**——这是最该主动打补丁的一类问题 |
+| 5 | **看回归必须看逐配置**，聚合数会同时掩盖 +113% 和 −28% |
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -9895,6 +10098,15 @@ sudo nvidia-bug-report.sh
 5. [vLLM #43730 — Fix CUDA illegal memory access in Marlin MoE c_tmp on SM 12.0a](https://github.com/vllm-project/vllm/pull/43730) — vLLM GitHub PR，2026-09。10 行 CUDA 改动加 CUDA-graphs 回归测试，与启用 sm_120a 原生 cubin 的 #40923 配套 — [src-vllm-43730]
 6. [RMA Policy — Thresholds for Row Remapping](https://docs.nvidia.com/deploy/a100-gpu-mem-error-mgmt/615/rma-policy-thresholds-for-row-remapping.html) — NVIDIA 官方文档。ECC 行重映射的 RMA 判定阈值 — [src-nvidia-rowremap]
 
+### SM120 共享内存上限的跨栈影响（第十三轮补充）
+
+1. [SGLang #17908 — fix(attention): add SM120 block size configuration for extend attention](https://github.com/sgl-project/sglang/pull/17908) — SGLang GitHub PR，2026-01-29、closed。给出 SM120 约 100 KB 对 SM100 约 228 KB 的共享内存硬差异，以及 8× Server Edition 上的修复后吞吐 — [src-sglang-17908]
+2. [SGLang #24361 — CUDA illegal memory access in flashinfer prefill replay during NGRAM speculative decoding on Blackwell sm_120](https://github.com/sgl-project/sglang/issues/24361) — SGLang GitHub Issue，2026-05-04、closed。给出完整 Engine 配置与被追叠加的三项规避 — [src-sglang-24361]
+3. [SGLang #34027 — Fix int32 offset overflow in SM120 page-split kernel](https://github.com/sgl-project/sglang/pull/34027) — SGLang GitHub PR，2026-08-07、open。int32 乘法在 `page_idx ≈ 57,359` 处回绕导致静默错写，修复代价 <1% — [src-sglang-34027]
+4. [TensorRT-LLM #11932 — TRTLLMGenFusedMoE + CUTLASS MoE both fail on SM120 with FP4 Qwen3-Next MoE](https://github.com/NVIDIA/TensorRT-LLM/issues/11932) — TensorRT-LLM GitHub Issue，2026-03-05、open。两个 MoE 后端双双失败而 B200 上正常 — [src-trtllm-11932]
+5. [TensorRT-LLM #12704 — Filter CUTLASS MoE GEMM tile configs by device shared memory on SM121](https://github.com/NVIDIA/TensorRT-LLM/pull/12704) — TensorRT-LLM GitHub PR，2026-04-02、closed、40 条评论。用 `cudaDevAttrMaxSharedMemoryPerBlockOptin` 在运行时过滤 tactic — [src-trtllm-12704]
+6. [llama.cpp #29281 — Performance regression: CUDA sparse flash attention decode 1.6x slower (b11047 → b11062)](https://github.com/ggml-org/llama.cpp/issues/29281) — llama.cpp GitHub Issue，2026-09-22、closed、10 条评论。11 个稀疏配置逐项对照，最差 +113% 而 dense 只动 0.1% — [src-llamacpp-29281]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -10034,7 +10246,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=197, evidence=1643, claims=1123, claims_high=878, claims_disputed=3, trace_events=395, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=203, evidence=1658, claims=1134, claims_high=889, claims_disputed=3, trace_events=407, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
