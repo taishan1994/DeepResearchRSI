@@ -40,3 +40,14 @@ python scripts/validate_research.py research/rtx-pro-6000
 ## 依赖约束
 
 本包**不得**依赖任何 `services/*` 模块。依赖方向是单向的：services → schemas。
+
+## run.schema.json
+
+`ResearchRun` 的契约，落地为每个研究目录下的 `run.json`。回答「这次研究是**怎么跑出来的**」：
+
+- `stop_reason`（**R1**）：`answered` / `budget_exhausted` / `gap_remaining` / `error`；
+  后两者必须同时给 `stop_note` 说明未解决部分。
+- `trace`：结构化事件序列，`seq` 唯一递增（**R3**），`kind` 枚举见 schema。
+  事件可携带 `source_ids` / `evidence_ids` / `claim_ids`，**必须指向真实存在的记录**。
+- `budget`：`limits` 与 `used` 分离，便于事后审计是否超支。
+- `eval`：本次运行的评测结果；`citation_support_rate` 需人工抽样，未抽样时留空而非填 1.0。

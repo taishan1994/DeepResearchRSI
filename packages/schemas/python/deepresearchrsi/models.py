@@ -15,6 +15,20 @@ ClaimType = Literal["spec", "measurement", "price", "attribution", "prediction"]
 Confidence = Literal["high", "medium", "low", "disputed"]
 Stance = Literal["supports", "refutes", "context"]
 QuestionStatus = Literal["answered", "partial", "unanswered"]
+StopReason = Literal["answered", "budget_exhausted", "gap_remaining", "error"]
+TraceKind = Literal[
+    "search",
+    "fetch",
+    "fetch_failed",
+    "extract",
+    "claim_added",
+    "claim_revised",
+    "claim_dropped",
+    "gap_declared",
+    "section_written",
+    "validate",
+]
+TraceOutcome = Literal["ok", "partial", "blocked", "superseded"]
 
 
 @dataclass(slots=True)
@@ -104,3 +118,90 @@ class Brief:
         for sq in self.subquestions:
             counts[sq.status] += 1
         return counts
+
+
+@dataclass(slots=True)
+class TraceEvent:
+    """一次可观察的动作及其后果。seq 必须在同一 run 内唯一且递增。"""
+
+    seq: int
+    kind: TraceKind
+    summary: str
+    target: Optional[str] = None
+    source_ids: list[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    claim_ids: list[str] = field(default_factory=list)
+    outcome: Optional[TraceOutcome] = None
+    note: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.seq < 1:
+            raise ValueError(f"trace seq must be >= 1: {self.seq}")
+        if not self.summary.strip():
+            raise ValueError(f"trace seq={self.seq}: summary must not be empty")
+        for sid in self.source_ids:
+            if not sid.startswith("src-"):
+                raise ValueError(f"trace seq={self.seq}: bad source_id {sid!r}")
+        for eid in self.evidence_ids:
+            if not eid.startswith("e-"):
+                raise ValueError(f"trace seq={self.seq}: bad evidence_id {eid!r}")
+        for cid in self.claim_ids:
+            if not cid.startswith("c-"):
+                raise ValueError(f"trace seq={self.seq}: bad claim_id {cid!r}")
+
+
+@dataclass(slots=True)
+class Budget:
+    limits: dict[str, int] = field(default_factory=dict)
+    used: dict[str, float] = field(default_factory=dict)
+
+    def exhausted(self) -> bool:
+        """任一受限维度达到上限即视为耗尽。未设上限的维度不参与判断。"""
+        for key, limit in self.limits.items():
+            if key == "max_tool_calls" and self.used.get("tool_calls", 0) >= limit:
+                return True
+            if key == "max_minutes" and self.used.get("minutes", 0) >= limit:
+                return True
+        return False
+
+
+@dataclass(slots=True)
+class ResearchRun:
+    """一次研究运行的完整记录（阶段 1 验收门槛「轨迹可看」的载体）。
+
+    不变量 R1：stop_reason 必填；budget_exhausted / gap_remaining 时
+    stop_note 必须说明未解决的部分，不得静默截断。
+    """
+
+    run_id: str
+    as_of: date
+    stop_reason: StopReason
+    budget: Budget
+    trace: list[TraceEvent]
+    slug: str = ""
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    plan_version: int = 1
+    report_version: int = 1
+    stop_note: Optional[str] = None
+    eval: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.run_id.startswith("run-"):
+            raise ValueError(f"run_id must start with 'run-': {self.run_id}")
+        if self.stop_reason in ("budget_exhausted", "gap_remaining") and not self.stop_note:
+            raise ValueError(
+                f"{self.run_id}: stop_reason={self.stop_reason} requires stop_note "
+                "listing what remains unresolved (invariant R1)"
+            )
+        seqs = [e.seq for e in self.trace]
+        if seqs != sorted(seqs):
+            raise ValueError(f"{self.run_id}: trace seq must be ascending")
+        if len(seqs) != len(set(seqs)):
+            raise ValueError(f"{self.run_id}: trace seq must be unique")
+
+    def counts_by_kind(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for e in self.trace:
+            out[e.kind] = out.get(e.kind, 0) + 1
+        return out

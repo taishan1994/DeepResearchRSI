@@ -89,8 +89,14 @@ ResearchRun ──> Brief / Plan / Trace / Report ────────┘
 | `report_version` | 输出版本 |
 | `eval` | 本次运行的评测结果 |
 | `stop_reason` | `answered` / `budget_exhausted` / `gap_remaining` / `error` |
+| `stop_note` | `stop_reason` 的自然语言说明；`budget_exhausted` / `gap_remaining` 时为必填 |
 
 **不变量 R1**：`stop_reason` 必填。预算耗尽时必须返回"已完成 + 未解决问题"，不得静默截断。
+**落地形式**：每个研究目录下的 `run.json`（schema 见 `packages/schemas/json/run.schema.json`）。
+`trace` 每条事件至少含 `seq` / `kind` / `summary`，可选携带 `source_ids` / `evidence_ids` / `claim_ids`
+反向链接到留档；`kind` 枚举见 schema。**trace 的引用必须闭合**——指向不存在的来源或证据视为校验失败。
+
+**不变量 R3**：`trace` 的 `seq` 在单次运行内唯一且递增。
 **不变量 R2**：每个子问题必须有状态：`answered` / `partial` / `unanswered`。
 
 ## Brief — 研究简报

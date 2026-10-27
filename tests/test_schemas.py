@@ -338,6 +338,65 @@ def test_brief_matches_report_appendix() -> None:
     assert not mismatch, f"状态不一致 (id, brief, appendix): {mismatch[:8]}"
 
 
+def test_run_requires_stop_note() -> None:
+    """不变量 R1：stop_reason 为 budget_exhausted / gap_remaining 时必须给 stop_note。"""
+    import json as _json
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "case"
+        root.mkdir()
+        (root / "brief.yaml").write_text("topic: t\n", encoding="utf-8")
+
+        def _write_run(reason: str, note) -> None:
+            doc = {
+                "run_id": "run-x",
+                "as_of": "2026-10-27",
+                "stop_reason": reason,
+                "budget": {"limits": {"max_tool_calls": 5}},
+                "trace": [{"seq": 1, "kind": "search", "summary": "s"}],
+            }
+            if note is not None:
+                doc["stop_note"] = note
+            (root / "run.json").write_text(
+                _json.dumps(doc, ensure_ascii=False), encoding="utf-8"
+            )
+
+        _write_run("gap_remaining", None)
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "stop_note" in str(exc), str(exc)
+        else:
+            raise AssertionError("缺失 stop_note 未被拒绝（R1）")
+
+        _write_run("answered", None)
+        validate_research_dir(root)  # answered 不要求 stop_note
+
+
+def test_run_rejects_dangling_trace_refs() -> None:
+    """run.json 的 trace 不得引用不存在的 source / evidence / claim。"""
+    import json as _json
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "case"
+        root.mkdir()
+        (root / "brief.yaml").write_text("topic: t\n", encoding="utf-8")
+        doc = {
+            "run_id": "run-x",
+            "as_of": "2026-10-27",
+            "stop_reason": "answered",
+            "budget": {"limits": {}},
+            "trace": [
+                {"seq": 1, "kind": "fetch", "summary": "s", "source_ids": ["src-nope"]}
+            ],
+        }
+        (root / "run.json").write_text(_json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "src-nope" in str(exc), str(exc)
+        else:
+            raise AssertionError("悬空 source 引用未被拒绝")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:

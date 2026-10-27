@@ -83,6 +83,7 @@ research/<slug>/
 ├── evidence.csv      证据表（ID、所属文档、来源、原文片段、定位、立场）
 ├── claims.csv        主张表（ID、主张、类型、置信度、支持/反驳证据）
 ├── REPORT.md         最终报告
+├── run.json          运行轨迹（查询、抓取成败、预算消耗、stop_reason）
 └── notes/            过程笔记、原始摘录（非交付物，见其 README）
 ```
 
@@ -96,6 +97,7 @@ research/<slug>/
 | `evidence.csv` | 原文**到底说了什么** | `quote` 必须是原文子串（E1） |
 | `claims.csv` | 我们**据此断定什么** | `evidence_ids`、`prediction` 需 `derivation`（C2） |
 | `REPORT.md` | 怎样**讲给读者** | `[c-*]` / `[e-*]` 引用不得悬空 |
+| `run.json` | 这次**怎么跑出来的** | `stop_reason` 必填（R1）、`trace` 引用闭合 |
 
 `research/_template/` 是人工阅读用的说明页；**实际脚手架以 `new_research.py` 为准**，二者不要各自维护一份骨架。
 

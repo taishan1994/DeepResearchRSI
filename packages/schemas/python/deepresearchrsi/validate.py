@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 import sys
 from datetime import date, datetime
@@ -23,6 +24,12 @@ SRC_REF_RE = re.compile(r"\[(src-[a-z0-9-]+)\]")
 EVIDENCE_REF_RE = re.compile(r"\[(e-[a-z0-9-]+)\]")
 
 # 与 packages/schemas/json/source.schema.json 的枚举保持一致
+STOP_REASONS = {"answered", "budget_exhausted", "gap_remaining", "error"}
+TRACE_KINDS = {
+    "search", "fetch", "fetch_failed", "extract", "claim_added",
+    "claim_revised", "claim_dropped", "gap_declared", "section_written", "validate",
+}
+
 SOURCE_TYPES = {
     "official",
     "vendor",
@@ -60,6 +67,7 @@ def _parse_date(value: str, *, where: str) -> date | None:
 
 def validate_research_dir(path: str | Path) -> dict[str, int]:
     """校验一个 research/<slug>/ 目录，返回统计信息；失败时抛 ValidationError。"""
+    stats_extra: dict[str, int] = {}
     root = Path(path)
     if not root.is_dir():
         raise ValidationError(f"不是目录: {root}")
@@ -147,16 +155,76 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
             if eid not in evidence_ids:
                 errors.append(f"REPORT.md: 引用了不存在的 {eid}")
 
+    # run.json：可选的运行轨迹（阶段 1 验收门槛「轨迹可看」）
+    run_path = root / "run.json"
+    if run_path.exists():
+        try:
+            run = json.loads(run_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            errors.append(f"run.json: 无法解析 JSON（{exc}）")
+            run = None
+        if run is not None:
+            rid = (run.get("run_id") or "").strip()
+            if not rid.startswith("run-"):
+                errors.append(f"run.json: 非法 run_id {rid!r}")
+            if not (run.get("as_of") or "").strip():
+                errors.append("run.json: as_of 为空")
+            _parse_date(run.get("as_of", ""), where="run.json.as_of")
+            reason = (run.get("stop_reason") or "").strip()
+            if reason not in STOP_REASONS:
+                errors.append(
+                    f"run.json: 非法 stop_reason {reason!r}（不变量 R1，允许 {sorted(STOP_REASONS)}）"
+                )
+            if reason in ("budget_exhausted", "gap_remaining") and not (run.get("stop_note") or "").strip():
+                errors.append(
+                    f"run.json: stop_reason={reason} 时 stop_note 必须说明未解决部分（不变量 R1）"
+                )
+            trace = run.get("trace") or []
+            if not isinstance(trace, list) or not trace:
+                errors.append("run.json: trace 不得为空")
+                trace = []
+            seqs = []
+            for ev in trace:
+                if not isinstance(ev, dict):
+                    errors.append("run.json: trace 元素必须是对象")
+                    continue
+                s = ev.get("seq")
+                if not isinstance(s, int) or s < 1:
+                    errors.append(f"run.json: 非法 trace seq {s!r}")
+                    continue
+                seqs.append(s)
+                kind = (ev.get("kind") or "").strip()
+                if kind not in TRACE_KINDS:
+                    errors.append(f"run.json[trace seq={s}]: 非法 kind {kind!r}")
+                if not (ev.get("summary") or "").strip():
+                    errors.append(f"run.json[trace seq={s}]: summary 为空")
+                for sid in ev.get("source_ids") or []:
+                    if sid not in source_ids:
+                        errors.append(f"run.json[trace seq={s}]: 引用了不存在的 source {sid}")
+                for eid in ev.get("evidence_ids") or []:
+                    if eid not in evidence_ids:
+                        errors.append(f"run.json[trace seq={s}]: 引用了不存在的 evidence {eid}")
+                for cid in ev.get("claim_ids") or []:
+                    if cid not in claim_ids:
+                        errors.append(f"run.json[trace seq={s}]: 引用了不存在的 claim {cid}")
+            if seqs != sorted(seqs):
+                errors.append("run.json: trace seq 必须递增")
+            if len(seqs) != len(set(seqs)):
+                errors.append("run.json: trace seq 必须唯一")
+            stats_extra["trace_events"] = len(seqs)
+
     if errors:
         raise ValidationError("\n".join(f"  - {e}" for e in errors))
 
-    return {
+    stats = {
         "sources": len(sources),
         "evidence": len(evidence),
         "claims": len(claims),
         "claims_high": sum(1 for r in claims if r.get("confidence") == "high"),
         "claims_disputed": sum(1 for r in claims if r.get("confidence") == "disputed"),
     }
+    stats.update(stats_extra)
+    return stats
 
 
 def main(argv: list[str]) -> int:
