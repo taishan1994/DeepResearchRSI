@@ -2301,6 +2301,41 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 **加剧因素** [c-warranty-no-box]：该卡以**无任何标识的牛皮纸盒**发货（商品页标注 OEM），用户装机时丢弃了包装，只剩卡本体和一个标签 [e-war-box]。**这直接摧毁了追溯能力**。
 
+**另有一份更完整的一手记录，把「为什么推诿」的机制讲清楚了** [c-support-tiers]。
+
+**根因是支持层级的正式排除**——NVIDIA 企业支持的书面复函原文：
+
+> "**NVIDIA Enterprise Support addresses DGX and Tesla M and above licensed products only.**"
+
+**RTX PRO 6000 不在企业支持覆盖范围内。** 而且企业支持页的**访客提交入口自 2025-09 起已废弃** [e-sup-deprecated]。
+
+**于是形成一条可复现的踢皮球链条** [c-support-runaround]：
+
+| 步骤 | 结果 |
+|---|---|
+| 1. 邮件 `enterprisesupport@nvidia.com` | ❌ "仅覆盖 DGX 与 Tesla M 及以上" |
+| 2. 企业支持页访客提交 | ❌ "该入口 2025-09 已废弃" |
+| 3. 在线聊天（人工确认是 FE） | → 指向开发者论坛「Community Information」区 |
+| 4. 论坛该区 | ❌ NVIDIA 员工回："**指错了，此处不提供硬件支持**" → 建议去 **GeForce 论坛** |
+
+**用户自述这是第四次尝试** [e-sup-attempts]，其原话相当尖锐：
+
+> "This **$9,000 USD 'Pro' card** purchased new through a tier 1 enterprise reseller is **supported in the same manner as a 5060**."
+
+**VBIOS 政策也在同一线程里被官方确认** [c-vbios-no-public]：
+
+> "In general the VBIOS updates are **handled through resellers directly, even with Founder's Edition GPUs**. We **don't provide a publicly available VBIOS/Flash utility** download for GPUs in this range."
+
+**这解释了 §10.4.1 的渠道困境不是沟通问题，而是政策**：连 Founders Edition 也走经销商。
+
+**唯一有效的自救方式** [c-support-bugreport]：
+
+```bash
+sudo nvidia-bug-report.sh
+```
+
+日志里含 **SKU 与序列号**，NVIDIA 员工据此**代用户向经销商跟进** [e-sup-bugreport]。**这是本报告能找到的唯一一条不完全依赖经销商的路径**——所以保留日志不是可选项。
+
 **采购含义**：
 - 购买前**书面确认保修主体**（是 NVIDIA、AIC（如 PNY/Leadtek）、还是经销商），不要依赖商品页描述
 - **保留原包装与所有标签**，即使标注 OEM 散装
@@ -2571,7 +2606,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **708 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **716 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2680,3 +2715,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 114. [NVIDIA AI Blueprints：RAG 的 MIG 切片 Helm 配置（RTX PRO 6000 SE 4 卡混合布局）](https://github.com/NVIDIA-AI-Blueprints/rag/blob/main/deploy/helm/mig-slicing/values-mig-rtx6000.yaml) — [src-nv-rag-mig]
 115. [LLM Energy Benchmark：RTX PRO 6000 Blackwell FP16 端到端能效基线](https://hongping-zh.github.io/updates/2026-06-08-rtx-pro6000-fp16-e2e/)（2026-06-08） — [src-energy-e2e]
 116. [LLM Energy Benchmark：RTX PRO 6000 Blackwell 分阶段能耗剖析与后端兼容性](https://hongping-zh.github.io/updates/2026-06-03-rtx-pro6000-blackwell-phase/)（2026-06-03） — [src-energy-phase]
+117. [NVIDIA Developer Forums：Support for a RTX Pro 6000 Blackwell Workstation Edition（支持层级排除实录）](https://forums.developer.nvidia.com/t/support-for-a-rtx-pro-6000-blackwell-workstation-edition/366144)（2026-04-09） — [src-nvf-support]
