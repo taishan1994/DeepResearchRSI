@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：186 ｜ **证据数**：1512 ｜ **主张数**：1014（高置信 771，争议 1）
+> **来源数**：186 ｜ **证据数**：1522 ｜ **主张数**：1024（高置信 781，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -3593,6 +3593,127 @@ llama-bench   -m /vol/release/compact/BTL-3-Compact-AVQ2.gguf   -ngl 99 -p 512 -
 **StorageReview 记录首发价 8,500 美元** [c-sr-price-8500]，而 Drop & Render 记录街价 **17,999 美元**——**相差一倍以上**。
 
 > **方向与「首发价之后应降价」相反**，所以更可能是**两个来源口径不同**（首发建议价 vs 稀缺期零售价），而非价格真在上涨。标 `medium`，本报告无法判断哪个对应真实成交价。
+
+### 5.4 与 DGX Spark 的对照：同核心，慢六倍
+
+**本报告此前从未提到 DGX Spark（GB10）。** 而它是这张卡最容易被混淆的对照物——**因为两者共享同一批核心。**
+
+#### 一、同核心不等于同能力
+
+**架构事实** [c-spark-same-cores]：
+
+> **RTX 6000 PRO 与 DGX Spark 共享同一批 SM120 核心。**
+>
+> **该架构的明确限制**：**无 TMEM、无 tcgen05.mma、只有 99 KB smem**（属 SM90 之前的特性集）。
+
+> ⚠️ **所以「同核心」不等于「同能力」**——**而本报告 §4.8.6 的单卡 753B 能力与 Spark 的差距极大，差的不是算力单元，是显存与功耗。**
+
+#### 二、最干净的同架构跨产品对照
+
+**一次直接测量** [c-spark-6x-slower]：
+
+| 配置 | 相对速度 |
+|---|---|
+| **2 × DGX Spark，TP2** | **1×** |
+| **2 × RTX PRO 6000，TP2** | **约 6×** |
+
+> **两者共享同一批 SM120 核心，因此 6 倍差距不来自架构，来自显存带宽与每卡功耗。**
+
+#### 三、六倍差距的一半来源：功耗预算
+
+**两者的功耗墙不同档** [c-spark-power]：
+
+| 状态 | DGX Spark |
+|---|---|
+| 两台空闲（加载模型后） | **约 100 W** |
+| 一般推理 | **约 300 W** |
+| **满载** | **约 400 W** |
+| 两节点 sparkring TP2 + vLLM 空闲 | 116 W |
+
+> **即单台 Spark 的功耗墙约 400 W 量级，远低于这卡的 600 W。**
+>
+> **加上显存远小，六倍差距有一半可归因于功耗预算。**
+
+#### 四、绝对性能量级
+
+**同一批卡上的不同模型** [c-spark-perf-scale]：
+
+| 配置 | 解码 |
+|---|---:|
+| DSv4 @ 128–200k 上下文 | **32 tok/s**（预填充 700–800） |
+| 单张 Spark，Qwen3.5-122B-A10B + DFlash | **80 tok/s** |
+| GLM-5.2 单张 | **20–28 tok/s** |
+| **GLM-5.2，4 张集群** | **27 tok/s** |
+
+> ⚠️ **把 4 张 Spark 集群的 27 tok/s 与 §11.9 的 16 卡 PRO 6000（105–116 tok/s）对照，规模效率差距明显。**
+
+#### 五、⚠️ 预填充在同一硬件上差 3–4 倍
+
+**高度依赖分支** [c-spark-prefill-range]：
+
+| 配置 | 预填充 |
+|---|---:|
+| 128k 上下文基线 | **1300–1400 tok/s** |
+| 换 Lucifer 分支 | **1600 tok/s** |
+| 2 张用 unholy 分支 | **1900 tok/s** |
+| **GLM-5.2 在 Spark 集群** | **约 500 tok/s** |
+
+> **同一硬件上预填充差 3–4 倍**，**社区认为软件优化还有一倍空间。**
+>
+> **这与 §10 反复出现的「软件栈决定实际性能」一致。**
+
+#### ⚠️ 六、一个被证伪的缺陷指控
+
+**退货决策可能基于错误诊断** [c-spark-nvfp4-gap]：
+
+> **有用户因「NVFP4 能力缺口」退货 4 台 DGX Spark，转投双 RTX 6K。**
+>
+> **但随后一篇声称 Spark 缺 NVFP4 的博客被证伪**——**`cvt.rn.satfinite.e2m1x2.f32` 在 sm121a 上确实存在，真正的缺口是代码路径未启用。**
+
+> ⚠️ **这是本报告「指令存在不等于路径启用」主题的又一实例。**
+
+#### 七、一个常被忽略的短板在 CPU
+
+**NodeJS 单线程实测** [c-spark-cpu-weak]：
+
+| 平台 | 分数 |
+|---|---:|
+| **DGX Spark** | **约 75 K** |
+| 上代 EPYC / Strix Halo | **约 108 K** |
+| 相对定位 | **介于 Zen3 与 Zen4，比 Zen5 慢约 30%** |
+
+> ⚠️ **对需要 CPU 卸载的 MoE 场景（如 §4.8.6 的单卡 753B），这是实质约束。**
+
+#### ⚠️ 八、下一代 Spark 会失去集群优势
+
+**一个向后延续性问题** [c-spark-cx7-loss]：
+
+> **下一代消费级 RTX Spark 取消了 ConnectX-7，即移除 InfiniBand，消除了它主要的集群优势。**
+
+> **因此以集群为目的买 Spark，会在下一代失去该能力。**
+
+#### 九、价格锚点
+
+**两者不是同一档** [c-spark-price-anchor]：
+
+| 项 | 价格 |
+|---|---:|
+| DGX Spark 4 TB（Microcenter 促销） | **$4,000** |
+| 8 × H200 NVL（同期询价） | **约 $230,000** |
+
+> **Spark 的定位是「低绝对成本、低单卡能力」。**
+>
+> ⚠️ **与本报告 §12 并列时须注意：$4,000 买的是单台低能力节点，不是这张卡的替代品。**
+
+#### 十、但软件栈正在收敛
+
+**一个正面结论** [c-spark-shared-backend]：
+
+> **vLLM PR #40082 合并后，FlashInfer 的 b12x 后端同时支持 SM120 与 SM121**（即 RTX Pro 6000 Blackwell 与 DGX Spark），**进入上游 vLLM。**
+
+> **因此两个平台的软件栈正在收敛，差异会更多来自硬件而非移植缺失。**
+>
+> **这也与「六倍差距来自显存与功耗」互为印证：软件拉平后剩下的就是硬件差。**
 
 ## 6. 功耗与能效：600W 是否值得
 
@@ -8293,7 +8414,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=186, evidence=1512, claims=1014, claims_high=771, claims_disputed=1, trace_events=373, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=186, evidence=1522, claims=1024, claims_high=781, claims_disputed=1, trace_events=373, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
