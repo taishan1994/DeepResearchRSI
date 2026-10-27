@@ -1603,6 +1603,64 @@ GPU3: 2790 MHz, 58°C, 599.98 W, sw_thermal: Not Active, sw_power_cap: Not Activ
 
 > **与 §10.5 的关系**：两者可能是同一硬件问题的不同表现（退化 → 最终复位），也可能是两个独立缺陷。当前证据**不足以判定**，本报告不做合并也不做割裂。
 
+### 10.8 静默计算损坏：本报告发现的最危险故障模式
+
+前面几节讲的故障都会**报错**——复位有 Xid、退化有频率读数、熔毁有痕迹。**这一节讲的故障什么都不报，只是让计算结果悄悄变错** [c-silent-ram]。
+
+**现象**：固定输入的矩阵乘法，**间歇性返回不同的有限结果**，而 **无 Xid、无 TDR、无 WHEA、无 ECC 报错、无 CUDA API 错误** [e-nvf-s-valid]。
+
+**关键对照实验**（同一张卡、同一驱动 596.86、同一输入生成方法）：
+
+| 测试 | 环境 | 结果 |
+|---|---|---|
+| PyTorch BF16 8192² | CUDA **13** | 274,375 次一致，**第 274,400 次失配**，max abs diff **1.71** |
+| PyTorch FP32 8192² | CUDA **13** | 11,180 次一致，**第 11,190 次失配**，diff **0.94** |
+| CuPy FP32 8192² | CUDA **13** | 12,900 次一致，**第 12,910 次失配**，diff **1.74** |
+| CuPy FP32 8192² | CUDA **12.9** | **35,520 次全部 diff = 0.0** ✅ |
+
+**注意这个误导性**：作者最初合理地怀疑是 **CUDA 13 / cuBLAS 13 的 bug**——因为 CUDA 12.9 全过。他甚至惊动了 NVIDIA 的 cuBLAS 产品经理，但**NVIDIA 内部无法复现** [e-nvf-s-root]。
+
+**真正的根因是显存故障**。而它躲过了所有常规检查 [c-silent-mask]：
+
+- 输出**全部是有限值**（不是 NaN/Inf，只是错了）
+- **无 Xid、无 TDR、无 WHEA、无 PCIe 错误、无热降频计数**
+- **32GiB 显存图案测试（0x00/0xFF/0xAA/0x55）跑了 1,252 轮约 40TiB 流量，零错误**
+
+> **常规显存测试查不出它。** 这是它最可怕的地方。
+
+**怎么确诊的** [c-silent-ecc]：**开启 ECC**。ECC 关闭时坏显存只是静默翻位；开启后驱动立刻告诉你哪里坏了：
+
+```bash
+nvidia-smi -i <gpu> -e 1        # 管理员权限，然后正常重启
+nvidia-smi -i <gpu> -q -d ECC,ROW_REMAPPER
+```
+
+数分钟内即报 `CUDA error: uncorrectable ECC error encountered`；事件日志给出物理地址与失败分区——**一小时内四个不同行在 FBPA 6 子分区 2 失效**，每次重启行重映射换一个备用行，然后新行接着坏。**片上 SRAM 计数全为 0：核心是好的，是一颗 GDDR7 坏了。**
+
+**几个关键特征** [c-silent-progress][c-silent-power]：
+
+| 特征 | 数据 |
+|---|---|
+| **随时间恶化** | 失败率从 **1–2%** 的步骤升到 **10–20%**，多任务共享卡时更严重 |
+| **与功耗强相关** | 450W 下 **80/80** 逐位一致；**600W 下只有 27/80**，部分输出为垃圾 |
+| **降功耗只减缓不消除** | 600/500/450W 都试过 |
+| **排除软件** | 三个驱动版本（597.06/616.92/596.36）DDU 重装均无效 |
+| **排除供电** | HWiNFO：600W 满载 10 分钟，12VHPWR 维持 11.76–11.84V，零失配 |
+| **排除温度** | 显存 58°C 时仍出错 |
+
+**可复用的自查协议** [c-silent-protocol]：
+
+1. 开启 ECC 并重启
+2. 跑你的**正常负载**（不是显存测试）
+3. `nvidia-smi -q -d ECC,ROW_REMAPPER` 查计数
+4. **任何非零的 DRAM Uncorrectable 或行重映射 = 硬件显存故障**
+5. 查事件日志的 `nvlddmkm` Event ID 14
+6. **RMA 前不要清零 ECC 计数**——它们就是证据
+
+> **给训练的实操建议** [e-nvf-s-take]：如果你的 NaN 是**间歇性的、同一输入不复现、且不跟随驱动或代码变更**，**先怀疑硬件，把 ECC 打开**。ECC 把静默损坏变成带物理地址的精确报错。
+>
+> NaN 与 loss 尖峰防护能保住训练（跳过坏步骤），但**抓不到小幅静默错误**，只能算权宜之计。
+
 ---
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
@@ -1841,6 +1899,16 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 **次生伤害值得警惕** [c-counterfeit-victim]：该用户在卡已被上游调包的情况下，反被零售商指控**退货欺诈**并永久拒绝交易。**举证责任落在买方**——这再次强化了留证的必要性。
 
+**第二份独立报告证实这不是单一商家个案** [c-fake-second]：另一位买家从 **Provantage** 购入（此前案例是 Newegg），同样是约 $8,000、同样宣称全新，拆开后是**同一块 PG144 板**，同样带测试针、残留、手工硅脂 [e-od-pcb][e-od-hand][e-od-pins]。
+
+**这份报告补充了三个此前没有的细节：**
+
+1. **DOA 是常见表现** [c-fake-genuine-doamar]：该卡**到货即死**——"no fans, no lights, nothing" [e-od-doa]。而包装线索**在通电前就已存在**：防静电袋封条已被打开、缺一件配件 [e-od-open]。**买家当时没有重视。**
+2. **指控模式重复** [c-fake-victim]：同样是**买家反被指控退货欺诈**并永久停止供货 [e-od-fraud]——两个渠道、两个买家、同一种反噬。
+3. **验收清单可以更具体** [c-fake-advice]：**开箱第一件事查封条与配件完整性**；记录序列号要覆盖**外壳/包装/PCB 三处**并带时间戳；**任何退货渠道库存（含标注 sealed）在实测前都视为未验证** [e-od-advice]。
+
+> **两份独立报告 + 两个不同渠道 = 这是市场层面的问题，不是个别事件。** 采购高价 Blackwell 工作站卡时，**开箱验货流程的价值不低于性能选型**。
+
 > 这两条合起来意味着：**在高价且稀缺的时期，渠道风险可能超过产品风险**。
 
 ---
@@ -2033,6 +2101,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q42 | 多卡推理到底有没有收益？ | ⚠️ | §4.10.1 官方说无、实测 3.36×；每卡效率给出裁决依据 |
 | q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
 | q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
+| q45 | 如何检测静默计算损坏？ | ✅ | §10.8 ECC + 行重映射自查协议 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2045,12 +2114,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q42 | 多卡推理到底有没有收益？ | ⚠️ | §4.10.1 官方说无、实测 3.36×；每卡效率给出裁决依据 |
 | q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
 | q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
+| q45 | 如何检测静默计算损坏？ | ✅ | §10.8 ECC + 行重映射自查协议 |
 
-**完成度：43/44 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：44/45 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **554 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **576 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2138,3 +2208,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 93. [NVIDIA：RTX PRO AI Factory——软件栈](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/software.html)（2026-05-18） — [src-nv-ra-sw]
 94. [arXiv 2609.29707：能耗去哪了——Blackwell GPU 上 LLM 智能体推理剖析](https://arxiv.org/abs/2609.29707)（2026-08-31） — [src-arx-energy]
 95. [arXiv 2606.23969：串行化之桥——Blackwell 机密计算下的 LLM 服务性能](https://arxiv.org/abs/2606.23969)（2026-06-22，v2 2026-07-09） — [src-arx-cc]
+96. [NVIDIA Developer Forums：RTX PRO 6000 Blackwell 上的静默 CUDA 计算损坏（最终确认为显存故障）](https://forums.developer.nvidia.com/t/silent-cuda-compute-corruption-on-rtx-pro-6000-blackwell/381759)（2026-08-29 起，2026-10-16 结论） — [src-nvf-silent]
+97. [Joshua Odmark：我从 Provantage 买的 RTX Pro 6000 里面到底是什么](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-odmark]
