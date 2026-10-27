@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：222 ｜ **证据数**：1765 ｜ **主张数**：1248（高置信 958，争议 4）
+> **来源数**：222 ｜ **证据数**：1772 ｜ **主张数**：1254（高置信 964，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -8404,6 +8404,94 @@ GPU3: 2790 MHz, 58°C, 599.98 W, sw_thermal: Not Active, sw_power_cap: Not Activ
 | 部署监控告警 | 跟踪 `clocks_event_reasons.sw_power_cap` 与频率/功耗比 |
 | 关注空闲功耗 | 有报告空闲 200–300W 偏高 [c-idle-power-high]，可作为早期信号 |
 | 多卡训练加看门狗 | 检测单卡吞吐偏离集群中位数 |
+#### 10.5.2 官方 RMA 判据：什么时候可以不再忍，直接换卡
+
+**上一节列了运维建议，但没回答一个更实际的问题：退化到哪一步，厂商认账？本轮找到了官方数字** [c-rma-three-thresholds]。
+
+#### ⭐ 一、三个会触发 RMA 标志的门槛
+
+**任何一个成立即可申请** [c-rma-three-thresholds]：
+
+| # | 触发条件 |
+|---|---|
+| ① | 某个 bank **已有八行**不可纠正错误被重映射后，**再次**尝试重映射 |
+| ② | 对**已重映射过的行**再次重映射（同一 bank 总次数**可少于八次**） |
+| ③ | 累计发生 **512 次**不可纠正错误重映射之后 |
+
+> ⭐ **该标志可通过 NVML / `nvidia-smi`（带内）或 SMBPBI（带外）读取。**
+
+> ⚠️ **条件②是关键：它意味着不必等到八行——同一行被重映射两次就够了。**
+
+#### ⭐ 二、Blackwell 多了一道修复步骤
+
+**一个此前只归档了一句的流程** [c-rma-blackwell-repair]：
+
+| 阶段 | 行为 |
+|---|---|
+| 第 1、2 次重映射 | 常规重映射 |
+| **第 3 次**（同一 bank） | ⭐ **触发 HBM 通道修复**（前提：有可用备用通道） |
+| 修复成功 | **硬件恢复可用** |
+| 修复失败 | **继续重映射，直到 Row-Remap Failure 标志置位** |
+
+> ⭐ **即 Blackwell 比前代多了一次「换备用通道」的机会——这是架构层面的容错增量。**
+
+#### ⚠️ 三、L2 的门槛比 DRAM 严格得多
+
+**一个容易被忽略的独立判据** [c-rma-l2-threshold]：
+
+| 存储类型 | 触发条件 |
+|---|---|
+| **奇偶校验保护 SRAM** | 同一地址 bank 内 **> 4 次** UCE Unique Count |
+| **SECDED ECC 保护 SRAM** | 同一地址 bank 内 **> 2 次** UCE Unique Count |
+
+> ⚠️ **个位数对 512——L2 的容错余量远小于 DRAM。**
+>
+> **但两者计数单位不同（UCE 唯一计数对 重映射次数），不可直接比倍数。**
+
+#### ⚠️⚠️ 四、一个直接影响 §10.8 的适用范围缺口
+
+**这是本轮最需要警示的一处** [c-containment-datacenter-only]。
+
+**官方支持矩阵（按架构列）** [c-reliability-feature-matrix]：
+
+| 能力 | GA100 | GA10x | Ada AD10x | GH100 | GB10x |
+|---|:-:|:-:|:-:|:-:|:-:|
+| **Error Containment** | ✅ | ❌ | ❌ | ✅ | ✅ |
+| Row remapping | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Dynamic Page Offlining | ✅ | ❌ | ❌ | ✅ | ✅ |
+| RAS Repair – GPU Memory | ❌ | ❌ | ❌ | ❌ | ⚠️ **X（不保证所有 Blackwell）** |
+
+**而错误隔离的官方表述明确带范围限定**：
+
+> 原文：**"On NVIDIA **data center-class** GPUs starting with Ampere architecture the impact will be limited to the applications that encounter the error."**
+
+⚠️ **即「不可纠正 ECC 错误只影响出错的那个应用、其它工作负载继续运行」这一保护，官方只承诺给数据中心级 GPU。**
+
+| 事实 | 状态 |
+|---|---|
+| RTX PRO 6000 是 GB202（工作站 Blackwell） | ✅ **确定** |
+| 它在 GA100 / GH100 之列 | ❌ **不在** |
+| 它属于 GB10x 的受支持子集 | ❌ **无法确认** |
+| 官方承诺它有错误隔离 | ⚠️ **没有** |
+
+> ⚠️ **§10.8 讨论静默计算损坏时，默认假设了这层保护存在。现在必须修正这个默认。**
+>
+> ⚠️ **但措辞要准确：这不是「这张卡没有错误隔离」，而是「官方文档没有承诺它有」。**
+>
+> **本报告只能记录「未被承诺」，不能断言「不具备」。**
+
+#### ⚠️ 五、即使有隔离，也不彻底
+
+**官方自己的免责声明** [c-containment-rare-uncontained]：
+
+> **「虽然最常发生的几类不可纠正错误会被隔离，但仍存在罕见情况下的不可纠正错误未被隔离，并可能影响 GPU 上正在处理的所有工作负载。」**
+
+> ⚠️ **这给 §10.8 加了一个双向上界：**
+>
+> **受支持的数据中心卡——有隔离但不彻底；**
+>
+> **这张工作站卡——连「有隔离」都未被官方承诺。**
+
 
 ### 10.6 供电接口熔毁：另一个与性能无关的硬件风险
 
@@ -12012,7 +12100,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=222, evidence=1765, claims=1248, claims_high=958, claims_disputed=4, trace_events=461, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=222, evidence=1772, claims=1254, claims_high=964, claims_disputed=4, trace_events=461, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
