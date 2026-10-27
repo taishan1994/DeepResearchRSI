@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：163 ｜ **证据数**：1272 ｜ **主张数**：830（高置信 625，争议 1）
+> **来源数**：165 ｜ **证据数**：1286 ｜ **主张数**：838（高置信 625，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -5663,9 +5663,73 @@ sudo nvidia-bug-report.sh
 | SM120 内核优化进展 | 当前软件劣势可能缩小 | vLLM/SGLang 为 SM120 专门优化 |
 | AWQ + MTP 长上下文问题修复 | 可能让 AWQ 重新可用于长上下文 | vLLM issue 关闭 |
 | Max-Q 实测吞吐公布 | 决定它是否真是 decode 最优 SKU | 第三方测试 |
-| Blackwell 后继架构 | 影响现在是否该等 | NVIDIA 路线图 |
+| Blackwell 后继架构（**已补，见 §16**） | 影响现在是否该等 | 已取得 Rubin/RTX 60 爆料材料，待 NVIDIA 官方确认 |
 
 ---
+
+### 14.1 后继架构：Rubin 与 RTX 60 的预期（本轮新补，但只能当爆料看）
+
+**这是本报告此前唯一的纯占位项**——§14 上表原本只有一行「Blackwell 后继架构｜影响现在是否该等｜NVIDIA 路线图」，**没有任何实质内容**。本轮补上了材料，但必须把它的等级说清楚 [c-roadmap-gap-closed]：**这是爆料级，不是官方级**。
+
+#### 路线与制程
+
+| 项 | 预期内容 |
+|---|---|
+| 架构 | **Rubin**（已在 AI GPU 首发，现走向 GeForce） |
+| 编号 | **GR20x**，旗舰为 **GR202** |
+| 节奏 | 维持约两年一代 |
+| 制程 | **TSMC 3nm FinFET 某变体**，**不采用 2nm 以下纳米片** |
+| 频率 | 2 GHz 高位 – 3 GHz 低位（**相对 Blackwell 只是小幅提升**） |
+
+> 报道特别指出：**不必是苹果、Intel 用的同一 N3 节点**——NVIDIA 可能像当年从 N5 派生 **NVIDIA 4N** 那样，要一个独占变体 [c-r60-node-n3]。
+
+#### 两个增幅差近 3 倍，方向很明确
+
+| 项目 | 相对 RTX 50 系列的预期提升 |
+|---|---|
+| **实时路径追踪**（第 5 代 RT 核心） | **+100%（翻倍）** |
+| **传统纯光栅** | **+30% ~ 35%**（SKU 对 SKU） |
+
+> **频率不涨，就得靠 IPC 和核心数** [c-r60-clock-modest]。
+>
+> **重点明确押在光追，而非光栅** [c-r60-pt-doubling]。
+
+**另一个旁证**：NVIDIA 早期 **DLSS 5** 演示**需要两张 RTX 5090**，而 Rubin 的目标是把它压进**单张** GPU、且不只高端 [e-r60-dlss5]。
+
+#### 那么「该不该等」？
+
+**把 Rubin 的预期代进本报告已有的实测，答案是：等一代改变不了渲染选型的结论** [c-r60-wait-verdict]。
+
+| 已有实测（§5.3） | 差距 |
+|---|---:|
+| PRO 6000 对 5090，Blender | **+6.3%** |
+| PRO 6000 对 5090，V-Ray | **−21.7%** |
+
+> **如果光栅只涨 30–35%，而这张卡在 Blender 上本只领先 6.3%、在 V-Ray 上还落后 21.7%，那么「谁更适合渲染」不会因为等一代而改变。**
+>
+> **真正可能被改变的是容量与显存代际**——Rubin 的数据中心版 CPX 已从 GDDR7 改回 **HBM4**（168 GB）。
+
+#### ⚠️ 证据等级
+
+**全部为 RedGaming Tech 爆料，TechPowerUp 以 `Rumor mill`、`reports`、`predicts` 措辞呈现，NVIDIA 未做任何确认。** 制程、频率、编号、增幅**均为未经证实的预期值**。
+
+> **本报告对这条材料的用法是：可以用来回答「等不等」，不能用来做采购时间表。**
+
+#### 顺带：RTX 5090 SE 让「5090 停产」的叙事更复杂了
+
+§12.5.1 原先只有两种信号（官方否认 vs 渠道行为）。**现在多了第三种** [c-5090se-implication]：
+
+| 项 | RTX 5090 SE |
+|---|---|
+| 硅片 | 同一 **GB202**，但只启用 **192 个 SM 中的 110 个** |
+| 核心 | **14,080 CUDA**、110 RT、440 Tensor、440 TMU |
+| 显存 | **384 bit**、仍 **32 GB**（24 Gb + 16 Gb 颗粒混用） |
+| 功耗 | **~500 W**（5090 为 575 W） |
+| 目标 MSRP | **$1,500**（街价会高得多） |
+
+> **关键一点**：报道明确说它**不是**出口管制特供（与 5090D、5090D V2 不同），而是**填补 5080 与 5090 之间空档的主线游戏产品** [c-5090se-implication]。
+>
+> **这说明 GB202 仍在被切分成新的消费级 SKU**——与「GB202 全部转给 RTX Pro」的传闻**方向相反**。
 
 ## 15. 参考文献
 
@@ -5843,6 +5907,8 @@ sudo nvidia-bug-report.sh
 ### 新闻报道（补充）
 
 - [Design & Reuse：Synopsys Deploys AI-Optimized NVIDIA RTX PRO Servers for Advanced Simulation Workloads](https://www.design-reuse.com/news/202529289-synopsys-deploys-ai-optimized-nvidia-rtx-pro-servers-for-advanced-simulation-workloads) — [src-designreuse-synopsys]
+- [TechPowerUp — NVIDIA Readies Rubin-based GeForce RTX 60-series with Massive RT Performance Gains](https://www.techpowerup.com/347848/nvidia-readies-rubin-based-geforce-rtx-60-series-with-massive-rt-performance-gains)（2026-03-30） — [src-tpu-rtx60-rubin]
+- [TechPowerUp — NVIDIA Readies GeForce RTX 5090 SE Graphics Card](https://www.techpowerup.com/350658/nvidia-readies-geforce-rtx-5090-se-graphics-card)（2026-07-10） — [src-tpu-5090-se]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6072,7 +6138,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=163, evidence=1272, claims=830, claims_high=625, claims_disputed=1, trace_events=334, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=165, evidence=1286, claims=838, claims_high=625, claims_disputed=1, trace_events=338, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
