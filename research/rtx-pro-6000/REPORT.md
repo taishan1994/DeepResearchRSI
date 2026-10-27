@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：40 ｜ **证据数**：238 ｜ **主张数**：158（高置信 102，争议 1）
+> **来源数**：42 ｜ **证据数**：245 ｜ **主张数**：163（高置信 106，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -622,12 +622,16 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 | 需要优化器卸载扩容量 | ❌ 用 GH200 | PCIe 卸载慢 12–25 倍 [c-ft-offload] |
 | 双精度 HPC / 分子动力学 | ❌ 用 H100/H200 | FP64 仅约 2 TFLOPS，比 H100 低 20× [c-fp64-vs-h100] |
 | 235B+ 模型单卡 | ❌ 不可能 | 需 H200 或多卡 [c-not-for-huge-models] |
+| **采购前想先验证** | ✅ **用云上 8 卡实例** | CoreWeave / AWS G7e / Akamai 均有 Server 版 [c-driver-cloud-available] |
 
-### 9.3 SKU 选择的三个反直觉提醒
+**最实用的一条建议**：不要仅凭本报告或任何第三方跑分下单。该卡的 Server 版**已在公有云提供 8 卡实例**（CoreWeave 分 High/Standard Memory 两档；AWS G7e、Akamai LKE 亦有）[c-driver-cloud-available]。用你的真实模型和真实并发跑一轮，比引用任何评测都可靠 [c-cloud-eval-advice]——尤其考虑到本报告已标注的 Blender 三方冲突与多套互不可比的口径。
+
+### 9.3 SKU 选择的四个反直觉提醒
 
 1. **Server 版不是"更强的 Workstation"**，也不是"更弱的"。它固件更保守：低功耗区更强（+38%），高功耗区受限；V-Ray 上第一，Blender 上垫底 [c-server-low-power-win][c-render-workload-dependent]。**必须按具体负载实测**。
 2. **Max-Q 显存时钟最高**（15,865 MHz，高于 WS 的 13,365）[c-vf-skup]。对显存带宽密集的 decode 负载，Max-Q **可能**优于 WS——但**该假设尚未被实测验证**，属待验证推断 [c-maxq-ws-diff]。
 3. **Workstation 版会主动吃满功耗**。同样负载下它比 Server 版多用 1.5–2 倍电 [c-ws-uses-watts]，电费敏感场景需主动设功耗墙。
+4. **驱动下限只对 Server 版有正式声明**（575.57.08）[c-driver-floor]，而自动化工具会把三个 SKU 折叠成同一个标识 [c-driver-tooling-collapse]——这意味着通用的驱动版本管控可能误判。WS/Max-Q 版需单独核对支持列表（570.195.03 起）[e-driver-ws-list]。
 
 ---
 
@@ -1010,6 +1014,11 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 39. [TechPowerUp：ASRock TempGuard 未能阻止 RTX PRO 6000 的 PSU 侧接口熔毁](https://www.techpowerup.com/352658/asrocks-tempguard-failed-to-stop-a-psu-side-connector-meltdown-on-a-usd-15-000-rtx-pro-6000-rig)（2026-09-14） — [src-tpu-melt]
 40. [TechPowerUp：NVIDIA 据称终止 RTX 5090，GB202 晶圆留给工作站卡](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-eol]
 
+### 驱动与云可用性
+
+41. [NVIDIA/aicr PR #2446：声明 RTX PRO 6000 Server Edition 驱动下限](https://github.com/NVIDIA/aicr/pull/2446)（合并 2026-09-03） — [src-aicr-driver]
+42. [CoreWeave：RTX PRO 6000 Blackwell Server Edition（8 卡实例）](https://docs.coreweave.com/platform/instances/gpu/rtxp6000-8x) — [src-coreweave-rtx]
+
 ---
 
 ## 附录 A：子问题完成度
@@ -1035,12 +1044,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q17 | MLPerf 官方成绩如何？ | ✅ | §4.6 封闭分区数据 |
 | q18 | 长期高负载有哪些硬件风险？ | ✅ | §10.5 退化 + §10.6 供电熔毁 |
 | q19 | 产品生命周期与停产风险？ | ✅ | §12.5 RTX 5090 停产传闻 |
+| q20 | 驱动与云上可用性？ | ✅ | §9.3 驱动下限 + §9.2 云实例建议 |
 
-**完成度：19/19 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：20/20 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **238 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **245 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1048,7 +1058,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=40, evidence=238, claims=158, claims_high=102, claims_disputed=1`
+当前校验结果：`sources=42, evidence=245, claims=163, claims_high=106, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
