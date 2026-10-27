@@ -1367,6 +1367,47 @@ MIG 把一张卡在硬件层切成最多 4 个完全隔离的实例（每实例 
 
 **厂商演示**：4× MIG 实例同时跑 4 个 1080p 全高《赛博朋克 2077》，相比时间切片基线图形扩展性能 **+60%** [c-mig-multitenant]。
 
+### 11.1.1 直通虚拟机的双重惩罚：P2P 消失 + 链路降级到 Gen1
+
+上一节讲的是 MIG（硬件分区）。**整卡直通（VFIO passthrough）是另一条路，而它有一个会静默发生的严重陷阱** [c-gen1-cap]。
+
+一台 **8× RTX PRO 6000** 的 Proxmox KVM 虚拟机，跑 GLM-5-NVFP4（744B MoE），性能远低于预期：**峰值仅约 485 tok/s**（目标 1000+），**单流延迟超过 21 秒** [c-gen1-symptom]。**没有任何报错**。
+
+**诊断出的第一层**（已知）：**P2P DMA 完全不可用**。所有跨卡传输被迫经主机内存中转，小传输延迟下限 **13.7 μs** [c-gen1-double]。
+
+**诊断出的第二层**（更严重，且此前一直没被发现）：
+
+```bash
+nvidia-smi --query-gpu=index,pci.bus_id,pcie.link.gen.current,pcie.link.width.current \
+  --format=csv,noheader
+```
+
+```
+0, 00000000:01:00.0, 1, 16
+1, 00000000:02:00.0, 1, 16
+...
+7, 00000000:08:00.0, 1, 16
+```
+
+> **全部 8 张卡都是 PCIe Gen1 ×16**。而**主机侧已确认是 Gen5 ×16 且 ASPM 已关闭** [e-gen1-host]。
+
+**量级** [c-gen1-scale]：
+
+| 链路 | 单向带宽 |
+|---|---:|
+| PCIe Gen1 ×16 | 约 **4 GB/s**（实测 3.94） |
+| PCIe Gen5 ×16 | 约 **63 GB/s** |
+
+**只剩约 6% 的硬件带宽**。这不是延迟问题，是**带宽天花板**。
+
+**成因推测** [c-gen1-cause]：QEMU Q35 芯片组模拟出的虚拟 PCIe 根端口可能不支持 Gen5 协商，或 VFIO 未正确向 guest 暴露链路能力。**两者均未被确证**，修复需按此方向排查。
+
+**一个反直觉的拓扑教训** [c-gen1-topo-cause]：该主板（ASUS ESC8000A-E13）让**每张卡独占一个 PCIe 根复合体**——通常被视为"最大化单卡带宽"的优点，但它在虚拟化下制造了**彼此隔离的 IOMMU 域**，**从根本上阻止 VFIO 授予直接 P2P**。
+
+**策略含义** [c-gen1-remedy]：在这种环境下，NCCL 拓扑 XML 覆盖之类的软件绕行**价值有限**，因为修不了链路速率本身。更有效的方向是**降低跨卡通信量**——改用专家并行或流水线并行，而非张量并行。
+
+> **如果你计划在虚拟机里跑多卡推理，务必先在 guest 内执行上面那条 `nvidia-smi` 查询。** 一条命令，几毫秒，能避免数周的误判。
+
 **官方选型结论**：RTX PRO 6000 Server Edition 是高性能 vWS 部署的推荐 GPU（SPECviewperf 15 @ 4K 原生性能最高）[c-vgpu-best]。
 
 ### 11.2 机密计算：厂商说 98%，学术说 73–87%
@@ -1713,15 +1754,17 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
+| q36 | 虚拟机直通是否可行？ | ⚠️ | §11.1.1 双重惩罚：P2P 消失 + 链路降到 Gen1 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
+| q36 | 虚拟机直通是否可行？ | ⚠️ | §11.1.1 双重惩罚：P2P 消失 + 链路降到 Gen1 |
 
-**完成度：34/35 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：35/36 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **466 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **476 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1796,3 +1839,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 75. [Joshua8.AI：为什么投机解码没有加速我的 120B 模型](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
 77. [Joshua8.AI：在单张 RTX 6000 上运行 MiniMax-M2.5（68 tok/s / 64K 上下文完整配置）](https://joshua8.ai/minimax-m25-rtx-6000-blackwell-sglang-guide/)（2026-02-28） — [src-j8-minimax]
 78. [Joshua8.AI：推理引擎的版本更新真的更快吗（月度同口径对比）](https://joshua8.ai/llm-inference-benchmark-update/)（2026-02-15） — [src-j8-update]
+79. [magik.net：Gen1 启示——一条诊断命令揭开的虚拟化开销（Proxmox 8 卡直通）](https://magik.net/blog/llmopt/seg_3/chunk_2/the_gen1_revelation.html) — [src-magik-gen1]
