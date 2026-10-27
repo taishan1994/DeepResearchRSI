@@ -1,9 +1,9 @@
-﻿# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
+# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
 
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：42 ｜ **证据数**：245 ｜ **主张数**：163（高置信 106，争议 1）
+> **来源数**：49 ｜ **证据数**：290 ｜ **主张数**：190（高置信 121，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -239,6 +239,41 @@ RTX PRO 6000 **没有 NVLink**，多卡走 PCIe 5.0 [c-nvlink-absent]。实测�
 
 **实践含义**：能用单卡解决的，不要用多卡；必须多卡时，PCIe switch 拓扑显著优于双路 CPU 直连。
 
+#### 4.3.1 一个会静默损坏输出的 P2P 陷阱（本轮新增，务必先读）
+
+上面讲的是 P2P "慢"。更危险的是 P2P **根本不能用却假装能用**。
+
+**机制** [c-ptp-silent-corruption]：在开启 IOMMU 的裸金属 Linux 上，PCIe peer copy **不是慢，是不被支持**。写入触发 fault，IOMMU 把它当作 Unsupported Request 丢弃——但 `cudaMemcpyPeerAsync` **仍然返回 `cudaSuccess`**，因为它没有"平台吞掉了你的 DMA"这种返回码 [e-ptp-copy]。
+
+**后果**：张量永远没到达，模型输出 `!!!!!`、`/////`、重复的西里尔字母或看似流畅但语义错乱的话——**而且什么都不会记录** [e-ptp-silent]。现场表现和"量化损坏"或"聊天模板写错"一模一样，有用户为此查了一整天。
+
+**为什么 RTX PRO 6000 特别容易踩** [c-ptp-gate-wrong]：多数工具按**产品名**而非**实际 NVLink 拓扑**决定是否开 P2P，而 RTX PRO 6000 被错误列入"数据中心卡"名单——同一名单里还有 RTX 6000 Ada、L40/L40S、L4，**这四个系列全都没有 NVLink 接口** [e-ptp-list]。
+
+**两个反直觉的坑**：
+
+| 坑 | 说明 |
+|---|---|
+| `GGML_CUDA_P2P=0` 反而**开启** P2P | 该变量是"存在即生效"，不是布尔开关 [c-ptp-zero-trap] |
+| 驱动会**撒谎** | `can_device_access_peer()` 和 `nvidia-smi topo -p2p w` 在每次拷贝都失败的机器上仍报 OK [c-ptp-driver-lies] |
+
+llama.cpp 自己的文档就写着：IOMMU 开启时"可能导致崩溃或输出损坏" [e-ptp-doc]。vLLM 也已因此实现了独立的 `can_actually_p2p()` 探针——说明这是行业已知问题，不是孤例。
+
+**可执行的判断与处置** [c-ptp-mitigation]：
+
+```bash
+# 唯一可信的判断依据：看拓扑里是不是 NV#
+nvidia-smi topo -m
+# 出现 SYS / PHB / NODE 而非 NV# → 不要开 P2P
+```
+
+| 场景 | 处置 |
+|---|---|
+| 拓扑显示 `NV#` | 可开 P2P（RTX PRO 6000 不会有这个） |
+| 显示 `SYS`/`PHB`/`NODE` | **关闭 P2P**，改用 FP32 累积或每卡独立副本 |
+| 必须多卡协同 | 优先返回 CPU 中转（慢但正确），或关闭 IOMMU（有安全与性能代价） |
+
+**这是本报告认为最应该加粗的一条**：无 NVLink 卡的 P2P 失败是**静默的**，它不会报错，只会让你的结果变错。
+
 ### 4.4 量化格式 × 上下文：最重要的反直觉发现
 
 同一硬件、同一模型（Qwen3.5-397B-A17B）、4× Server Edition TP4 下：
@@ -296,6 +331,42 @@ RTX PRO 6000 **没有 NVLink**，多卡走 PCIe 5.0 [c-nvlink-absent]。实测�
 **引用注意** [c-mlperf-caveat]：白皮书中部分图表是提交截止后的初步结果，**未经 MLCommons 正式验证**。引用时必须区分"已认证"与"未认证"数据点，不能一概当作官方成绩。
 
 Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存带宽敏感），后者是 120B 级大模型（容量敏感），正是该卡最该被检验的两类负载。
+
+### 4.7 llama.cpp / GGUF：此前完全遗漏的第二条软件路径
+
+前面的推理数据全部来自 vLLM 与 SGLang。但 RTX PRO 6000 还有一条成熟的 **llama.cpp/GGUF** 路径 [c-llamacpp-path]，能在 `sm_120a` 上原生编译运行 [e-btl-sku]。对"本地跑一个模型自己用"的场景，它往往比 vLLM 更容易部署。
+
+**prefill 实测**（`-b 2048 -ub 2048 -fa 1`，全 GPU 卸载，F16 KV）[c-llamacpp-prefill]：
+
+| 模型 | 提示长度 | prefill 吞吐 |
+|---|---|---|
+| Qwen3.5-35B-A3B-Q8_0 | 2048 | **16,459 tok/s** |
+| Qwen3.5-35B-A3B-Q8_0 | 4096 | 16,595 tok/s |
+| Qwen3.8-27B-Q8_0 | 2048 | **4,757 tok/s** |
+| Qwen3.8-27B-Q8_0 | 4096 | 4,699 tok/s |
+
+**MoE 与稠密的收益差距明显** [c-llamacpp-moe-gap]：同一次 GDN kernel 优化，35B-A3B（MoE）提升 **11–21%**，稠密 27B 只有 **3–6%** [e-lc-moe-gap]。说明 **MoE 在 llama.cpp 上还有较大优化空间**，后续版本可能继续拉开。
+
+**优化不损精度** [c-llamacpp-quality]：困惑度 5.777 → 5.782，top-token 一致率 98.824% [e-lc-ppl]。这个差异小于测量不确定度，可以放心用。
+
+**单流 decode 与 5090 接近持平** [c-llamacpp-decode-parity]：8.4GB 的 Q2 量化模型上，Server 版生成 **43.16 tok/s** [e-btl-gen]。原因很直接——**两者带宽同为 1792 GB/s，decode 是带宽瓶颈** [e-btl-parity]。这再次印证 §5 的核心判断：单流 decode 上 96GB 买不到速度，只能买到容量。
+
+**NVIDIA 官方在 2026-09 宣称** llama.cpp 与 vLLM 的优化可带来最高 **1.9 倍**本地推理提升，并通过 LM Studio / Ollama 直接可用 [c-nvidia-19x]。注意最大收益出现在 RTX 5090 上跑 Qwen3.6-35B，**不代表 PRO 6000 同幅度**。
+
+**双卡部署的坑（重要）** [c-multigpu-split-fails]：在 PCIe 环境下，llama.cpp 的**层切分会损坏文本与工具调用输出**，**行切分不被支持**。唯一可靠方案是**每卡跑一个独立副本** [e-t2-split]——这正是 §4.3.1 那个 P2P 陷阱的另一种表现。
+
+**两种扩展路线的取舍**：
+
+| 路线 | 吞吐 | 适用 |
+|---|---|---|
+| 双卡独立副本（llama.cpp） | 290.3 tok/s @ 总并发 8 [c-replica-scaling] | 高可用、单卡故障不拖垮全部 |
+| 单卡 vLLM 高并发 | **1,336.5 tok/s @ C32** [c-serving-vs-replica] | 吞吐优先的服务化场景 |
+
+**这两行不可直接比较**——批处理形态不同（4 槽/卡 vs 32 并发），原报告也明确声明它不是受控的模型速度 A/B。要比较必须控制并发与序列长度。
+
+**一个有用的交叉验证** [c-500w-tie]：500W 功耗墙下，同一模型在 llama.cpp 与 vLLM 上分别跑到 70.3 与 72.1 tok/s，**基本持平** [e-t2-speed]。这从第二条软件路径独立佐证了 §6.4 的结论：**500W 与 600W 在推理上差异很小**。
+
+**实际可用的上下文能力** [c-longctx-256k]：双卡各 500W 的部署中，每副本 4 槽、池化 1,048,576 token，单槽硬上限 **262,144 token** [e-t2-ctx]。这是 96GB + Q8_0 KV 的真实可用值，不是营销数字。
 
 ---
 
@@ -623,6 +694,8 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 | 双精度 HPC / 分子动力学 | ❌ 用 H100/H200 | FP64 仅约 2 TFLOPS，比 H100 低 20× [c-fp64-vs-h100] |
 | 235B+ 模型单卡 | ❌ 不可能 | 需 H200 或多卡 [c-not-for-huge-models] |
 | **采购前想先验证** | ✅ **用云上 8 卡实例** | CoreWeave / AWS G7e / Akamai 均有 Server 版 [c-driver-cloud-available] |
+| **单人多卡、无 NVLink** | ⚠️ **每卡独立副本** | 层切分会静默损坏输出 [c-multigpu-split-fails] |
+| **需要 7×24 生产可用** | ⚠️ **必须有冗余** | 整芯片复位无前兆且需断电恢复 [c-fullchip-noprecursor] |
 
 **最实用的一条建议**：不要仅凭本报告或任何第三方跑分下单。该卡的 Server 版**已在公有云提供 8 卡实例**（CoreWeave 分 High/Standard Memory 两档；AWS G7e、Akamai LKE 亦有）[c-driver-cloud-available]。用你的真实模型和真实并发跑一轮，比引用任何评测都可靠 [c-cloud-eval-advice]——尤其考虑到本报告已标注的 Blender 三方冲突与多套互不可比的口径。
 
@@ -753,6 +826,34 @@ export FLASHINFER_FORCE_SM=120f
 | 高密度部署考虑 8-pin 多路方案 | 分散单点电流，牺牲便利换安全 |
 
 **诚实标注**：这是基于单一维修技师报告 + 历史先例的分析，**不是统计意义上的故障率**。但它与 RTX 5090 上已大量出现的同类事件同源（同一连接器标准），因此不应被当作孤例忽略。
+
+### 10.7 整芯片复位：比退化更严重的可用性故障
+
+§10.5 的退化是"变慢"，这里是**直接不可用**。本报告在第二轮挖掘中发现了这个此前完全遗漏的故障类别。
+
+**症状** [c-fullchip-fault]：GPU 在持续推理负载下进入不可恢复状态——nvidia-smi 里还能看到，但 Fan / Power / GPU-Util / MIG 全部报 `ERR!`，`GPU Recovery Action: Reset`。**软重启无效，必须彻底断掉 PSU 电源** [e-fc-powercycle]。
+
+**内核日志特征** [c-fullchip-symptoms]：**1 秒内 74,341 次寄存器读错误**，全部返回同一毒值 `0xbadf3200`，随后触发 `NV_ERR_GPU_IN_FULLCHIP_RESET` 断言级联 [e-fc-74k]。
+
+**最棘手的是它没有前兆** [c-fullchip-noprecursor]：故障发生前的内核日志干净，没有任何预警 [e-fc-noprecursor]。这意味着**预测性维护失效**，只能靠冗余。
+
+**时间尺度与退化一致** [c-fullchip-latency]：有用户报告 24/7 稳定运行数月，然后一周内多次复发 [e-fc-months]。采购验收时测不出来。
+
+**已排除项（覆盖相当充分）** [c-fullchip-ruledout]：散热（故障时仅 28°C）、显存 OOM、驱动版本（580.x 与 595.45.04 均复现）、PCIe 链路降级、应用 bug、另一块卡干扰，甚至换 PCIe 插槽也无效——**故障跟随卡而非插槽** [e-fc-slot][e-fc-thermal][e-fc-driver]。
+
+**缓解手段有限且有争议**：
+
+| 手段 | 效果 | 争议 |
+|---|---|---|
+| 降功耗墙到 450W | 有用户可稳定跑 2 小时 gpu_burn [c-fullchip-powerworkaround] | ⚠️ 另一用户报告 600W/450W 都数分钟崩溃 [c-fullchip-powerworkaround-disputed] |
+| 改用 Triton 后端 | 临时可用，非修复 [c-fullchip-workaround-triton] | 说明与特定内核实现相关 |
+| RMA 换卡 | 有用户通过 RMA 解决 [e-fc-rma] | 指向个体缺陷 |
+
+**这不是单一故障，而是一个 Xid 家族** [c-xid-family]：Xid 31（MMU fault）、Xid 62/154（GSP PMU halt）、Xid 79（掉卡）、Xid 119（GSP 超时）、Xid 120（GSP kernel panic）。多个错误码指向 **GSP 固件层面的共性问题** [e-mmu-xid31][e-mmu-xid120][e-mmu-xid79]。
+
+**证据强度**：至少 5 名独立用户在 NVIDIA 官方论坛报告，负载覆盖 vLLM、Ollama、llama.cpp 与 UNet 训练 [c-fullchip-multiuser]。Max-Q 版本亦有 MMU 错误报告 [c-mmu-maxq]，但不限于某一 SKU。
+
+> **与 §10.5 的关系**：两者可能是同一硬件问题的不同表现（退化 → 最终复位），也可能是两个独立缺陷。当前证据**不足以判定**，本报告不做合并也不做割裂。
 
 ---
 
@@ -1045,12 +1146,14 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q18 | 长期高负载有哪些硬件风险？ | ✅ | §10.5 退化 + §10.6 供电熔毁 |
 | q19 | 产品生命周期与停产风险？ | ✅ | §12.5 RTX 5090 停产传闻 |
 | q20 | 驱动与云上可用性？ | ✅ | §9.3 驱动下限 + §9.2 云实例建议 |
+| q21 | 除 vLLM/SGLang 外的软件路径？ | ✅ | §4.7 llama.cpp/GGUF 与双卡部署约束 |
+| q22 | 多卡是否存在隐蔽故障模式？ | ✅ | §4.3.1 P2P 静默损坏 + §10.7 整芯片复位 |
 
-**完成度：20/20 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：22/22 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **245 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **290 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1058,9 +1161,18 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=42, evidence=245, claims=163, claims_high=106, claims_disputed=1`
+当前校验结果：`sources=49, evidence=290, claims=190, claims_high=121, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
 - `[e-<id>]` = 证据 ID，指向 `evidence.csv` 中的原文片段
 - `[src-<id>]` = 来源 ID，指向 `sources.csv` 中的 URL 与抓取时间
+### 稳定性、P2P 与 llama.cpp 生态（第二轮补充）
+
+43. [NVIDIA 开发者论坛：整芯片复位故障（完整日志与排除项）](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-gb202-recurring-full-chip-reset-during-sustained-llm-inference-requires-psu-power-cycle-to-recover/365739)（2026-04-06） — [src-forum-fullchip]
+44. [NVIDIA 开发者论坛：Max-Q 版本 MMU 错误报告](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-max-q-hardware-problem-multitude-of-mmu-errors-in-dmesg/381310)（2026-08-26） — [src-forum-mmufault]
+45. [Unsloth PR #10646：P2P 必须按 NVLink 拓扑而非产品名开启](https://github.com/unslothai/unsloth/pull/10646)（2026-09） — [src-unsloth-p2p]
+46. [llama.cpp PR #29353：GDN chunked kernel（含 PRO 6000 prefill 实测）](https://github.com/ggml-org/llama.cpp/pull/29353)（2026-10-14） — [src-llamacpp-29353]
+47. [NVIDIA Blog：IFA 2026 本地 AI 加速（llama.cpp/vLLM 最高 1.9x）](https://blogs.nvidia.com/blog/local-ai-ifa-next-gen-agents-nv-pair-rtx-spark/)（2026-09-03） — [src-nvidia-ifa]
+48. [Hugging Face：BTL-3 Compact 在 RTX PRO 6000 上的 llama-bench 原始数据](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md)（2026-07-19） — [src-btl-llamacpp]
+49. [Tower2 双卡部署验证记录（切分失败与副本方案）](https://raw.githubusercontent.com/Osmantic/MMBT-Messy-Model-Bench-Tests/refs/heads/main/benchmarks/gemma4-31b-q4/GEMMA4_31B_Q4_VERIFIED_RESULTS.md)（2026-10） — [src-osmantic-tower2]
