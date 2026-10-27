@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：159 ｜ **证据数**：1208 ｜ **主张数**：783（高置信 583，争议 1）
+> **来源数**：160 ｜ **证据数**：1220 ｜ **主张数**：795（高置信 594，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -4817,6 +4817,112 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 
 ---
 
+### 11.10 多卡互联：PCIe P2P 实测，以及「开 P2P 更好」是个陷阱
+
+本报告此前只说过「RTX PRO 6000 没有 NVLink」。**这一节补上实测数据**——结果发现 P2P 的开关不是一个「越开越好」的选项。
+
+#### 带宽：单向 53–56 GB/s，效率 89%
+
+PCIe Gen5 x16 下 [c-p2p-bandwidth]：
+
+| 方向 | 同 NUMA | 跨 NUMA |
+|---|---:|---:|
+| **单向** | **53–56 GB/s** | 39–51 GB/s |
+| **双向** | **103–111 GB/s** | 64–99 GB/s |
+
+> **理论最大 63 GB/s 单向，实测约 56 GB/s = 89% 效率。**
+
+**跨 NUMA 的代价很具体**：在一台双 Turin 系统（4× WS + 2× RTX 5090）的完整矩阵里，**跨 NUMA 那块卡的带宽从 56/111 降到 51/99 GB/s**。
+
+#### 延迟：启用 P2P 差 30 倍
+
+| 状态 | 跨 GPU 延迟 |
+|---|---:|
+| **P2P 启用**（同 NUMA） | **0.36–0.45 µs** |
+| P2P 禁用 | **~14 µs** |
+
+> **30 倍** [c-p2p-latency-30x]。
+>
+> **这就是为什么延迟比带宽更值得关注。**
+
+#### 关键洞察：推理的消息太小，带宽根本用不上
+
+每个 AllReduce 在推理中只有 **32–256 KB** [c-p2p-small-msg-latency]：
+
+> **56 GB/s 传 256 KB 只需 4.5 µs。带宽完全不是瓶颈，延迟才是。**
+>
+> **所以优化顺序应该是：先降延迟（NCCL LL 协议 1.5–1.9×，自定义内核 2–3×），再谈带宽。**
+
+#### 反直觉的核心发现：高并发下关掉 P2P 快一倍
+
+这是本节最重要的一条 [c-p2p-no-p2p-better]：
+
+| 负载形态 | P2P 启用 | **P2P 禁用** | 谁赢 |
+|---|---:|---:|---|
+| **单批（低延迟）** | **90 tok/s** | 70 tok/s | **P2P** |
+| **100 并发请求** | 5,000 tok/s | **10,000 tok/s** | **禁用 P2P，快一倍** |
+
+> **原因**：DRAM 路由在大批量操作中能用到**更多内存通道和更高聚合带宽**；而 P2P 把流量固定在点对点路径上，反而限制了通道数。
+>
+> **所以「P2P 该开还是关」没有统一答案** [c-p2p-topology-dependent]——**必须按你的服务是低延迟单流还是高并发吞吐来决定，并分别实测。**
+
+#### TP 的通信天花板
+
+**一个硬数字** [c-p2p-tp-ceiling]：397B MoE 约 60 层，每 token 约 **120 次 AllReduce**，按每次 25 µs：
+
+> **纯通信开销约 3 ms/token → 即使计算时间为零，decode 也只能到 ~333 tok/s。**
+>
+> **这是张量并行的物理上限，不是调优能解决的问题。**
+
+#### 自定义 allreduce 有明确交叉点
+
+| 消息大小 | 自定义（µs） | NCCL（µs） | 赢家 |
+|---|---:|---:|---|
+| 256 B | **7.5** | 24.6 | **自定义 3.3×** |
+| 8 KB | **9.2** | 24.2 | **自定义 2.6×** |
+| 32 KB | **16.5** | 24.5 | **自定义 1.5×** |
+| 64 KB | 25.9 | **24.1** | **NCCL 1.1×** |
+| 256 KB | 73.6 | **28.0** | **NCCL 2.6×** |
+
+> **分界点在 32–64 KB** [c-p2p-custom-ar-crossover]。
+>
+> **而且这个内核只在密集 PCIe 交换拓扑上有效——在无交换的双 CPU 系统上比 NCCL 还慢。**
+
+#### NCCL 默认配置会浪费 40%
+
+| 系统 | 配置 | AllReduce 总线带宽 |
+|---|---|---:|
+| Festr（双 Turin） | `MIN_NCHANNELS=8` | **37.6 GB/s** |
+| Festr（双 Turin） | **默认** | **22.2 GB/s** |
+
+> **默认配置损失约 40%** [c-p2p-nccl-config]。
+>
+> **结合 §7.3.13：硬件能线性扩展（8 卡 7.61×），但软件配置跟不上就会白白浪费。**
+
+#### 三个必须做的部署检查
+
+**1. BAR1 必须是 96 GB** [c-p2p-bar1-required]
+
+> `nvidia-smi` 应显示 **98304 MiB**。**部分 BIOS 默认只有 256 MB，会严重削弱 P2P。**
+> 16 卡配置还需把 GPU 显示模式设为 headless。
+
+**2. `uvm_disable_hmm=1` 几乎必备** [c-p2p-uvm-required]
+
+> **否则 NCCL P2P 可能锁死。** 这与 P2P 驱动覆盖是**两项独立配置**。
+
+**3. `pcie_aspm=off` + `pcie_port_pm=off` 必须同时设** [c-p2p-aspm-lockup]
+
+> 后者阻止根端口在 GPU 链路 **Gen1↔Gen5 重训练期间挂起**，否则会触发 **Surprise Link Down**（`aer_uncor_status: 0x00000020`）并**导致系统锁死**。
+> `iommu=off` 则用于防止 NCCL 死锁。
+
+#### 修正一个此前的隐含理解
+
+> 本报告此前说「没有 NVLink」，容易被读成「多卡无法有效协同」。
+>
+> **但实测显示：通过 PCIe 交换拓扑 + P2P + 调优后的 NCCL，8 卡仍可达到 41.1 GB/s 的 AllReduce 总线带宽** [c-p2p-revise-nvlink]。
+>
+> **「没有 NVLink」不等于「不能多卡」，只是小消息延迟不如 NVLink 系统。** 标 `medium`：本报告未取得与 NVLink 系统的同条件对照。
+
 ## 12. 价格与采购时机
 
 ### 12.1 价格时间线（截至 2026-10-27）
@@ -5506,6 +5612,7 @@ sudo nvidia-bug-report.sh
 - [JANCTION Render — Benchmarks：按分辨率/帧数/采样数的 GPU 秒矩阵（含 CSV 原始数据与可复现场景 zip + sha256）](https://render.janction.jp/benchmarks)（2026-10-01） — [src-janction-bench]
 - [Drop & Render（blendercloudrender.com）— RTX PRO 6000 Blackwell Workstation Edition 渲染基准页，含 Methodology 段（自建测试 + 机器学习推算 + 公开数据三类混合）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-workstation-edition)（2026-10-26） — [src-dnr-gpu-bench]
 - [OTOY — OctaneBench 2025.2 Results（官方结果数据库，含 2x–8x 多 GPU 配置）](https://render.otoy.com/octanebench/results.php)（2026-10-27） — [src-octanebench]
+- [local-inference-lab / rtx6kpro — PCIe Bandwidth & P2P Performance（RTX PRO 6000 多卡 P2P / NCCL 实测汇总）](https://github.com/local-inference-lab/rtx6kpro/blob/main/hardware/pcie-bandwidth.md)（2026-10-27） — [src-rtx6kpro-pcie]
 
 ---
 
@@ -5642,7 +5749,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=159, evidence=1208, claims=783, claims_high=583, claims_disputed=1, trace_events=326, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=160, evidence=1220, claims=795, claims_high=594, claims_disputed=1, trace_events=328, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
