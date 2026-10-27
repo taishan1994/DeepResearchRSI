@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：152 ｜ **证据数**：1130 ｜ **主张数**：700（高置信 516，争议 1）
+> **来源数**：153 ｜ **证据数**：1144 ｜ **主张数**：712（高置信 529，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1964,7 +1964,7 @@ TTFT P95 只从 198 降到 179 ms（−10%），而 TPOT 降了 41% [c-mtp-ttft-
 |---|---|
 | RTX PRO 6000 Workstation | **18,571** |
 | GeForce RTX 5090 | 16,311 |
-| RTX PRO 6000 Server | **15,821** |
+| RTX PRO 6000 Server | **18,580**（第 32 轮复算，原记 15,821 已废） |
 | GeForce RTX 4090 | 11,663 |
 
 来源 [e-blender-oden][e-blender-5090][e-blender-se][c-vs-5090-blender][c-blender-ratio]
@@ -2396,11 +2396,11 @@ PassMark 是覆盖最广的第三方 GPU 数据库之一（3,900+ 卡），本�
 
 ### 7.3 一条必须并列呈现的冲突
 
-Blender 的 Server 版成绩，两个来源相差 **69%**：
+Blender 的 Server 版成绩，两个来源相差 **99%**（第 32 轮用原始快照复算后修正，原记 69%）：
 
 | 来源 | Server 版 Blender 分 | 说明 |
 |---|---|---|
-| Blender Open Data（众测） | **15,821** | 社区贡献，样本构成不透明 [e-blender-se] |
+| Blender Open Data（众测） | **18,580** | 50 个完整 run 原始复算 [c-bsn-server-real]；原记 15,821 无法复现 |
 | Drop & Render（自建库） | **9,382** | 农场方自测，标注"3 of 4 benchmarks" [e-dr-se-blender] |
 
 **本报告不对该冲突做裁决** [c-blender-conflict]。可能原因：Blender 版本不同、测试场景子集不同、Server 卡在测试机箱内的散热条件不同（被动散热卡对风道极敏感，见 §6.5）。
@@ -2415,7 +2415,7 @@ Blender 的 Server 版成绩，两个来源相差 **69%**：
 | **Blender 版本** | **5.1.1（明确）** [c-blender-version] | **未公布** |
 | 更新日期 | 未标注 | 2026-10-26 [e-dnr-meta] |
 | WS 版 | 18,571 | 16,272 |
-| **Server 版** | **15,821** | **9,382** |
+| **Server 版** | **18,580**（复算） | **9,382** |
 | RTX 5090 | 16,311 | — |
 
 **关键观察**：两套数据的 **WS 基数本身相差 14%**（18,571 vs 16,272），而 **Server 版相差 69%**。也就是说，差距不是均匀的——Server 版的差异远大于整体口径差异。
@@ -2428,12 +2428,14 @@ Blender 的 Server 版成绩，两个来源相差 **69%**：
 
 | 数据源 | WS 版 | Server 版 | **Server / WS 比值** |
 |---|---:|---:|---:|
-| Blender Open Data | 18,571 | 15,821 | **0.852** |
+| Blender Open Data | 18,571 | **18,580** | **1.000** |
 | Drop & Render | 16,272 | 9,382 | **0.577** |
 
-**两个比值相差 48%。**
+**两个比值相差 73%**（1.000 vs 0.577）——**比本报告原先记录的 48% 更大，不是更小。**
 
-> **这是决定性的观察**：如果低分仅仅由「Server 版被动散热被降频」造成，那么**两套数据都会受同一物理限制**，比值应该大致接近。**实测比值差 48%，说明散热之外还有第二个变量。**
+> **原记录的 Open Data 一侧 15,821 / 0.852 是错的。** 第 32 轮用 Open Data 原始快照逐条复算，Server 与 WS 实际几乎完全相同（见 §7.3.6）。**修正方向与直觉相反：Open Data 并没有显示 Server 落后。**
+
+> **这是决定性的观察**：如果低分仅仅由「Server 版被动散热被降频」造成，那么**两套数据都会受同一物理限制**，比值应该大致接近。**实测比值差 73%（1.000 vs 0.577），说明散热之外还有第二个变量——且 Open Data 一侧根本没有落后。**
 
 **同时可以排除一个简单解释** [c-blender-ws-spread]：WS 版本身两源只差 14%，**远小于 Server 版的 69%**。所以不是「整体尺度不同」——**差距集中在 Server 版这一个点上**。
 
@@ -2469,6 +2471,106 @@ Blender 的 Server 版成绩，两个来源相差 **69%**：
 社区反馈还有一条实用观察 [c-blender-small-scene]：**小型/简单场景下 RTX PRO 6000 与 RTX 4090/5090 的渲染速度差别不大**——**大显存的价值在大场景，小场景下溢价不转化为速度**。这与 §6 的实景工作室测试（1.2GB 场景只用 14.2GB 显存，5090 反而最快）**方向完全一致**。
 
 **采购含义**：若要以 Blender 为主要渲染器，**必须要求供应商在你的场景上实测**，不能引用任一第三方分数。
+
+### 7.3.6 用原始数据裁决：Open Data 里 Server 版根本不慢
+
+前面 7.3.2–7.3.5 都建立在「两个数据源的聚合分」上。这一轮换了个做法：**下载 Open Data 的全量原始快照，自己算。**
+
+#### 关键一步：原始数据是可得的
+
+> **Blender Open Data 提供全量快照下载**（`opendata-latest.zip`，**1.8 GB**，**434,774 行 / 1,040,927 条记录**）[c-bsn-raw-available]。
+>
+> 这不是网页上的排名表，而是**逐条跑分记录**——每条含三个场景的 `total_render_time`、显卡名、Blender 版本、操作系统。
+
+**这意味着此前无法回答的问题现在可以回答了：某个分数在总体分布里到底处于什么位置。**
+
+#### 先自校验：能不能复现已知值
+
+复算公式 [c-bsn-reproduce-method]：
+
+```
+score = 613,491 / 几何均值(monster, junkshop, classroom 的 total_render_time)
+```
+
+常数由 WS 中位 18,571 校准。**复算结果：**
+
+| SKU | 完整 run 数 | 几何均值渲染时间（中位） | **复算 score** | 本报告原引用 |
+|---|---:|---:|---:|---:|
+| Workstation Edition | 292 | 33.03 s | **18,571** | 18,571 ✅ |
+| **Server Edition** | **50** | **33.02 s** | **18,580** | ~~15,821~~ ❌ |
+| Max-Q | 75 | 32.85 s | 18,678 | — |
+| RTX 5090 | 3,308 | 32.72 s | 18,747 | — |
+
+> **WS 精确复现 18,571** —— 说明口径正确 [c-bsn-ws-reproduced]。
+>
+> **但 Server 复算是 18,580，不是 15,821。**
+
+#### 所以 Server/WS 的比值是 1.000，不是 0.852
+
+> Server 33.02 s 对 WS 33.03 s，**相差 0.03%** [c-bsn-server-real]。
+>
+> **Open Data 里 Server 版与 WS 版的 Blender 性能基本相同。**
+
+#### 15,821 这个数字站不住
+
+我对它做了四重排除 [c-bsn-15821-unreproducible]：
+
+**1. 它要求的渲染时间超出实测范围。**
+15,821 反推需要几何均值 **38.78 s**；而 50 个 Server 完整 run 的**实际范围是 31.44–35.71 s**，**全部快于该值**。
+
+**2. 不是聚合口径问题** [c-bsn-agg-robust]。
+中位 run / 均值 run / 各 run 分数的均值 / 各 run 分数的中位——四种口径下 Server 都落在 **18,477–18,580**，**无一接近 15,821**。
+
+**3. 不是版本子集问题** [c-bsn-agg-robust]。
+按 Blender 版本细分，Server/WS 比值分别是 4.4.0→0.990、4.5.0→1.028、5.1.0→0.992、5.1.1→1.006、5.2.0 LTS→0.955。**没有任何版本子集落在 15,000–16,500。**
+
+**4. 不是别的 SKU** [c-bsn-15821-not-variant]。
+扫描全部 RTX PRO 6000 家族变体（含 MIG 与 DC-2Q/8Q/12Q/16Q/48Q/96Q），**只有 DC-16Q（n=2）落在 14,500–17,000 区间的 16,946**，其余全部高于 17,500。
+
+> **结论：15,821 无法由当前快照中的任何一个 RTX PRO 6000 变体复现。** 它可能来自更早的快照、某个已下线的筛选条件，或引用时的转写错误。**无论哪种，本报告不应再引用它。**
+
+#### 那 Drop & Render 的 9,382 呢
+
+它在 Open Data 分布里是**明确的离群值** [c-bsn-dnr-outlier]：
+
+| | 几何均值渲染时间 |
+|---|---:|
+| D&R 的 9,382 对应 | **65.39 s** |
+| Open Data Server 中位 | 33.02 s（**1.98 倍**） |
+| Open Data Server 最慢样本 | 35.71 s（**1.83 倍**） |
+
+更直接的一个检验 [c-bsn-zero-slow]：**如果 Server 真慢两倍，Open Data 里应该有一堆超过阈值（63.8 / 67.6 / 61.1 s）的记录。实测三个场景分别是 0/50、0/50、0/50。**
+
+> **注意措辞**：这**不等于 D&R 造假**。它的测试条件、场景版本、散热环境、采样时长可能完全不同——**只能说它测的不是同一件事**。这也正好呼应 7.3.4 的候选解释 (a)：**短时采样不会让被动散热充分升温，但也不能解释 1.98 倍的差距。**
+
+#### 散热假说被证伪了
+
+> **「Server 版因被动散热降频导致低分」在大样本中得不到支持** [c-bsn-heat-hypothesis-refuted]：50 个 run 的差距只有 0.03%，**远小于任何可归因于散热的幅度**。
+
+**但必须留一个反向保留**：Open Data 的 Server 记录**可能多来自散热良好的机架环境**（Linux 105 / Windows 45）。**所以这不是「Server 版散热没问题」，而是「在真实部署环境里它没有表现出降频」。**
+
+#### 一个顺带的发现：三个 SKU 与 5090 几乎打平
+
+| SKU | score |
+|---|---:|
+| RTX 5090 | **18,747** |
+| Max-Q | 18,678 |
+| Server | 18,580 |
+| WS | 18,571 |
+
+**极差仅约 0.9%，而 RTX 5090 还略高于全部 RTX PRO 6000** [c-bsn-all-skus-equal]。
+
+> 这印证了报告已记录的社区判断：**Pro 6000 本质是一颗完整的 5090 核心**。
+>
+> **在 Blender 上，多花的钱买不到速度——买的是 96 GB 显存。**
+
+#### 本节的修正意义
+
+> §7.3.2 的「两源比值相差 48%」应改为 **73%**（1.000 vs 0.577）[c-bsn-revise-ratio]。
+>
+> **修正方向与原记录相反**：原以为 Open Data 也显示 Server 明显落后，实测显示**它几乎完全不落后**。
+>
+> **真正的谜团因此更尖锐了：如果 Open Data 的 50 个 Server 样本都不慢，D&R 那 1.98 倍到底测的是什么？** 本报告无法回答，但至少现在**知道了问题在哪一侧**。
 
 ### 7.4 视频与专业特性
 
@@ -4338,7 +4440,7 @@ sudo nvidia-bug-report.sh
 | 议题 | 说法 A | 说法 B | 处置 |
 |---|---|---|---|
 | vs H100 整体性能 | HOSTKEY：整体相当，token 速率约 2× [c-vs-h100-parity] | LynxBenchAI：H100 领先 31% [c-vs-h100-lynx]；Fixstars：稠密模型 H100 更快 [c-ft-vs-h100-mixed] | **并列呈现**：三者分别测小模型推理、综合指数、稠密微调，不可互相否定 |
-| **Blender 的 Server 版成绩** | Blender Open Data：15,821 [e-blender-se] | Drop & Render：9,382 [e-dr-se-blender] | **标为 disputed，不做裁决** [c-blender-conflict]，差距 69% |
+| **Blender 的 Server 版成绩** | ~~Blender Open Data：15,821~~ → 原始快照复算 18,580 [c-bsn-server-real] | Drop & Render：9,382 [e-dr-se-blender] | **标为 disputed，不做裁决** [c-blender-conflict]，差距 69% |
 | vs 5090 差距 | Procyon：+6.5%~21.5% [c-vs-5090-procyon-gap] | Drop & Render Blender：Server 版 -38% [c-blender-dr] | **并列呈现**：前者是 AI 推理，后者是渲染且为不同 SKU |
 | Max-Q 是否适合 decode | 推理：显存时钟最高可能更优 | 无实测吞吐数据 | **标为未验证推断** [c-maxq-ws-diff] |
 | Server 版是否适合渲染 | V-Ray #1（14,827）[c-vray-se-wins] | Blender #17（9,382）[c-blender-dr] | **按渲染器分别结论** [c-render-workload-dependent] |
@@ -4645,6 +4747,12 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 补充来源
+
+- [Blender Foundation — Blender Open Data 原始快照：Blender Open Data 全量快照 opendata-2026-10-27（434,774 行 / 1,040,927 条记录 / 1.8GB）](https://opendata.blender.org/snapshots/opendata-latest.zip)（2026-10-27） — [src-blender-snapshot]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -4707,7 +4815,7 @@ sudo nvidia-bug-report.sh
 | q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
 | q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
 | q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
-| q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
+| q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.6 已用原始快照刻画：Open Data 侧 50 run 比值 1.000，D&R 的 9,382 为离群（1.98×）；仍并列 |
 | q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
 | q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
 | q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
@@ -4745,7 +4853,7 @@ sudo nvidia-bug-report.sh
 | q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
 | q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
 | q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
-| q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
+| q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.6 已用原始快照刻画：Open Data 侧 50 run 比值 1.000，D&R 的 9,382 为离群（1.98×）；仍并列 |
 | q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
 | q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
 | q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
@@ -4778,7 +4886,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=152, evidence=1130, claims=700, claims_high=516, claims_disputed=1, trace_events=309, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=153, evidence=1144, claims=712, claims_high=529, claims_disputed=1, trace_events=315, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
