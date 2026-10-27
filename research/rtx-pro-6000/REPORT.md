@@ -1,4 +1,4 @@
-# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
+﻿# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
 
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
@@ -2211,6 +2211,59 @@ Unable to enable MIG Mode for GPU 00000000:01:00.0: Not Supported
 
 > **教训：仅凭一次关键词检索就断言「未获认证」会得出完全错误的结论。** 必须以制造商 + 型号 + 驱动版本多字段交叉核对。
 
+### 10.4.1.1.1 官方认证系统清单：一个必须知道的功耗陷阱
+
+本报告此前从未查过 **NVIDIA-Certified Systems** 官方目录。核完后有两个发现，第二个比第一个重要得多。
+
+#### 兼容性覆盖很广
+
+**这张卡已进入 13 家厂商、20+ 个具体机型的认证列表** [c-nv-cert-breadth]：
+
+| 厂商 | 已认证机型 |
+|---|---|
+| **HPE** | ProLiant Compute DL380 Gen12 / DL380a Gen12 |
+| **Cisco** | UCS C845A M8 / C240 M8 |
+| **Dell** | PowerEdge XE7740 / XE7745 |
+| **Supermicro** | SYS-221GE-NR / AS-5126GS-TNRT2 / SYS-422GA-NRT / SYS-422GL-NR / **SYS-521GE-TNRT** / SYS-522GA-NRT |
+| **Lenovo** | ThinkSystem SR675 V3 |
+| **Fujitsu** | PRIMERGY GX2560 M8s |
+| **GIGABYTE** | G494-ZB4-AAP2 |
+| **Leadtek** | WinFast GS5850T / GS5852T / GS5855T |
+| **QCT** | QuantaGrid D75E-4U |
+| **PEGATRON** | AS205-2T1 / AS400-2A1 / AS400-2A1-CX8 |
+| **ASUS** | ESC8000A-E13P |
+| **MSI** | S6053G480RAU8 |
+
+> **这是本报告首次给出完整的整机兼容清单。** 采购时可直接按此表核对机型。
+
+#### 但有一个必须知道的功耗陷阱
+
+在 **2-2-3-400** 参考配置中，HPE ProLiant Compute DL380 Gen12 配该卡有一条官方脚注 [c-nv-power-cap]：
+
+> *"**GPU power is capped based on system capabilities.** Contact the partner for details."*
+
+**即：在认证系统里这张卡会按机箱能力被降功耗运行。**
+
+**这个脚注的意义必须说透** [c-nv-power-cap-meaning]：
+
+> **合格认证 ≠ 满血运行。**
+>
+> 这与本报告 §4.8.4 的实测完全吻合——Server 版在 500W 实测 157,543 Gflop/s，且实测者指出它在塔式机箱里「无法在 500W 以上散热」。
+>
+> **即：官方认证的是「能装能用」，不是「能跑满 600W」。采购时必须向厂商确认实际封顶功耗。**
+
+#### 参考配置的命名规则
+
+官方口径也值得记录 [c-nv-refconfig-naming]：**CPU数-GPU数-网卡数-平均GPU网络带宽(Gb/s)**。
+
+| 配置 | 含义 |
+|---|---|
+| **2-2-3-400** | 2 CPU + 2 GPU + 3 网卡 + **400 Gb/s** |
+| **2-4-3-200** | 2 CPU + 4 GPU + 3 网卡 + 200 Gb/s |
+| **2-8-5-200** | 2 CPU + **8 GPU** + 5 网卡 + 200 Gb/s |
+
+**网络代际也在过渡中** [c-nv-cx8]：多数该卡条目仍标 **CX7**，而 **PEGATRON AS400-2A1-CX8 是唯一明确标注 CX8（ConnectX-8）** 的该卡机型——说明 CX8 认证刚起步。
+
 ### 10.4.1.2 Ansys 官方支持矩阵：一个远比 Dassault 严格的图景
 
 上一节 Dassault 给出的是「已认证」的好消息。**Ansys 完全不同**——我核了 **Ansys GPU Compute Capabilities Release 2026 R1** 官方 PDF（6 页，逐应用列出已实测认证的型号）。
@@ -3433,6 +3486,7 @@ sudo nvidia-bug-report.sh
 | q67 | Ansys 支持吗？ | ⚠️ 部分 | §10.4.1.2 Fluent 仅 Linux、Rocky 仅 Max-Q、Speos 不支持 |
 | q68 | 一张卡能支撑多少 CAD 用户？ | ✅ | §10.4.1.3 单卡最多 30 个 Siemens NX 并发（ATS 基准） |
 | q69 | 分辨率对专业负载影响多大？ | ✅ | §7.2.2 同一张卡 FHD vs 4K 差 +7% 到 +159%，unreal 反向 -10% |
+| q70 | 有哪些官方认证的整机可买？ | ✅ | §10.4.1.1.1 13 家厂商 20+ 机型，但注意功耗封顶脚注 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -3470,12 +3524,13 @@ sudo nvidia-bug-report.sh
 | q67 | Ansys 支持吗？ | ⚠️ 部分 | §10.4.1.2 Fluent 仅 Linux、Rocky 仅 Max-Q、Speos 不支持 |
 | q68 | 一张卡能支撑多少 CAD 用户？ | ✅ | §10.4.1.3 单卡最多 30 个 Siemens NX 并发（ATS 基准） |
 | q69 | 分辨率对专业负载影响多大？ | ✅ | §7.2.2 同一张卡 FHD vs 4K 差 +7% 到 +159%，unreal 反向 -10% |
+| q70 | 有哪些官方认证的整机可买？ | ✅ | §10.4.1.1.1 13 家厂商 20+ 机型，但注意功耗封顶脚注 |
 
-**完成度：69/70 已答（6 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：70/71 已答（6 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **847 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **853 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -3606,3 +3661,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 136. [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-p8-4k]
 137. [SPEC.org：SPECviewperf 15.0 官方结果 — ThinkStation P3 Tower Gen2 / RTX PRO 6000 / FHD](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P3_TWR_G2_Ultra_9_285K_RTX_PRO_6000_FHD/results.html) — [src-spec-p3-fhd]
 138. [Microsoft Learn：在 Azure 虚拟桌面上使用 RTX PRO 6000 Blackwell 运行 Siemens NX（官方参考架构与完整 ATS 结果）](https://learn.microsoft.com/en-us/industry/manufacturing/architecture/siemens-azure-blackwell)（2026-07-31 更新） — [src-ms-learn-nx]
+139. [NVIDIA：List of NVIDIA-Certified Systems（官方认证系统完整清单）](https://docs.nvidia.com/certification-programs/latest/nvidia-certified-systems.html) — [src-nv-cert]
