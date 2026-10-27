@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：153 ｜ **证据数**：1154 ｜ **主张数**：721（高置信 537，争议 1）
+> **来源数**：153 ｜ **证据数**：1164 ｜ **主张数**：734（高置信 544，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2560,6 +2560,11 @@ score = 613,491 / 几何均值(monster, junkshop, classroom 的 total_render_tim
 
 **极差仅约 0.9%，而 RTX 5090 还略高于全部 RTX PRO 6000** [c-bsn-all-skus-equal]。
 
+> ⚠️ **但这个「打平」只在「不控制系统与版本」的聚合层级上成立。**
+> §7.3.8 控制到 **Linux + Blender 4.5.0** 后发现：**WS 为 38.3 s 而 Server 为 31.4 s，WS 反而慢 22%**——
+> 原因是 WS 在 Linux 上有 76.3% 的机器掉进一个约慢 20% 的「慢簇」。
+> **请把本节的中位数当作「混合人群的平均」，不要当作「单机预期」。**
+
 > 这印证了报告已记录的社区判断：**Pro 6000 本质是一颗完整的 5090 核心**。
 >
 > **在 Blender 上，多花的钱买不到速度——买的是 96 GB 显存。**
@@ -2656,6 +2661,132 @@ score = 613,491 / 几何均值(monster, junkshop, classroom 的 total_render_tim
 > **大场景的正确做法仍是单卡大显存，或者增加机器而不是增加卡。**
 
 这条建议标 `medium` 而非 `high`，因为：**bmw27 是旧场景、卡型较老，Blackwell 与 NVLink/PCIe 拓扑可能改变结论**。但结合本报告已记录的「H200 NVL 上 NVLink 在 2/4 卡时反而有害」，**方向是一致的**。
+
+### 7.3.8 一个被中位数掩盖的缺陷：Linux 上四分之三的 WS 掉进慢簇
+
+这一轮继续挖同一份原始快照，结果发现**§7.3.6 的「三个 SKU 几乎打平」这句话本身有严重缺陷**。
+
+#### 先看分布，不要先看中位数
+
+把 Workstation 版在 monster 场景的 292 条记录画成直方图 [c-bimodal-monster]：
+
+```
+31.4-32.2s  █████████████████████████████████  66
+32.2-33.0s  █████████████  26
+33.0-33.8s  █  2
+35.4-37.1s  █  3
+37.1-37.9s  ██  4
+37.9-38.7s  ██████████████████████████████████████████████  93
+38.7-39.5s  ████████  17
+```
+
+> **这是明显的双峰**：一个簇在 **31–33 s**，另一个簇在 **38–39 s**，中间 **33–37 s 几乎为空**。
+>
+> **用单一中位数（32.2 s）描述这个分布，会同时掩盖两个真实群体。**
+
+#### 慢簇几乎只在 Workstation 版出现
+
+monster 场景中慢于 34 s 的占比 [c-slow-cluster-sku]：
+
+| SKU | 慢簇占比 | 样本 |
+|---|---:|---:|
+| **Workstation Edition** | **40.4%** | 118 / 292 |
+| Server Edition | 10.0% | 5 / 50 |
+| **Max-Q** | **0.0%** | **0 / 75** |
+| RTX 5090 | 3.9% | 130 / 3,308 |
+
+> **Max-Q 一条慢簇记录都没有，WS 却占四成。**
+
+#### 罪魁不是「Linux 更慢」
+
+按操作系统分层 [c-slow-cluster-os]：
+
+| SKU | Linux（monster 中位） | Windows（monster 中位） |
+|---|---:|---:|
+| **Workstation** | **38.1 s**（n=176） | **31.7 s**（n=116） |
+| Server | 31.3 s（n=35） | 32.9 s（n=15） |
+| Max-Q | 31.3 s（n=30） | 31.1 s（n=45） |
+| RTX 5090 | 31.1 s（n=400） | 31.2 s（n=2,908） |
+
+> **只有 WS 出现「Linux 38.1 s vs Windows 31.7 s」。**
+>
+> 如果只是「Linux 渲染更慢」，**Server / Max-Q / 5090 的 Linux 数据也该慢——但它们全部在 31.1–31.3 s。**
+
+#### 排除版本混杂后，现象更强而不是更弱
+
+固定 **Blender 4.5.0 + Linux** [c-slow-cluster-controlled]：
+
+| 条件 | WS | Server | Max-Q | 5090 |
+|---|---:|---:|---:|---:|
+| Linux + 4.5.0 | **38.3 s**（n=131） | 31.4 s（n=17） | 31.3 s（n=14） | 31.2 s（n=223） |
+| Windows + 4.5.0 | 31.9 s（n=74） | 32.9 s（n=12） | 31.6 s（n=19） | 31.4 s（n=1,332） |
+
+**同一控制下的慢簇占比：**
+
+> **Linux：76.3%（100 / 131）落在慢簇。**
+> **Windows：4.1%（3 / 74）。**
+
+**这不是聚合造成的假象——控制变量后差距从 ~7 倍扩大到 ~19 倍。**
+
+#### 这意味着什么
+
+> **在 Linux 上以 WS 版跑 Blender，约四分之三的机器可能落在慢簇（monster 慢约 20%）；Windows 上只有约 4%。** [c-slow-cluster-implication]
+
+**选型评估不能只引用总体中位数，必须按操作系统分层看。**
+
+#### 但我不知道成因
+
+必须说清楚：**成因尚未确定** [c-slow-cluster-cause]。可能的方向包括驱动、电源管理、PCIe 拓扑或热策略的平台差异——**本报告只能确认三件事**：
+
+1. 现象存在，且幅度固定（约 38.3 vs 31.9 s，慢 20%）
+2. 它与 **Linux + WS 这个组合**相关
+3. **其他三个 SKU 在同条件下都没有**
+
+> **已确认的是相关性，不是因果。** 也不能排除「Linux 用户更倾向于某种特定配置」这类选择偏差——毕竟样本是社区自愿提交的。
+
+#### 顺带：这一发现推翻了上一节的表述
+
+上一节写「三个 SKU 与 5090 几乎打平（极差 0.9%）」。**现在看，那个结论只在「不控制系统与版本」的聚合层级上成立。**
+
+> **同一份数据在不同层级给出方向相反的结论** [c-agg-trap-demonstrated]：
+>
+> - 不控制：WS 33.03 s vs Server 33.02 s —— **平手**
+> - 固定 Linux+4.5.0：WS 38.3 s vs Server 31.4 s —— **WS 慢 22%**
+
+**这是第 32–34 轮反复出现的同一类教训的最强版本：聚合层级决定结论方向，而不是样本多少决定。**
+
+#### MIG 分片：数据太少，但方向反直觉
+
+顺带查了 RTX PRO 6000 的 MIG 分片 [c-mig-samples-tiny]：
+
+> **全库只有 7 个含三场景的 MIG run**（WS MIG 1g.24gb 4 个、Server MIG 1g.24gb 2 个、Server MIG 2g.48gb 1 个）。
+
+样本虽少，但两点值得记录：
+
+| | 整卡 | **MIG 1g.24gb** | 比例 |
+|---|---:|---:|---:|
+| monster | 2,214 MiB | **963 MiB** | **43%** |
+| junkshop | 5,750 MiB | **4,499 MiB** | **78%** |
+| classroom | 2,318 MiB | **1,040 MiB** | **45%** |
+
+**显存确实省了很多** [c-mig-vram-saves]。
+
+**性能上没看出损失** [c-mig-not-slower]：WS MIG 的三场景约 31.2 / 33.8 / 30.8 s，与整卡同量级持平。
+
+> **但结论必须停在「机制上可能有利」** [c-mig-verdict]：**7 个样本，且与整卡的版本/系统不匹配**，不足以作为选型依据。要推荐 MIG 做渲染，必须专门实测。
+
+#### 版本回归：方向一致但不敢下结论
+
+4.4.0 对比 4.5.0 在 monster 与 junkshop 上方向一致 [c-version-regression]：
+
+| SKU | monster | junkshop | classroom |
+|---|---:|---:|---:|
+| WS | **4.4.0 快 13.7%** | 快 6.4% | −0.3% |
+| 5090 | 快 1.9% | 快 7.7% | +0.7% |
+
+> **但这条只能标 `medium`** [c-version-fragile]：WS 的 4.4.0 只有 **n=35**（4.5.0 是 n=205），Server 的 4.4.0 只有 **n=2**；而且 **4.5.0 组里混进了大量 Linux 慢簇样本**，会把跨版本差异夸大。
+>
+> **两个混杂因子同时存在，任何「哪个版本更快」的断言都不可靠。**
 
 ### 7.4 视频与专业特性
 
@@ -4971,7 +5102,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=153, evidence=1154, claims=721, claims_high=537, claims_disputed=1, trace_events=315, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=153, evidence=1164, claims=734, claims_high=544, claims_disputed=1, trace_events=315, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
