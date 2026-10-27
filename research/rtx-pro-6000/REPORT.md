@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：145 ｜ **证据数**：1004 ｜ **主张数**：635（高置信 456，争议 1）
+> **来源数**：146 ｜ **证据数**：1032 ｜ **主张数**：649（高置信 469，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1453,6 +1453,94 @@ V2a 存储模式的表现**高度依赖模型** [c-xfp-v2a-variance]：
 #### 来源权重
 
 这是一篇**单一作者独立预印本**（Gemini Stiftung Leipzig），代码开源，**未经同行评审** [c-xfp-single-author]。数据详实且方法透明，但**按预印本权重对待，不与 NVIDIA 官方数据同级**。
+
+### 4.11.4 线性注意力的状态量化：为什么 NVFP4 在这里是 0 分
+
+本报告此前没有单独覆盖**线性注意力**这一类负载（Qwen/Kimi/GLM 的 GDN、KDA 层）。这一轮补上，而且结论比预期尖锐得多 [c-lq-nvfp4-fails]。
+
+#### 先看一个惊人的失败
+
+Qwen3.5-9B 的 AIME 基线 **87.9%**。把循环状态直接套用现成低比特格式：
+
+| 方法 | AIME | LiveCodeBench |
+|---|---:|---:|
+| FP32 基线 | **87.9** | **64.1** |
+| **NVFP4** | **0.4** | **0.0** |
+| MXFP4 | 4.6 | 0.0 |
+| INT4 per-channel | 0.2 | 6.6 |
+| KVQuant | 1.1 | 0.0 |
+| QuaRot | 0.6 | 0.5 |
+| TurboQuant | 41.6 | 3.3 |
+
+> **NVFP4 把 87.9% 打到 0.4%。** 这不是「精度略降」，是**模型完全失效**。
+>
+> **含义：NVFP4 不是万能的。** 本报告在权重与 KV 上记录了大量 NVFP4 的成功案例（§4.8、§4.9），但**循环状态是另一回事**——它有 outlier 行/列，且误差会沿时间步累积 [c-lq-nvfp4-fails]。
+
+#### 真正的元凶不是位宽，是「每一步都量化」
+
+这是本节最有价值的发现 [c-lq-bf16-also-bad]：
+
+| 做法 | AIME | LCB | kernel 加速 |
+|---|---:|---:|---:|
+| FP32 逐 step | 87.9 | 64.1 | 1.00× |
+| **BF16 逐 step** | **72.1** | **49.6** | 1.64× |
+| INT8 逐 step | **7.1** | **9.2** | 2.43× |
+| INT8 + per-window | 82.4 | 60.6 | 2.64× |
+| + 补偿 token | 86.6 | 61.5 | 2.56× |
+| + 平滑 | **87.9** | **64.1** | **2.52×** |
+
+> **连 BF16 逐 step 都会掉 15.8 个百分点**（87.9→72.1）。位宽拉满也救不了——**问题在「每个 token 都量化一次」这个做法本身**。
+>
+> 改成「**跳过一个窗口、只在窗口末尾量化一次**」，INT8 就从 7.1% 回到 82.4%。**同一份数据、同样的位宽，只改量化频率。**
+
+#### 三段修复的完整链条
+
+最终方案是三件事叠加 [c-lq-fix-chain]：
+
+1. **per-window 量化** —— 窗口内用高精度 buffer 累积更新，只在边界量化一次
+2. **补偿 token（Compensator Tokens）** —— 把状态里最大的 outlier 保留为若干高精度 token
+3. **平滑** —— 对残余残差做平滑后再量化
+
+结果是**精度回到 FP32 水平，同时保留 2.52× kernel 加速**。
+
+#### 窗口长度的甜点
+
+| 窗口 | AIME | LCB | 加速 |
+|---:|---:|---:|---:|
+| 4 | 86.2 | 62.8 | 1.59× |
+| 8 | 87.1 | 63.2 | 2.13× |
+| **16** | **87.9** | **64.1** | **2.52×** |
+| 32 | 87.9 | 64.2 | 2.20× |
+
+> **16 是最优**：32 精度持平但速度掉到 2.20×（窗口太长，buffer 开销回来了）；4 则精度和速度双输。
+
+#### 在 RTX PRO 6000 上的实际收益
+
+单层线性注意力（32 head、dk=dv=128、batch 512）[c-lq-kernel-gain]：
+
+| 平台 | GDN | KDA |
+|---|---:|---:|
+| B200 | 2.68× | 2.41× |
+| **RTX PRO 6000** | **3.95×** | **3.38×** |
+| RTX 5090 | 4.25× | 3.64× |
+
+> **工作站卡的增益反而高于 B200** [c-lq-why-workstation-higher]。原因很直接：**循环状态的读写流量在这些卡上是更强的瓶颈**——又是「带宽相对算力更紧张」这同一件事。
+
+端到端 [c-lq-e2e]：RTX PRO 6000 提升 **1.31–1.65×**，B200 为 1.23–1.60×。**工作站卡连端到端都反超 B200**，这在其他负载上很少见。
+
+#### 一个容量边界
+
+> **RTX PRO 6000 上 batch 512 放不下，实际最大 batch 是 256**；且在该 batch 下 Qwen3.5-35B-A3B 只能用 **2K 而非 4K 上下文** [c-lq-not-for-96gb-alone]。
+
+**即：96GB 上「高 batch」和「长上下文」不能同时要。** 这条与 §4.13 讨论的 KV/并发取舍是同一类约束。
+
+#### 显存收益
+
+状态存储从每元素 **4 字节降到 1.19 字节**（含 INT8 残差、平滑缩放、补偿 token），约 **3.4×** 压缩 [c-lq-memory]。开前缀缓存时端到端显存降 **41% / 51% / 56%**（9B / 35B-A3B / Kimi-Linear-48B）。
+
+**方法本身是免训练的（training-free）** [c-lq-training-free]——不需要重训或校准数据。
+
+> **注意适用边界**：该方法的收益是「同卡跑更多并发」，**不是「让小卡装下大模型」**。RTX PRO 6000 的 batch 上限仍是 256，容量墙没有被突破。
 
 ### 4.12 生产级延迟画像：128K 上下文 + 48 并发的真实数字
 
@@ -4144,6 +4232,12 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 学术论文与预印本（补充）
+
+- [arXiv (UC Berkeley 等；含 Song Han / Ion Stoica / Kurt Keutzer)：LeapQuant: Efficient Linear Attention with Accurate Recurrent State Quantization](https://arxiv.org/abs/2609.38166)（2026-09-29） — [src-arx-leapquant]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -4277,7 +4371,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=145, evidence=1004, claims=635, claims_high=456, claims_disputed=1, trace_events=297, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=146, evidence=1032, claims=649, claims_high=469, claims_disputed=1, trace_events=299, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
