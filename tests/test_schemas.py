@@ -288,6 +288,56 @@ def test_docs_quote_real_counts() -> None:
             assert got == want, f"{rel}: 声明 {got} {kind}，实际 {want}"
 
 
+def test_brief_matches_report_appendix() -> None:
+    """brief.yaml 的子问题集合必须与 REPORT.md 附录 A 表格一致（不变量 R2）。"""
+    import re as _re
+    target = ROOT / "research" / "rtx-pro-6000"
+    if not target.is_dir():
+        print("  (skip: archive absent)")
+        return
+    brief = (target / "brief.yaml").read_text(encoding="utf-8")
+    report = (target / "REPORT.md").read_text(encoding="utf-8")
+
+    m = _re.search(r"## 附录 A.*?(?=\n## |\Z)", report, _re.S)
+    if not m:
+        print("  (skip: no appendix A)")
+        return
+    rows = _re.findall(
+        r"^\|\s*(q\d+)\s*\|\s*([^|]*)\|\s*([^|]*)\|", m.group(0), _re.M
+    )
+    if not rows:
+        print("  (skip: appendix table empty)")
+        return
+
+    appendix = {}
+    for qid, _q, status in rows:
+        if qid in appendix:
+            continue
+        s = status.strip()
+        appendix[qid] = (
+            "answered" if "✅" in s else "partial" if "⚠" in s
+            else "unanswered" if "❌" in s else "other"
+        )
+
+    brief_ids = _re.findall(r"id:\s*(q\d+)", brief)
+    brief_status = _re.findall(r"status:\s*(\w+)", brief)
+
+    assert len(brief_ids) == len(brief_status), (
+        f"brief.yaml 中 {len(brief_ids)} 个 id 但 {len(brief_status)} 个 status"
+    )
+    brief_map = dict(zip(brief_ids, brief_status))
+
+    only_brief = sorted(set(brief_map) - set(appendix))
+    only_report = sorted(set(appendix) - set(brief_map))
+    assert not only_brief, f"brief.yaml 有而附录缺: {only_brief[:8]}"
+    assert not only_report, f"附录有而 brief.yaml 缺: {only_report[:8]}"
+
+    mismatch = [
+        (q, brief_map[q], appendix[q]) for q in appendix if brief_map[q] != appendix[q]
+    ]
+    assert not mismatch, f"状态不一致 (id, brief, appendix): {mismatch[:8]}"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
