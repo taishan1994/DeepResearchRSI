@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：144 ｜ **证据数**：964 ｜ **主张数**：620（高置信 442，争议 1）
+> **来源数**：145 ｜ **证据数**：1004 ｜ **主张数**：635（高置信 456，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1305,6 +1305,154 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 > *"The GeForce RTX 5090 shares the architecture but has **32 GB**, which needs a reduced-AdaLN checkpoint and a non-resident text encoder at this resolution."*
 
 **同架构、同 sm_120，但 32 GB 装不下** → 要换缩减版 checkpoint + 文本编码器放 host。这又一次印证了本报告的主线判断：**这张卡的护城河是容量，不是算力。**
+
+### 4.11.1 两张 96GB 装下 397B：H-Process 的完整实证
+
+这是本报告见过**最激进的容量案例**，也是「96GB × 2 到底能干什么」的上限答案 [c-xfp-397-fits-2x96]。
+
+#### 问题有多难
+
+Qwen3.5-397B-A17B 的硬指标 [c-xfp-397-fits-2x96]：
+
+| 项 | 值 |
+|---|---|
+| routed experts | **512 / 层** |
+| 层数 | 60 |
+| **BF16 原始体积** | **约 795 GB** |
+| 常规 4bit 后 | 约 200 GB（**仍装不进 2×96GB**） |
+
+原文对这一点的描述很直接 [c-xfp-397-fits-2x96]：
+
+> *"The uncompressed weights exceed 700 GB. At INT4 the model fits, but barely: KV cache is starved, context length is capped, and the quality loss from uniform 4-bit quantization is substantial."*
+
+**即：2×96GB 的 192 GB 总量，连「4bit + 完整 KV」都吃紧。** 这不是「能不能跑」，是「跑了还剩多少给上下文」。
+
+#### 怎么装进去的
+
+作者没有用「统一位宽 + 专家剪枝」，而是**按层按类分配位宽** [c-xfp-perclass]：
+
+| 组件 | 位宽 | 占比 |
+|---|---|---|
+| 自注意力 | **xfp4** | 100% |
+| 线性注意力 | **xfp4** | 100% |
+| 共享专家 | **xfp4** | 100% |
+| **routed experts** | **xfp2** | 多数 |
+
+平均 **约 3.4 有效位**。routed 路径上的 xfp4 升级集中在**第 1–3 层**（GatedDeltaNet 起始转换）与**第 13 层**，且跨运行稳定。
+
+**为什么可以这样分** [c-xfp-gauss-reason]：routed expert 的权重分布**接近高斯**，能承受激进量化；注意力层不能。这就是原文所说的 *"P3—The MoE Heterogeneity Problem"*。
+
+#### 收益
+
+H1.5 配置下的实测 [c-xfp-397-fits-2x96] [c-xfp-length-scaling]：
+
+| 指标 | 值 |
+|---|---|
+| 长输出解码 | **100.9 tok/s** |
+| 中输出 | 98.2 tok/s |
+| 短输出 | **73.4 tok/s** |
+| GSM8K 严格匹配 | **66.72%**（1319 题，**单种子**） |
+| 稳态显存 | 83 GiB / GPU（峰值 97 GiB） |
+
+> **注意短输出反而慢（73.4 < 100.9）**——这与「固定开销摊销」一致，但也提醒：**用短请求测长上下文模型的吞吐会低估它。**
+
+#### 但可用窗口极窄
+
+这是本节最重要的部分 [c-xfp-hprocess-window]：
+
+| 配置 | τ_lazy | 结果 |
+|---|---|---|
+| G | 0.80 | **routed 塌成近 100% xfp2，数学输出退化为重复 token** |
+| H1 | 0.92 | 52% GSM8K，72 GiB/GPU |
+| **H1.5** | **0.93** | **60% 探测 / 66.72% 全量，83 GiB/GPU** |
+| H1.7 | 0.935 | **OOM（三次全失败）** |
+| H | 0.94 | OOM |
+
+原文对 0.80 那档的描述极有价值 [c-xfp-hprocess-window]：
+
+> *"math output degenerates to repeated tokens (**cosine passes, benches do not**)"*
+
+> **这是本报告见过最锋利的一句方法论警告**：**余弦相似度这个「量化质量指标」通过了，但实际基准挂了。** 用重构误差做质量门禁是不够的，必须跑下游任务。
+
+而 0.92 → 0.93 的边际代价也很具体：**多占 11 GiB/GPU，换约 8 个百分点的探测精度**。
+
+#### OOM 发生在编码阶段，不是服务阶段
+
+这条对容量规划是可操作的 [c-xfp-oom-is-spike]：
+
+> H1.7（τ_lazy=0.935）**三次全部失败**，即使把 `gpu_mem_util` 压到 0.97、KV cache 只留 2 GB、`max_model_len` 降到 8192 —— **因为峰值发生在任何服务分配之前**。
+
+**即：能不能装下，取决于「量化加载时的编码峰值」，而不是稳态服务占用。**
+
+> **实操含义：按稳态显存做容量规划会漏掉这一类失败。** 部署时要预留的是「编码峰值 + 稳态」的较大者。
+
+#### 两个与既有结论吻合的部署细节
+
+- **必须关 custom all-reduce**（SM120 在 TP=2 下的已知问题）[c-xfp-tp2-known-issue] —— 这与 §4.8 记录的「SM120 镜像需 `--disable-custom-all-reduce`」**完全一致，是独立的第二例**。
+- **因 `head_dim=256`，FlashInfer 的 FP8-KV 不可用**，只能走 Triton + BF16 KV，`max_model_len` 限 65536。
+
+### 4.11.2 量化格式的真实差距：XFP vs Marlin INT4 同机对照
+
+这是一份少见的**严谨同机对照**——同一张卡、同一会话、同模型 [c-xfp-marlin-gain]。
+
+#### 数字
+
+Qwen3.5-122B-A10B，RTX PRO 6000 SM120 [c-xfp-marlin-gain]：
+
+| 格式 | TP | tok/s | GSM8K 严格 | 有效位 |
+|---|---:|---:|---:|---:|
+| **XFP V2** | 1 | **110** | 94.62 ± 0.67 | ~3.97 |
+| **XFP V2** | 2 | **138** | 94.49 ± 0.57 | ~3.97 |
+| Marlin INT4 | 1 | 73.6 | 95.27 ± 0.12 | 4.0 |
+
+**TP=1 时 XFP 快 49%，TP=2 时相对 Marlin TP=1 快 87%。**
+
+#### 一个必须说清的归因问题
+
+原文把优势归给「少读 0.03 位」[c-xfp-bits-397]：
+
+> *"XFP reads ~3.97 effective bits per weight versus Marlin's 4.0"*
+
+**但 3.97/4.0 只差 0.75%，实测却差 49%** —— 这个归因**不完整**。合理的补充解释是 fused depack–gather–scatter–GEMM kernel 的实现效率差异。**本报告保留原文说法，但明确指出单纯「位数差」解释不了 49%。**
+
+#### 精度代价可以接受
+
+XFP 相对 Marlin 低 **0.65 个百分点**（94.62 vs 95.27）[c-xfp-acc-tradeoff]，而 Lloyd 初始化的抖动标准差就有 **0.67 pp** —— **即这个差距落在噪声范围内**，两者同处 94–95% 区间。
+
+### 4.11.3 单流量化推理只要 240W：一个重要的功耗反例
+
+这条数据对 §6「600W 是否值得」是直接反例 [c-xfp-single-power-240]。
+
+单流解码、TP=2、Qwen3.5-122B-A10B [c-xfp-single-power-240]：
+
+| 指标 | 值 |
+|---|---|
+| 单流解码 | 138 tok/s（引擎持续 137） |
+| **GPU 利用率** | **98% / 98%** |
+| **GPU 功耗** | **240 / 240 W** |
+| 显存 | 57 / 96 GiB |
+
+> **利用率 98% 但功耗只有 240W** —— 说明这是**带宽打满、算力未打满**的负载。
+>
+> **含义：单流量化推理场景下，600W 完全没有必要，240W 就能让卡处于满负荷状态。** 这与 §6 记录的「功耗墙只限制 SM 频率，不限制显存时钟」机制完全一致——**带宽受限的负载，降功耗几乎不掉性能。**
+
+**但必须标注适用边界** [c-xfp-single-scope]：该数据来自**单用户参考 kernel**，原文明确写 *"concurrent / batched serving is out of scope"*。**不能外推到高并发场景**——高并发时算力会真正吃满，功耗曲线完全不同。
+
+#### 顺带一个格式选择的反例
+
+V2a 存储模式的表现**高度依赖模型** [c-xfp-v2a-variance]：
+
+| 模型 | V2a tok/s | 相对 Marlin |
+|---|---:|---:|
+| Qwen3.5-122B-A10B | 108.1 | **+47%** |
+| GLM-4.7-Flash | 118.1 | **−2.5%** |
+| Qwen3.5-35B-A3B | 204.0 | 无同款 INT4，无法比 |
+
+> **同一个格式，122B 上快 47%，GLM 上反而慢 2.5%。** 作者主动标注了 35B 对比不公平（因为不存在同款 Q3.5 INT4 checkpoint）——**这种自我限制值得记录**。
+
+#### 来源权重
+
+这是一篇**单一作者独立预印本**（Gemini Stiftung Leipzig），代码开源，**未经同行评审** [c-xfp-single-author]。数据详实且方法透明，但**按预印本权重对待，不与 NVIDIA 官方数据同级**。
 
 ### 4.12 生产级延迟画像：128K 上下文 + 48 并发的真实数字
 
@@ -3990,6 +4138,12 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 学术论文与预印本（补充）
+
+- [arXiv (Thomas Witt, Gemini Stiftung Leipzig)：XFP: Quality-Targeted Adaptive Codebook Quantization with Sparse Outlier Separation for LLM Inference](https://arxiv.org/abs/2605.14844)（2026-05-14） — [src-arx-xfp]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -4123,7 +4277,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=144, evidence=964, claims=620, claims_high=442, claims_disputed=1, trace_events=297, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=145, evidence=1004, claims=635, claims_high=456, claims_disputed=1, trace_events=297, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
