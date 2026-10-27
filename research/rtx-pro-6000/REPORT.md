@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：203 ｜ **证据数**：1658 ｜ **主张数**：1134（高置信 889，争议 3）
+> **来源数**：204 ｜ **证据数**：1663 ｜ **主张数**：1139（高置信 889，争议 3）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -9137,13 +9137,52 @@ PCIe Gen5 x16 下 [c-p2p-bandwidth]：
 
 | 时点 | 价格 | 说明 |
 |---|---|---|
-| 2025-03 发布 | 无官方 MSRP | 通过 PNY / TD SYNNEX 分销 [e-press-availability] |
+| 2025-03 发布 | **$8,565**（官方商城） | Workstation 与 Max-Q **同价** [c-price-all-three-8565] |
 | 2025-05 上市 | **~$8,435–8,565** | 渠道挂牌价（VideoCardz 转述）[c-price-launch] |
+| **2026-06** | **$13,250**（官方商城） | ⭐ **+55%**；PNY 非公版 $11,359.99 [c-price-hike-13250] |
 | 2026-08 | **$16,000** | 官方调价，接近翻倍 [c-price-now] |
 | **2026-10-27** | **$17,999**（≈¥120,058） | 美国 10 家店的典型最低新价 [c-price-17999] |
 | 同期 RTX 5090 | **$4,996**（≈¥33,325） | 美国 17 家店典型最低新价 [c-price-5090-4996] |
 
 **当前价格比 = 3.6 倍** [c-price-ratio]。涨价主因是高端 GDDR7/DRAM 供应紧张，且预期持续多年 [c-price-cause]。
+
+**累计涨幅**：从 $8,565 到 $17,999 是 **+110%**。而这条线是**四级阶梯**（$8,565 → $13,250 → $16,000 → $17,999），**不是一次性翻倍**——每一级之间的涨幅分别是 +55%、+21%、+12%。
+
+#### 12.1.1 同一张卡，四个渠道，价差 15%
+
+**2026 年 6 月的同期报价** [c-price-channel-spread]：
+
+| 渠道 / 版本 | 价格 | 相对官方商城 |
+|---|---:|---:|
+| **Newegg**（Workstation） | **$12,099.99** | ⭐ **−8.7%** |
+| **PNY 非公版**（官方商城） | **$11,359.99** | ⭐ **−14.3%** |
+| **官方商城**（Workstation） | **$13,250** | 基准 |
+| **Newegg**（**Server Edition**） | **$14,999** | **+13.2%** |
+
+> ⭐ **方向并不固定——原文明确「在部分型号上英伟达官方渠道的价格反而低于第三方零售商」。**
+
+> ⚠️ **这推翻了「官方商城一定最贵」的直觉。**
+
+**两个 SKU 的零售溢价** [c-price-server-premium]：
+
+> **Server Edition 比同一时点的 Workstation Edition 贵约 24%。**
+>
+> ⚠️ **且 Server Edition 不经英伟达官方商城面向普通消费者销售。**
+
+> ⭐ **这是本报告首次给出两个 SKU 在同一时点的零售价对照；此前 §12 只有云端租赁的 SKU 排序（而且那个排序是反的，见 §12.8）。**
+
+#### ⚠️ 12.1.2 采购时必须区分三种「货」
+
+**同一个型号、同一个价格，背后可能是三种完全不同的东西** [c-price-oem-caveat]：
+
+| 类型 | 特征 |
+|---|---|
+| **正规零售** | 有零售包装、可享厂商保修 |
+| **第三方卖家** | 平台上的第三方，货源不明 |
+| **OEM 版本** | ⚠️ **面向系统集成商批量销售，一般不带零售包装** |
+
+> ⚠️ **这与 §12.7.2 的「已证实假卡：PCB 是 RTX 5090」构成同一类风险的两个端点：一端是假货，另一端是合法但无保修的 OEM 货。**
+
 
 ### 12.2 另一种口径：持有型 TCO 下它反而最便宜
 
@@ -10107,6 +10146,10 @@ sudo nvidia-bug-report.sh
 5. [TensorRT-LLM #12704 — Filter CUTLASS MoE GEMM tile configs by device shared memory on SM121](https://github.com/NVIDIA/TensorRT-LLM/pull/12704) — TensorRT-LLM GitHub PR，2026-04-02、closed、40 条评论。用 `cudaDevAttrMaxSharedMemoryPerBlockOptin` 在运行时过滤 tactic — [src-trtllm-12704]
 6. [llama.cpp #29281 — Performance regression: CUDA sparse flash attention decode 1.6x slower (b11047 → b11062)](https://github.com/ggml-org/llama.cpp/issues/29281) — llama.cpp GitHub Issue，2026-09-22、closed、10 条评论。11 个稀疏配置逐项对照，最差 +113% 而 dense 只动 0.1% — [src-llamacpp-29281]
 
+### 价格的四级阶梯与四个渠道（第十四轮补充）
+
+1. [英伟达 RTX PRO 6000 Blackwell 全线涨价，较去年首发价高出 55%](https://www.c114.net.cn/industry/90315.html) — C114 通信网转述 IT之家 / Tom's Hardware，2026-06-13。同时列出官方商城 $13,250、PNY 非公版 $11,359.99、Newegg $12,099.99 与 Server Edition $14,999 四个同期报价 — [src-c114-price-hike]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -10246,7 +10289,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=203, evidence=1658, claims=1134, claims_high=889, claims_disputed=3, trace_events=407, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=204, evidence=1663, claims=1139, claims_high=889, claims_disputed=3, trace_events=410, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
