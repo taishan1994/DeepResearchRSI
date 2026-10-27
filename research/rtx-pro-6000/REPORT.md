@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：150 ｜ **证据数**：1116 ｜ **主张数**：692（高置信 510，争议 1）
+> **来源数**：152 ｜ **证据数**：1130 ｜ **主张数**：700（高置信 516，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -291,6 +291,82 @@ RTX PRO Blackwell 工作站线的核心规模呈明确阶梯 [c-cg-lineup]：
 **容量换算**：四卡 336GB、八卡 672GB，可支撑量化后的 671B 模型 [c-6000d-capacity]。
 
 ---
+
+### 3.9 ECC 的真实代价：是容量问题，不是带宽问题
+
+本报告此前只在规格表里写过「Max-Q 的 ECC 默认关闭」，**从没量化过开关的代价**。这一轮补上，而结论和一个流传很广的说法相反。
+
+#### 普遍说法 vs 有据可查的事实
+
+流传的说法是「关掉 ECC 能提升带宽」。**这个说法缺乏受控证据。**
+
+一份写得很克制的资料明确拒绝了这个推断 [c-ecc-no-bw-claim]：
+
+> *"Intel still specifies the B70 at 608 GB/s. **We have no controlled evidence that ECC-off increases raw bandwidth, so we do not claim it does.**"*
+
+而且总线规格根本没变：仍是 256-bit GDDR6，标称 608 GB/s [c-ecc-no-bw-claim]。
+
+> **这是本轮最值得学的一句**：作者**拒绝了一个对自己论点有利、但没有证据支持的推断**。对比之下，很多内容农场正是靠这种推断撑起整篇文章。
+
+#### 真正的代价是容量
+
+Intel 官方文档记载 [c-ecc-capacity-cost]：
+
+| ECC | 可见容量（Arc B70，物理 32 GB） | 标称带宽 |
+|---|---|---|
+| 关 | **约 32 GB** | 608 GB/s |
+| **开** | **约 28 GB** | 608 GB/s |
+
+**开 ECC 少约 4 GB，带宽不变。**
+
+#### 那为什么有人觉得「关了快很多」
+
+因为那是**容量效应，不是速度开关** [c-ecc-capacity-effect]：
+
+> **如果模型本来就装得下，关 ECC 不会明显改变 tok/s。**
+>
+> 只有当多出的容量**避免了 CPU 卸载、换页、OOM、KV cache 缩水或并发降低**时，实际提升才可能很大。
+
+**即：不是「变快了」，是「避免了灾难性降级」。** 这两件事在体感上都表现为「快了一大截」，但机制完全不同——**理解了机制才知道自己的场景会不会受益**。
+
+#### 什么时候该开
+
+| 场景 | 建议 | 理由 |
+|---|---|---|
+| 容量是硬约束（本地推理、模型开发、跑基准） | **关** | 换来约 4 GB |
+| 长时无人值守任务 | **开** | 一次比特翻转可能毁掉整轮结果 |
+| 可靠性敏感工作 | **开** | 保守选择 |
+| 排查疑似显存错误 | **开** | 诊断前提 |
+
+#### 一个必须知道的测量陷阱
+
+> 判断 ECC 状态**必须同时看 `Current` 与 `Pending` 两个字段** [c-ecc-verify-trap]。
+>
+> **两者不一致时，pending 状态意味着尚未生效，此时采集的性能数据不是有效的基准元数据。**
+
+**这是「测之前先验证环境」的一个具体实例**——本报告 §10.8 记录的「450W vs 600W 逐位比对」也是同一类问题：**环境没验证，数据就白测。**
+
+#### ECC 保护不到的地方
+
+ECC **只保护显存**，不保护 [c-ecc-scope-limits]：
+
+- GPU 核心逻辑
+- L1 / L2 缓存
+- 数据到达显存之前的传输链路
+
+而且**主要针对单比特错误**——同一内存字内多比特同时翻转时，**通常只能检测、不能纠正**。
+
+> **所以别把 ECC 当成万能的「数据保险」。** 这一点与本报告 §10.8 记录的「静默 CUDA 计算错误」直接相关：**那类错误 ECC 是能抓到的（FBPA 子分区报 uncorrectable ECC），但核心逻辑或缓存层的错误它抓不到。**
+
+#### 必须声明的证据缺口
+
+> **关于 RTX PRO 6000 开 ECC 的确切容量与带宽代价，本轮没有取得一手实测** [c-rtx6k-ecc-unknown]。
+>
+> 两个候选来源都不可达：Whirlpool 论坛的 ECC 实测帖（403，Cloudflare）、WOLF 的 GDDR7 白皮书（404）。
+>
+> 另有二手汇编称容量减少 6%–12.5%、ML 任务降约一成、渲染可达三成 [c-ecc-6pct-tertiary]——**但该来源未给卡型号、测试方法与原始数据，只作「业界流传说法」记录，不作量化依据。**
+
+**所以本节用 Intel B70 说明的是「机制」，不是「RTX PRO 6000 的具体折扣数字」。** 后者仍是悬空项。
 
 ## 4. AI 推理性能：96GB 到底买到了什么
 
@@ -4562,6 +4638,13 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 补充来源
+
+- [steveseguin / b70-optimization-lab：B70 ECC and usable VRAM：ECC 开关到底是容量收益还是带宽收益](https://github.com/steveseguin/b70-optimization-lab/blob/main/learn/b70-ecc-and-vram.html)（2026-06-01） — [src-b70-ecc]
+- [人人代码（内容农场）：工作站显卡一开 ECC，显存和带宽都跟着缩水？先看清代价再决定开不开](https://www.renrendaima.com/article/28804)（2026-10-17） — [src-rrd-ecc]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -4695,7 +4778,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=150, evidence=1116, claims=692, claims_high=510, claims_disputed=1, trace_events=307, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=152, evidence=1130, claims=700, claims_high=516, claims_disputed=1, trace_events=309, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
