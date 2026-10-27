@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：185 ｜ **证据数**：1438 ｜ **主张数**：959（高置信 716，争议 1）
+> **来源数**：186 ｜ **证据数**：1453 ｜ **主张数**：972（高置信 729，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1171,6 +1171,149 @@ Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存
 **一个有用的交叉验证** [c-500w-tie]：500W 功耗墙下，同一模型在 llama.cpp 与 vLLM 上分别跑到 70.3 与 72.1 tok/s，**基本持平** [e-t2-speed]。这从第二条软件路径独立佐证了 §6.4 的结论：**500W 与 600W 在推理上差异很小**。
 
 **实际可用的上下文能力** [c-longctx-256k]：双卡各 500W 的部署中，每副本 4 槽、池化 1,048,576 token，单槽硬上限 **262,144 token** [e-t2-ctx]。这是 96GB + Q8_0 KV 的真实可用值，不是营销数字。
+
+#### 4.4.2 量化质量谱系：一个此前完全没有的质量维度
+
+**§4.4.1 只比了 NVFP4 与 FP8 的速度，没有质量谱系。** 本节补上——而结论比速度更反直觉。
+
+#### 一、KLD 已成为事实标准，且有可比横表
+
+**同以 FP8 为参考** [c-kld-metric]：
+
+| 量化 | KLD | 评价 |
+|---|---:|---|
+| **QuantTrio AWQ** | **0.024** | **最优** |
+| Luke NVFP4 | 0.035 | |
+| **NVIDIA 官方 NVFP4** | **0.036** | |
+| AutoRound INT4 | **0.070** | **最差** |
+
+> **AWQ 在质量上优于两种 NVFP4。**
+
+#### ⚠️ 二、NVIDIA 官方量化比社区版差 7–10%
+
+**这条最反直觉** [c-kld-nvidia-worse]：
+
+> **`nvidia/GLM-5.1-NVFP4` 的 KLD 为 0.0757，而社区版为 0.0687（W4A16 42-窗口）——官方版差 7–10%。**
+
+> **即「官方量化」不等于「质量更好」，社区调过的校准数据可以胜出。**
+
+#### 三、激活位宽比权重位宽更影响质量
+
+**同一模型** [c-kld-activation-bits]：
+
+| 激活位宽 | KLD |
+|---|---:|
+| **16 位** | **0.062** |
+| **4 位** | **0.189** |
+
+> **相差约 3 倍。**
+>
+> **这解释了为什么 §4.4.1 的 W4A16（只量化权重）质量无退化，而同时量化激活的方案会明显掉质量。**
+
+#### 四、KLD 的绝对数值需要噪声底参照
+
+**Qwen3.6-27B 上** [c-kld-noise-floor]：
+
+| 格式 | KLD | 相对噪声底 |
+|---|---:|---:|
+| **BF16 噪声底** | **0.00076** | 1× |
+| FP8 | — | **7.3×** |
+| **NVFP4** | — | **395×** |
+
+> **即 NVFP4 的质量偏差约为 FP8 的 54 倍**（395 ÷ 7.3）。
+>
+> **所以「KLD 0.1」这种绝对数字没有意义，必须知道噪声底在哪。**
+
+#### ⚠️ 五、KLD 会因构建版本严重回归
+
+**一次真实事故** [c-kld-regression-risk]：
+
+| b12x 版本 | 平均 KLD |
+|---|---:|
+| v0.7.2 | **0.035** |
+| **v0.7.4** | **9.33** |
+
+> **约 266 倍。随后修复。**
+>
+> **即量化质量不是格式的固定属性，而是「格式 + 具体构建 + 校准数据」的联合属性。**
+
+#### 六、EXL3：一条独立且已验证的路径
+
+**本报告此前 `EXL3` 在全文出现 0 次。** 它是 ExLlamaV3 的 trellis 量化 [c-exl3-separate-path]：
+
+| 项 | 数据 |
+|---|---|
+| 模型 | Qwen3.5-397B-A17B，**3.47 bpw** |
+| 硬件 | **2 × RTX PRO 6000（不用张量并行）** |
+| 吞吐 | **1500 pp/s、50+ tg/s** |
+| **190K 上下文** | **1300+ pp/s、43 tg/s** |
+
+**质量也成立** [c-exl3-quality]：
+
+> **GLM-5.2-EXL3-TR3-3.0bpw：GPQA 88.89%、KLD 约 0.014（相对 BF16）**；独立验证为 KLD 0.116（NVFP4 KV）/ 0.101（FP8 KV）、Estonia 30/30、解码约 87–88 tok/s。
+
+⚠️ **两批 KLD 数字差距大（0.014 对 0.116），可能参考基准不同，引用时须注明。**
+
+**trellis 内核修复的收益很大** [e-exl3-trellis-fix]：
+
+> **预填充吞吐 +58–64%。**
+
+#### 七、MTP 草稿层也该量化
+
+**一个很实用的发现** [c-exl3-mtp-quant]：
+
+> **GLM-5.2 的第 78 层草稿层量化到 3 bpw EXL3 后，与 BF16 接受率持平，而体积只有五分之一，在 TP4 上释放约 3.8 GB 每卡。**
+
+> **这与 §4.16 的草稿服务器负载讨论直接相关：草稿头可以压到 3 bpw 而不掉接受率。**
+
+#### ⚠️ 八、但 EXL3 在长上下文上弱于 NVFP4
+
+**30k 上下文召回测试** [c-exl3-ctx-weak]：
+
+| 格式 | 得分 |
+|---|---:|
+| **NVFP4** | **4/10** |
+| **EXL3** | **0/10** |
+
+> **所以两者不是替代关系而是分工**：**EXL3 适合短到中上下文的质量与吞吐，NVFP4 适合长上下文一致性。**
+
+#### 九、还有两个被低估的格式
+
+**AWQ** [c-awq-beats-nvfp4]：
+
+| 对比 | AWQ | NVFP4 |
+|---|---:|---:|
+| Estonia | **27/30** | 25/30 |
+| KLD | **0.036** | — |
+| **A16 下速度** | **快 15%** | — |
+
+**FP6** [c-fp6-beats-fp8]：
+
+| 项 | FP6 | Qwen 自家 FP8 |
+|---|---:|---:|
+| KLD | **0.016** | 0.023 |
+| 体积 | **25 GB** | — |
+
+> **即在这张卡上 6 位比 8 位质量更好而体积更小。**
+
+**而 Unsloth 干脆放弃了 NVFP4** [c-unsloth-nvfp4-drop]：**理由是质量差且在 SM120 上并不更快。**
+
+#### 十、本轮最重要的方法论结论
+
+**综合以上证据** [c-quant-not-format-property]：
+
+> **量化质量不是格式的固定属性，而是「格式 + 具体构建 + 校准数据 + 哪些层被量化」的联合属性。**
+
+**四条独立证据**：
+
+| 证据 | 幅度 |
+|---|---|
+| 官方 NVFP4 比社区版差 | **7–10%** |
+| b12x 一个版本 KLD 恶化 | **266×** |
+| 混合量化在敏感层保留 FP8 | **28% KLD 改善** |
+| 自定义 mxfp8 击败原厂 fp8 | 有 |
+
+> **这改变的不是某个结论，而是「怎么读量化数字」。**
 
 ### 4.8 投机解码不总是有效：一个必须并列的反面证据
 
@@ -7395,6 +7538,7 @@ sudo nvidia-bug-report.sh
 - [NVIDIA Blog — Cadence Taps NVIDIA Blackwell to Accelerate AI-Driven Engineering Design and Scientific Simulation（2025-05-07）](https://blogs.nvidia.com/blog/cadence-millennium-nvidia-blackwell/) — [src-nvblog-cadence]
 - [llama.cpp Discussion #15396 — gpt-oss guide（含 RTX PRO 6000 Max-Q 与 Workstation 两臂原始 llama-bench 日志）](https://github.com/ggml-org/llama.cpp/discussions/15396) — [src-llamacpp-15396]
 - [local-inference-lab/rtx6kpro — Daily Summaries（2026-09 与 2026-10，50 篇 RTX6kPRO Discord 自动汇总）](https://github.com/local-inference-lab/rtx6kpro/tree/master/daily-summaries) — [src-rtx6kpro-daily]
+- [local-inference-lab/rtx6kpro — Daily Summaries 全量（2026-02 至 2026-10，共 246 篇）](https://github.com/local-inference-lab/rtx6kpro/tree/master/daily-summaries) — [src-rtx6kpro-daily-full]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -7630,7 +7774,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=185, evidence=1438, claims=959, claims_high=716, claims_disputed=1, trace_events=371, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=186, evidence=1453, claims=972, claims_high=729, claims_disputed=1, trace_events=373, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
