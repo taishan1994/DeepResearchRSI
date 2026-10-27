@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：172 ｜ **证据数**：1351 ｜ **主张数**：887（高置信 670，争议 1）
+> **来源数**：174 ｜ **证据数**：1358 ｜ **主张数**：893（高置信 670，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -6149,6 +6149,110 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 12.8 云租赁 vs 自购：本报告此前完全没有的第三种持有方式
+
+§12.1–§12.7 都在讨论**买**多少钱。但 8,000–17,999 美元的卡还有**第三种选项：按小时租**。这一维度在本报告此前是空白（「按小时」出现 **0 次**）。
+
+#### 一、按需价横跨 6 倍
+
+**15 家供应商、17 个报价，时点 2026-10-27** [c-price-rent-range]：
+
+| 口径 | 每 GPU 小时 |
+|---|---:|
+| **最低按需** | **$0.92** |
+| **中位** | **$2.45** |
+| **最高按需** | **$5.50** |
+| **最低现货/可中断** | **$0.79** |
+
+**逐家按需价**（节选，完整见档案）：
+
+| 供应商 | 按需 /GPU-hr | 现货 | 备注 |
+|---|---:|---:|---|
+| **Vast.ai**（Max-Q） | **$0.92** | — | 按秒计费 |
+| Vast.ai（Server） | $1.06 | — | |
+| Vast.ai（Workstation） | $1.07 | — | |
+| Nebius | $1.80 | **$0.79** | |
+| Hyperstack | $1.85 | $1.48 | |
+| Verda | $2.04 | $1.02 | |
+| RunPod | $2.09 | — | |
+| **CoreWeave** | $2.50 | $1.39 | **最少 8 卡** |
+| AWS | $3.36 | $2.54 | |
+| Google Cloud | $4.50 | $1.79 | |
+| Oracle Cloud | $4.50 | — | **最少 8 卡** |
+| **Microsoft Azure** | **$5.50** | $1.02 | |
+
+#### 二、租 vs 买的回收期
+
+**按 730 小时/月折算** [c-price-rent-buy-crossover]：
+
+| 租赁档位 | 单卡月租 | 追平 $8,000 需 | 追平 $17,999 需 |
+|---|---:|---:|---:|
+| **最低价 $0.92** | **$672** | 约 **12 个月** | 约 **27 个月** |
+| **中位价 $2.45** | **$1,789** | 约 **4.5 个月** | 约 **10 个月** |
+
+> **关键结论：「租还是买」的分界高度依赖于能否拿到低价档，而不是卡本身的性能。**
+>
+> ⚠️ 这里用 $8,000–17,999 的区间，是因为**本报告 §12 记录的两个整卡价本身相差逾 2 倍**
+> （StorageReview 8,500 对 Drop & Render 17,999），该争议尚未解决。
+
+#### 三、8 卡 24/7 的月度成本
+
+| 档位 | 8 卡月成本 |
+|---|---:|
+| **最低按需价** | **约 $5,373** |
+| **中位价** | **约 $14,308** |
+
+> **最低价下约一年追平一张整卡价；中位价下 8 卡月租已到 8 卡整机价的一半量级。**
+>
+> **故大规模长期使用通常指向自购** [c-price-8gpu-monthly]。
+
+#### 四、一个反直觉的定价排序
+
+**云端 SKU 定价与硬件规格排序不一致** [c-price-sku-rank-inverted]：
+
+| SKU | 功耗定位 | Vast.ai 按需价 |
+|---|---|---:|
+| **Max-Q** | **最低** | **$0.92（最便宜）** |
+| Server | 中 | $1.06 |
+| Workstation | 高 | $1.07（**最贵**） |
+
+> **价差约 16%。最低功耗的 SKU 反而最便宜——说明云端定价反映的是稀缺性与供给，不是性能。**
+>
+> **这是本报告区分 SKU 时的一个实用提示：租的时候别默认「便宜的规格就差」。**
+
+#### ⚠️ 五、这些数字只能当量级参考
+
+**两个独立聚合站对同一供应商的报价互相冲突** [c-price-aggregators-conflict]：
+
+| 供应商 | InferenceHub | GPUPerHour |
+|---|---:|---:|
+| **Vast.ai** | $0.92 | **$1.47** |
+| **RunPod** | $2.09 | **$0.50 起**（折扣档） |
+| 最低价 | $0.92 | **$0.69** |
+| 中位价 | $2.45 | **$2.38** |
+
+> **因此这些聚合数字不可当作可成交价格引用。**
+>
+> **这是「不能把聚合值当成交价」的直接证据**——与本报告多处「聚合值掩盖分布」的教训一致。
+
+#### 六、最小起租量会改变可选项集合
+
+**部分供应商有最小起租限制** [c-price-min-node]：
+
+| 供应商 | 最小起租 |
+|---|---|
+| **CoreWeave** | **8 卡** |
+| **Latitude.sh** | **8 卡** |
+| **Oracle Cloud** | **8 卡** |
+
+> **单卡试用与 8 卡部署面对的供应商集合并不相同。**
+
+#### ⚠️ 七、证据等级说明
+
+**这两个来源的 `trust_tier` 均为 `secondary`（聚合站，非一手供应商报价）**，因此本节的四条价格主张按不变量 **C1** 已全部降为 `medium`。
+
+> **结论：本节可用于量级判断（「租赁是几百到几千美元/月」），不可用于精确比价。**
+
 ## 13. 争议与证据缺口
 
 ### 13.1 明确的口径冲突
@@ -6456,6 +6560,8 @@ sudo nvidia-bug-report.sh
 - [HF 讨论区 — Kolibri-1 FP8 on one RTX PRO 6000：BEAM 100K 的 262K 窗口 vs 7K 记忆页](https://huggingface.co/Aleph-Alpha/Kolibri-1/discussions/10)（2026-08-31） — [src-hf-kolibri-beam]
 - [HF 讨论区 — NVFP4 vs FP8 on an RTX PRO 6000 Blackwell (vLLM 0.24)](https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4/discussions/8)（2026-09-20） — [src-hf-nvfp4-vs-fp8]
 - [GamersNexus — NVIDIA RTX PRO 6000 Blackwell Benchmarks & Tear-Down（含声学与拆解）](https://devtest.gamersnexus.net/gpus/nvidia-rtx-pro-6000-blackwell-benchmarks-tear-down-thermals-gaming-llm-acoustic-tests)（2025-09-25） — [src-gn-teardown]
+- [InferenceHub — RTX PRO 6000 Rental Pricing 2026](https://inferencehub.org/gpus/rtx-pro-6000)（2026-10-27） — [src-inferencehub-pricing]
+- [GPUPerHour — RTX PRO 6000 Blackwell 租赁价格聚合](https://gpuperhour.com/rent/rtx-pro-6000-blackwell)（2026-10-27） — [src-gpuperhour-pricing]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6685,7 +6791,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=172, evidence=1351, claims=887, claims_high=670, claims_disputed=1, trace_events=352, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=174, evidence=1358, claims=893, claims_high=670, claims_disputed=1, trace_events=352, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
