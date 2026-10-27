@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：207 ｜ **证据数**：1694 ｜ **主张数**：1172（高置信 912，争议 3）
+> **来源数**：208 ｜ **证据数**：1701 ｜ **主张数**：1178（高置信 918，争议 3）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -672,6 +672,101 @@ NVRM: Xid (PCI:0000:02:00): 154, Node Reboot Required
 | **短期交付** | **不值得**（两个 SKU 均缺货） |
 | **预算敏感** | **不值得**（冷头 + 冷排 + 泵 + 接头远超 $217） |
 | **主力生产、不愿承担改水风险** | **不值得**（无独立实测，且厂商资料自相矛盾） |
+### 3.6 物理安装：能不能装进去，以及三年后谁修
+
+**§3.1 是电气规格，§3.4–§3.5 是拆解与水冷，但中间缺了一层最基础的东西：这张卡能不能装进机箱、要接几根线、坏了谁管多久。**
+
+#### 一、完整的物理安装规格
+
+**授权板卡商官方页给出的数据** [c-physical-form-factor]：
+
+| 项 | 值 |
+|---|---|
+| 外形 | **4.4 英寸高 × 10.5 英寸长** |
+| 槽位 | ⭐ **FHFL 双槽** |
+| 重量 | **1.219 kg** |
+| 散热 | ⚠️ **被动（Passive）** |
+| 供电 | **1 个 PCIe CEM5 16-pin** |
+| 附件 | **附辅助供电线** |
+
+> **10.5 英寸（约 267 mm）这个长度不算夸张，但 1.219 kg 配上双槽被动散热，意味着它对机箱风道的依赖比长度更值得关注。**
+
+#### ⚠️ 二、Server Edition 也有显示输出
+
+**这条推翻了一个常见的 SKU 区分方式** [c-server-has-display]：
+
+| 项 | Server Edition |
+|---|---|
+| 显示输出 | ⭐ **4 个 DisplayPort 2.1** |
+| 最高分辨率 | **8K@240Hz 或 16K@60Hz** |
+
+> ⚠️ **即「Workstation 有显示输出、Server 无」这个区分方式不成立——Server Edition 不是无头卡。**
+
+#### ⚠️ 三、一处需要核对的官网内部矛盾
+
+**同一页面上两个功耗数字并存** [c-server-power-400w-floor]：
+
+| 位置 | 写法 |
+|---|---|
+| Specifications 表 | ⭐ **「400 W – 600 W（可配置）」** |
+| Features 段 | 「最大功耗 600 W」 |
+
+> **即其下限可以配到 400 W。这是本报告此前未记录的功耗档位——§6 一直只讨论 300 W（Max-Q）与 600 W 两档。**
+
+#### ⚠️ 四、一处 SKU 间的带宽差异
+
+**同为 96 GB GDDR7 ECC、512-bit，但标称带宽不同** [c-server-bw-lower]：
+
+| SKU | 标称带宽 |
+|---|---:|
+| **Workstation Edition** | **1.792 TB/s** |
+| **Server Edition** | ⚠️ **「最高 1.6 TB/s」** |
+| 差异 | **约 −10.7%** |
+
+> ⚠️ **这与 §3「三个 SKU 的差异主要在功耗」的既有认识不符。**
+>
+> **但需注意：这可能只是标称口径或取整不同，故本条标为需进一步核对的观察，不作为性能结论。**
+
+#### ⭐ 五、保修：3 年，以及软件套件的两个期限
+
+**本报告此前完全没有保修期限这个维度** [c-warranty-3yr]：
+
+| 项 | 期限 |
+|---|---|
+| **硬件保修** | ⭐ **3 年有限保修** |
+| **NVIDIA AI Enterprise 软件套件** | 按 GPU 计价，**3 年**（731-AI7027-P2CMI36）或 **5 年**（731-AI7027-P2CMI60） |
+
+> ⭐ **§12.7.1 记录过「保修归属真空：三方互相推诿」，但从没记录保修期限本身。**
+>
+> **而 3 年这个数字直接影响 TCO 里的折旧年限假设——§12.2 的持有型 TCO 计算此前没有明确折旧基数。**
+
+#### ⭐ 六、一个采购时容易忽略的耦合
+
+**物理规格决定了改造路径** [c-physical-vs-thermal]：
+
+| SKU | 散热 | 水冷改造的起点 |
+|---|---|---|
+| Workstation | **主动（带风扇）** | 拆风扇、保留冷板（§3.5） |
+| **Server** | ⚠️ **被动（无风扇）** | ⚠️ **没有风扇可拆，路径不同** |
+
+> ⚠️ **§3.5 的全部 18 个小节都基于 Workstation 版——被动散热版本的改造方案在本报告中仍属空白。**
+
+#### 七、其余已确认的规格（补齐对照）
+
+**这些数值此前已在正文出现过，此处按官方页统一列出**：
+
+| 项 | 值 |
+|---|---|
+| CUDA 核心 | **24,064** |
+| Tensor 核心 | **752（第 5 代）** |
+| RT 核心 | **188（第 4 代）** |
+| MIG | ⭐ **最多 4 个 24 GB 实例**，带 QoS 保证 |
+| 机密计算 | ✅ **支持** |
+| Secure Boot with Root of Trust | ✅ **支持** |
+| 媒体引擎 | **4× NVENC / 4× NVDEC / 4× JPEG** |
+
+> ⭐ **MIG 的 4 × 24 GB 这个切分值得与 §11 的虚拟化章节对照——它意味着 96 GB 可以被硬隔离成四份，而不是只能软切。**
+
 
 ### 3.9 ECC 的真实代价：是容量问题，不是带宽问题
 
@@ -10696,6 +10791,10 @@ sudo nvidia-bug-report.sh
 
 1. [feat: SM120 (Blackwell Desktop) support for GLM-5.1 inference (PR #26928)](https://github.com/sgl-project/sglang/pull/26928) — GitHub sgl-project/sglang，2026-06-01 创建、**2026-07-28 合入**。详列 FlashInfer #3395 与 DeepGEMM #324 所缺的 SM120 API、656 字节/token/层的精确 KV 布局、788 对 708 的容量修正，以及「默认后端仍是 trtllm」的取舍 — [src-sglang-26928]
 
+### 物理安装与保修（第十八轮补充）
+
+1. [NVIDIA RTX PRO 6000 Blackwell Server Edition（SKU: TCSRTXPRO6000SE-PB）](https://www.pny.com/en-eu/nvidia-rtx-pro-6000-blackwell) — PNY Technologies 官方产品页。给出完整物理安装规格（4.4 英寸 × 10.5 英寸、FHFL 双槽、1.219 kg、单 16-pin PCIe CEM5、被动散热）、**3 年有限保修**、4 个 DisplayPort 2.1、最多 4 个 24 GB MIG 实例，以及 Server Edition 标称带宽「最高 1.6 TB/s」这一与 Workstation 版 1.792 TB/s 的差异 — [src-pny-se-spec]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -10835,7 +10934,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=207, evidence=1694, claims=1172, claims_high=912, claims_disputed=3, trace_events=419, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=208, evidence=1701, claims=1178, claims_high=918, claims_disputed=3, trace_events=422, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
