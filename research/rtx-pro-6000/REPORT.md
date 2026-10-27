@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：181 ｜ **证据数**：1404 ｜ **主张数**：932（高置信 692，争议 1）
+> **来源数**：183 ｜ **证据数**：1415 ｜ **主张数**：941（高置信 698，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -4471,6 +4471,123 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 
 ---
 
+### 7.7 EDA 与 3D-IC：一个此前完全空白的垂直领域
+
+**`EDA` 在本报告全文此前出现 0 次**——这是第三章之外最明显的一个覆盖漏洞。本节补上，但**证据强度有明确上限**。
+
+#### 一、这张卡已经进入 EDA 求解器栈
+
+**Cadence 的 Millennium M2000 超级计算机**把 RTX PRO 6000 集成进自家求解器 [c-eda-first-vertical]：
+
+| 组成 | 内容 |
+|---|---|
+| **计算** | NVIDIA **HGX B200** 系统 + **RTX PRO 6000 Blackwell Server Edition** |
+| **软件** | **CUDA-X 库** + Cadence 求解器 |
+| **目标负载** | 半导体与 **3D-IC 设计**、数据中心数字孪生、**药物发现建模** |
+| **覆盖市场** | 超大规模计算、汽车、数据中心、航空航天与国防 |
+
+**分工**：HGX B200 承担主算力，**RTX PRO 6000 承担渲染与图形侧工作**。
+
+#### 二、厂商的加速比声称，以及两处措辞不一致
+
+**声称** [c-eda-performance-claim]：
+
+> 相较 CPU 系统，在 **EDA / 系统设计与分析 / 药物发现**上最高 **80 倍**性能、多个学科上最高 **20 倍更低功耗**。
+
+⚠️ **但两个 primary 来源的措辞不同**：
+
+| 来源 | 措辞 |
+|---|---|
+| **Cadence 新闻稿** | 「相较 **CPU 系统**」 |
+| **NVIDIA 博客** | 「相较**其前代 CPU 系统**」 |
+
+> **后者限定了比较基准是特定前代系统，不是任意 CPU。**
+>
+> **没限定基准是这类加速比最常见的夸大方式。**
+
+#### ⚠️ 三、这个 80 倍不能用于任何横向对比
+
+**理由很硬** [c-eda-80x-not-normalizable]：
+
+| 它比较的是 | 它没公布 |
+|---|---|
+| **整套 M2000** vs **CPU 系统** | CPU 侧具体配置 |
+| | 问题规模 |
+| | 求解器版本 |
+
+> **既非单卡对单卡，也未给方法与规模。**
+>
+> **所以不能据此推断「RTX PRO 6000 比某颗 CPU 快 80 倍」。**
+
+#### 四、比 80 倍更有信息量的一个具体案例
+
+**这个案例给出了任务类型、CPU 数量级与时间跨度** [c-eda-pi-case]：
+
+| 项 | 内容 |
+|---|---|
+| 任务 | **芯片级电源完整性（PI）仿真** |
+| 旧限制 | 传统做法**只能覆盖很小的时间窗** |
+| 旧成本 | **数百颗 CPU 近两周** |
+| 新成本 | **一台 M2000 不到一天** |
+
+> **这比「80 倍」可核对得多**——因为它在两个维度上都给了量级。
+
+#### 五、为什么这个领域会选它：多物理耦合
+
+**M2000 被定位为「业界首个为 AI 设计打造的专用仿真器」** [c-eda-3dic-multiphysics]，集成 3D-IC 与先进封装所需的**全部多物理能力**：
+
+> **电源 · 热 · 应力/翘曲 · 电磁**
+
+**这解释了选型逻辑**：先进封装的多物理耦合需要的正是**大显存 + 多求解器并行**——96 GB 在这里的用处不是装模型，是装**网格与多物理场状态**。
+
+#### 六、一句对选型很关键的话：软件要重写
+
+**Cadence CEO Devgan 在与黄仁勋的对谈中** [c-eda-software-rewrite]：
+
+> **「这是多年积累的结果。是 NVIDIA 在硬件与系统侧的进步——当然，我们还必须重写我们的软件来利用它。」**
+
+> **即这类 80 倍级别的收益不是买硬件就能拿到的，需要 ISV 重写软件栈。**
+>
+> **这与 §10 的软件生态讨论同构：硬件能力与软件就绪度是两件事。**
+
+#### 七、需求侧信号：NVIDIA 自己买了 10 套
+
+**黄仁勋宣布** [c-eda-nv-buys-10]：
+
+> **NVIDIA 计划采购 10 套基于 GB200 NVL72 平台的 Millennium 系统**，用于加速自家芯片设计流程，原话「这对我们来说是件大事，我们开始建设自己的数据中心就是为它做准备」。
+
+⚠️ **注意这是 GB200 NVL72 平台，不是 RTX PRO 6000**——**只能作为需求侧信号，不能当作本卡的性能证据。**
+
+#### ⚠️ 八、一个必须纠正的证据归属
+
+**本报告此前把 MIG 4×24GB 与机密计算当作这张卡在服务器场景的卖点。本轮逐词核查了两处 primary 原文** [c-eda-mig-not-in-pr]：
+
+| 关键词 | Cadence 新闻稿 | NVIDIA 博客 |
+|---|---:|---:|
+| `MIG` | **0** | **0** |
+| `Multi-Instance` | **0** | **0** |
+| `Confidential` | **0** | **0** |
+| `96GB` | 0 | **0** |
+
+> **即在这两处 primary 原文中，MIG 与机密计算并非 Cadence 或其合作方主张的内容**——**相关表述来自二手报道。**
+>
+> **能力本身有 §11 的独立来源支撑（该处结论不变），但不能挂在这两处 primary 名下。**
+
+#### ⚠️ 九、这一节的证据强度上限
+
+**必须说清楚** [c-eda-vendor-only]：
+
+| 项 | 状态 |
+|---|---|
+| 独立第三方实测 | **无** |
+| 测试方法 | **未公布** |
+| 问题规模 | **未公布** |
+| 来源 | **全部为 Cadence 与 NVIDIA 双方** |
+
+> **因此本报告只能记录「厂商如此声称」，不能给出该卡在 EDA 上的性能结论。**
+>
+> **这与 §3.5 处理 Alphacool 声称的纪律一致。**
+
 ## 8. 训练与微调：被误解的一侧
 
 ### 8.1 相对 H100 的真实位置
@@ -7056,6 +7173,8 @@ sudo nvidia-bug-report.sh
 - [HYPERPC — AMPERE X ULTRA：4× RTX 6000 Blackwell 计算工作站客户案例](https://hyperpc.ae/project/clients/ampere-x-ultra-for-ai)（2026-10-27） — [src-hyperpc-ampere]
 - [Aquanode — RTX PRO 5000 vs RTX PRO 6000: Specs, VRAM & Price](https://www.aquanode.io/compare/gpu/rtx-pro-5000-vs-rtx-pro-6000)（2026-10-27） — [src-aquanode-compare]
 - [badtheorylabs — BTL-3 Compact: RTX PRO 6000 speed（2026-07-19 实测）](https://huggingface.co/badtheorylabs/BTL-3-Compact/blob/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md) — [src-btl-llamacpp-speed]
+- [Cadence — Cadence Unveils Millennium M2000 Supercomputer with NVIDIA Blackwell Systems（新闻稿 PDF 原文，2025-05-07）](https://www.semiconductorpackagingnews.com/uploads/2/Millennium_Press_Release_5_7_25_FINAL.pdf) — [src-cadence-millennium-pr]
+- [NVIDIA Blog — Cadence Taps NVIDIA Blackwell to Accelerate AI-Driven Engineering Design and Scientific Simulation（2025-05-07）](https://blogs.nvidia.com/blog/cadence-millennium-nvidia-blackwell/) — [src-nvblog-cadence]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -7291,7 +7410,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=181, evidence=1404, claims=932, claims_high=692, claims_disputed=1, trace_events=363, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=183, evidence=1415, claims=941, claims_high=698, claims_disputed=1, trace_events=367, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
