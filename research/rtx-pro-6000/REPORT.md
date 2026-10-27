@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：141 ｜ **证据数**：930 ｜ **主张数**：605（高置信 430，争议 1）
+> **来源数**：144 ｜ **证据数**：964 ｜ **主张数**：620（高置信 442，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1306,6 +1306,109 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 **同架构、同 sm_120，但 32 GB 装不下** → 要换缩减版 checkpoint + 文本编码器放 host。这又一次印证了本报告的主线判断：**这张卡的护城河是容量，不是算力。**
 
+### 4.12 生产级延迟画像：128K 上下文 + 48 并发的真实数字
+
+前面 §4.x 的吞吐数据多是短上下文或低并发。这一轮找到一份**完整可复现**的生产配置基准，补上了延迟分位这块空白 [c-coder-128k-single]。
+
+#### 配置
+
+| 项 | 值 |
+|---|---|
+| 模型 | Qwen3-Coder-Next-FP8 |
+| 卡 | **1× Server Edition**（TP=1、PP=1） |
+| `--max-model-len` | **262,144** |
+| `--max-num-seqs` | 48 |
+| `--gpu-memory-utilization` | 0.9 |
+| 压测形态 | 4,000 输入 / 4,000 输出 × 80 请求 |
+| 引擎 | vLLM（`vllm/vllm-openai:latest`，镜像未固定版本） |
+
+#### 结果
+
+| 指标 | 均值 | 中位 | P99 |
+|---|---:|---:|---:|
+| **TTFT** | 9,098 ms | **11,370 ms** | 16,449 ms |
+| **TPOT** | 34.08 ms | 35.22 ms | 47.19 ms |
+| **ITL** | 34.08 ms | 32.95 ms | 36.29 ms |
+
+吞吐 [c-coder-throughput]：**输出 1,152.31 tok/s**（峰值 1,488.00），总吞吐 2,304.62 tok/s，277.70 秒跑完 80 个请求，**0 失败**。
+
+#### 一个必须看懂的细节：中位 TTFT 高于均值
+
+正常直觉是「均值被少数慢请求拉高」，但这里**反过来**：
+
+> **TTFT 中位 11,370 ms > 均值 9,098 ms** [c-coder-ttft-skew]
+
+这说明分布**左偏**——**多数请求排队时间更长，少数先到的请求把均值拉低了**。这是「48 并发同时压、预填串行排队」的典型形态：先被调度的请求 TTFT 很短，后面大批请求在队列里等，于是中位比均值难看。
+
+> **含义：看均值会低估用户的真实体感。** 高并发预填场景下，**中位 TTFT 才是不满率的正确代理**。TPOT 那边则是正常的右偏（均值 34.08 < 中位 35.22 不成立，两者几乎相等，P99 47.19 拖尾），说明解码阶段比较平稳。
+
+#### TPOT 34 ms 意味着什么
+
+TPOT 34.08 ms ≈ **单流 29 tok/s**。结合 48 并发下总输出 1,152 tok/s，可反推**平均并发有效吞吐约 39.6 路**——即 48 并发里有一部分时间在排队而不是在解码。
+
+> 对照 §4.8 的多卡数据：这张单卡在 128K 模型长度、48 并发下能给到这个量级，说明**对中等规模代码模型的单卡部署，96GB 是够用的**，瓶颈会先出现在预填而非容量。
+
+**注意两个限制**：① 压测用的是 4k 输入，**不是真的把 128K 上下文塞满**——262,144 只是「配置允许」，不是「压测覆盖」；② 引擎镜像标签是 `latest`，**未固定版本，不可严格复现**。
+
+### 4.13 MTP 的真实收益：单卡并发翻倍，代价是 KV 缩水 23%
+
+这是本报告见到**最直接的 SLO 收益数据**，也是第一次给出 MTP 的完整权衡 [c-mtp-singlecard-gain]。
+
+#### 实测对比
+
+环境：单张 Server Edition、Qwen3.8-27B FP8（e4m3，64 层，hidden 5120）、driver 580.105.08 / CUDA 13.0、vLLM 0.27.1 V1 engine + CUDA graphs [c-mtp-env-580]。
+
+| 指标 | 不开 MTP | MTP K=3 | 变化 |
+|---|---:|---:|---:|
+| TTFT P95（并发 1） | 198 ms | 179 ms | −10% |
+| **TPOT（并发 1）** | **22 ms** | **13 ms** | **1.7×** |
+| **单流 tok/s** | **43** | **78** | **1.8×** |
+| **SLO 内并发** | **32** | **64** | **2.0×** |
+| 该并发下输出 tok/s | 999.9 | 1,954.0 | **1.96×** |
+| 峰值输出 tok/s | 1,284.8 | 2,254.7 | 1.76× |
+| 权重 + 非 torch | 29.34 GiB | 29.94 GiB | +0.60 GiB |
+| **KV cache** | **767,317 tok** | **592,164 tok** | **−23%** |
+
+#### 收益与代价必须一起看
+
+> **并发翻倍不是白来的** [c-mtp-kv-cost]：**KV cache 从 767,317 token 掉到 592,164 token，缩水 23%。**
+>
+> 这意味着：
+>
+> | 场景 | MTP 的影响 |
+> |---|---|
+> | **短请求、高 QPS**（编码、分类、短对话） | **纯赚** —— 并发翻倍，KV 用不满 |
+> | **长上下文、少并发**（长文档、大仓库代码） | **可能亏** —— KV 缩水 23% 直接压低可承载上下文 |
+>
+> **所以在 96GB 这张卡上，MTP 的选择取决于你是「要更多并发」还是「要更长上下文」，两者不可兼得。** 这是本报告此前没有记录过的取舍。
+
+#### 收益集中在解码，不在预填
+
+TTFT P95 只从 198 降到 179 ms（−10%），而 TPOT 降了 41% [c-mtp-ttft-barely]。这跟 §4.8 关于 EAGLE 的结论一致：**投机解码改善的是逐 token 生成，对预填帮助有限。**
+
+#### 峰值增益 < SLO 增益
+
+> 峰值吞吐 1.76×，SLO 并发下 1.96× [c-mtp-peak-vs-slo]。
+>
+> **SLO 内的增益高于峰值增益**，说明 MTP 的价值不在「跑得更快」，而在「**同等延迟预算内塞进更多请求**」——这正是服务容量规划真正关心的指标。
+
+#### 质量评估不能用字节比对
+
+原文专门有一节叫 *"why a byte diff is the wrong test"* [c-mtp-acceptance-content]。原因很直接：**投机解码的采样路径与基线不同，输出本就不保证逐位一致**，字节比对会把「正常差异」误判为「质量退化」。
+
+正确做法是**语义或任务级评估**（如 KLD、任务准确率），这也是本报告 §10.x 记录 KLD 检查的原因。
+
+#### 与既有 MTP 数据的对照
+
+§4.8 已经记录过：**在多卡 397B 场景，AWQ + MTP 在长上下文会崩塌**（32k 起 MTP 反而有害，128k 时比不开慢 2.4 倍）。这与本轮单卡 27B 的正面结果不矛盾——**差别在上下文长度与量化格式**：
+
+| 场景 | MTP 效果 | 原因 |
+|---|---|---|
+| 单卡 27B FP8，短上下文 | **+70~96%** | 接受率高，KV 未吃紧 |
+| 多卡 397B AWQ，≥32k | **负收益** | 接受率随上下文下降 + KV 吃紧 |
+
+> **结论：MTP 不是「开了就快」的开关，它的收益随上下文长度和量化格式反向变化。** 上线前必须按自己的实际上下文分布测。
+
 ## 5. 与 RTX 5090 的横向对比
 
 ### 5.1 三套独立口径
@@ -2016,6 +2119,42 @@ RTX PRO 6000 用 **SM120**（GB202），数据中心 Blackwell 用 **SM100**。�
 **实际后果**：新模型/新量化格式在 SM120 上往往需要 nightly 构建或补丁（HOSTKEY 测 WAN 2.2 时需 `--pre` 安装 cu129 nightly PyTorch）[c-driver-gap]。
 
 **这不是抽象风险，有精确的实例**（详见 §10.2）：NVIDIA 自己的 TensorRT-LLM 在 sm120 上无法服务 Qwen3-Next，而官方同时把两者都列为"支持" [c-trtllm-misleading]。
+
+#### 「缺少 tcgen05」的具体后果：MoE 解码有个 4 token 的天花板
+
+上面说 SM120 缺 tcgen05/TMEM，此前只是特性清单层面的描述。这一轮找到了**它在 kernel 层面的确切后果** [c-sm120-tc-cap4]：
+
+> SM120 的原生 BF16/NVFP4 MoE 解码路径，**在超过 4 个 token 时不再使用「直接路由 + Tensor Core 融合求和」**，而是退回开销更大的 route packing。
+
+**即：投机解码或小批量解码一旦超过 T4，就走上了慢路径。** 这解释了为什么 SM120 上开 MTP 的收益波动很大——**预测 token 数一多，硬件路径就换了**。
+
+好消息是这条已被修复，但**范围很窄** [c-sm120-tc-t8]：
+
+| 条件 | 值 |
+|---|---|
+| 平台 | **仅 SM120**（SM121 保留旧上限） |
+| 量化 | packed NVFP4 / E4M3，**block-16 scale** |
+| H（hidden） | ≤ 2048 |
+| I（intermediate） | ≤ 512 |
+| top-k | ≤ 10 |
+| token 数 | 扩展到 **T8** |
+
+**FP16 行为不变。** 超出这些形状仍回落到 T4。
+
+实测收益相当可观 [c-sm120-t8-gain]（H2048/I512/E512/K10/T8，SwiGLU）：
+
+| 路由 / 缓存 | 原始 native | 改进后 | 加速 |
+|---|---:|---:|---:|
+| Shared / warm | 93.807 µs | 39.840 µs | **2.355×** |
+| Shared / cold | 107.423 µs | 48.848 µs | 2.199× |
+| Disjoint / warm | 163.919 µs | 63.808 µs | **2.569×** |
+| Disjoint / cold | 195.935 µs | 103.615 µs | 1.891× |
+
+**但必须看清测量边界** [c-sm120-t8-scope]：CUPTI 只计完整的 routed-expert GPU 调用，**不含**权重准备、路由网络计算、共享专家、EP 通信与主机入队。**作者本人明确写「These are not model throughput results」**——所以这 2.3–2.6× 不能当成端到端提速。
+
+还有一条反向教训 [c-sm120-unrestricted-regress]：**无限制放开 TC 解码会显著劣化 H7168/I2048 的共享专家路径**，所以修复必须按形状设界。**「放开就好」在 kernel 优化里是不成立的。**
+
+> **对使用者的实际含义**：如果你在 SM120 上跑 MoE 且用投机解码，**先确认你的模型形状落在 H≤2048 / I≤512 / top-k≤10 内**。落在里面能吃到 2×+ 的 kernel 加速；落在外面就是 T4 天花板。
 
 ### 10.2 案例：TensorRT-LLM 在 sm120 上开箱失败
 
@@ -3843,6 +3982,14 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 独立评测与实测（补充 3）
+
+- [FlashInfer (GitHub PR #7190)：perf(moe): extend bounded SM120 BF16 TC decode through eight tokens](https://github.com/flashinfer-ai/flashinfer/pull/7190)（2026-08-20） — [src-flashinfer-sm120]
+- [cloudrift-ai / emmy (deplodock)：Qwen3-Coder-Next-FP8 单卡 Server Edition：128K 模型长度 / 48 并发 vLLM 基准](https://github.com/cloudrift-ai/emmy/blob/298b7255fc4236b00937fd75fd3766a0f3f50f0e/experiments/Qwen3-Coder-Next-FP8/optimal_mcr_pro6000_vllm/2026-03-05_01-15-36_a64f1bc9/pro6000x1_mc48_np80_mcr48_vllm_benchmark.txt)（2026-03-05） — [src-emmy-coder]
+- [EcoHash Dev Team：One vLLM flag doubled the concurrency a single card holds](https://huggingface.co/blog/ecohash-ai/one-vllm-flag-doubled-the-concurrency-a-single-car)（2026-09-15） — [src-ecohash-mtp]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -3976,7 +4123,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=141, evidence=930, claims=605, claims_high=430, claims_disputed=1, trace_events=282, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=144, evidence=964, claims=620, claims_high=442, claims_disputed=1, trace_events=297, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
