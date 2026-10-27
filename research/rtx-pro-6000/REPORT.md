@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：223 ｜ **证据数**：1778 ｜ **主张数**：1262（高置信 971，争议 4）
+> **来源数**：225 ｜ **证据数**：1783 ｜ **主张数**：1266（高置信 971，争议 5）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -8560,6 +8560,79 @@ GPU3: 2790 MHz, 58°C, 599.98 W, sw_thermal: Not Active, sw_power_cap: Not Activ
 >
 > **这张工作站卡——连「有隔离」都未被官方承诺。**
 
+#### 10.5.3 唯一一条第三方现场故障率：一个数字，两种说法
+
+**§10.5 与 §10.5.2 讲的是「怎么判断坏了」与「坏到什么程度能换」。本节补一个此前完全空白的问题：这张卡的故障率到底高不高** [c-puget-6k-high-failure]。
+
+**数据来源**：Puget Systems 的 2025 年度硬件可靠性报告——一家专做工作站与小型服务器的高性能定制主机商。
+
+#### ⭐ 一、报告说了什么
+
+| 型号 | 报告中的表述 |
+|---|---|
+| RTX Ada Generation | ✅ 表现稳健，**全系合计 4 例故障** |
+| RTX PRO Blackwell（除 6000 WS 外的型号） | ✅ **仅 1 例故障** |
+| ⚠️ **RTX PRO 6000 Blackwell Workstation Edition** | ⚠️ **「异常高的故障率」** |
+
+> ⚠️ **即同一个世代里，唯独这个高功耗型号被单独点名。**
+
+#### ⚠️⚠️ 二、但两个转述的强度不一样
+
+**这是本轮最需要谨慎处理的一处** [c-puget-failure-wording-dispute]：
+
+| 来源 | 措辞 |
+|---|---|
+| 英文转述 | ⚠️ **"exceptionally high failure rate"（异常高）** |
+| 中文转述 | ⚠️ **「故障率略高」，且未给任何数量对照** |
+
+> ⚠️ **两种说法指向同一份原始报告，但强度相差很大。**
+>
+> ⚠️ **而 Puget 原站返回 403，原文未能获取——本报告无法判定哪个更接近原意。**
+>
+> ⭐ **故此处不做取舍，两边并存，标 `disputed`。**
+
+> ⭐ **这恰好是 §2.4 那条观察的正面案例：**
+>
+> **当确实存在两个来源时，它们反而可能互相矛盾；**
+>
+> **而那份审计说 89% 的主张根本没有第二个来源可裁决。**
+
+#### ⚠️ 三、一个不能忽略的分母问题
+
+**读故障例数时必须看销量** [c-puget-ship-ratio-caveat]：
+
+| 世代 | 2025 年出货量 | 故障例数 |
+|---|---|---|
+| Ada Generation | ⭐ **Blackwell 的 4 倍以上** | 4 |
+| Blackwell（除 6000 WS） | — | 1 |
+| RTX PRO 6000 WS | — | ⚠️ **多例（未给具体数）** |
+
+> ⚠️ **分母相差至少四倍——不能直接用绝对例数比较两个世代的可靠性。**
+
+#### ⚠️ 四、厂商自己的免责声明
+
+**必须随数据一起引用** [c-puget-not-industry]：
+
+> **Puget Systems 明确表示：鉴于其销售额相对于整个市场而言有限，这些数据并不能反映整个行业的情况。**
+
+> ⚠️ **即这不能作为「该卡全行业故障率」的估计，只能作为「一家 BTO 厂商观察到的现象」。**
+>
+> **它是一份有用的旁证，不是一份召回公告。**
+
+#### ⭐ 五、与 §10 其余部分的关系
+
+**这条数据不给因果，只给一个独立的方向性对照**：
+
+| 已有证据 | 类型 |
+|---|---|
+| §10.5 多用户论坛报退化 | ⚠️ **自选择样本** |
+| §10.5.2 官方 RMA 门槛 | ✅ **一手，但只讲判据不讲发生率** |
+| ⭐ **本节 Puget 统计** | ⭐ **第三方全量交付样本** |
+
+> ⭐ **前两者都无法回答「发生率有多高」，本节第一次给了一个方向性答案——**
+>
+> **而它的方向和论坛报告一致：问题集中在这个高功耗型号上。**
+
 
 ### 10.6 供电接口熔毁：另一个与性能无关的硬件风险
 
@@ -12086,6 +12159,11 @@ sudo nvidia-bug-report.sh
 
 1. [Genesis1231：Self-Hosted Streaming TTS & Voice Cloning on RTX 5090 / RTX PRO 6000](https://github.com/Genesis1231/fish-s2-rtx) — Fish Audio OpenAudio S2-Pro + vLLM-Omni 0.22 部署项目（2026-10-01）。⭐ 本报告在音频/TTS 维度的首个一手实测：RTX PRO 6000（sm_120）预热后首音频延迟零样本约 100 ms、声音克隆约 135 ms；实时因子单流约 2.8×、4 路并发聚合约 7×。⚠️ 同时记录了两条架构限制：FlashAttention-3 只提供 sm90a 与 sm120a kernel、无 sm_120；SGLang 在 sm_120 上被阻塞 — [src-fish-tts]
 
+### 现场故障率统计（第二十九轮补充）
+
+1. [GIGAZINE：The most reliable CPUs, GPUs, motherboards, etc. in 2025（转述 Puget Systems 年度可靠性报告）](https://gigazine.net/gsc_news/en/20260205-most-reliable-hardware-2025-puget-systems/) —（2026-02-05）。⭐⭐ 本报告找到的唯一一条关于 RTX PRO 6000 现场故障率的第三方统计：Puget Systems 2025 年度报告指出该高功耗工作站型号「被报告有异常高的故障率」（exceptionally high failure rate），而除它之外 Blackwell 卡仅 1 例故障、Ada Generation 全系合计 4 例；同时给出销量背景——2025 年 Ada 出货量为 Blackwell 的四倍以上。⚠️ 原文站 pugetsystems.com 返回 403，此为二级转述 — [src-gigazine-puget]
+2. [电子工程专辑：哪家硬件最可靠：Intel AMD CPU打平手、NVIDIA公版显卡最稳（同一报告的另一个转述）](https://www.eet-china.com/mp/a472169.html) —（2026-02-02）。⚠️ 中文转述的措辞明显更弱：「唯独高功耗的 RTX Pro 6000 工作站版故障率略高」，用的是「略高」而非「异常高」，且未给任何数量对照。⚠️ 两处转述强度不一致而原文不可得，故本报告将相关判断标为 `disputed` 并保留双方表述；该文同时记录了 Puget 自己的免责声明「鉴于其销售额相对于整个市场而言有限，这些数据并不能反映整个行业的情况」 — [src-eet-puget]
+
 
 ## 附录 A：子问题完成度
 
@@ -12226,7 +12304,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=223, evidence=1778, claims=1262, claims_high=971, claims_disputed=4, trace_events=464, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=225, evidence=1783, claims=1266, claims_high=971, claims_disputed=5, trace_events=470, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
