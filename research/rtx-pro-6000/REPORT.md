@@ -1415,6 +1415,52 @@ Blender 的 Server 版成绩，两个来源相差 **69%**：
 
 **一个未经证实的假设** [c-blender-hypothesis]：Server 版为**无风扇被动散热** [c-gdep-cooling]，若在非服务器机箱内测试会显著降频。16 卡实战 wiki 恰好观察到塔式机箱把 Server 卡钳制在 85°C [c-gdep-passive]。**这可能解释 Drop & Render 的低分，但本报告没有直接证据，不作为结论**。
 
+#### 7.3.2 把争议的靶心从「绝对值」移到「同源比值」
+
+此前一直在比绝对分。**真正能推进诊断的是同源比值** [c-blender-ratio-divergence]：
+
+| 数据源 | WS 版 | Server 版 | **Server / WS 比值** |
+|---|---:|---:|---:|
+| Blender Open Data | 18,571 | 15,821 | **0.852** |
+| Drop & Render | 16,272 | 9,382 | **0.577** |
+
+**两个比值相差 48%。**
+
+> **这是决定性的观察**：如果低分仅仅由「Server 版被动散热被降频」造成，那么**两套数据都会受同一物理限制**，比值应该大致接近。**实测比值差 48%，说明散热之外还有第二个变量。**
+
+**同时可以排除一个简单解释** [c-blender-ws-spread]：WS 版本身两源只差 14%，**远小于 Server 版的 69%**。所以不是「整体尺度不同」——**差距集中在 Server 版这一个点上**。
+
+#### 7.3.3 一个跨源一致性检验：异常只出现在 Server 版
+
+再换个角度，把两套数据里**WS 版相对 RTX 5090 的关系**各自内部核算 [c-blender-ws-5090-consistent]：
+
+| 数据源 | WS 版 | RTX 5090 | **WS / 5090** |
+|---|---:|---:|---:|
+| Open Data | 18,571 | 16,311 | **+13.9%** |
+| Drop & Render | 16,272 | 15,005 | **+8.4%** |
+
+**两个比值都是「WS 略快于 5090」，方向一致、幅度接近。**
+
+> **也就是说：两套数据的内部逻辑在 WS 与 5090 上是自洽的，唯有 Server 版这一项崩了。**
+
+**第三个独立参照也指向同一结论** [c-blender-third-source]：Blender Artists 上一位社区实测者认为「**Pro 6000 本质是一颗完整的 RTX 5090 核心，只是做了分档与超频，渲染表现基本就是 5090 那样，主要差别是显存与价格**」——**与上述 +13.9% / +8.4% 的小幅领先完全吻合**。
+
+#### 7.3.4 第二变量的候选解释（低置信，不裁决）
+
+既然散热不足以解释，可能的第二变量如下 [c-blender-second-var]。**本报告无法从现有公开数据判定，按 C3 并列，不做结论**：
+
+| 候选 | 说明 | 与散热假设的关系 |
+|---|---|---|
+| **(a) 测试时长不同** | Drop & Render 标注「Measured: 3 of 4 benchmarks」，其 Blender 项可能是**短时采样**；被动散热的 Server 版在短测中**反而不会充分升温** | **方向相反**——若成立，则 D&R 的 9,382 不是散热低分，而是别的原因，而 Open Data 的长时众测才是散热受限的那个 |
+| **(b) 场景/版本构成不同** | Open Data 众测混杂多版本场景；Drop & Render 未公布版本、疑为单一内部场景 | 与散热无关 |
+| **(c) 样机或固件差异** | Server 版样机的 VBIOS / 驱动 / MIG 状态不同 | 与散热无关 |
+
+> **(a) 这个可能性值得强调**：它意味着「Server 版散热差 → 低分」这个直觉解释**可能连方向都是错的**。被动散热要达到热平衡需要时间，短测反而掩盖问题。
+
+#### 7.3.5 对小场景的一个补充实测
+
+社区反馈还有一条实用观察 [c-blender-small-scene]：**小型/简单场景下 RTX PRO 6000 与 RTX 4090/5090 的渲染速度差别不大**——**大显存的价值在大场景，小场景下溢价不转化为速度**。这与 §6 的实景工作室测试（1.2GB 场景只用 14.2GB 显存，5090 反而最快）**方向完全一致**。
+
 **采购含义**：若要以 Blender 为主要渲染器，**必须要求供应商在你的场景上实测**，不能引用任一第三方分数。
 
 ### 7.4 视频与专业特性
@@ -2730,6 +2776,7 @@ sudo nvidia-bug-report.sh
 | q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
 | q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
 | q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
+| q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2756,12 +2803,13 @@ sudo nvidia-bug-report.sh
 | q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
 | q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
 | q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
+| q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
 
-**完成度：58/59 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：59/60 已答（4 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **752 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **758 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2876,3 +2924,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 120. [HPC Technologies：LAMMPS Benchmark（RTX PRO 6000 SE 单卡 LJ liquid）](https://pub.hpc-technologies.co.jp/hpc-benchmark/lammps-benchmark/) — [src-hpct-lammps]
 121. [HPC Technologies：GROMACS Benchmark（Server / Max-Q / RTX 5090 三平台）](https://pub.hpc-technologies.co.jp/hpc-benchmark/gromacs-benchmark/) — [src-hpct-gromacs]
 122. [HPC Technologies：Llama 3 8B LoRA 微调实测（RTX PRO 6000 SE，含 nvidia-smi 截图）](https://pub.hpc-technologies.co.jp/hpc-benchmark/nvidia-rtx-pro-6000-blackwell-server-edition-gpu-llama-finetuning-benchmark/)（2025-09-29） — [src-hpct-lora]
+123. [Blender Artists Community：RTX PRO 6000 Performance（含 Open Data 5.1.1 四卡对照与社区实测反馈）](https://blenderartists.org/t/rtx-pro-6000-performance/1648521)（2026-07-24） — [src-ba-pro6000]
