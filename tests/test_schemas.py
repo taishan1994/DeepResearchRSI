@@ -441,6 +441,110 @@ def test_c1_high_requires_primary_support() -> None:
         validate_research_dir(root)
 
 
+def test_c3_disputed_requires_counter_evidence() -> None:
+    """不变量 C3：disputed 主张必须给出 counter_evidence_ids。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _write(root, "sources.csv", "source_id,url,fetched_at,trust_tier\n",
+               ["src-a,https://a,2026-10-27T00:00:00+00:00,primary"])
+        _write(root, "evidence.csv", "evidence_id,source_id,quote,stance\n",
+               ["e-a,src-a,正面,supports", "e-b,src-a,反面,refutes"])
+        _write(root, "claims.csv",
+               "claim_id,statement,claim_type,as_of,confidence,evidence_ids,"
+               "counter_evidence_ids\n",
+               ["c-a,有争议的事实,spec,2026-10-27,disputed,e-a,"])
+        (root / "REPORT.md").write_text("引用 [c-a] [e-a] [e-b]。\n", encoding="utf-8")
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "C3" in str(exc), str(exc)
+        else:
+            raise AssertionError("disputed 未给反证未被拒绝（C3）")
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _write(root, "sources.csv", "source_id,url,fetched_at,trust_tier\n",
+               ["src-a,https://a,2026-10-27T00:00:00+00:00,primary"])
+        _write(root, "evidence.csv", "evidence_id,source_id,quote,stance\n",
+               ["e-a,src-a,正面,supports", "e-b,src-a,反面,refutes"])
+        _write(root, "claims.csv",
+               "claim_id,statement,claim_type,as_of,confidence,evidence_ids,"
+               "counter_evidence_ids\n",
+               ["c-a,有争议的事实,spec,2026-10-27,disputed,e-a,e-b"])
+        (root / "REPORT.md").write_text("引用 [c-a] [e-a] [e-b]。\n", encoding="utf-8")
+        validate_research_dir(root)  # 给了反证就允许
+
+
+def test_r2_rejects_bad_subquestion_status() -> None:
+    """不变量 R2：brief.yaml 的 status 必须是三值之一。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _write(root, "sources.csv", "source_id,url,fetched_at\n", [])
+        _write(root, "evidence.csv", "evidence_id,source_id,quote\n", [])
+        _write(root, "claims.csv",
+               "claim_id,statement,claim_type,as_of,confidence,evidence_ids\n", [])
+        (root / "REPORT.md").write_text("空报告。\n", encoding="utf-8")
+        (root / "brief.yaml").write_text(
+            "subquestions:\n"
+            "  - id: q1\n"
+            "    question: 测试\n"
+            "    status: answered\n"
+            "  - id: q2\n"
+            "    question: 测试2\n"
+            "    status: done\n",  # 非法值
+            encoding="utf-8",
+        )
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "R2" in str(exc), str(exc)
+        else:
+            raise AssertionError("非法子问题状态未被拒绝（R2）")
+
+
+def test_s2_non_open_source_cannot_support() -> None:
+    """不变量 S2：access!=open 的来源不得支撑 high/medium 主张。"""
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        _write(root, "sources.csv", "source_id,url,fetched_at,trust_tier,access\n",
+               ["src-a,https://a,2026-10-27T00:00:00+00:00,primary,blocked"])
+        _write(root, "evidence.csv", "evidence_id,source_id,quote,stance\n",
+               ["e-a,src-a,片段,supports"])
+        _write(root, "claims.csv",
+               "claim_id,statement,claim_type,as_of,confidence,evidence_ids\n",
+               ["c-a,某事实,spec,2026-10-27,high,e-a"])
+        (root / "REPORT.md").write_text("引用 [c-a] [e-a]。\n", encoding="utf-8")
+        try:
+            validate_research_dir(root)
+        except ValidationError as exc:
+            assert "S2" in str(exc), str(exc)
+        else:
+            raise AssertionError("blocked 来源支撑 high 主张未被拒绝（S2）")
+
+
+def test_all_sources_listed_in_references() -> None:
+    """sources.csv 的每个来源都必须出现在 REPORT.md 的参考文献一节里。
+
+    曾经有 141 个来源但参考文献只列了 42 个——正文引用了数据，读者却找不到出处。
+    """
+    import csv as _csv
+    import re as _re
+    target = ROOT / "research" / "rtx-pro-6000"
+    if not target.is_dir():
+        print("  (skip: archive absent)")
+        return
+    report = (target / "REPORT.md").read_text(encoding="utf-8")
+    m = _re.search(r"## 15\. 参考文献([\s\S]*?)(?=\n## 附录 A|\Z)", report)
+    if not m:
+        print("  (skip: no references section)")
+        return
+    listed = set(_re.findall(r"\[(src-[a-z0-9\-]+)\]", m.group(1)))
+    with (target / "sources.csv").open(encoding="utf-8-sig") as fh:
+        all_src = {r["source_id"] for r in _csv.DictReader(fh)}
+    missing = sorted(all_src - listed)
+    assert not missing, f"未列入参考文献的来源 ({len(missing)}): {missing[:10]}"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:

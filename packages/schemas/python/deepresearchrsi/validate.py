@@ -213,6 +213,78 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
                 errors.append("run.json: trace seq 必须唯一")
             stats_extra["trace_events"] = len(seqs)
 
+    # 不变量 C3：disputed 主张必须给出反证（冲突并列，不单方断言）。
+    c3_violations: list[str] = []
+    for row in claims:
+        if (row.get("confidence") or "").strip() != "disputed":
+            continue
+        cid = (row.get("claim_id") or "").strip()
+        counters = [
+            x.strip()
+            for x in (row.get("counter_evidence_ids") or "").split(";")
+            if x.strip()
+        ]
+        if not counters:
+            c3_violations.append(cid)
+            continue
+        for ce in counters:
+            if ce not in {r.get("evidence_id", "").strip() for r in evidence}:
+                errors.append(
+                    f"claims.csv[{cid}]: counter_evidence_ids 引用了不存在的 {ce}"
+                )
+    stats_extra["c3_violations"] = len(c3_violations)
+    for cid in c3_violations:
+        errors.append(
+            f"claims.csv[{cid}]: confidence=disputed 但未给出 counter_evidence_ids"
+            "（不变量 C3：冲突必须并列双方，不得单方断言）"
+        )
+
+    # 不变量 S2：access != open 的来源不得用于支撑 high/medium 主张。
+    non_open = {
+        (row.get("source_id") or "").strip()
+        for row in sources
+        if (row.get("access") or "open").strip() != "open"
+    }
+    if non_open:
+        owner = {
+            (row.get("evidence_id") or "").strip(): (row.get("source_id") or "").strip()
+            for row in evidence
+        }
+        for row in claims:
+            if (row.get("confidence") or "").strip() not in ("high", "medium"):
+                continue
+            cid = (row.get("claim_id") or "").strip()
+            for e in [
+                x.strip()
+                for x in (row.get("evidence_ids") or "").split(";")
+                if x.strip()
+            ]:
+                if owner.get(e) in non_open:
+                    errors.append(
+                        f"claims.csv[{cid}]: 用 access!=open 的来源 {owner[e]} 支撑 "
+                        "high/medium 主张（不变量 S2）"
+                    )
+
+    # 不变量 R2：brief.yaml 的每个子问题必须有合法 status。
+    brief_path = root / "brief.yaml"
+    if brief_path.exists():
+        brief_text = brief_path.read_text(encoding="utf-8")
+        pairs = re.findall(
+            r"id:\s*(q\d+)([\s\S]*?)(?=\n\s*- id:|\Z)", brief_text
+        )
+        r2_bad = 0
+        for qid, body in pairs:
+            m = re.search(r"status:\s*(\w+)", body)
+            st = m.group(1) if m else ""
+            if st not in ("answered", "partial", "unanswered"):
+                errors.append(
+                    f"brief.yaml[{qid}]: 非法 status {st!r}"
+                    "（不变量 R2：必须为 answered/partial/unanswered）"
+                )
+                r2_bad += 1
+        stats_extra["subquestions"] = len(pairs)
+        stats_extra["r2_violations"] = r2_bad
+
     # 不变量 C1：confidence=high 需要至少一条 trust_tier=primary 的 supports 证据。
     # 强制阻断。若无一手证据，正确做法是补证据或降为 medium，而不是放宽规则。
     evidence_owner: dict[str, str] = {}

@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：136 ｜ **证据数**：872 ｜ **主张数**：573（高置信 412，争议 1）
+> **来源数**：141 ｜ **证据数**：930 ｜ **主张数**：605（高置信 430，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1235,6 +1235,77 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 
 ---
 
+### 4.11 视频生成：一类此前完全没覆盖的负载
+
+前面所有推理数据都是**文本 LLM**。这一轮找到一个完整的**视频生成**实测，是这张卡上少见的「全驻留、不吃 host 内存」的大负载案例 [c-video-e2e-nvfp4]。
+
+#### 实测数据
+
+环境：单张 RTX PRO 6000（96 GB），FastH3 NVFP4 checkpoint，文本编码器 + 去噪器 + INT8 轻量 VAE **全部常驻显存**。任务为 10.1 秒、1344×768、243 帧（73.6k packed tokens）。
+
+| Checkpoint | 去噪 | 视频解码 | **端到端** | 峰值显存 |
+|---|---:|---:|---:|---:|
+| 4-step（VSA 0.9） | 30.1–31.0 s | 9.0 s | **41.2 / 42.4 s** | **79.6 GB** |
+| 8-step（VSA 0.8） | 75.6 s | 9.0 s | **86.5 s** | — |
+
+> **这组数字的价值在于「装得下」的边界被具体化了**：79.6 GB 峰值意味着 **48 GB 卡（如 RTX 6000 Ada、L40S）在这个分辨率下做不了全驻留**，必须卸载到 host 内存，而卸载会带来数量级的延迟惩罚（见 §4.8.5.2 的同类现象）。
+>
+> 换句话说：**96 GB 在这里不是"更快"，是"能不能跑"的分界。**
+
+有两条延迟特性需要注意 [c-video-first-shape]：
+
+- **首次新分辨率约需 200 秒**的 VAE 编译预热。**这是首次调用延迟，不是稳态性能**，做基准测试时若只跑一次会把结论完全带偏。
+- 480p（124 帧、15.1k tokens）8-step 冷跑 **12.5 秒**——分辨率降一档，耗时降近 7 倍。
+
+#### 一个 sm120 特有的性能陷阱
+
+这在其他负载类别里没出现过，值得单列 [c-video-gemm-backend]：
+
+> *"FlashInfer 的 `mm_fp4(backend="auto")` 在 sm_120 上，一旦激活行数达到数万，会选到比 `cutlass` 或 `cudnn` **慢约 2 倍**的 kernel。"*
+
+实测对比（73.6k 行）：
+
+| Linear | `auto` | `cutlass` | `cudnn` |
+|---|---:|---:|---:|
+| `to_q` (5376→7168) | 7.96 ms | **3.96 ms** | 4.24 ms |
+| `to_out` (7168→5376) | 9.07 ms | **4.09 ms** | 4.27 ms |
+| `fc_in` (5376→28672) | 21.54 ms | 16.59 ms | **16.17 ms** |
+| `fc_out` (14336→5376) | 18.06 ms | **8.09 ms** | 8.43 ms |
+
+> **`auto` 在后两个线性层上慢了 2.2–2.7 倍**，而在 15.1k 行时三者相当（`to_q` 均为 0.88 ms）。
+>
+> **即：这个陷阱只在大激活时暴露。** 拿小规模测试调优，会得出"auto 挺好"的错误结论。**生产环境务必显式指定 `cutlass` 或 `cudnn`。**
+
+#### 8 卡 PCIe 的通信代价
+
+这是本报告第一次拿到 **all-to-all**（而非 all-reduce）在这个无 NVLink 平台上的具体带宽 [c-video-alltoall-21]：
+
+> *"On 8x RTX PRO 6000 (PCIe only), NCCL **all-to-all** moves about **21 GB/s per GPU**, with NCCL P2P on or off."*
+
+**注意「P2P on or off 都一样」这句很重要**：说明瓶颈不在 P2P 路径选择，而在 PCIe 本身。73.6k tokens 时一次 BF16 的 q/k/v/gate 交换要 **24 ms/block**，压成 FP4 后降到 7.2 ms。
+
+作者据此估 8 卡能到 **18–20 秒/10 秒片段**，但原文明确写了 **"It has not executed yet"** [c-video-8gpu-unverified]——**这是未验证估计，本报告按预测类主张处理，不作为实测引用。**
+
+#### 稀疏 vs 稠密的量级差
+
+73.6k tokens 下单 block 注意力耗时 [c-video-dense-vs-sparse]：
+
+| 实现 | 768p（73.6k tokens） |
+|---|---:|
+| 稠密 FP4（SageAttention3） | 211.9 ms |
+| 稀疏 FP4（象限掩码） | 123.4 ms |
+| **稀疏 FP4 + warp skip** | **83.0 ms**（VSA 0.8）/ **49.3 ms**（VSA 0.9） |
+
+**稀疏 + warp skip 比稠密快 2.5–4.3 倍。** 稠密 FP4 在这个场景下不可取——这跟文本 LLM 里「FP4 总是更好」的直觉相反，因为视频注意力的激活规模远超文本。
+
+#### 5090 为什么不行
+
+原文的限制说明写得很直接 [c-video-sm120-only]：
+
+> *"The GeForce RTX 5090 shares the architecture but has **32 GB**, which needs a reduced-AdaLN checkpoint and a non-resident text encoder at this resolution."*
+
+**同架构、同 sm_120，但 32 GB 装不下** → 要换缩减版 checkpoint + 文本编码器放 host。这又一次印证了本报告的主线判断：**这张卡的护城河是容量，不是算力。**
+
 ## 5. 与 RTX 5090 的横向对比
 
 ### 5.1 三套独立口径
@@ -2271,6 +2342,49 @@ Unable to enable MIG Mode for GPU 00000000:01:00.0: Not Supported
 >
 > **即：官方认证的是「能装能用」，不是「能跑满 600W」。采购时必须向厂商确认实际封顶功耗。**
 
+#### 450W 的真实根因：是线缆在说话，不是厂商在锁频
+
+上一节把「认证系统的功耗封顶」记为厂商行为。**这一轮找到了真实机制，并且推翻了这个归因。**
+
+NVIDIA 员工在官方开发者论坛上亲自答复了一位 Supermicro SYS-521GE-TNRT 用户的提问 [c-450w-root-cause]：
+
+> *"The GPU is not factory-locked, but **the maximum power limit is adjusted to what the 12VHPWR cable is identifying as**."*
+
+具体到那台机器 [c-450w-supermicro-cable]：
+
+> *"That server is using the X13DEG-OA motherboard which is (or was) shipped with Supermicro 12VHPWR (2x6)+ 4S to 8-Pin (2X4) 30cm Power Cable (**CBL-PWEX-0962Y-30**). **That cable is configured for 450W**."*
+
+**机制已经很清楚**：
+
+> **12VHPWR / 12V-2x6 接口内部有一对 sense pin（感测针）。线缆通过针脚编码告诉显卡「这根线最多能送多少电」，驱动读到 450W 就把功率天花板设在 450W。**
+>
+> **所以 `nvidia-smi -pl 600` 完全无效**——它改不了线缆报告的上限。用户贴出的 `nvidia-smi -q` 里三行印证了这一点 [c-450w-root-cause]：
+>
+> ```text
+> Current Power Limit  : 450.00 W
+> Requested Power Limit: 450.00 W
+> Max Power Limit      : 450.00 W   ← 上限本身就是 450，不是被限到 450
+> ```
+
+后续进展也闭环了 [c-450w-supermicro-cable]：Supermicro 回复应改用 **CBL-PWEX-1364Y-30**，并把它写进了官方 FAQ。但 [c-450w-cable-scarce]：
+
+> *"almost no available SuperMicro distributor has this cable in stock"*
+
+**一根线成为 600W 的实际瓶颈。** 这条对采购的含义比上一节的脚注具体得多：
+
+| 你以为的问题 | 实际的问题 |
+|---|---|
+| 厂商把显卡锁频了 | **随机附带的线缆只编码了 450W** |
+| `nvidia-smi -pl 600` 能解 | **解不了，上限由硬件针脚决定** |
+| 换更大功率的电源就行 | **要换的是线缆型号，不是电源** |
+| 认证系统 = 满血 | **认证只保证能装能用** |
+
+> **实操建议：拿到服务器先查线缆料号，而不是先看 `nvidia-smi` 的功率数字。** 若 `Max Power Limit` 显示 450W 而非 600W，先怀疑线缆。
+>
+> 本报告此前记录的多起「450W 封顶」现象，现在有了一致的解释；这一条也修正了上一节的归因——**不是厂商按机箱能力主动降功耗，而是线缆编码的下限**。两者在表象上相同，但解决路径完全不同。
+
+当然，**确实存在刻意设计成 450W 的情况** [c-450w-deliberate]：Lenovo ThinkSystem SR650a V4 允许「两张卡跑 600W 或四张卡跑 450W」，用功耗换密度，论坛估计此时推理吞吐约为满功耗的 85–95%。所以排查时要分清是**线缆编码**还是**厂商设计**——前者换线可解，后者不可解。
+
 #### 参考配置的命名规则
 
 官方口径也值得记录 [c-nv-refconfig-naming]：**CPU数-GPU数-网卡数-平均GPU网络带宽(Gb/s)**。
@@ -2961,6 +3075,105 @@ nvidia: probe of 0000:02:02.0 failed with error -1
 
 > 注意这条报错的措辞**会误导人**——它说"system BIOS may have misconfigured"，**实际原因是 VM 的 MMIO 空间没配够**，不是 BIOS 问题。
 
+#### 11.1.3 48 台 VM 的官方出处，以及一条被忽略的显存上涨
+
+§11.1 提到过单卡可切多台虚拟机，但当时只有第三方转述。这一轮找到了**一手官方口径** [c-vgpu-48vm-official]：
+
+> *"NVIDIA vGPU 19.0 and NVIDIA RTX PRO Blackwell GPUs, with MIG enabled, support **as many as 48 concurrent virtual machines (VMs) on a single GPU**"*
+
+**这个 48 是乘法得来的** [c-vgpu-48vm-official]：
+
+| 层 | 数量 | 官方原文 |
+|---|---|---|
+| MIG 实例 | **4** | `1g.24gb` × 4 |
+| 每个 MIG 上叠 vGPU | **×12** | *"NVIDIA vGPU can partition each MIG up to 12 VMs"* |
+| **合计** | **= 48** | |
+
+> **关键概念：MIG 是空间切分（硬件隔离），vGPU 是时间切分（软件复用）。两者叠加才有 48 这个数字。**
+>
+> 只用 MIG 是 4；只用 vGPU 是时间片并发。**48 = 4 × 12 是本报告见过最容易被误读的规格数字**——它不是「一张卡能跑 48 个独立实例」，而是「4 个硬件隔离域，每个域内再时分复用 12 份」。
+
+#### 一条与容量规划直接相关的官方数据
+
+NVIDIA 内测给出的结论 [c-vgpu-win11-mem]：
+
+> *"GPU memory usage for knowledge worker applications on **Windows 11 is 60% higher than on Windows 10**"*
+
+为此 vGPU 19.0 新增了 **3B 的 vPC profile** [c-vgpu-win11-mem]。
+
+> **这条对 VDI 容量规划是硬约束**：同样一批知识工作者应用，从 Win10 迁到 Win11 后**显存需求直接涨 60%**。按 Win10 密度做的选型，迁到 Win11 会不够用。
+>
+> 而这张卡的 MIG 最小档就是 **24 GB**（见下节），所以「涨 60%」在小档位上直接意味着**跨档**，而不是同档内多占一点。
+
+NVIDIA 同时确认这张卡是**首批同时面向图形与计算负载的 MIG 启用 GPU**，vGPU 19.0 起支持 VBS 配合 Azure Local 与 Windows Server 虚拟化 [c-vgpu-first-mig-both]——后者对金融、医疗、政府等强监管行业是硬需求。
+
+另外记一笔官方宣传口径 [c-vgpu-l40s-56]：相对 L40S 最高 5.6 倍（Llama 3 70B），分项为 Siemens UFX 2.3×、Dassault Abaqus 2×、Autodesk Arnold 1.9×、Omniverse 3.5×。**厂商自测，应视为上界。**
+
+### 11.1.4 MIG 到底能切多细：三档，最小 24GB
+
+此前报告只写了「最大 4×24GB」。这一轮找到了 NVIDIA 官方 profile 表 + 第三方实测的 NVML 返回值，两件事都比规格数字更有用 [c-mig-profile-official-table]。
+
+#### 只有三档，没有更小的
+
+| Profile | 显存 | SM 占比 | 最多实例 |
+|---|---:|---:|---:|
+| `1g.24gb` | 24 GB | 1/4 | 4 |
+| `2g.48gb` | 48 GB | 1/2 | 2 |
+| `4g.96gb` | 96 GB | 整卡 | 1 |
+
+> **这是这张卡做多租户最实际的一条限制** [c-mig-no-small-profile]：**没有 8GB / 12GB / 16GB 这些小档位。**
+>
+> 实测者请求 8000 MiB，拿到的却是完整的 `1g.24gb` 实例（容器内可见 24,192 MiB）：
+>
+> > *"This GPU has no 8 GB profile, so the 8,000 MiB request receives 1g.24gb; the container sees the complete 24,192 MiB MIG instance."*
+>
+> 且**差额无法回收给同一实例内的其他租户**：
+>
+> > *"the unused difference cannot be assigned to another pod inside that instance"*
+>
+> **含义：如果你要跑的是很多个小模型/小服务，这张卡的 MIG 粒度太粗，会有严重浪费。** 想切细只能退回 vGPU 时间分片（但那就没有硬件隔离了）。
+
+#### NVML 的 legal placement 是个坑
+
+一个此前完全没有任何公开记录的技术细节 [c-mig-placement-nvml]：**NVML 报告的 placement 不是显存 GB 数，而是内存切片区间。**
+
+| Profile | memoryMB | Core | sliceCount | 合法 placement (start, size) |
+|---|---:|---:|---:|---|
+| `1g.24gb` | 24,192 | 25 | 1 | `(0,3)` `(3,3)` `(6,3)` `(9,3)` |
+| `2g.48gb` | 48,512 | 50 | 2 | `(0,6)` `(6,6)` |
+| `4g.96gb` | 97,408 | 100 | 4 | `(0,12)` |
+
+> 原文特意强调：**"these values are not GiB and are specific to this GPU"**，且 **`size` ≠ `sliceCount`**。总范围是 `[0,12)`。
+>
+> **写调度器或自己做 MIG 管理的人必须知道这一点**：直接拿 memoryMB 去除以 GB 会算错 placement，导致实例创建失败。
+
+#### 实测确认的三件事
+
+第三方在 8 卡 Server Edition 上做了完整生命周期测试 [c-mig-mixed-live] [c-mig-survives-restart]：
+
+| 测试 | 结果 |
+|---|---|
+| **混合 profile 共存** | `1g.24gb` 与 `2g.48gb` **可同卡同时运行** |
+| **精确回收** | 删除小实例**只回收它自己的 GI/CI**，相邻 CUDA 任务不受影响 |
+| **设备插件重启** | 有效分配**跨 HAMi device-plugin 重启存活**，MIG UUID 不变，CUDA 进度继续 |
+
+**这三点对企业部署是实质性利好**：混合规格共卡意味着不必为不同大小的服务买不同的卡；精确回收意味着不会误杀邻居；插件重启不掉任务意味着运维升级不必排停机窗口。
+
+#### 四个运维陷阱
+
+同样值得记录，因为都是踩过的 [c-mig-hami-traps]：
+
+| 陷阱 | 实际表现 |
+|---|---|
+| **chart 版本 ≠ 运行时版本** | Helm chart 元数据写 `2.9.0`，但 checkout 的代码已含新实现；不加 image override 会部署旧二进制 |
+| **`operatingmode` ≠ `migStrategy`** | 前者激活动态 MIG，后者只是告诉 NVIDIA device-plugin 别单独发布已建 MIG 资源 |
+| **`filterdevices.index` 是排除列表** | 初始列表「只留 GPU 4」写法是排除其余全部，且**挡不住启动阶段的动作** |
+| **UUID 回收是最终一致** | 回收有延迟，且 **UUID 可能被复用**，不能用 UUID 做长期身份标识 |
+
+还有一条更一般的警告 [c-mig-hetero-caveat]：**同构节点上的成功不构成异构节点的保证**——混合机型部署必须重新验证 legal placement。
+
+**驱动门槛也在放宽** [c-mig-driver-610]：这个 8 卡环境跑在 **driver 610.43.02 + Kubernetes v1.35.6** 上，说明动态 MIG 已不局限于早期那个 R575 门槛。
+
 ### 11.2 机密计算：厂商说 98%，学术说 73–87%
 
 RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 Blackwell 产品 [c-cc-supported]。这是消费级 RTX 5090 完全没有的能力。
@@ -3502,6 +3715,134 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 社区实测与论坛记录（补充）
+
+- [NVIDIA Developer Forums：RTX PRO 6000 Blackwell (GB202) - Recurring full chip reset during sustained LLM inference, requires PSU power cycle to recover](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-gb202-recurring-full-chip-reset-during-sustained-llm-inference-requires-psu-power-cycle-to-recover/365739)（2026-04-06） — [src-forum-fullchip]
+- [NVIDIA Developer Forums：RTX PRO 6000 Blackwell Max-Q hardware problem? Multitude of MMU errors in dmesg](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-max-q-hardware-problem-multitude-of-mmu-errors-in-dmesg/381310)（2026-08-26） — [src-forum-mmufault]
+- [Hugging Face (badtheorylabs)：BTL-3 Compact — RTX PRO 6000 speed](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md)（2026-07-19） — [src-btl-llamacpp]
+- [GitHub (Osmantic)：Gemma 4 31B QAT Q4_0 on Tower2: verified results](https://raw.githubusercontent.com/Osmantic/MMBT-Messy-Model-Bench-Tests/refs/heads/main/benchmarks/gemma4-31b-q4/GEMMA4_31B_Q4_VERIFIED_RESULTS.md)（2026-10-27） — [src-osmantic-tower2]
+- [local-inference-lab：RTX PRO 6000 Blackwell LLM Wiki — Running Large LLMs on PCIe GPUs without NVLink](https://github.com/local-inference-lab/rtx6kpro) — [src-rtx6kpro-wiki]
+- [local-inference-lab：Benchmark Results -- RTX 6000 Pro Blackwell](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/benchmarks/results.md) — [src-rtx6kpro-bench]
+- [local-inference-lab：PCIe Topology & GPU Interconnect](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/hardware/topology.md) — [src-rtx6kpro-topo]
+- [local-inference-lab：Troubleshooting -- Common Issues on RTX 6000 Pro Blackwell](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/troubleshooting/common-issues.md) — [src-rtx6kpro-issues]
+- [shihanqu：Blackwell Wattage-Performance Dashboard](https://shihanqu.github.io/Blackwell-Wattage-Performance/) — [src-wattage-dash]
+- [local-inference-lab：Intermittent GPU Bus Drops on Multi-PSU Open-Air Frames](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/troubleshooting/gpu-bus-drops-multi-psu-grounding.md) — [src-gpu-bus-drops]
+- [NVIDIA Developer Forums：Blackwell Pro 6000 MHz degrading](https://forums.developer.nvidia.com/t/blackwell-pro-6000-mhz-degrading/355157/17)（2026-07-08） — [src-nvforum-powercap]
+- [NVIDIA Developer Forums：NVIDIA-branded RTX PRO 6000 WE warranty claim: PNY denies serial in writing, Enterprise Support closes case same day](https://forums.developer.nvidia.com/t/nvidia-branded-rtx-pro-6000-we-warranty-claim-pny-denies-serial-in-writing-enterprise-support-closes-case-same-day-who-services-warranty-for-nvidi/380744/4)（2026-10-07） — [src-nvf-warranty]
+- [NVIDIA Developer Forums：Expert Parallelism using 6000 Pro PCIe Gen5 Vs B200 Nvlink](https://forums.developer.nvidia.com/t/expert-parallelism-using-6000-pro-pcie-gen5-vs-b200-nvlink/378258)（2026-07-27） — [src-nvf-ep]
+- [vLLM Forums：Support for RTX 6000 Blackwell 96GB card](https://discuss.vllm.ai/t/support-for-rtx-6000-blackwell-96gb-card/1707)（2025-10-07） — [src-vllm-forum]
+- [NVIDIA Developer Forums：Silent CUDA Compute Corruption on RTX PRO 6000 Blackwell](https://forums.developer.nvidia.com/t/silent-cuda-compute-corruption-on-rtx-pro-6000-blackwell/381759)（2026-08-29） — [src-nvf-silent]
+- [NVIDIA Developer Forums：RTX 6000 pro ws BIOS update to >= 98.02.55.00.00 how?](https://forums.developer.nvidia.com/t/rtx-6000-pro-ws-bios-update-to-98-02-55-00-00-how/342946)（2025-08-23） — [src-nvf-vbios]
+- [NVIDIA Developer Forums：Where to find NVIDIA RTX PRO 6000 Blackwell Max-Q BIOS / vBIOS / firmware updates?](https://forums.developer.nvidia.com/t/where-to-find-nvidia-rtx-pro-6000-blackwell-max-q-bios-vbios-firmware-updates/360321)（2026-02-11） — [src-nvf-maxqvb]
+- [NVIDIA Developer Forums：MIG support on RTX Pro 6000 Blackwell（第 44 帖：Max-Q 成功启用 MIG）](https://forums.developer.nvidia.com/t/mig-support-on-rtx-pro-6000-blackwell/334906/44)（2025-07-30） — [src-nvf-mig44]
+- [NVIDIA Developer Forums：MIG not available on RTX PRO 6000 Blackwell – VBIOS requirement?](https://forums.developer.nvidia.com/t/mig-not-available-on-rtx-pro-6000-blackwell-vbios-requirement/366155)（2026-04-10） — [src-nvf-migreq]
+- [NVIDIA Developer Forums：How to reflash bricked RTX PRO 6000](https://forums.developer.nvidia.com/t/how-to-reflash-bricked-rtx-pro-6000/360472)（2026-02-12） — [src-nvf-brick]
+- [NVIDIA Developer Forums：RTX PRO 6000 Blackwell Max-Q (10de:2bb4): FLR fails on vfio-pci release after KVM guest shutdown](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-max-q-10de-2bb4-flr-fails-on-vfio-pci-release-after-kvm-guest-shutdown-gpu-inaccessible-until-cold-power-cycle/386790)（2026-10-25） — [src-nvf-flr]
+- [Level1Techs Forums：Question regarding MIG support on RTX Pro 6000（40 帖完整过程）](https://forum.level1techs.com/t/question-regarding-mig-support-on-rtx-pro-6000/232627)（2025-06-27） — [src-l1t-mig]
+- [NVIDIA Developer Forums：Support for a RTX Pro 6000 Blackwell Workstation Edition（支持层级实录）](https://forums.developer.nvidia.com/t/support-for-a-rtx-pro-6000-blackwell-workstation-edition/366144)（2026-04-09） — [src-nvf-support]
+- [local-inference-lab：RTX PRO 6000 Blackwell — Power-Limit Sweep: Workstation vs Server vs Max-Q（gpu_burn 逐 50W 扫描 + 自然功耗附录）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/dd2fba9126ae4a3435a591eef18162a0086bebe3/hardware/blackwell-power-limit-sweep.md) — [src-rtx6k-plsweep]
+- [Blender Artists Community：RTX PRO 6000 Performance（含 Blender Open Data 5.1.1 四卡对照）](https://blenderartists.org/t/rtx-pro-6000-performance/1648521)（2026-07-24） — [src-ba-pro6000]
+- [Hugging Face 社区（CarouselAether 等）：Running on 2 RTX Pro 6000 Blackwell GPUs at ~30 tps（Mistral-Medium-3.5-128B 双卡 TP2 完整配置与投机解码实测）](https://huggingface.co/mistralai/Mistral-Medium-3.5-128B/discussions/17)（2026-05-02） — [src-hf-mm35]
+
+### 一手来源（NVIDIA 官方）（补充）
+
+- [unslothai/unsloth GitHub：Studio: gate GGML_CUDA_P2P on a confirmed NVLink fabric, not a product name](https://github.com/unslothai/unsloth/pull/10646)（2026-09-09） — [src-unsloth-p2p]
+- [ggml-org/llama.cpp GitHub：cuda, hip: GDN chunked kernel](https://github.com/ggml-org/llama.cpp/pull/29353)（2026-09-24） — [src-llamacpp-29353]
+- [NVIDIA Blog：Sparks Fly: NVIDIA Accelerates Local AI at IFA 2026](https://blogs.nvidia.com/blog/local-ai-ifa-next-gen-agents-nv-pair-rtx-spark/)（2026-09-03） — [src-nvidia-ifa]
+- [SPEC (Standard Performance Evaluation Corporation)：SPECviewperf 15 Results Overview](https://www.spec.org/gwpg/gpc.data/viewperf15/)（2026-04-30） — [src-spec-vp15]
+- [SPEC：SPECviewperf 15.0 Results - LENOVO ThinkStation P8 / RTX PRO 6000 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-vp15-p8]
+- [NVIDIA：NVIDIA RTX PRO AI Factory — Overview](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/overview.html)（2026-05-18） — [src-nv-ra-ov]
+- [NVIDIA：NVIDIA RTX PRO AI Factory — Components](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/components.html)（2026-05-18） — [src-nv-ra-comp]
+- [NVIDIA：NVIDIA RTX PRO AI Factory — Networking Physical Topologies](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/networking-physical-topologies.html)（2026-05-18） — [src-nv-ra-topo]
+- [NVIDIA：NVIDIA RTX PRO AI Factory — Appendix (BOM/交换机/线缆)](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/appendix.html)（2026-05-18） — [src-nv-ra-app]
+- [NVIDIA：NVIDIA RTX PRO AI Factory — Software](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/software.html)（2026-05-18） — [src-nv-ra-sw]
+- [NVIDIA：MIG User Guide — Supported GPUs](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/supported-gpus.html) — [src-nv-mig-gpus]
+- [NVIDIA：MIG User Guide — Getting Started with MIG（含 RTX PRO Blackwell 附加前提）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/getting-started-with-mig.html) — [src-nv-mig-start]
+- [GitHub (ggml-org/llama.cpp)：One million tokens prompt club · Discussion #24622](https://github.com/ggml-org/llama.cpp/discussions/24622) — [src-llama-1m]
+- [NVIDIA：NVIDIA RTX PRO Blackwell GPU Architecture（v1.1，49 页，含附录 A 完整规格表）](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/quadro-product-literature/pdf/NVIDIA-RTX-Blackwell-PRO-GPU-Architecture-v1_1.pdf) — [src-nv-arch-wp]
+- [ELSA Japan（NVIDIA 官方数据表）：NVIDIA RTX PRO 6000 Blackwell Server Edition データシート（2026-04-08）](https://www.elsa-jp.co.jp/wp-content/uploads/2026/04/NVIDIA_RTX_PRO_6000_Server_Edition_Datasheet.pdf) — [src-elsa-srv]
+- [ELSA Japan（NVIDIA 官方数据表）：NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition データシート](https://www.elsa-jp.co.jp/wp-content/uploads/2025/03/Datasheet_NVIDIA_RTX_PRO_6000_Blackwell_Max-Q_Workstation_Edition.pdf) — [src-elsa-maxq]
+- [NVIDIA：NVIDIA Data Center Drivers — Driver Lifecycle](https://docs.nvidia.com/datacenter/tesla/drivers/latest/driver-lifecycle.html) — [src-nv-drv-life]
+- [NVIDIA：NVIDIA Data Center Drivers — Supported Drivers and CUDA Toolkit Versions](https://docs.nvidia.com/datacenter/tesla/drivers/latest/supported-drivers-and-cuda-toolkit-versions.html) — [src-nv-drv-matrix]
+- [NVIDIA：NVIDIA AI Blueprints RAG — MIG 切片 Helm 配置（RTX PRO 6000 SE）](https://github.com/NVIDIA-AI-Blueprints/rag/blob/main/deploy/helm/mig-slicing/values-mig-rtx6000.yaml) — [src-nv-rag-mig]
+- [NVIDIA：NVIDIA Virtual GPU Software — Validated Platforms（VMware vSphere 发布说明）](https://docs.nvidia.com/vgpu/latest/grid-vgpu-release-notes-vmware-vsphere/validated-platforms.html) — [src-vgpu-validated]
+- [Dassault Systèmes：Dassault Systèmes: Windows 11 64-bit Certified Workstation List（含 RTX PRO 6000 Blackwell WS / Max-Q 认证状态）](https://media.3ds.com/support/certified_hardware/Windows_11_64-bit.html) — [src-ds-cert]
+- [Ansys / Synopsys：Ansys GPU Compute Capabilities — Release 2026 R1（官方 GPU 求解器支持矩阵）](https://www.ansys.com/content/dam/it-solutions/platform-support/2026-r1/ansys-2026-r1-gpu-compute-capabilities.pdf) — [src-ansys-gpu]
+- [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — Lenovo ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-p8-4k]
+- [SPEC.org：SPECviewperf 15.0 官方结果 — Lenovo ThinkStation P3 Tower Gen2 / RTX PRO 6000 / FHD](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P3_TWR_G2_Ultra_9_285K_RTX_PRO_6000_FHD/results.html) — [src-spec-p3-fhd]
+- [Microsoft Learn：Run Siemens NX using NVIDIA RTX PRO 6000 Blackwell GPUs on Azure Virtual Desktop（官方参考架构与完整 ATS 结果）](https://learn.microsoft.com/en-us/industry/manufacturing/architecture/siemens-azure-blackwell) — [src-ms-learn-nx]
+- [NVIDIA：List of NVIDIA-Certified Systems（官方认证系统完整清单，含 RTX PRO 6000 Server Edition 条目）](https://docs.nvidia.com/certification-programs/latest/nvidia-certified-systems.html) — [src-nv-cert]
+- [NVIDIA Developer Forums：RTX 6000 Pro Server power limit of 450W instead of expected 600W](https://forums.developer.nvidia.com/t/rtx-6000-pro-server-power-limit-of-450w-instead-of-expected-600w/345003)（2025-09-15） — [src-nvf-450w]
+
+### 独立评测与实测（补充）
+
+- [CSDN（AI让世界更懂你）：【全网首份】价值百元的RTX 6000D与RTX Pro 6000实测对比](https://fjiang.blog.csdn.net/article/details/162849417)（2026-07-14） — [src-cn-6000d]
+- [Exxact + DRD：Ansys Fluent GPU Benchmark with DRD & Exxact](https://www.exxactcorp.com/blog/benchmarks/ansys-fluent-gpu-benchmark-with-drd-exxact) — [src-exxact-fluent]
+- [Exxact：LoRA Fine Tuning Benchmark on NVIDIA RTX PRO Blackwell GPUs](https://www.exxactcorp.com/blog/benchmark/lora-fine-tuning-benchmark-on-nvidia-gpus) — [src-exxact-lora]
+- [Drop & Render：RTX PRO 6000 Blackwell Server Edition rendering benchmarks](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition) — [src-dnr-server]
+- [ArchVizDaily：Best GPU for architectural visualization in 2026: real numbers from a working studio](https://archvizdaily.com/posts/best-gpu-for-archviz-2026)（2026-07-11） — [src-archviz]
+- [Joshua Odmark：I Bought an RTX Pro 6000 from Provantage. Here's What Was Actually Inside.](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-provantage-fake]
+- [Joshua8.AI：Running LLMs on NVIDIA Blackwell: vLLM, SGLang, and NVFP4](https://joshua8.ai/blackwell-inference/) — [src-j8-guide]
+- [Joshua8.AI：vLLM v0.16.0 Delivers Up to 20% Higher Throughput on Blackwell GPUs](https://joshua8.ai/vllm-v016-blackwell-throughput-benchmark/)（2026-02-25） — [src-j8-v016]
+- [Joshua8.AI：Chasing an 8% Decode Regression in vLLM Nightlies on Desktop Blackwell](https://joshua8.ai/vllm-nightly-decode-regression-qwen35/)（2026-04-13） — [src-j8-nightly]
+- [Joshua8.AI：Twice as Fast on the Same Card: Eight Weeks Later — Qwen3.8-Flash-Next on an RTX PRO 6000 Max-Q](https://joshua8.ai/qwen38-flash-next-penny-royal-rtx-pro-6000/)（2026-10-22） — [src-j8-penny]
+- [Joshua8.AI：Why Speculative Decoding Didn't Speed Up My 120B Model](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
+- [Joshua8.AI：Running MiniMax-M2.5 on a Single RTX 6000 Blackwell: 68 Tokens/s with 64K Context](https://joshua8.ai/minimax-m25-rtx-6000-blackwell-sglang-guide/)（2026-02-28） — [src-j8-minimax]
+- [Joshua8.AI：Do LLM Inference Engines Actually Get Faster With Updates?](https://joshua8.ai/llm-inference-benchmark-update/)（2026-02-15） — [src-j8-update]
+- [magik.net：The Gen1 Revelation: A Single Diagnostic Command That Exposed the Full Scope of Virtualization Overhead](https://magik.net/blog/llmopt/seg_3/chunk_2/the_gen1_revelation.html) — [src-magik-gen1]
+- [HelixML：GLM-5.3-Flash on RTX PRO 6000: TP2 Benchmarks on 2, 4 or 8 GPUs](https://helixml.tech/blog/glm53-flash-tp2-rtx-pro-6000)（2026-09-14） — [src-helix-tp2]
+- [Joshua Odmark：I Bought an RTX Pro 6000 from Provantage. Here's What Was Actually Inside.](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-odmark]
+- [Jared Frost：TRT-LLM vs vLLM vs llama.cpp on Blackwell（RTX PRO 6000 上的四引擎同条件对比）](https://jared-hpc.com/posts/four-inference-engines-blackwell-qwen3-moe/)（2026-06-28） — [src-jf-4eng]
+- [HPC Technologies：LAMMPS Benchmark（LJ liquid，RTX PRO 6000 SE 单卡）](https://pub.hpc-technologies.co.jp/hpc-benchmark/lammps-benchmark/)（2025-09-18） — [src-hpct-lammps]
+- [HPC Technologies：GROMACS Benchmark（Server / Max-Q / RTX 5090 三平台对照）](https://pub.hpc-technologies.co.jp/hpc-benchmark/gromacs-benchmark/)（2025-12-19） — [src-hpct-gromacs]
+- [HPC Technologies：Llama 3 8B LoRA 微调实测（RTX PRO 6000 Blackwell Server Edition）](https://pub.hpc-technologies.co.jp/hpc-benchmark/nvidia-rtx-pro-6000-blackwell-server-edition-gpu-llama-finetuning-benchmark/)（2025-09-29） — [src-hpct-lora]
+- [PassMark Software：PassMark Videocard Benchmark — RTX PRO 6000 Blackwell Server Edition（G3D Mark 与横向对比）](http://216.146.218.45/gpu.php?gpu=RTX+PRO+6000+Blackwell+Server+Edition&id=6962) — [src-passmark-se]
+- [SemiAnalysis InferenceX：Qwen 3.5 397B-A17B — GB300 NVL72 与 RTX PRO 6000 每美元性能](https://inferencex.semianalysis.com/zh/compare-per-dollar/qwen-3-5-gb300-vs-rtx6000pro) — [src-inferencex-gb300]
+- [Kubesimplify：HAMi Dynamic MIG on RTX PRO 6000: A Live Kubernetes Test](https://blog.kubesimplify.com/dynamic-mig-in-kubernetes-with-hami)（2026-08-11） — [src-hami-mig]
+
+### 厂商资料（补充）
+
+- [Ansys (Synopsys)：Which NVIDIA Blackwell GPU Delivers the Best Fluent ROI?](https://ansys.synopsys.com/fr-fr/blog/which-nvidia-blackwell-gpu-delivers-best-fluent-roi) — [src-ansys-roi]
+- [ProX PC：The Biggest Molecular Dynamics Hardware Comparison: 5090 vs Pro 6000 vs H100/H200（含 GPU-resident 机制解释）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md2]
+- [NVIDIA Technical Blog：NVIDIA vGPU 19.0 Enables Graphics and AI Virtualization on NVIDIA Blackwell GPUs](https://developer.nvidia.com/blog/nvidia-vgpu-19-0-enables-graphics-and-ai-virtualization-on-nvidia-blackwell-gpus/)（2025-08-05） — [src-nv-vgpu19]
+
+### 新闻报道（补充）
+
+- [Design & Reuse：Synopsys Deploys AI-Optimized NVIDIA RTX PRO Servers for Advanced Simulation Workloads](https://www.design-reuse.com/news/202529289-synopsys-deploys-ai-optimized-nvidia-rtx-pro-servers-for-advanced-simulation-workloads) — [src-designreuse-synopsys]
+- [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
+- [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
+- [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
+- [not an architect（转述 Microsoft Tech Community 原文）：Azure Virtual Desktop with RTX PRO 6000: Validation shows up to 30 Siemens NX users per GPU](https://notanarchitect.io/azure-virtual-desktop-with-rtx-pro-6000-validation-shows-up-to-30-siemens-nx-users-per-gpu/)（2025-10-26） — [src-avd-nx]
+- [CIMdata（转述 Synopsys 官方新闻稿）：Synopsys Embraces NVIDIA RTX PRO Servers to Accelerate Compute-Heavy Simulation Workloads](https://www.cimdata.com/en/industry-summary-articles/item/28273-synopsys-embraces-nvidia-rtx-pro-servers-to-accelerate-compute-heavy-simulation-workloads)（2025-08-28） — [src-synopsys-rtxpro]
+
+### 厂商相关方与云平台（补充）
+
+- [Spheron：RTX PRO 6000 96GB Training Benchmark vs H100 (2026)](https://www.spheron.network/blog/h100-vs-rtx-pro-6000-blackwell-fine-tuning-benchmark-2026/)（2026-09-13） — [src-spheron-h100]
+- [NODEMALL (노드몰)：RTX PRO 6000 Blackwell 종합 가이드, Workstation·Max-Q·Server 정리](https://nodemall.co.kr/article/nodetalk/12/281/)（2026-05-15） — [src-nodemall]
+- [GDEP Advance (NVIDIA Elite Partner)：NVIDIA RTX PRO 6000 Blackwell シリーズ製品比較ベンチマークレポート](https://www.gdep.co.jp/information/news/nvidia-rtx-pro-6000-blackwell_benchmark_report/) — [src-gdep-report]
+- [Akash Network：RTX PRO 6000 Blackwell vs H100 vs H200: Which GPU Do You Actually Need? (2026)](https://akash.network/the-bid/rtx-pro-6000-blackwell-vs-h100-vs-h200-2026/)（2026-08-25） — [src-akash]
+- [ProX PC：The Biggest Molecular Dynamics Hardware Comparison: 5090 vs Pro 6000 vs H100/H200（AMBER 24 STMV）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md]
+- [CompareAIHardware：BOXX APEXX 8R (1x RTX PRO 6000 Blackwell) — 整机规格与起价](https://compareaihardware.com/ai-workstation/boxx-apexx-8r-1x-rtx-pro-6000-blackwell) — [src-caih-boxx]
+
+### 媒体评测（补充）
+
+- [StorageReview：Dell Precision 7875 Review: Threadripper PRO 9995WX Meets Dual RTX PRO 6000 Blackwell GPUs](https://www.storagereview.com/review/dell-precision-7875-review-threadripper-pro-9995wx-meets-dual-rtx-pro-6000-blackwell-gpus)（2026-03-18） — [src-sr-7875]
+
+### 学术论文与预印本（补充）
+
+- [arXiv (Luo, Li, Wang, Chen)：Where Does the Energy Go? Profiling LLM Agent Inference on Blackwell GPUs](https://arxiv.org/abs/2609.29707)（2026-08-31） — [src-arx-energy]
+- [arXiv (Yin, Wang)：The Serialized Bridge: Understanding and Recovering LLM Serving Performance under Blackwell GPU Confidential Computing](https://arxiv.org/abs/2606.23969)（2026-06-22） — [src-arx-cc]
+- [LLM Energy Benchmark：RTX PRO 6000 Blackwell FP16 End-to-End Baseline（2026-06-08）](https://hongping-zh.github.io/updates/2026-06-08-rtx-pro6000-fp16-e2e/)（2026-06-08） — [src-energy-e2e]
+- [LLM Energy Benchmark：RTX PRO 6000 Blackwell: Phase-Separated Energy Profiling（2026-06-03）](https://hongping-zh.github.io/updates/2026-06-03-rtx-pro6000-blackwell-phase/)（2026-06-03） — [src-energy-phase]
+- [STFC ePubs：NAMD 3.0.2 - GPU-offload Performance: stmv benchmark（两次下载超时，PDF 0 页）](https://epubs.stfc.ac.uk/manifestation/64246471/STFC-CONF-2026-003.pdf) — [src-stfc-namd]
+- [hao-ai-lab (FastVideo)：FastH3 NVFP4 on RTX PRO 6000 (sm120)](https://haoailab.com/FastVideo/inference/fasth3_rtx_pro_6000/)（2026-08-01） — [src-fasth3-video]
+
+### 渠道与零售（补充）
+
+- [ETE.UA：RTX PRO 6000 Blackwell: 96 GB GDDR7, MIG and 600 W](https://ete.ua/en/rtx-pro-6000-blackwell-96-gb-gddr7/)（2026-06-08） — [src-ete-ua]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -3541,7 +3882,7 @@ sudo nvidia-bug-report.sh
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
-| q36 | 虚拟机直通是否可行？ | ⚠️ | §11.1.1 双重惩罚：P2P 消失 + 链路降到 Gen1 |
+| q36 | 虚拟机直通是否可行？ | ✅ | §11.1.1 双重惩罚（P2P 消失 + 链路降 Gen1）；§11.1.3 官方 vGPU 19.0 口径 48 VM = 4 MIG × 12；§11.1.4 三档 MIG profile、NVML legal placement、混合共存/精确回收/插件重启存活、四个 HAMi 陷阱 |
 | q37 | PCIe 多卡跑 MoE 的最优并行策略？ | ✅ | §4.3.5 专家并行：吞吐 2.3×、TTFT 27× |
 | q38 | 双卡 192GB 形态的实际产能？ | ✅ | §4.9 TP2 部署单元（388 tok/s @ 4 并发） |
 | q39 | 第二张卡的边际收益有多大？ | ✅ | §4.9.1 受控 1x/2x：decode 3.36×、均衡 1.45× |
@@ -3579,7 +3920,7 @@ sudo nvidia-bug-report.sh
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
-| q36 | 虚拟机直通是否可行？ | ⚠️ | §11.1.1 双重惩罚：P2P 消失 + 链路降到 Gen1 |
+| q36 | 虚拟机直通是否可行？ | ✅ | §11.1.1 双重惩罚（P2P 消失 + 链路降 Gen1）；§11.1.3 官方 vGPU 19.0 口径 48 VM = 4 MIG × 12；§11.1.4 三档 MIG profile、NVML legal placement、混合共存/精确回收/插件重启存活、四个 HAMi 陷阱 |
 | q37 | PCIe 多卡跑 MoE 的最优并行策略？ | ✅ | §4.3.5 专家并行：吞吐 2.3×、TTFT 27× |
 | q38 | 双卡 192GB 形态的实际产能？ | ✅ | §4.9 TP2 部署单元（388 tok/s @ 4 并发） |
 | q39 | 第二张卡的边际收益有多大？ | ✅ | §4.9.1 受控 1x/2x：decode 3.36×、均衡 1.45× |
@@ -3619,8 +3960,8 @@ sudo nvidia-bug-report.sh
 
 | 状态 | 数量 | 编号 |
 |---|---:|---|
-| ✅ answered | **62** | 其余 |
-| ⚠️ partial | **7** | q29、q36、q40、q42、q59、q61、q67 |
+| ✅ answered | **63** | 其余（q36 本轮由 partial 升级） |
+| ⚠️ partial | **6** | q29、q40、q42、q59、q61、q67 |
 | ❌ unanswered | **1** | q34 |
 
 > **口径说明**：本表与 `brief.yaml` 的 `status` 字段逐条对应，由附录 A 表格直接统计得出。此前本文曾写作「70/71 已答」，分母与分子均与附录不符，属人工计数错误，已按实际数据更正。
@@ -3635,7 +3976,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=136, evidence=872, claims=573, claims_high=412, claims_disputed=1, c1_violations=0`
+当前校验结果：`sources=141, evidence=930, claims=605, claims_high=430, claims_disputed=1, trace_events=282, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
