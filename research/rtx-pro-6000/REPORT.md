@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：216 ｜ **证据数**：1739 ｜ **主张数**：1221（高置信 941，争议 4）
+> **来源数**：217 ｜ **证据数**：1745 ｜ **主张数**：1228（高置信 947，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -9411,6 +9411,90 @@ NVIDIA 同时确认这张卡是**首批同时面向图形与计算负载的 MIG 
 还有一条更一般的警告 [c-mig-hetero-caveat]：**同构节点上的成功不构成异构节点的保证**——混合机型部署必须重新验证 legal placement。
 
 **驱动门槛也在放宽** [c-mig-driver-610]：这个 8 卡环境跑在 **driver 610.43.02 + Kubernetes v1.35.6** 上，说明动态 MIG 已不局限于早期那个 R575 门槛。
+### 11.1.6 vGPU 的许可费：§12.9 只算了软件成本的一半
+
+**本报告 §12.9 记录了 AI Enterprise 的 $4,500/GPU/年。本轮发现另一套完全独立的软件许可，而它一直被漏掉** [c-vgpu-software-two-buckets]。
+
+#### ⭐⭐ 一、两套许可按不同维度计费，不能相加也不能抵扣
+
+| 许可 | 计价单位 | 价格 | 用途 |
+|---|---|---|---|
+| **AI Enterprise** | **GPU** | **$4,500/GPU/年** | AI 工作负载 |
+| **vGPU**（RTX vWS） | ⚠️ **CCU（并发用户）** | **$250/CCU/年** | 虚拟化桌面/工作站 |
+
+> ⭐⭐ **CCU 的定义是「任何时候正在访问或使用软件的用户，无论是否维持活动连接」** [c-vgpu-ccu-not-per-gpu]。
+>
+> ⚠️ **即一台 VM 里的多个用户需要多份许可，而一块 GPU 上的多台 VM 也需要多份。这与「按卡付费」是两种完全不同的扩张方式。**
+
+#### ⭐ 二、完整价格表（NVIDIA 官方建议价）
+
+**年度订阅** [c-vgpu-price-table]：
+
+| 许可 | 每年 | 4 年 | 5 年 |
+|---|---:|---:|---:|
+| NVIDIA Virtual Applications（vApps） | **$10/CCU** | — | — |
+| NVIDIA Virtual PC（vPC） | **$50/CCU** | **$43.75** | **$40** |
+| **NVIDIA RTX Virtual Workstation（vWS）** | ⭐ **$250/CCU** | **$206.25** | **$180** |
+
+**永久授权 + SUMS**：
+
+| 许可 | 永久授权 | SUMS/年 |
+|---|---:|---:|
+| vApps | **$20/CCU** | **$5** |
+| vPC | **$100/CCU** | **$25** |
+| **RTX vWS** | **$450/CCU** | **$100** |
+
+#### ⚠️ 三、一个反直觉的算术：「买永久」五年反而更贵
+
+**一条容易被漏算的强制条款** [c-vgpu-perpetual-mandatory-sums]：
+
+> **所有采用永久授权的 vGPU 产品必须同时购买五年期 SUMS；一年期 SUMS 仅用于续订。**
+
+| 方案 | 五年总支出/CCU |
+|---|---:|
+| **永久授权** | $450 + $100 × 5 = ⭐ **$950** |
+| **五年订阅** | $180 × 5 = ⭐ **$900** |
+
+> ⭐ **永久授权比五年订阅贵 $50（+5.6%）。**
+>
+> ⚠️ **这与「买永久更划算」的直觉相反——在五年口径下，订阅反而略便宜。永久授权的价值在于五年之后的零许可成本，而不在五年之内。**
+
+#### ⚠️ 四、把「48 台 VM」换算成账单
+
+**§11.1.3 说单卡可跑 48 台 VM。若按一 VM 一用户的上界估算** [c-vgpu-48ccu-cost]：
+
+| 许可档 | 年费（48 CCU） | 五年 |
+|---|---:|---:|
+| **RTX vWS**（$250） | ⚠️ **$12,000** | ⚠️ **$60,000** |
+| vPC（$50） | **$2,400** | **$12,000** |
+
+> ⚠️ **RTX vWS 的五年许可费 $60,000，是这张卡当前最低零售价 $17,999 的 3.3 倍。**
+>
+> **即在这个配置下，软件成本是硬件成本的 3 倍以上——与 §12.9 的「五年软件 ≈ 再买一张卡」完全不是一个量级。**
+
+> ⚠️ **必须说明该估算的假设**：48 VM ≠ 48 CCU（CCU 是用户数）。此处按「一 VM 一用户」的上界计算，实际值取决于并发用户数。故本条取 `medium`。
+
+#### ⭐ 五、唯一有明确折扣的路径：教育定价
+
+**NVIDIA 教育定价计划** [c-vgpu-edu-half]：
+
+| 许可 | 教育价 | 商业价 | 比例 |
+|---|---:|---:|---:|
+| vWS 永久 + SUMS | **$99/CCU** + **$25/年** | $450 + $100 | ⭐ **22%** |
+| vWS 年度订阅 | **$50/CCU/年** | $250 | ⭐ **20%** |
+
+> ⭐ **约为商业价的五分之一。这是本报告记录的唯一一个有明确折扣路径的软件许可。**
+>
+> **且教育定价的两种模式均仅适用于 vWS**——vApps 与 vPC 无教育价。
+
+#### ⚠️ 六、所有 vGPU 价格都必须带着这句免责声明
+
+> **官方原文：「上述定价仅为建议价格，最终价格需联系 NVIDIA 授权合作伙伴确定」** [c-vgpu-price-is-suggested]。
+>
+> **另需注意：若打算使用 vGPU 软件运行或托管对外服务，还需加入 NPN CSP 合作伙伴计划。**
+
+> ⚠️ **故本节所有数字在引用时都必须标注「建议价」。**
+
 
 ### 11.2 机密计算：厂商说 98%，学术说 73–87%
 
@@ -10675,6 +10759,12 @@ sudo nvidia-bug-report.sh
 
 **§12.2 算过持有型 TCO、§12.8 算过云租赁、§12.3 算过每美元性能。但这三种口径全都漏了同一项：软件许可。**
 
+> ⚠️ **而本节只算了两笔软件许可中的一笔（本轮补充说明）。**
+>
+> **若用于虚拟化桌面/工作站，还存在第二笔按并发用户计费的 vGPU 许可（RTX vWS $250/CCU/年，48 CCU 五年可达 $60,000），详见 §11.1.6** [c-vgpu-software-two-buckets]。
+>
+> **两笔许可计价维度不同（GPU 对 用户）、用途不同，不能相加也不能互相抵扣。**
+
 #### ⭐⭐ 一、NVIDIA 公布的价格
 
 **AI Enterprise 许可** [c-ai-enterprise-price]：
@@ -11404,6 +11494,10 @@ sudo nvidia-bug-report.sh
 
 1. [Driver Lifecycle — NVIDIA Data Center Drivers](https://docs.nvidia.com/datacenter/tesla/drivers/latest/driver-lifecycle.html) — NVIDIA 官方文档（更新 2026-09-09）。驱动分支完整对照表：NFB 至少每 3 个月主版本、无支持承诺；PB 每年两次、支持 1 年；LTSB 每个硬件架构至少一次、支持 3 年；并明确该文档适用于 data center GPU，不覆盖工作站卡的 Studio / Game Ready 分支 — [src-nv-drv-life2]
 
+### vGPU 许可定价（第二十五轮补充）
+
+1. [NVIDIA Virtual GPU Software Packaging, Pricing, and Licensing Guide (DA-09924-001_v12)](https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/solutions/resources/documents1/Virtual-GPU-Packaging-and-Licensing-Guide.pdf) — NVIDIA 官方应用说明（2024-08，16 页）。给出 vApps / vPC / RTX vWS 三档按并发用户（CCU）计价的完整建议价：年度订阅 $10 / $50 / $250（vWS 四年 $206.25、五年 $180）；永久授权 $20 / $100 / $450 加每年 $5 / $25 / $100 SUMS；强制五年 SUMS 条款；教育定价 vWS $99 + $25/年 或 $50/年；并声明上述均为建议价、最终价需经授权合作伙伴 — [src-nv-vgpu-pricing]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -11543,7 +11637,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=216, evidence=1739, claims=1221, claims_high=941, claims_disputed=4, trace_events=445, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=217, evidence=1745, claims=1228, claims_high=947, claims_disputed=4, trace_events=448, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
