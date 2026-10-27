@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：242 ｜ **证据数**：1907 ｜ **主张数**：1375（高置信 1054，争议 7）
+> **来源数**：243 ｜ **证据数**：1912 ｜ **主张数**：1379（高置信 1058，争议 7）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1346,6 +1346,72 @@ TPOT 几乎不变（12.63 → 12.82 ms），说明 **EP 优化的是通信与调
 >
 > **⚠️ 因此「关掉 P2P 换 SHM」这个常见规避手段在这里完全无效——**
 > **而本报告 §4.3.1 给出的多卡排查清单里，正是以关闭 P2P 为主要手段之一。**
+
+#### ⚠️⚠️ 二·补：这个 bug 与六个变量全部无关
+
+**厂商升级报告原件给出了比总览文档更强的独立性证据** [c-pex-bug-independent]：
+
+| 变量 | 测试范围 | 结果 |
+|---|---|---|
+| 传输大小 | 4 MB – 1024 MB | ⚠️ 同崩 |
+| MaxReadReq | 128B / 512B / 4096B | ⚠️ 同崩 |
+| P2P 开关 | 关掉走 SHM | ⚠️ 也是 2.7 GB/s |
+| **内核版本** | 6.17.0-19 / 6.17.0-20 | ⚠️ **均复现** |
+| **NVIDIA 驱动** | 595.45.04 / 595.58.03 | ⚠️ **均复现** |
+| **ACS 状态** | 开 / 关 | ⚠️ **都崩**（但同芯片 P2P 须关 ACS） |
+
+> ⭐ **「与内核和驱动版本无关」这两条是新信息，价值在于：**
+> **它排除了「等驱动修好」这条路——**
+> **用户能换的内核与驱动都被测过，bug 依然存在。**
+
+#### ⚠️⚠️ 二·补二：三层同时封闭，用户无法自救
+
+**这份报告最沉重的部分不是 bug 本身，而是它不可绕过** [c-pex-fw-locked]：
+
+| 层 | 状态 |
+|---|---|
+| **MaxReadReq** | ⚠️ **固件锁定 128 字节**，`setpci` 只读 |
+| **10-Bit Tag** | 具备能力但交换机端口上被禁（`10BitTagCap+ / 10BitTagReq−`） |
+| **全部 DevCtl / DevCtl2** | ⚠️ **只读（固件锁定）** |
+| **Broadcom SDK v9.81** | ⚠️ 读 PEX89000 内部寄存器返回**错误 524**（PLX 8000 式访问不适用于 MRPC 接口） |
+
+> ⚠️ **三层同时封闭：**
+> **调参无效（MaxReadReq 锁死）、**
+> **软件侧无法绕过仲裁（寄存器只读）、**
+> **连诊断都受限（SDK 读不出内部状态）。**
+>
+> **只剩固件更新一条路。**
+
+#### ⭐⭐ 二·补三：一组数据看清「共享上行」是什么
+
+**全部 GPU 写 NUMA 0 固定主机内存，传 256 MB** [c-pex-bw-shared-uplink]：
+
+| 场景 | 总带宽 | 每卡带宽 |
+|---|---:|---:|
+| GPU0 单独 | **56.3 GB/s** | 56.3 |
+| GPU0 + GPU1 | **56.3 GB/s** | 28.1 |
+| GPU0 + GPU2 | **56.3 GB/s** | 28.1 |
+| GPU0 + 1 + 2 | **56.3 GB/s** | 18.8 |
+| GPU0 + 1 + 2 + 3 | **56.2 GB/s** | ⚠️ **14.1** |
+
+> ⭐ **从 1 卡到 4 卡，总带宽变化 −0.2%，而每卡带宽降到 1/4。**
+>
+> **⚠️ 含义：在交换机拓扑上增加卡数不会增加「到主机内存」的总带宽，**
+> **只会把同一份带宽切得更碎。**
+>
+> **这正是 §4.3.7 所说「交换机适合纯 GPU 间通信、不适合 KV 卸载」的机理。**
+
+#### ⚠️ 二·补四：这条线索已经走到外部边界
+
+**报告方已提交序列号（T9S0CG000107）、BIOS 版本（AMI v1104）、**
+**完整内核参数与可复现脚本** [c-pex-asic-closed]，
+**但自述「无 Broadcom 交换机 XML 配置或 trace 日志的访问权限」，**
+**且 SDK 读内部寄存器失败。**
+
+> ⭐ **本报告对这一缺陷的挖掘到此为止——**
+> **再往下需要 Broadcom 专有管理工具，而那不是公开信息。**
+>
+> **故记为「已定位到边界、根因待厂商确认」，而不是继续找第三份描述它的文档。**
 
 #### ⚠️ 三、机制解释（原文标注为推测）
 
@@ -14319,6 +14385,7 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 1. [rtx6kpro — ASUS ESC8000A-E13P with Broadcom PEX890xx Switches](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/asus-esc8000a-e13p-broadcom-switches.md) —（2026-03-17）。⭐⭐⭐ 本报告见过最详细的 PCIe 拓扑实测：8× RTX PRO 6000 Server Edition、双 EPYC 9575F、2 颗 Broadcom PEX890xx（各分 2 个虚拟交换机）。核心是一个已定位到确切触发条件的**硬件级 bug**——posted write 仲裁崩溃，带宽从 37 GB/s 掉到 **2.7 GB/s（−93%）**，且**与传输大小、MaxReadReq、P2P 开关全部无关**。另含完整 8×8 带宽矩阵、逐链路效率（下行口 85% vs 跨芯片 60%）、ACS 寄存器偏移、p2pmark 三机对照 — [src-r6k-esc8000]
 2. [rtx6kpro — PCIe Oneshot AllReduce for Inference](https://github.com/local-inference-lab/rtx6kpro/blob/master/optimization/pcie-oneshot-allreduce.md) —（2026-03-17）。⭐⭐ AllReduce 延迟随消息大小的完整曲线（1 KB–1 MB，交叉点 512 KB）、自校准阈值（4 卡 120 KB / 8 卡 48 KB）、端到端并发收益 +5.2%~+11.3%，以及一条与 §11.13 **不同**的 `expandable_segments` 故障机制（IPC 句柄 vs 驱动崩溃）— [src-r6k-oneshot]
+3. [rtx6kpro — ASUS ESC8000A-E13P PEX890xx Bug Report](https://github.com/local-inference-lab/rtx6kpro/blob/master/troubleshooting/asus-esc8000a-e13p-pex890xx-bug-report.md) —（2026-03-17）。⭐⭐⭐ posted-write 仲裁 bug 的**厂商升级报告原件**：序列号 T9S0CG000107、BIOS AMI v1104、驱动 595.58.03 / CUDA 13.2、24×64 GB DDR5-6400 全通道插满、可复现脚本。比总览文档多出三项独立性证据（**内核 6.17.0-19/20、驱动 595.45.04/595.58.03、ACS 开关均不影响该崩溃**），以及 MaxReadReq 固件锁定 128B、交换机寄存器全只读、Broadcom SDK 读内部寄存器报错 524 这三层「无法自救」的约束 — [src-r6k-pex-bugrep]
 
 
 ## 附录 A：子问题完成度
@@ -14460,7 +14527,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=242, evidence=1907, claims=1375, claims_high=1054, claims_disputed=7, trace_events=514, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=243, evidence=1912, claims=1379, claims_high=1058, claims_disputed=7, trace_events=516, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
