@@ -42,7 +42,7 @@ RTX PRO 6000 Blackwell 不是"更快的 RTX 5090"，而是**同一颗 GB202 die 
 
 - 强制 300W 下，**Server 版比 Workstation 版快 38%** [c-server-low-power-win]
 - Server 版在 300W 能效最高（414 Gflop/s/W，比 WS 同功耗高 38%）[c-server-efficiency]
-- Workstation 版在 600W 时吞吐最高（165,682 Gflop/s），但比 250–350W 损失约 11% 能效 [c-ws-efficiency-flat]
+- Workstation 版在 600W 时吞吐最高（**165,682 / 161,408 Gflop/s 两张卡**），但比 250–350W 损失约 11% 能效 [c-ws-efficiency-flat][c-pls-ws-600-single]
 - **同样的非饱和负载，WS 主动吃满 600W，Server 只取约 390W** [c-ws-uses-watts]
 - 渲染性能因 SKU 与渲染器而剧烈分化：V-Ray 上 Server 版第一，Blender/Octane 上 Workstation 版第一 [c-render-workload-dependent]
 
@@ -775,6 +775,91 @@ Invalid __global__ read of size 4 bytes
 > **权威限定** [c-energy-caveat]：作者明确声明，这些数字**不应被读作「量化在 Blackwell 上本质需要 2–3 倍能耗」**，它只记录 **bitsandbytes 这一个实现**在该软硬件栈下的行为。**这是实现质量问题，不是量化本身的问题。**
 >
 > 这与本报告 §4.3 的 NVFP4/AWQ 正面结果**不矛盾**：那条路径用的是 vLLM 的原生量化内核，不是 bitsandbytes。
+
+### 4.8.4 功耗上限扫描的原始数据：两卡复现，以及三个 SKU 的 boost 哲学
+
+§3 的功耗上限结论来自一份**完整的原始扫描数据**，本轮取到全文，其中若干细节修正了此前的转述 [c-pls-ws-600-single]。
+
+**方法与规模** [e-pls-setup][e-pls-rig]：`gpu_burn -tc`（张量核心 compare 压力），功耗上限**逐 50W** 步进，每档约 10 秒爬坡 + 30 秒 1Hz 遥测。**同一台机器上两张 WS 卡 + 两张 Server 卡各自独立扫描**以验证可复现性，另有社区第三张 WS 卡（10W 分辨率）与一张 Max-Q 卡的数据。
+
+**先修正本报告自己的一处措辞**：此前称 165,682 Gflop/s「经两张卡交叉验证」。**实际是单卡（GPU 3）实测 165,682，第二张卡（GPU 14）为 161,408，低约 2.6%**——属正常硅片分档差异，而非一致复现 [e-pls-ws-g14]。**两卡曲线形状相同，只是整体平移。** 社区第三张卡落在两者之间，**三卡分档带宽约 ±5%** [c-pls-binning]。
+
+**Server 在全区间胜出，且是被固件铸进去的** [c-pls-server-wins]：
+
+| 功耗上限 | WS 均值 | Server 均值 | **Δ Server vs WS** |
+|---:|---:|---:|---:|
+| 300 W | 90,210 | 124,224 | **+38%** |
+| 400 W | 118,836 | 143,769 | +21% |
+| 500 W | 142,427 | 157,543 | **+11%** |
+
+**能效差距更大** [c-pls-server-eff]：Server 在 300W 下限达到 **414 Gflop/s/W**，WS 同功耗只有 **301**（+38%）。WS 能效在 200–350W **平坦**（约 300–305），600W 默认值相对 250–350W **损失约 11%**。
+
+> **Server 的 414 Gflop/s/W 是所有 SKU、所有设置中最好的能效点**——这是本报告能给出的最具体的一条运行建议。
+
+#### 一个关键约束：功耗上限只动核心，不动显存
+
+**显存在每个 SKU 内频率恒定** [c-pls-memclock-invariant]：WS **13,365** / Server **12,481** / Max-Q **15,865 MHz**，**不随功耗上限变化**。
+
+> **这直接限制了把上表外推到 LLM 推理的合法性**：`gpu_burn` 是**计算受限**的合成负载，而 decode 阶段的注意力/KV cache 读取是**显存受限**的。**对 decode 为主的推理，Max-Q 更高的显存频率可能比它更低的 GFX 频率更重要**——但原作者明确说**没有 Max-Q 的吞吐数据可验证**。
+
+#### 自然功耗附录：三个 SKU 的 boost 哲学不同
+
+这是全文最有价值的一段：**不加功耗上限，把同一内核同时跑在 WS 和 Server 上**，看它们各自怎么选择频率 [c-pls-natural-ws]。
+
+| 负载 | WS（GPU 14） | Server（GPU 8） |
+|---|---|---|
+| BF16 8192² 矩阵乘 | 1762 MHz / **600 W** / 292 it/s | 2062 MHz / **600 W** / **341 it/s** |
+| BF16 1024²（轻载） | **2805 MHz / 600 W** / 75,125 it/s | **2415 MHz / 390 W** / 64,949 it/s |
+| 4GB memcopy（显存受限） | 2842 MHz / 401 W / 682 it/s | 2422 MHz / 365 W / **680 it/s** |
+
+**三个结论**：
+
+1. **WS 会激进用满 600W** —— 一个轻载内核（BF16 1024²）就把 WS 吃满 600W / 2805 MHz，**同一个内核在 Server 上只用 390W / 2415 MHz**。**同样的活，WS 耗电约 1.54×**。而且 Server 当时只有 70°C，**散热余量充足，不是温度导致的保守** [e-pls-natural2]。
+2. **两 SKU 在相同功耗下也不收敛** [c-pls-no-converge]：在接近等功耗的 memcopy 点（WS 401W / Server 365W），**WS 仍高 17% 频率**（2842 vs 2422）。**boost 决策本身是 SKU 特有的，不是功耗余量的函数。**
+3. **吞吐胜负随负载翻转**：计算饱和型负载上 Server 赢（8192² 快 17%）；轻载/显存受限型负载上 WS 赢（1024² 快 16%，但代价是 1.54× 功耗）；纯 memcopy 两者持平（682 vs 680）。
+
+**对 LLM 推理的直接含义** [c-pls-llm-power]：
+
+> 典型 batch 下计算并不饱和时，**WS 版会比 Server 版多耗 1.5–2× 的电**。不要假设不设功耗上限的 WS 版会表现得像 Server 版——**它会把可用的瓦数用来推高频率**。
+
+**操作建议** [e-pls-guidance]：
+- **Server 版装在工作站机箱**：`nvidia-smi -pl 500` 封顶，避免那 100W「幻影预算」只发热不出活
+- **WS 版**：350W 接近峰值能效，约一半功耗换约 64% 吞吐
+
+#### 一个跨来源的印证：Blender 争议
+
+**该文的散热警示独立佐证了 §6.4.1 那个低置信度假设** [c-pls-cooling-crosscheck]：
+
+> "the test rig is a workstation tower **not** a server-grade chassis. The Server-edition card is designed for forced-air server enclosures; in this tower it **cannot dissipate above ~500 W** and starts thermal-throttling at ~85 °C."
+
+**这正是「被动散热的 Server 版在非服务器机箱中被降频」的机制性证据。** 该假设此前只有推测（Octane 上 Server 版同样偏低形成交叉印证），现在有了**具体的温度与功耗拐点**。
+
+**作者主动声明了测不到的东西** [e-pls-notmeasure]：真实 LLM 推理吞吐、良好散热下 500W 以上的 Server、Max-Q 吞吐、多小时持续行为（每档只有 30 秒稳态）。
+
+### 4.8.5 分子动力学：一个 RTX PRO 6000 逼近 H200 的领域
+
+这是本报告此前**完全没有涉及**的负载类别，而它的结论与 AI 推理相当不同 [c-md-amber]。
+
+**AMBER 24 / STMV 基准（约 100 万原子）**：
+
+| GPU | 架构 | ns/day | 相对 |
+|---|---|---:|---:|
+| NVIDIA H200 | Hopper | 135.03 | 6.75× |
+| **RTX PRO 6000** | **Blackwell Pro** | **121.56** | **6.1×** |
+| NVIDIA RTX 5090 | Blackwell 消费 | 110.03 | 5.5× |
+| NVIDIA H100 | Hopper | ~90 | 4.5× |
+| RTX 6000 Ada | Ada | 71.50 | 3.5× |
+| Quadro RTX 5000 | Turing | ~20 | 1.0× |
+
+> **RTX PRO 6000 达到 H200 的 90%，并且是 H100 的 1.35×。** 这在 AI 训练场景是**不可想象**的（§5 的记录里它对 H100 是明显落后的）。
+
+**为什么** [c-md-clock-driven]：现代 MD 代码（**NAMD 3.0 / AMBER 24 / OpenMM**）已是 **GPU-resident**——整个模拟常驻显存，CPU 只做协调。在这种负载下，**频率而非并行度主导性能**：消费卡约 **2.9 GHz** 对数据中心卡约 **1.7 GHz**，于是高频率卡在 100 万原子以下的标准生物体系上占优。
+
+**边界在哪**：**>1000 万原子**的超大体系（病毒衣壳、全细胞器）才需要 H200 的 **141GB** 显存与 **4.8 TB/s** 带宽，以及 8 卡 MPI 所需的 NVLink。
+
+**批量筛选场景 NVLink 无关** [c-md-ensemble]：**4× RTX 5090（约 440 ns/day 聚合）超过单张 H200（135.03）3 倍以上**，价格相当或更低——**因为 MD 的并行单位是相互独立的副本**，不依赖卡间互联。这与 §4.9 的「独立副本优于 TP」结论方向一致。
+
+> **可信度说明**：该数据来自**整机厂商自测**（ProX PC，2026-01-05），**没有公开方法细节**（未说明 AMBER 参数、GPU 服务版本、编译选项），因此标为 **tertiary / medium**。**数量级可信，精确值需自行复核。**
 
 ### 4.9 双卡 TP2：一个可复制的部署单元（192GB 形态）
 
@@ -2579,6 +2664,8 @@ sudo nvidia-bug-report.sh
 | q52 | 哪个引擎最快？ | ✅ | §4.8.2 错问题：prefill 属 TRT-LLM、decode 属 llama.cpp |
 | q53 | 每焦耳能出多少 token？ | ✅ | §4.8.3 FP16 2,660 J/1k；bnb INT8 仅 14–16% FP16 |
 | q54 | MIG 生产怎么配？ | ✅ | §11.1.0 官方 mixed 策略：整卡+切片混搭 |
+| q55 | 功耗上限原始数据能否复现？ | ✅ | §4.8.4 两卡独立扫描，±5% 分档带 |
+| q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2601,12 +2688,14 @@ sudo nvidia-bug-report.sh
 | q52 | 哪个引擎最快？ | ✅ | §4.8.2 错问题：prefill 属 TRT-LLM、decode 属 llama.cpp |
 | q53 | 每焦耳能出多少 token？ | ✅ | §4.8.3 FP16 2,660 J/1k；bnb INT8 仅 14–16% FP16 |
 | q54 | MIG 生产怎么配？ | ✅ | §11.1.0 官方 mixed 策略：整卡+切片混搭 |
+| q55 | 功耗上限原始数据能否复现？ | ✅ | §4.8.4 两卡独立扫描，±5% 分档带 |
+| q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
 
-**完成度：54/55 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：56/57 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **716 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **738 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2716,3 +2805,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 115. [LLM Energy Benchmark：RTX PRO 6000 Blackwell FP16 端到端能效基线](https://hongping-zh.github.io/updates/2026-06-08-rtx-pro6000-fp16-e2e/)（2026-06-08） — [src-energy-e2e]
 116. [LLM Energy Benchmark：RTX PRO 6000 Blackwell 分阶段能耗剖析与后端兼容性](https://hongping-zh.github.io/updates/2026-06-03-rtx-pro6000-blackwell-phase/)（2026-06-03） — [src-energy-phase]
 117. [NVIDIA Developer Forums：Support for a RTX Pro 6000 Blackwell Workstation Edition（支持层级排除实录）](https://forums.developer.nvidia.com/t/support-for-a-rtx-pro-6000-blackwell-workstation-edition/366144)（2026-04-09） — [src-nvf-support]
+118. [local-inference-lab：RTX PRO 6000 Blackwell 功耗上限扫描（WS / Server / Max-Q 完整原始数据）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/dd2fba9126ae4a3435a591eef18162a0086bebe3/hardware/blackwell-power-limit-sweep.md) — [src-rtx6k-plsweep]
+119. [ProX PC：分子动力学硬件对比 5090 vs Pro 6000 vs H100/H200（AMBER 24 STMV）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md]
