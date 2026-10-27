@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：58 ｜ **证据数**：359 ｜ **主张数**：234（高置信 163，争议 1）
+> **来源数**：63 ｜ **证据数**：387 ｜ **主张数**：253（高置信 177，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -758,6 +758,46 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 
 这说明 Max-Q 的设计意图不是"单卡最强"，而是**单机显存密度最大化**——4 张 Max-Q 的 384GB 远超任何单卡方案。
 
+### 7.6 CAE / CFD 仿真：一个此前完全未覆盖的场景
+
+本报告此前只覆盖渲染与 CAD。**仿真计算是另一个独立且重要的专业图形场景**，而且有第三方实测 [c-cae-scenario]。
+
+**测试条件**：41.3M 单元排气模型、**双精度**、1:1 CPU 核卡比、Ansys Fluent 2026，对比 RTX PRO 5000、RTX PRO 6000、H200 NVL（有/无 NVLink）[e-fx-method][e-fx-cards]。
+
+**相对 32 核 CPU 的加速比** [c-cae-speedup]：
+
+| 配置 | RTX PRO 5000 | **RTX PRO 6000** | H200 NVL + NVLink | H200 NVL 无 NVLink |
+|---|---:|---:|---:|---:|
+| 1× | — | — | — | 15.32× |
+| 2× | — | **16.67×** | 19.73× | 21.35× |
+| 4× | 22.37× | **26.42×** | 23.14× | 25.82× |
+| 6× | 26.56× | **29.06×** | 30.44× | 24.06× |
+| 8× | 33.67× | **34.23×** | 28.65× | 25.50× |
+
+**第一层结论**：GPU 对 CFD 是**数量级提升**，不是边际改善——单卡就有 15 倍以上。
+
+**第二层结论更反直觉** [c-cae-nvlink-harm]：**NVLink 在中等规模仿真中不但无益，甚至有害**。H200 NVL 在 2 卡与 4 卡时，**无 NVLink 反而更快**（2 卡 390.90s vs 436.13s）。直到 6 卡才反转（331.54s vs 419.58s）。
+
+> **这是对本报告"无 NVLink 是劣势"这一总体判断的重要限定**。对 LLM 推理的 TP，NVLink 必不可少；但对中等规模 CFD，它可能是负资产。**结论不能跨场景套用**。
+
+**第三层结论** [c-cae-vs-5000]：RTX PRO 6000 相对 PRO 5000 的优势**随卡数迅速衰减**——4 卡时快约 15%，6 卡时约 8.5%，8 卡时不到 2%。
+
+**扩展有天花板** [c-cae-scaling-ceiling]：41.3M 单元时 6–8 卡已接近收益下限；报告建议 **60–100M+ 单元**才值得上更多卡 [e-fx-plateau]。**在 CFD 上"堆卡"远不如在 LLM 上有效**。
+
+**精度可以直接换显存和时间** [c-cae-precision]：
+
+| 精度 | 显存占用 | 求解时间 |
+|---|---:|---:|
+| 单精度 | **64.85 GB** | **253.14s** |
+| 混合精度 | 87.69 GB | 265.24s |
+| 双精度 | 96.54 GB | 299.80s |
+
+**单精度比双精度省 33% 显存、快 18%**。混合精度是 Ansys 新特性（场变量单精度 + AMG 内迭代双精度），精度优于纯单精度。**显存不够时，先换精度再考虑加卡**。
+
+**厂商侧印证** [c-cae-vendor]：Ansys 官方称 RTX PRO 6000 Blackwell Server 是"中小规模部署的强且更易获得的服务器级选项" [e-ansys-roi]。Synopsys 已在 **6 款 Ansys 产品**上部署 RTX PRO Server，包括 FreeFlow、Lumerical FDTD、Perceive EM、Rocky、Speos [c-syn-portfolio]。
+
+**ISV 覆盖面因此被大幅扩展**——该卡不只是渲染卡或 AI 卡，也是**仿真卡**。
+
 ---
 
 ## 8. 训练与微调：被误解的一侧
@@ -838,11 +878,44 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 
 | 场景 | 建议 |
 |---|---|
-| 短序列（<4K）微调、LoRA/QLoRA | ✅ RTX PRO 6000（快 1.8×，且 300W 省电） |
+| 短序列（<4K）全参微调 | ✅ RTX PRO 6000（快 1.8×，且 300W 省电） |`n| **8B 级 LoRA 微调** | ⚠️ **优先比价：4× 4500 总耗时反超 2× 6000** [c-lora-time] |
 | 单卡微调 100B+ 模型（量化） | ✅ RTX PRO 6000（96GB 装得下） |
 | 长序列（>8K）全参 SFT | ❌ 用 H100/GH200 |
 | 需要优化器卸载扩展容量 | ❌ 用 GH200（PCIe 卸载不可用） |
 | BF16 为主的常规训练 | ❌ 用 H100（张量性能 2.25×） |
+
+### 8.8 LoRA 微调的实测基准：该卡在这里并非最优
+
+上面 §8.1–8.7 主要讲全参与大模型。**LoRA 微调是另一回事**，而独立实测给出了一个需要正视的结论 [c-lora-scenario]。
+
+**测试条件**：Llama-3.1-8B + LoRA（rank 16，q/v_proj，seq 512，batch 2/卡，BF16，DDP）[e-lora-setup]。
+
+| 显卡 | 单卡 tok/s | 单卡能效 | 双卡 tok/s | 双卡效率 |
+|---|---:|---:|---:|---:|
+| **RTX PRO 6000 SE** | **4,962** | 12.3 tok/s/W | **9,541** | **96.1%** |
+| RTX PRO 5000 | 3,721 | 10.4 | 7,216 | 97.8% |
+| RTX PRO 4500 WS | 2,777 | 9.6 | 5,429 | 97.8% |
+
+**第一个发现：缺 NVLink 并未损害 DDP** [c-lora-ddp]。双卡扩展效率 96.1%–97.8%——因为 **DDP 每卡持完整副本、只同步梯度**，通信量远小于 TP。这与 §4.3 中 TP 受 PCIe 制约的结论**并不矛盾**，是不同并行策略的差异。
+
+**第二个发现：96GB 在 8B LoRA 上用不上** [c-lora-vs-5000]。RTX PRO 6000 只比 PRO 5000 快 **33%**（4,962 vs 3,721），远小于价格差距。
+
+**第三个发现：四张小的可能比两张大的更快** [c-lora-time]：
+
+| 数据规模 | 1× 4500 | 4× 4500 | 2× 5000 | **2× 6000 SE** |
+|---|---|---|---|---|
+| 小（5M 参数） | ~30 min | **~8 min** | ~12 min | ~9 min |
+| 中（50M） | ~5 hr | **~1.3 hr** | ~1.9 hr | ~1.5 hr |
+| 大（500M） | ~50 hr | **~13 hr** | ~19 hr | ~15 hr |
+| 研究级（5B） | ~21 天 | **~5.4 天** | ~8 天 | ~6 天 |
+
+**4 张 PRO 4500 在总耗时上反超 2 张 PRO 6000**。对小模型微调，"多而小"确实可能优于"少而大"。
+
+> **这条结论修正了 §8.7 表格里"LoRA 一律选 RTX PRO 6000"的简化表述**。准确的说法是：**该卡的价值在容量与长上下文，不在小模型微调的吞吐**。
+
+**云上成本对照** [c-cloud-rate]：Spheron 上 RTX PRO 6000 按需 $2.35/hr、竞价 $1.11/hr，H100 为 $2.65/$2.20 [e-spheron-price]。
+
+但**单 epoch 成本 $0.18–0.21 是投影值不是实测** [c-cloud-cost-epoch]——它由 H100 实测 $0.30 套用第三方 30–40% 系数得出 [e-spheron-projection]。**证据强度低，引用需谨慎**。
 
 ---
 
@@ -881,7 +954,7 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 | Blender 渲染为主 | ⚠️ 需实测 | 两来源冲突达 69%，不可盲选 [c-blender-conflict] |
 | 虚拟工作站 / 多租户隔离 | ✅ 任一（MIG） | 4×24GB 完全隔离实例 [c-mig4] |
 | 视频工作站（4:2:2 编解码） | ✅ Workstation | 4× NVENC + ISV 认证 [c-nvenc] |
-| 纯渲染 / 可视化 | ❌ 用 RTX 5090 | 每美元性能约 3 倍 [c-render-value] |
+| **CAE/CFD 仿真** | ✅ **4 卡（6000 或 5000）** | 4 卡是最优性价比点，再多收益骤减 [c-cae-config] |`n| **中等规模仿真（~50M 单元）** | ⚠️ **别上 NVLink** | 无 NVLink 反而更快 [c-cae-nvlink-harm] |`n| **8B 级 LoRA 微调** | ⚠️ **先比价** | 96GB 用不上，4×4500 可能更快更省 [c-lora-scenario] |`n| 纯渲染 / 可视化 | ❌ 用 RTX 5090 | 每美元性能约 3 倍 [c-render-value] |
 | 长序列（>8K）全参训练 | ❌ 用 H100/GH200 | GH200 领先 1.7–1.8× [c-ft-crossover] |
 | 需要优化器卸载扩容量 | ❌ 用 GH200 | PCIe 卸载慢 12–25 倍 [c-ft-offload] |
 | 双精度 HPC / 分子动力学 | ❌ 用 H100/H200 | FP64 仅约 2 TFLOPS，比 H100 低 20× [c-fp64-vs-h100] |
@@ -1355,12 +1428,14 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q24 | 多卡部署的正确调优方式？ | ✅ | §4.3.2–4.3.4 链路抖动、NCCL、接地 |
 | q25 | 长上下文的关键使能技术？ | ✅ | §4.5.2 DCP 与量化版本选择 |
 | q26 | RTX 6000D 究竟被砍了什么？ | ✅ | §3.3.1 Tensor Core 实测保留率 |
+| q27 | CAE/CFD 仿真表现如何？ | ✅ | §7.6 Fluent 实测与 NVLink 反例 |
+| q28 | LoRA 微调是否值得？ | ✅ | §8.8 DDP 扩展与四卡反超 |
 
-**完成度：26/26 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：28/28 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **359 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **387 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1368,7 +1443,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=58, evidence=359, claims=234, claims_high=163, claims_disputed=1`
+当前校验结果：`sources=63, evidence=387, claims=253, claims_high=177, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1398,3 +1473,11 @@ python scripts/validate_research.py research/rtx-pro-6000
 56. [常见问题排查（NCCL/CUDA/SM120/PCIe 稳定性）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/troubleshooting/common-issues.md) — [src-rtx6kpro-issues]
 57. [Blackwell 瓦特-性能交互面板](https://shihanqu.github.io/Blackwell-Wattage-Performance/) — [src-wattage-dash]
 58. [CSDN：RTX 6000D 与 RTX PRO 6000 同口径实测对比（中文）](https://fjiang.blog.csdn.net/article/details/162849417)（2026-07-14） — [src-cn-6000d]
+
+### CAE / LoRA / 云成本（第三轮补充）
+
+59. [Exxact + DRD：Ansys Fluent GPU 基准（41.3M 单元，含 NVLink 对照）](https://www.exxactcorp.com/blog/benchmarks/ansys-fluent-gpu-benchmark-with-drd-exxact) — [src-exxact-fluent]
+60. [Ansys：哪款 Blackwell GPU 的 Fluent ROI 最佳](https://ansys.synopsys.com/fr-fr/blog/which-nvidia-blackwell-gpu-delivers-best-fluent-roi) — [src-ansys-roi]
+61. [Design & Reuse：Synopsys 部署 RTX PRO Server 于仿真负载](https://www.design-reuse.com/news/202529289-synopsys-deploys-ai-optimized-nvidia-rtx-pro-servers-for-advanced-simulation-workloads) — [src-designreuse-synopsys]
+62. [Exxact：RTX PRO Blackwell LoRA 微调基准](https://www.exxactcorp.com/blog/benchmark/lora-fine-tuning-benchmark-on-nvidia-gpus) — [src-exxact-lora]
+63. [Spheron：RTX PRO 6000 与 H100 微调及云租赁成本对照](https://www.spheron.network/blog/h100-vs-rtx-pro-6000-blackwell-fine-tuning-benchmark-2026/) — [src-spheron-h100]
