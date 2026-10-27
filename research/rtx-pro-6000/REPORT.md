@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：171 ｜ **证据数**：1338 ｜ **主张数**：876（高置信 661，争议 1）
+> **来源数**：172 ｜ **证据数**：1351 ｜ **主张数**：887（高置信 670，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -291,6 +291,125 @@ RTX PRO Blackwell 工作站线的核心规模呈明确阶梯 [c-cg-lineup]：
 **容量换算**：四卡 336GB、八卡 672GB，可支撑量化后的 671B 模型 [c-6000d-capacity]。
 
 ---
+
+### 3.4 拆解、散热与噪声：本报告此前完全没有的物理层证据
+
+规格表只能告诉你功耗多少瓦，不能告诉你**多吵、多热、里面长什么样**。本节补上这三项，全部来自半消声室实测与实物拆解。
+
+#### 一、噪声：约 32.5 dBA，与 5090 几乎相同
+
+**在半消声室中测量** [c-gn-noise]：
+
+| 卡 | 噪声 | 说明 |
+|---|---:|---|
+| **RTX 5090** | 约 **32.5 dBA** | 基准 |
+| **RTX PRO 6000** | 约 **32.5 dBA** | 折算本底差异后**约响 1 dBA** |
+
+**测试本底**：13.6–15.0 dBA（受当前麦克风限制；作者称换麦可达 6–8 dBA）。
+
+> **约 1 dBA 的差异，作者判断对多数人几乎不可察觉。**
+>
+> ⚠️ **这是本报告第一个噪声实测锚点**——此前「分贝」在全文出现 **0 次**。
+
+#### 二、但频谱分布不同，这比总声压级更有信息量
+
+| 项 | RTX 5090 | RTX PRO 6000 |
+|---|---|---|
+| 高频段（**8000–10000 Hz**） | **更吵** | 较安静 |
+| 峰值频率 | 约 **175 Hz** | 约 **194 Hz** |
+
+> **总 dBA 几乎相同，但主观感受可能因频段分布而不同** [c-gn-noise-spectrum]。
+>
+> **这是「单一标量掩盖分布」的又一例**——与本报告多处的聚合值教训同构。
+
+#### 三、温度：核心更热 10°C，显存反而相当
+
+**固定渲染负载** [c-gn-hotter-core]：
+
+| 项 | RTX 5090 | RTX PRO 6000 |
+|---|---:|---:|
+| **GPU 核心** | 72°C | **82°C（高 10°C）** |
+| **显存（软件读取）** | 约 90°C | **约 88°C** |
+| 风扇转速（自动） | 1,550–1,600 RPM | **1,700 RPM** |
+
+**这个组合值得单独指出** [c-gn-core-hot-memory-ok]：
+
+> **PRO 6000 有 96 GB 显存、密度远高于 5090 的 32 GB，按常理应更担心显存散热，实测却是显存温度与 5090 持平、核心高出 10°C。**
+>
+> **所以该卡的散热瓶颈在核心侧，不在显存侧。** ⚠️ 这是本报告推断，原文未直接如此表述。
+>
+> 作者另指出 **5090 的 90°C 显存在装入机箱并考虑导热垫老化与积灰的长期影响后偏高**。
+
+#### 四、一个长期可靠性相关的实物差异：没有液态金属
+
+| 卡 | 导热介质 |
+|---|---|
+| RTX 5090 | **液态金属** |
+| **RTX PRO 6000** | **硅脂** |
+
+**作者推测的原因** [c-gn-no-liquid-metal]：**可靠性考虑**，以及**担心液态金属泄漏到昂贵服务器上的责任问题**；并认为**不太可能为省成本**。
+
+> **对多卡密集部署，这是比几度温差更实质的长期因素。**
+
+#### 五、die 利用率：98% 对 88.5%
+
+**同一个 die，完整度差别很大** [c-gn-die-utilization]：
+
+| 卡 | die 完整度 |
+|---|---:|
+| **RTX PRO 6000** | **约 98%** |
+| RTX 5090 | 约 **88.5%** |
+
+> **这解释了为何同 die 下 5090 只有 21,760 CUDA 而 PRO 6000 有 24,064**——差的不是设计，是良率筛选。
+
+#### 六、结构：全贯穿风道 + 定制引脚适配器
+
+**拆解确认** [c-gn-teardown-struct]：
+
+| 项 | 描述 |
+|---|---|
+| 形态 | **2 槽、2 个大风扇** |
+| PCB | **居中**，作者称是「见过最密的 PCB」 |
+| PCIe 连接 | 经**定制引脚适配器** |
+| 风道 | **全贯穿式**——风直穿卡体而非吹向 PCB |
+| 细节 | 风扇背面中部有轻微**凹陷以帮助压降** |
+| 排风 | 顶部保留斜角叶片，气流**斜向上方排出** |
+| 供电 | 与 5090 一样用 **12VHPWR** |
+
+> 作者称 **「PCB 是我见过最密的」** [c-gn-pcb-density]。
+
+#### 七、容量域：70B 上领先 928%，但原因不是算力
+
+**LM Studio 增量测试** [c-gn-70b-capacity-domain]：
+
+| 模型 | PRO 6000 相对 5090 |
+|---|---:|
+| **Llama 3.3 70B Q4_K_S** | **+928%** |
+| 同上，相对 4090 | **+1141%** |
+
+> **但这个数量级差距的来源不是算力，而是显存容量**——到某个点其它卡显存耗尽，**工作站卡在最大的 Llama 模型里连一半显存都没用到**。作者自己给出了这个解释。
+>
+> **928% 若脱离容量背景会被严重误读，必须与解释一并引用。**
+
+**容量不是瓶颈时两者几乎无差别** [c-gn-small-model-tie]：
+
+| 模型 | PRO 6000 | 5090 | 差 |
+|---|---:|---:|---:|
+| DeepSeek Llama 8B Distil | 约 81 tok/s | 约 81 tok/s | **并列** |
+| 8bit Phi-4 | 62 | 51 | +22% |
+| Qwen 2.5 | 44 tok/s | — | +25%（对 4090 +37%） |
+
+> **作者特意指出这三个小模型才代表同口径对照**，因为任何卡都能装下。
+>
+> **这与本报告 §5.3 的「小模型上 5090 基本追平」结论一致，互为独立验证。**
+
+#### ⚠️ 八、按来源自标等级引用
+
+**作者明确声明这是实验性测试** [c-gn-experimental-label]：图表带 `experimental` 标签、**不达其常规基准的完整置信标准**，因为团队仍在学习 ML/LLM 测试方法。
+
+> **因此其 928% 等数字应视为方向性证据，而非精确测量。**
+
+**顺带**：游戏侧 PRO 6000 比 5090 快约 5–14%（Ryzen 9800X3D 平台），作者明确表示**这本身不构成购买理由**，并称该卡**不是为游戏准备的**。原始 MSRP 区间 8,000–11,000 美元，发布日 2025-03-18。
 
 ### 3.9 ECC 的真实代价：是容量问题，不是带宽问题
 
@@ -6336,6 +6455,7 @@ sudo nvidia-bug-report.sh
 - [HF 讨论区 — Serving notes: single RTX PRO 6000 Blackwell (96 GB)，587k KV tokens at 123–143 tok/s](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/discussions/15)（2026-09-13） — [src-hf-radixark-587k]
 - [HF 讨论区 — Kolibri-1 FP8 on one RTX PRO 6000：BEAM 100K 的 262K 窗口 vs 7K 记忆页](https://huggingface.co/Aleph-Alpha/Kolibri-1/discussions/10)（2026-08-31） — [src-hf-kolibri-beam]
 - [HF 讨论区 — NVFP4 vs FP8 on an RTX PRO 6000 Blackwell (vLLM 0.24)](https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4/discussions/8)（2026-09-20） — [src-hf-nvfp4-vs-fp8]
+- [GamersNexus — NVIDIA RTX PRO 6000 Blackwell Benchmarks & Tear-Down（含声学与拆解）](https://devtest.gamersnexus.net/gpus/nvidia-rtx-pro-6000-blackwell-benchmarks-tear-down-thermals-gaming-llm-acoustic-tests)（2025-09-25） — [src-gn-teardown]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6565,7 +6685,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=171, evidence=1338, claims=876, claims_high=661, claims_disputed=1, trace_events=350, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=172, evidence=1351, claims=887, claims_high=670, claims_disputed=1, trace_events=352, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
