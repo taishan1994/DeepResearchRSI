@@ -1,4 +1,4 @@
-﻿# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
+# NVIDIA RTX PRO 6000 Blackwell 全系性能分析
 
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
@@ -28,6 +28,10 @@ RTX PRO 6000 Blackwell 不是"更快的 RTX 5090"，而是**同一颗 GB202 die 
 | OctaneBench 2025 | Workstation | **+1.2%** [c-octane] |
 | 稀疏矩阵乘 FP32 | LynxBenchAI | **-12%** [c-vs-5090-fp32] |
 | **Blender（Drop & Render）** | **Server Edition** | **-38%** [c-blender-dr] |
+| 3DMark 基准图形（默认频率） | Workstation | **+8~9%** [c-vs-5090-3dmark] |
+| 3DMark 基准图形（**超频后**） | Workstation | **+12~16%** [c-vs-5090-3dmark] |
+
+> **注意 3DMark 这两行**：超频能把领先幅度从 8–9% 拉到 12–16%——**这是本报告唯一记录到"超频显著改变相对定位"的场景**，说明在纯图形光栅负载上，两者的默认频率差距比架构差距更关键。
 
 **关键判断**：理论算力只领先 20%（FP32 126 vs 104.8 TFLOPS）[c-vs-5090-db]，实际差距靠**显存容量与带宽压力**撑开——模型越大、上下文越长，差距越明显（Llama3 仅 +6.5%，Llama2 +21%）[c-vs-5090-procyon-gap]。买它是为了"装得下"，不是为了"算得快"。
 
