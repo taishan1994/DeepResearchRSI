@@ -239,6 +239,24 @@ def test_validator_rejects_bad_source_type() -> None:
             raise AssertionError("非法 source_type 未被拒绝")
 
 
+def test_report_header_counts_match_data() -> None:
+    """REPORT.md 末尾声明的计数必须与实际 CSV 行数一致（防止静默漂移）。"""
+    import re as _re
+    target = ROOT / "research" / "rtx-pro-6000"
+    if not target.is_dir():
+        print("  (skip: archive absent)")
+        return
+    stats = validate_research_dir(target)
+    report = (target / "REPORT.md").read_text(encoding="utf-8")
+    m = _re.search(
+        r"sources=(\d+), evidence=(\d+), claims=(\d+), claims_high=(\d+)", report
+    )
+    assert m, "REPORT.md missing validation-result line"
+    got = tuple(int(x) for x in m.groups())
+    want = (stats["sources"], stats["evidence"], stats["claims"], stats["claims_high"])
+    assert got == want, f"header counts {got} != actual {want}"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:
