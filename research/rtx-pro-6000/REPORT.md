@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：166 ｜ **证据数**：1294 ｜ **主张数**：844（高置信 630，争议 1）
+> **来源数**：167 ｜ **证据数**：1306 ｜ **主张数**：851（高置信 637，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1097,6 +1097,87 @@ LJ liquid 基准、单张 Server Edition [c-lam-scaling]：
 **但同一平台内部的扫描给出了更可靠的结论** [c-gmx-thread-scaling]：Server 平台全程同一张卡，从 2 procs/8 threads 的 **365.463** 涨到 4/64 的 **535.091**（**+46%**）。
 
 > **给这张卡配足够多的 CPU 核心，比换卡更有效。** 这是本节最可操作的一条。
+
+### 4.8.6 单卡跑 753B：96GB 的能力上限被推到了一个新量级
+
+§4.8.5.2 讲的是**稠密模型**的边界（128B 要双卡）。这里补上**另一条路**：MoE + 专家卸载，把单卡的「能服务多大的模型」推到 **753B**。
+
+#### 结果
+
+| 引擎 | GLM-5.2（753B-A40B）吞吐 | 平均 TTFT |
+|---|---:|---:|
+| **FreeToken** | **14.9 tok/s** | 7.5 s |
+| llama.cpp | 7.3 tok/s | 7.8 s |
+
+> **2.0 倍差距，且两者专家权重逐位相同、TTFT 相当** [c-ft-753b-single]。
+>
+> 这是本报告迄今 **96 GB 单卡服务过的最大模型**。
+
+#### 它是怎么装下的
+
+| 项 | 数值 |
+|---|---|
+| 模型规模 | **753B 参数 / 40B 激活** |
+| 量化 | **NVFP4 路由专家** |
+| checkpoint | **433 GB** |
+
+> **433 GB 远超 96 GB 显存，所以走的不是「装进显存」，而是「专家池驻留主机内存 + GPU 缓存子集」** [c-ft-capacity-not-speed]。
+
+#### 这恰好是「能力 ≠ 速度」的第三次印证
+
+| 模型 | 吞吐 |
+|---|---:|
+| Llama 3.1 70B | **31.8 tok/s** |
+| **GLM-5.2 753B** | **14.9 tok/s** |
+
+> **能跑 753B，但比 70B 慢一半以上。96 GB 买到的是「能不能」，不是「多快」。**
+
+#### 一个难得的实测带宽锚点
+
+该论文的测试系统表**明确标注「在实际部署的张量形状上实测，而非取自平台规格」** [c-ft-measured-bandwidth]：
+
+| 项 | 实测值 |
+|---|---:|
+| PCIe 5.0 x16 主机→设备专家传输 | **51.5 GB/s** |
+| 主机侧有效带宽（DDR5, Xeon 8559C） | **178 GB/s** |
+
+> **51.5 GB/s 与本报告 §11 记录的 P2P 实测 53–56 GB/s 同一量级**，互相印证。
+
+#### 引擎不是通用的：KTransformers 直接不可用
+
+> **KTransformers 在这台 512 GiB 主机的机器上对该模型没有可服务路径** [c-ft-ktransformers-blocked]：
+> - 其 GLM-5.2 方法需要 **753 GB – 1.5 TB** 主机驻留专家，而该机只有 **512 GiB**
+> - 且其 CPU 内核**不读取 GLM-5.2 的 NVFP4 布局**
+
+> **这是本报告第一次记录到「引擎在某配置上完全不可用」，而不是「更慢」。**
+
+#### 主机内存带宽才是分水岭
+
+**双缓冲的对照** [c-ft-host-bandwidth-divides]：
+
+| 引擎 | 单通道消费级台式机上的解码率保持 |
+|---|---:|
+| **FreeToken** | **损失仅 4%** |
+| llama.cpp | **只剩 80%** |
+
+> **原因是 llama.cpp 的 CPU 驻留专家在两条 DDR5 通道上得不到足够带宽。**
+>
+> **这与 §11.12 的结论同构：主机内存通道数是真实瓶颈。**
+
+#### ⚠️ 引用边界（很重要）
+
+**14.9 tok/s 不能当作该卡在通用 agent 负载上的代表值** [c-ft-claim-scope]：
+
+| 限制 | 说明 |
+|---|---|
+| 单一工作负载 | GLM-5.2 一档**只跑了 W1 数学推理**（AIME） |
+| 未跑 Ollama | 该档没有 Ollama 对照 |
+| **单独演示** | RTX PRO 6000 是「单独演示」，**不与消费级卡同表对比** |
+| 论文定位 | 主结论面向**边缘设备**，工作站仅作前沿规模档 |
+
+**还有一条值得注意** [c-ft-baseline-timeout]：**基线在至少一种设置下耗时超过 150 秒**——长到足以触发真实 agent 客户端超时。
+
+> **所以「能不能用」与「快不快」在 agent 场景下会合并成同一个问题。**
 
 ### 4.8.7 一次完整的 LoRA 微调实录：61GB 峰值，9.9 分钟
 
@@ -5964,6 +6045,7 @@ sudo nvidia-bug-report.sh
 - [TechPowerUp — NVIDIA Readies Rubin-based GeForce RTX 60-series with Massive RT Performance Gains](https://www.techpowerup.com/347848/nvidia-readies-rubin-based-geforce-rtx-60-series-with-massive-rt-performance-gains)（2026-03-30） — [src-tpu-rtx60-rubin]
 - [TechPowerUp — NVIDIA Readies GeForce RTX 5090 SE Graphics Card](https://www.techpowerup.com/350658/nvidia-readies-geforce-rtx-5090-se-graphics-card)（2026-07-10） — [src-tpu-5090-se]
 - [arXiv 2606.00516 — Threshold-Based Exclusive Batching for LLM Inference](https://arxiv.org/abs/2606.00516)（2026-05-30） — [src-arxiv-eb]
+- [arXiv 2608.16157 — FreeToken: Efficient Edge-Native MoE Serving with Bandwidth-Adaptive Execution](https://arxiv.org/html/2608.16157)（2026-08-17） — [src-arxiv-freetoken]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6193,7 +6275,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=166, evidence=1294, claims=844, claims_high=630, claims_disputed=1, trace_events=340, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=167, evidence=1306, claims=851, claims_high=637, claims_disputed=1, trace_events=342, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
