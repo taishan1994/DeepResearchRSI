@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：167 ｜ **证据数**：1306 ｜ **主张数**：851（高置信 637，争议 1）
+> **来源数**：168 ｜ **证据数**：1316 ｜ **主张数**：859（高置信 644，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2062,6 +2062,103 @@ TTFT P95 只从 198 降到 179 ms（−10%），而 TPOT 降了 41% [c-mtp-ttft-
 | 对照设定 | H200 4.8 TB/s vs RTX PRO 6000 1.792 TB/s |
 | 摘要未给 | 模型规模、序列长度、实现框架 |
 | **百分比不可跨基线叠加** | 41.9% 与 36.4% 是**相对其自身基线**，不能直接加到本报告其它来源的吞吐上 [c-eb-scope-limit] |
+
+### 4.15 KV 缓存本身能压到多少：3.5 倍容量，换来的是长度不是速度
+
+前面几节都在讲**权重**怎么装、怎么跑。这里补一个此前完全没覆盖的对象：**KV 缓存本身**。
+
+#### 压缩到什么程度
+
+在**单张 96GB RTX PRO 6000 Server Edition** 上跑 **Qwen3.6-27B**，采用三层混合格式 [c-mkv-compression]：
+
+| 层 | 格式 |
+|---|---|
+| Recent + Anchor 页 | **FP8** |
+| Stale 页 | **TQ3** |
+
+| 指标 | 数值 |
+|---|---:|
+| 每活跃 token 注意力 KV | **18.3 KiB** |
+| 相对 **BF16** | **3.50×** 缩减 |
+| 相对 **FP8** | **1.75×** 缩减 |
+| 独立 canary（两个 59,008 token 请求） | **3.625×** 活跃 KV 压缩 |
+
+> **关键是：每个活跃请求的页仍然可寻址，不需要保留与缓存同尺寸的稠密影子。**
+
+#### 但吞吐没有提升
+
+| 指标 | 数值 |
+|---|---:|
+| 单对吞吐比（相对稠密对照） | **0.9821×** |
+
+> **压缩 3.6 倍，吞吐反而略慢 1.8%** [c-mkv-throughput-flat]。
+>
+> **所以 KV 压缩买到的是「能装更长的上下文 / 更大的并发」，不是「更快」。**
+>
+> 这与 §4.8.6 的「96GB 买能力不买速度」、§6 的带宽受限结论**同构**。
+
+#### 质量代价：很小，但有一个反直觉的方向
+
+**LongBench v2（同一 503 题集合）** [c-mkv-quality-cost]：
+
+| 上下文长度 | 相对稠密对照 |
+|---|---:|
+| 16K | **−0.80 个百分点** |
+| 32K | **−0.60 个百分点** |
+| 64K | **−0.40 个百分点** |
+
+> **全部在 1 个百分点以内。**
+
+**但短上下文反而更差**：
+
+| 长度 | 结果 |
+|---|---|
+| 4K（RULER） | **−0.9 个百分点** |
+| 8K | **+0.20 个百分点**（宏分提升） |
+| 16K（RULER NIAH） | 与稠密**持平** |
+
+> **损失随上下文变长而减小**——这与「压缩只在大上下文才划算」的直觉相反 [c-mkv-quality-inverted]。
+>
+> 合理解释是锚点页机制在长上下文中占比更小、被保护的高保真页覆盖了更关键的注意力位置。⚠️ **这是本报告推断，论文未直接给出该机制解释。**
+
+#### 一份罕见的自我约束，值得当引用范本
+
+这篇论文**主动列出了自己的三项硬局限** [c-mkv-honest-limits]：
+
+| 局限 | 内容 |
+|---|---|
+| ① | **只有一个模型、一张 GPU**；张量并行、多 GPU、视觉路径均未评估 |
+| ② | **64 个语言层中只有 16 层持有全注意力 KV**，18.3 KiB/token **只适用于该池**，不含 Gated DeltaNet 状态或进程总 HBM |
+| ③ | 18.3 KiB/token 这一**聚合值缺少按层级的字节分解**、元数据、暂存与稠密影子记账 |
+
+> **它还声明吞吐是「单对结果」而非重复运行证据。**
+>
+> **本报告据此不把 18.3 KiB/token 当作整卡 HBM 占用的代表值。**
+
+#### ⚠️ 可复现性缺口
+
+**论文自述**：证据包**只命名了模型**，未绑定不可变的模型/分词器版本、引擎 commit，以及 **CUDA、驱动、PyTorch、TileLang 版本**；这些仍属其「发表闸门」的一部分 [c-mkv-repro-gap]。
+
+> **因此目前无法独立复现 18.3 KiB/token 与 0.9821× 这两个数字。**
+
+#### 一个必须防的 SKU 口径陷阱
+
+> **该论文引用的是 Server Edition 标称 1,597 GB/s 带宽** [c-mkv-bandwidth-sku-trap]。
+>
+> 而本报告 **§3 记录 Workstation 版为 1,792 GB/s**、Server 版显存时钟 12,481 MHz。
+>
+> **这是不同 SKU 的不同标称口径，不可混用为同一个数字。**
+
+#### 顺带：它和缓存放置方案不冲突
+
+**KV 保真度分层**与**缓存放置分层**是两个**正交**维度 [c-mkv-composes]：
+
+| 系统 | 操作对象 |
+|---|---|
+| LMCache / Mooncake | **跨 GPU 内存、主机 DRAM、存储、网络的放置** |
+| Minima-KV | **GPU 内的保真度状态** |
+
+> **两者可组合：一个 FP8 或 TQ3 页仍可被外部缓存层搬动。**
 
 ## 5. 与 RTX 5090 的横向对比
 
@@ -6046,6 +6143,7 @@ sudo nvidia-bug-report.sh
 - [TechPowerUp — NVIDIA Readies GeForce RTX 5090 SE Graphics Card](https://www.techpowerup.com/350658/nvidia-readies-geforce-rtx-5090-se-graphics-card)（2026-07-10） — [src-tpu-5090-se]
 - [arXiv 2606.00516 — Threshold-Based Exclusive Batching for LLM Inference](https://arxiv.org/abs/2606.00516)（2026-05-30） — [src-arxiv-eb]
 - [arXiv 2608.16157 — FreeToken: Efficient Edge-Native MoE Serving with Bandwidth-Adaptive Execution](https://arxiv.org/html/2608.16157)（2026-08-17） — [src-arxiv-freetoken]
+- [arXiv 2608.23834 — Minima-KV: Retention-Preserving KV Cache Compression with Mixed-Format Paged Attention](https://arxiv.org/html/2608.23834)（2026-08-31） — [src-arxiv-minimakv]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6275,7 +6373,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=167, evidence=1306, claims=851, claims_high=637, claims_disputed=1, trace_events=342, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=168, evidence=1316, claims=859, claims_high=644, claims_disputed=1, trace_events=344, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
