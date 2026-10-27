@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：177 ｜ **证据数**：1369 ｜ **主张数**：903（高置信 671，争议 1）
+> **来源数**：178 ｜ **证据数**：1388 ｜ **主张数**：917（高置信 685，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -511,7 +511,157 @@ RTX PRO Blackwell 工作站线的核心规模呈明确阶梯 [c-cg-lineup]：
 
 > **因此改水方案不能作为短期交付路径规划**——与 §12.7 同属「标价不等于可得」。
 
-#### 九、什么时候才值得改水
+#### 九、终于有一手实测了：四卡改水 41,081 tok/s、58°C、2.44 kW
+
+⚠️ **本节前八小节的一个共同缺陷是「没有独立实测」。第 55 轮找到了第一份**——作者自建四卡改水的完整工程记录。
+
+**整机配置** [c-wb-four-gpu-real]：
+
+| 项 | 配置 |
+|---|---|
+| 卡 | **4 × RTX PRO 6000 Blackwell Workstation**（GB202、96GB、600W） |
+| 平台 | **Threadripper Pro 7995WX on WRX90** |
+| 冷头 | **4 × Bykski 全覆盖** |
+| 冷排 | **2 × Alphacool NexXxoS XT45 1260mm**（各 9 个 140mm 风扇） |
+| 水路 | 单分水器/水箱、**双泵**、蒸馏水、**四卡并联** |
+| 电源 | **2 × 1500W**（3kW 预算），应对约 2.4kW 持续功耗 |
+
+**四卡并发实测** [c-wb-four-gpu-real]：
+
+| | 推理 tok/s | 训练 TFLOPS | 温度 | 功耗 |
+|---|---:|---:|---:|---:|
+| GPU 0 | 10,393 | 210.5 | 57°C | 612 W |
+| **GPU 1（修复卡）** | 10,234 | 212.5 | **54°C** | 609 W |
+| GPU 2 | 10,311 | 208.3 | 58°C | 608 W |
+| GPU 3 | 10,143 | 206.2 | 58°C | 607 W |
+| **聚合** | **41,081** | **837.6** | **58°C** | **2.44 kW** |
+
+> **零 Xid 事件。**
+>
+> **修复卡是四张里最凉的**，因为硅脂与导热垫最新 [c-wb-fleet-spread]。
+>
+> **其余三张推理相差 4% 以内、训练 3% 以内**——作者称这已接近原厂硅片上的机队匹配极限。
+
+#### 十、水冷的真正价值不是「凉一点」，是「能否维持满加速」
+
+**这是 §3.5 与前八小节之间缺的那一环** [c-wb-air-vs-water-thermal]：
+
+| | 风冷 | 水冷 |
+|---|---|---|
+| 温度 | **被压到 80 多°C** | **54–58°C** |
+| 加速频率 | **降频** | **全程满加速** |
+| 步进时间 | **长 run 中下滑** | **保持平稳** |
+
+**作者的机制解释很关键**：**同步训练中最慢的一张卡决定节奏**，所以先降频的那张会把整个 run 拖慢。
+
+> **改水买到的不是温度数字，是「四张卡都不会成为瓶颈」。**
+
+**作者原话**：风冷下「卡会降频进入 80 多度、最慢的一张卡住同步步进、有效 TFLOPS 在长 run 中下滑」。
+
+#### 十一、⚠️ 一个会毁卡的坑：冷态拆导热垫会拽掉元件
+
+**这是本节最有操作价值的一条** [c-wb-cold-teardown-kills]：
+
+> **导热垫与元件之间的粘接是真实的。冷态撕下 VRM 区导热垫时，向上拉扯力集中在小尺寸 SMD 元件而非大电感封装上**——边缘焊点会彻底断开，健康焊点也会被应力化。
+
+**作者的首张试点卡就是这样被拽掉一颗 85N 功率电感** [c-wb-cold-teardown-kills]。
+
+**正确做法** [c-wb-warm-teardown-fix]：
+
+| 步骤 | 做法 |
+|---|---|
+| 1 | **跑一段计算负载把卡预热到约 90°C** |
+| 2 | **断电** |
+| 3 | **立即开始拆解** |
+| 不需要 | 热风枪、加热台——**卡自身热量足够** |
+
+> **原理**：约 90°C 时导热垫的硅胶变软，会**松开**元件而不是黏住并掀起。
+>
+> **作者按此法改的另外三张卡零事故。**
+>
+> 配套的流程纪律是**先改一张做试点、跑一周真实负载再改其余** [c-wb-pilot-first]：若四张一起改，就有四个冷头要拆、四次制造新缺陷的机会。
+
+#### 十二、故障签名与为什么它难查
+
+**持续负载下的签名** [c-wb-xid79-signature]：
+
+```
+NVRM: Xid (PCI:0000:02:00): 79, pid='<unknown>', GPU has fallen off the bus.
+NVRM: Xid (PCI:0000:02:00): 154, Node Reboot Required
+```
+
+**完整故障链** [c-wb-failure-chain]：
+
+> 边缘焊点在 600W 下经热循环逐渐开裂
+> → 瞬态电流下电感失去可靠接触
+> → 其余电感分担其负载、稳压器反馈环噪声上升、纹波升高
+> → GPU 某路内部供电跌出规格
+> → **卡选择中止 PCIe 链路而非损坏数据**
+
+**为什么难查**：卡**看起来是健康的**——能枚举、能加载驱动、能跑短基准。**故障只在 VRM 推动真实电流一段时间后才出现。**
+
+> **作者承认先花数小时换驱动、换 CUDA 版本、怀疑 `torch.compile`，全部无效。**
+>
+> **「工作一周」不构成硬件健康的证明** [c-wb-one-week-not-proof]——边缘焊点能通过 bring-up，只在足够热循环后才失效。
+
+#### 十三、⚠️ 不要 RMA，也不要自己焊
+
+**作者的实际路径** [c-wb-repair-not-rma]：
+
+| 项 | 详情 |
+|---|---|
+| 去哪 | 拉斯维加斯的 **SmartFix**（全国连锁手机维修店，官网列有逻辑板维修） |
+| 花多少 | **$40** |
+| 多久 | **约 20 分钟** |
+| 为什么行 | 这类店每天做 iPhone 板的 **BGA 重植与 0201 间距**作业，3mm 双大焊盘电感对他们是五分钟的活 |
+
+> **如果故障是单个分立元件脱落，你不需要 RMA、热风返修台或 500 美元显微镜。**
+>
+> **你需要的是本地标注「微焊」或「逻辑板维修」的店**——手机维修连锁、独立手机店、游戏机维修店都有这技能。
+
+#### 十四、冷排可以刻意过量，理由不是余量
+
+**作者自述冷排是刻意超配** [c-wb-radiator-overspec]：
+
+> **「倾泻 2.4 kW 不需要这么多冷排」**——但训练是 **24–72 小时连续负载**，回路没有像推理那样在突发之间休息的机会。
+>
+> **大冷排意味着低转速风扇（可以睡在机器旁）**，也是对长任务中途风扇故障或滤网堵塞的**保险**。
+
+#### 十五、⚠️ 「全覆蓋」不等于双面覆蓋
+
+**一个易被忽略的点** [c-wb-backplate-gap]：
+
+> **这些卡背面的 GDDR7 封装也需要散热，而全覆蓋冷头通常只覆盖正面。**
+>
+> 两种做法：**导热垫贴向机箱侧板**，或**用导热胶粘小鳍片散热器**。
+
+#### 十六、同一套四卡在推理形态下的产能
+
+**训练任务之间的空闲期跑推理** [c-wb-inference-shape]：
+
+| 项 | 配置 |
+|---|---|
+| 部署 | **DP=4** 的 Qwen3.6-27B vLLM，每卡一实例 |
+| 前端 | nginx 负载均衡 + Cloudflare tunnel |
+| 负载 | **1,024 并发、5,120 token 输出** |
+| 结果 | **约 8,000 输出 tok/s** |
+| 均衡 | 四端点误差 **0.7%** 以内 |
+| KV 缓存 | **99.6%** |
+
+> **每张卡都跑满 600W**——与训练是同一热包络，只是形状不同。
+
+#### ⚠️ 十七、这份来源的可信边界
+
+**两点须打折引用** [c-wb-source-caveat]：
+
+| 问题 | 详情 |
+|---|---|
+| **AI 生成痕迹** | HN 讨论中多位读者指出开头两段有此迹象，**作者两次回复「已改进文章」** |
+| **机制描述被质疑** | 读者质疑撕垫受力的解释，**作者回复不确定具体原因、可能是外力或虚焊** |
+
+> **因此：其操作结论（预热、先试点、找微焊店）可信度高；但故障的微观力学解释应视为作者推测。**
+
+#### 十八、什么时候才值得改水
 
 综合以上，改水的适用条件很窄：
 
@@ -6677,6 +6827,7 @@ sudo nvidia-bug-report.sh
 - [Igor's Lab — Alphacool: 1-Slot Water Coolers for RTX PRO and Radeon AI PRO](https://www.igorslab.de/en/alphacool-announces-1-slot-water-block-rtx-pro-blackwell-radeon-ai-pro/)（2026-10-08） — [src-igorslab-alphacool]
 - [FormulaMod — Bykski RTX PRO 6000 全覆盖水冷头 N-RTXPRO6000-SR](https://www.formulamod.net/products/bykski-gpu-water-block-for-nvidia-rtx-pro-6000-all-metal-structure-water-cooling-cooler-n-rtxpro6000-sr)（2026-10-27） — [src-formulamod-bykski]
 - [FormulaMod — Bykski RTX PRO 6000 600W 一体式水冷 B-FRD-RTXPRO6000-WS](https://www.formulamod.net/products/bykski-all-in-one-gpu-water-cooling-for-nvidia-rtx-pro-6000-water-cooling-system-liquid-cooler-360-radiator-b-frd-rtxpro6000-ws)（2026-10-27） — [src-formulamod-aio]
+- [Ever Awake (Sabareesh) — 4× RTX PRO 6000 Blackwell on Water, and the One Card That Wouldn't Behave](https://sabareesh.com/posts/blackwell-waterblock/)（2026-06-12） — [src-sabareesh-waterblock]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6912,7 +7063,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=177, evidence=1369, claims=903, claims_high=671, claims_disputed=1, trace_events=355, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=178, evidence=1388, claims=917, claims_high=685, claims_disputed=1, trace_events=357, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
