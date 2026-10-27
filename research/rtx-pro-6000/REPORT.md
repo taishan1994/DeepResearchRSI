@@ -2113,7 +2113,45 @@ Unable to enable MIG Mode for GPU 00000000:01:00.0: Not Supported
 1. **缺零售包装 ≠ 假卡** [c-vbios-bulk]：官方说明这是 **bulk 版**（面向系统集成商，省去拆包与包装处理）。因此 §12.7.2 的验收清单必须修正——**"无彩盒/配件少"本身不构成假卡判据**，需与**封条破损、残留测试针、手工硅脂**等硬物证合并判断。
 2. **MIG 可能不是你要的** [c-vbios-mig-advice]：官方建议，**只是在一张卡上并行跑多个任务并不需要 MIG**——GPU 自身调度即可，甚至可能塞下第 5 个任务。MIG 的真实价值是**可预测的低延迟**与**多租户隔离**（与 §11.1 一致）。
 
-#### 10.4.2 驱动分支与 EOL：一个此前完全空白的运维维度
+#### 10.4.1.1 ISV 认证：Dassault 官方的实际登记状态
+
+本报告此前从未查过 ISV 认证矩阵，这是一个实际缺口。我核了 **Dassault Systèmes 官方 Windows 11 认证列表** [c-ds-certified]。
+
+**结论：该卡已获认证**，但登记方式有一个必须说清的细节 [c-ds-derived]：
+
+| 项 | 官方记录 |
+|---|---|
+| 登记名称 | **RTX Pro 6000 Blackwell Workstation Edition** |
+| 认证驱动 | **582.16** |
+| 认证日期 | **2026-07** |
+| 托管机型 | **Dell Precision 7960 Rack**（2× Xeon Platinum 8468V） |
+| 备注 | **derived from RTX Pro 2000 Blackwell** |
+
+> **「derived from」的意思是：它的认证是从 RTX PRO 2000 派生（继承）而来，而非独立送测。**
+>
+> 同类情况见于 RTX 6000 Ada（derived from RTX 2000 Ada）与更早的 RTX 6000（derived from RTX 4000）。**这是 Dassault 的常规做法，不是这张卡的缺陷**——但读者应理解「已认证」在这里的确切含义。
+
+#### 认证驱动版本独立印证了 R580 的建议
+
+这里有个值得注意的交叉验证 [c-ds-driver-gap]：Dassault 认证的驱动是 **582.16**，而 §10.4.2 的结论是「生产环境应锁 **R580 LTSB**（EOL 2028-06），而非报告多处出现的 R595」。
+
+> **582.16 正落在 R580 分支内。** 两个完全独立的来源——NVIDIA 的分支 EOL 政策，与 Dassault 的 ISV 认证实践——**指向同一个答案**。
+
+#### Server Edition 不在这个列表里
+
+**Server Edition 未出现在 Dassault 的 Windows 11 认证列表中** [c-ds-server-not-listed]，列表中的 Blackwell 条目是 WS 版、Max-Q 版与 **RTX PRO 5000 72GB**。
+
+> **这不等于它不能跑 Dassault 软件，而是说没有官方认证背书。** 与本报告 §8 的记录一致——Server 版是数据中心定位，Windows 工作站 ISV 认证通常不覆盖它。**做 CAD/CAE 选型时这是一个必须知道的边界。**
+
+#### 一个我自己踩到的检索陷阱
+
+必须记下这个过程 [c-ds-naming-trap]：**在官方列表中检索「RTX PRO 6000」命中 0 次**——我一度以为它未获认证。
+
+原因：**官方登记名写作「RTX Pro 6000」**（小写 `ro`）。搜索大小写敏感导致漏检。
+
+> **教训：仅凭一次关键词检索就断言「未获认证」会得出完全错误的结论。** 必须以制造商 + 型号 + 驱动版本多字段交叉核对。
+
+### 10.4.2 驱动分支与 EOL：一个此前完全空白的运维维度
 
 本报告多处引用了 `595.x` 驱动，但**从未说明该分支还能用多久**。官方驱动生命周期文档给出了硬数据 [c-drv-branches][c-drv-eol]。
 
@@ -2672,6 +2710,49 @@ SemiAnalysis InferenceX 的官方数据页给出了本报告最直接的每美�
 | RTX PRO 5000 72GB | 72GB | $9,999 MSRP / £6,899 街价（2025-12）[c-price-5000-72g] |
 | RTX 5090 | 32GB | **$4,996**（2026-10），且可能停产 |
 
+### 12.3.1 整机层级的报价：一个此前缺失的锚点
+
+本报告此前只讨论**单卡价格**。整机是另一个数量级，值得单列。
+
+**BOXX APEXX 8R（1× RTX PRO 6000 WS 版）** 的配置与起价 [c-boxx-price]：
+
+| 项 | 配置 |
+|---|---|
+| 起价 | **$18,000** |
+| GPU | RTX PRO 6000 Blackwell **WS 版**，96GB GDDR7，1,792 GB/s |
+| 系统内存 | 256GB DDR5 ECC（最高 2,048GB） |
+| CPU | AMD Threadripper PRO，64 核+，350W |
+| 存储 | 4TB NVMe PCIe 5.0 |
+| 电源 | **1,500W**（估算峰值功耗 1,000W） |
+| 散热 | BOXX 定制水冷 |
+| 保修 | **3 年**，可选上门 |
+
+**这个价格需要谨慎解读** [c-boxx-price-context]：**单卡 2026-10 已约 $17,999，而整机起价 $18,000——几乎等于单卡价**。
+
+> 这说明「$18,000 起」很可能是**较早的定价或基础配置**，**不能代表当前整机成本**。引用时必须注明这是 **2026-07 的快照**。
+
+#### 一个第三方独立印证
+
+整机厂商的规格表**独立确认了 NVLink 不支持**，并直接写明了后果 [c-boxx-nolink]：
+
+> *"No NVLink support (multi-GPU limited to PCIe P2P)"*
+
+这与本报告 §4.9/§10 的记录一致，但**这是首次从整机厂商视角给出的表述**。
+
+#### 数据质量必须标注
+
+**这页自述** [c-boxx-quality-warning]：*"Vendor specification — from manufacturer datasheet. **No hands-on testing was performed.**"*
+
+> 即**三方聚合站的规格转述，无实测**。本报告定为 **tertiary** 可信度，**仅用于整机配置与价格锚点，不用于任何性能结论**。
+
+#### 顺带纠正一个常见的估算误导
+
+该页给出「**Max model size: ~185B params at Q4**」[c-caih-185b-claim]，但它自己标注是「calculated estimates, **not measured**」，且计算方式是 **weight-only（仅权重）**，**完全不含 KV 缓存**。
+
+> 与本报告 §4.8.5.2 的实测对照：**128B 稠密模型权重就占 140GB，已超 96GB**——**185B@Q4 在单卡上实际不可行**。
+>
+> **这是 weight-only 估算的系统性偏差**：它给出的「能装下」在真实推理中会因 KV 缓存和激活值而 OOM。本报告 §4 各节的实测对此更有发言权。
+
 ### 12.4.1 RTX 5090 的价格参照（重要：它自己也在涨）
 
 比价时必须承认一个前提：**RTX 5090 的零售价已严重脱离首发价** [c-price-5090]。
@@ -3096,6 +3177,8 @@ sudo nvidia-bug-report.sh
 | q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
 | q63 | 出口管制如何影响采购？ | ✅ | §12.5.2 BIS 2026-05-31 看总部不看收货地，存量豁免 |
 | q64 | 每 token 成本比 H100/GB300 如何？ | ✅ | §12.2.1 $/chip/hr 最低但每 token 最贵，差 10-18 倍 |
+| q65 | 有 ISV 官方认证吗？ | ✅ | §10.4.1.1 Dassault 已认证，驱动 582.16，Server 版未列入 |
+| q66 | 整机采购要多少钱？ | ✅ | §12.3.1 BOXX 起价 ,000（2026-07 快照），1500W 电源 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -3128,12 +3211,14 @@ sudo nvidia-bug-report.sh
 | q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
 | q63 | 出口管制如何影响采购？ | ✅ | §12.5.2 BIS 2026-05-31 看总部不看收货地，存量豁免 |
 | q64 | 每 token 成本比 H100/GB300 如何？ | ✅ | §12.2.1 $/chip/hr 最低但每 token 最贵，差 10-18 倍 |
+| q65 | 有 ISV 官方认证吗？ | ✅ | §10.4.1.1 Dassault 已认证，驱动 582.16，Server 版未列入 |
+| q66 | 整机采购要多少钱？ | ✅ | §12.3.1 BOXX 起价 ,000（2026-07 快照），1500W 电源 |
 
-**完成度：64/65 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：66/67 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **800 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **814 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -3256,3 +3341,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 128. [电子工程专辑：美国出台新规，禁止向中企境外子公司出口 AI 芯片（BIS 2026-05-31 指引）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
 129. [SemiAnalysis InferenceX：Qwen 3.5 397B-A17B 在 GB300 NVL72 与 RTX PRO 6000 上的每美元性能](https://inferencex.semianalysis.com/zh/compare-per-dollar/qwen-3-5-gb300-vs-rtx6000pro)（截至 2026-10-27） — [src-inferencex-gb300]
 130. [NVIDIA Virtual GPU Software：VMware vSphere 已验证平台（含 RTX PRO 6000 Server Edition）](https://docs.nvidia.com/vgpu/latest/grid-vgpu-release-notes-vmware-vsphere/validated-platforms.html) — [src-vgpu-validated]
+131. [Dassault Systèmes：Windows 11 64-bit 认证工作站列表（含 RTX PRO 6000 Blackwell）](https://media.3ds.com/support/certified_hardware/Windows_11_64-bit.html)（截至 2026-07 认证） — [src-ds-cert]
+132. [CompareAIHardware：BOXX APEXX 8R（1× RTX PRO 6000 Blackwell）整机规格与起价](https://compareaihardware.com/ai-workstation/boxx-apexx-8r-1x-rtx-pro-6000-blackwell)（2026-07-23 核实） — [src-caih-boxx]
