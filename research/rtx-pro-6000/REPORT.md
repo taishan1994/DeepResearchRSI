@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：68 ｜ **证据数**：416 ｜ **主张数**：272（高置信 192，争议 1）
+> **来源数**：70 ｜ **证据数**：426 ｜ **主张数**：279（高置信 195，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1339,6 +1339,58 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | 可用多卡替代单卡 | 重新计算总拥有成本（2×5090 的 64GB 仍不及单卡 96GB 的易用性） |
 | 数据中心多卡推理 | 对比 H100/H200 的每 token 成本，而非单卡价格 |
 | 高负载 7×24 运行 | ⚠️ 先读 §10.5 退化风险与 §10.6 供电风险，要求书面 RMA 政策 |
+| **任何渠道采购** | ⚠️ **必读 §12.7：保修归属真空 + 已证实的假卡案例** |
+
+### 12.7 两个此前完全未记录的采购风险（本轮新增，建议优先阅读）
+
+这一节不在任何评测里，但**可能比性能差异更影响你的实际得失**。
+
+#### 12.7.1 保修归属真空：三方互相推诿
+
+一个已记录的完整案例 [c-warranty-gap]：用户从 Newegg 购买 **NVIDIA 品牌**的 RTX PRO 6000 WE，卡出现故障后：
+
+| 相关方 | 立场 |
+|---|---|
+| **NVIDIA 企业支持** | "RTX PRO 保修不是我们的" → **关闭了两个工单**，让其找卖家 [e-war-nvidia] |
+| **PNY** | **书面否认**该序列号属于其产品 [e-war-pny] |
+| **Newegg 商品页** | 明确写着"保修由 NVIDIA 负责" [e-war-pny] |
+
+> **原话**："So everybody points at someone else and **nobody will actually look up the serial**."
+
+**加剧因素** [c-warranty-no-box]：该卡以**无任何标识的牛皮纸盒**发货（商品页标注 OEM），用户装机时丢弃了包装，只剩卡本体和一个标签 [e-war-box]。**这直接摧毁了追溯能力**。
+
+**采购含义**：
+- 购买前**书面确认保修主体**（是 NVIDIA、AIC（如 PNY/Leadtek）、还是经销商），不要依赖商品页描述
+- **保留原包装与所有标签**，即使标注 OEM 散装
+- 优先选择能明确承诺售后责任的整机厂商或授权渠道
+
+#### 12.7.2 已证实的假卡：PCB 是 RTX 5090
+
+一个带照片物证的案例 [c-counterfeit-real]：用户以约 $8,000 购入"全新 RTX PRO 6000"，到手即点不亮。数月后拆开散热器发现——
+
+> **PCB 丝印为 `180-1G144-DFAF-B13`，即 RTX 5090 Founders Edition 的 PG144 板，根本不是 PRO 6000 的板** [e-fake-board]。
+
+**可辨识的物证清单** [c-counterfeit-signs]（这些是**可操作的验收检查点**）：
+
+| 检查项 | 假卡表现 |
+|---|---|
+| 防静电袋封条 | **已破损**，且缺配件 [e-fake-seal] |
+| PCB 背面 | **残留两颗金色测试针**——出厂零售卡不会带 [e-fake-pins] |
+| 板面清洁度 | 整板有黏性残留（疑为助焊剂），未清洗 [e-fake-pins] |
+| 硅脂 | **手工涂抹**，溢出芯片边缘到基板；产线不会这样 [e-fake-paste] |
+| 导热垫 | 不匹配、有纤维碎屑，**明显复用** [e-fake-paste] |
+
+**造假路径推断** [c-counterfeit-path]（作者明确标注为推断）：本应销毁的工厂废板/工程样片经灰色渠道流出 → 套上零售散热器与外壳 → 贴上更贵型号标签 → 通过退货流转或市场渠道售出。**本报告采信其物证，不采信其渠道推断**。
+
+**防御清单** [c-counterfeit-advice]：
+1. **到货先验封条与配件完整性**，破损即停止并拍照
+2. **立即拍照记录外壳 / 包装 / PCB 序列号**，带时间戳
+3. **不要以外观和重量作为判断依据**——该案例的卡"看起来完全正常"
+4. **任何退货流转库存**（open-box / restocked / 甚至 sealed）**都视为未核实**，直到跑分通过
+
+**次生伤害值得警惕** [c-counterfeit-victim]：该用户在卡已被上游调包的情况下，反被零售商指控**退货欺诈**并永久拒绝交易。**举证责任落在买方**——这再次强化了留证的必要性。
+
+> 这两条合起来意味着：**在高价且稀缺的时期，渠道风险可能超过产品风险**。
 
 ---
 
@@ -1516,12 +1568,14 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q28 | LoRA 微调是否值得？ | ✅ | §8.8 DDP 扩展与四卡反超 |
 | q29 | Blender 冲突能否裁决？ | ⚠️ | §7.3.1 补齐版本元数据，仍按 C3 并列 |
 | q30 | Server 版 TDP 与散热约束？ | ✅ | §3.1 注释（400–600W 可配 + 被动散热） |
+| q31 | 采购渠道有什么风险？ | ✅ | §12.7 保修归属真空 + 假卡物证 |
+| q32 | 真实生产场景的墙钟时间？ | ✅ | §7.2.1 Corona/Vantage 实测 |
 
-**完成度：29/30 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：31/32 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **416 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **426 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1529,7 +1583,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=68, evidence=416, claims=272, claims_high=192, claims_disputed=1`
+当前校验结果：`sources=70, evidence=426, claims=279, claims_high=195, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1576,3 +1630,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 67. [NVIDIA Developer Forums：Blackwell Pro 6000 MHz degrading（含 nvidia-smi 现场输出）](https://forums.developer.nvidia.com/t/blackwell-pro-6000-mhz-degrading/355157/17)（2026-07-08） — [src-nvforum-powercap]
 68. [ArchVizDaily：2026 年建筑可视化最佳 GPU（真实生产场景墙钟时间）](https://archvizdaily.com/posts/best-gpu-for-archviz-2026)（2026-07-11） — [src-archviz]
+### 采购风险与真实场景（第六轮补充）
+
+69. [NVIDIA Developer Forums：NVIDIA 品牌 RTX PRO 6000 WE 保修归属争议（PNY 书面否认序列号）](https://forums.developer.nvidia.com/t/nvidia-branded-rtx-pro-6000-we-warranty-claim-pny-denies-serial-in-writing-enterprise-support-closes-case-same-day-who-services-warranty-for-nvidi/380744/4)（2026-10-07） — [src-nvf-warranty]
+70. [Joshua Odmark：从 Provantage 买的 RTX Pro 6000 拆开是什么（假卡物证）](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-provantage-fake]
