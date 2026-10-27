@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：66 ｜ **证据数**：404 ｜ **主张数**：264（高置信 185，争议 1）
+> **来源数**：68 ｜ **证据数**：416 ｜ **主张数**：272（高置信 192，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -725,6 +725,35 @@ Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存
 
 **Blender 上 Server 版掉到 #17**（9,382 分）[e-dr-se-blender]，而 Workstation 版是 #1（16,272）[e-dr-ws-blender]。
 
+#### 7.2.1 一个真实工作室的墙钟时间（覆盖 Corona 与 Vantage）
+
+上面的表都是跑分。**跑分与真实项目的墙钟时间不是一回事**。一家实际接单的建筑可视化工作室用**生产场景**（1.2GB 3ds Max、九单元住宅、完整景观、六套 PBR 室内、4K、固定采样）测了四张卡 [c-archviz-5090-wins]：
+
+| 引擎 | RTX 5090 | RTX PRO 6000 | RTX 4090 |
+|---|---|---|---|
+| **Corona 12** | **11分40秒** | 略慢于 5090 | 15分40秒（慢 34%） |
+| **V-Ray GPU** | **8分20秒** | — | 11分30秒 |
+| **Unreal 5.5 路径追踪** | **2分15秒/帧** | — | 3分00秒/帧 |
+| **Chaos Vantage** | **44 fps** | — | 32 fps |
+
+**RTX 5090 在全部四个引擎上都最快** [c-archviz-5090-wins]。RTX PRO 6000 在 Corona 上**比 5090 略慢**，原因是频率更低。
+
+**那 96GB 买的是什么** [c-archviz-6000-position]？该工作室的原话是：它"从未接近显存上限，且可同时驻留多个场景供交互审阅"。
+
+**显存确实会撞墙** [c-archviz-vram]：同一场景在 V-Ray GPU 下推到 **14.2GB**，16GB 的 RTX 5080 几乎没有余量；24GB 足够。
+
+> **这为"96GB 是否过剩"提供了一个现实参照**：绝大多数建筑可视化场景在 **24GB 以内**。96GB 的价值在于**多场景常驻**与**总平面级超大场景**，不在于单帧渲染速度。
+
+**多卡扩展的渲染器差异极大** [c-archviz-multigpu]：
+
+| 引擎 | 双卡扩展 |
+|---|---|
+| Corona / V-Ray | 近乎线性，**两张 4090 总渲染时间超过一张 5090** |
+| Unreal 路径追踪 | 较差（帧批处理方式所致） |
+| Chaos Vantage | **实时播放基本不用第二张卡** |
+
+**工作室的最终建议与跑分排序相反** [c-archviz-advice]：主工作站选 5090，加渲染节点选 4090，**只有总平面级超大场景才选 RTX PRO 6000**。这与本报告 §12 的价值排序一致，但给出了更具体的场景边界。
+
 ### 7.3 一条必须并列呈现的冲突
 
 Blender 的 Server 版成绩，两个来源相差 **69%**：
@@ -1078,6 +1107,37 @@ export FLASHINFER_FORCE_SM=120f
 - 采购验收时跑分正常，几个月后才暴露
 
 **证据强度（诚实标注）**：至少 5 名独立用户在 NVIDIA 官方论坛报告同类指纹，其中一人已退回 2 张卡、另有 2 张异常 [c-degradation-multiuser]。但**未见 NVIDIA 官方公告或召回**，样本量有限，不能推断为全批次缺陷 [c-degradation]。
+
+#### 10.5.1 本轮补充：这是一个有多条独立帖子、签名高度一致的群体性问题
+
+本轮找到了更多可核对的现场证据，**显著提高了该问题的可信度** [c-powercap-prevalence]：
+
+| 帖子标题 | 回复 | 浏览 | 日期 |
+|---|---:|---:|---|
+| "SW Power Cap ~600 MHz @ 600 W / 35°C — fix or RMA?" | 2 | 802 | 2026-08-06 |
+| "stuck at 577MHz, claims 600 Watts but 35c" | 1 | 300 | 2026-09-18 |
+| **"Wrong temperature thresholds causes SW Power Cap, GPU throttled to 510MHz (1/6 performance)"** | 3 | **1,175** | 2026-07-15 |
+| "Blackwell Pro 6000 MHz degrading"（主帖） | 17+ | — | 2026-07-08 |
+
+**现场签名高度一致** [c-powercap-signature]。一位用户贴出的 `nvidia-smi` 输出（4 卡，同型号）是关键证据：
+
+```
+GPU0: 2760 MHz, 58°C, 599.90 W, sw_thermal: Not Active, sw_power_cap: Not Active
+GPU1: 1237 MHz, 43°C, 599.99 W, sw_thermal: Not Active, sw_power_cap: ACTIVE
+GPU2: 2760 MHz, 59°C, 599.99 W, sw_thermal: Not Active, sw_power_cap: Not Active
+GPU3: 2790 MHz, 58°C, 599.98 W, sw_thermal: Not Active, sw_power_cap: Not Active
+```
+
+**三个卡在 2760–2790 MHz，一张卡在 1237 MHz**——同为 600W、同温度区间、同一台机器。而 `sw_power_cap` 只在故障卡上激活，`sw_thermal_slowdown` **全部未激活**。
+
+> **这不可能是真实过热**：43°C 远低于任何热阈值，且功耗读数与健康卡完全相同。**是功耗/温度遥测的判断逻辑出了问题，不是供电或散热不足。**
+
+**一条帖子直接点名根因** [c-powercap-root-cause]：标题为"**错误温度阈值**导致 SW Power Cap"的帖子获得最高浏览（1,175），把问题指向阈值逻辑错误。但**未见 NVIDIA 官方确认修复**，用户仍在询问 RMA 流程（"Has anyone received feedback regarding a RMA process?"）。
+
+**这段的采购含义**：该问题**修不了、查不出、也可能退不掉**。若部署在长期高负载场景，建议：
+- 把"持续 1 小时满载后 SM 频率不低于标称 90%"写进验收测试
+- 保留 `nvidia-smi --query-gpu=clocks.sm,power.draw,temperature.gpu,clocks_throttle_reasons.sw_power_cap` 的长期采样日志，作为 RMA 证据
+- 事先书面确认退化/锁频是否在保修范围
 
 **另有争议点**：温度阈值显示为负值（Shutdown -5°C）是否算 bug。NVIDIA 论坛人员解释这些是相对 T.Limit 的**差值**而非绝对温度，不是缺陷 [c-temp-threshold-dispute]。本报告采信该解释，但**锁频故障本身仍被多方独立复现**，两者是不同问题。
 
@@ -1461,7 +1521,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **404 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **416 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1469,7 +1529,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=66, evidence=404, claims=264, claims_high=185, claims_disputed=1`
+当前校验结果：`sources=68, evidence=416, claims=272, claims_high=192, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1512,3 +1572,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 64. [GDEP：RTX PRO 6000 Blackwell 三 SKU 对比报告（日文）](https://www.gdep.co.jp/information/news/nvidia-rtx-pro-6000-blackwell_benchmark_report/) — [src-gdep-report]
 65. [Blender Artists：RTX PRO 6000 性能讨论（含 Open Data 5.1.1 版本信息）](https://blenderartists.org/t/rtx-pro-6000-performance/1648521/2)（2026-07-24） — [src-blenderartists]
 66. [Drop & Render：Server Edition 渲染基准（更新于 2026-10-26）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition) — [src-dnr-server]
+### 真实生产场景与群体性故障（第五轮补充）
+
+67. [NVIDIA Developer Forums：Blackwell Pro 6000 MHz degrading（含 nvidia-smi 现场输出）](https://forums.developer.nvidia.com/t/blackwell-pro-6000-mhz-degrading/355157/17)（2026-07-08） — [src-nvforum-powercap]
+68. [ArchVizDaily：2026 年建筑可视化最佳 GPU（真实生产场景墙钟时间）](https://archvizdaily.com/posts/best-gpu-for-archviz-2026)（2026-07-11） — [src-archviz]
