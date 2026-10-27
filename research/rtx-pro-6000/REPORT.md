@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：163 ｜ **证据数**：1265 ｜ **主张数**：823（高置信 619，争议 1）
+> **来源数**：163 ｜ **证据数**：1272 ｜ **主张数**：830（高置信 625，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -3596,7 +3596,18 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 
 **第一个发现：缺 NVLink 并未损害 DDP** [c-lora-ddp]。双卡扩展效率 96.1%–97.8%——因为 **DDP 每卡持完整副本、只同步梯度**，通信量远小于 TP。这与 §4.3 中 TP 受 PCIe 制约的结论**并不矛盾**，是不同并行策略的差异。
 
+**机制可以再往下推一层** [c-lora-ddp-mechanism]：通信量之所以小到可以忽略，是因为**只同步 `q_proj` 与 `v_proj` 两个适配器矩阵的梯度**，完整的 8B 参数梯度张量根本不参与 all-reduce。实测每卡吞吐从 1 卡到 4 卡只掉 **98 tok/s（3.5%）**。
+
+> **这意味着这个结论不能外推到全量微调**——全量微调要同步的是整个参数梯度，那才是 §8.5 里被 PCIe 卡住的情形。
+
 **第二个发现：96GB 在 8B LoRA 上用不上** [c-lora-vs-5000]。RTX PRO 6000 只比 PRO 5000 快 **33%**（4,962 vs 3,721），远小于价格差距。
+
+**显存读数直接证实了这一点** [c-lora-vram-constant]：8B 的 LoRA 微调在三款卡上都只占 **24.8–25.0 GB**，且**与卡数无关**——96 GB 里有 **七成以上是闲置的**。
+
+**真正的门槛在别处** [c-lora-8b-full-needs-60gb]：8B 用 LoRA 只需 25 GB（单张 32 GB 的 4500 就够、无需张量并行），但**8B 的全量微调计入权重与优化器状态后可能每 GPU 就要 60 GB 以上**。
+
+> **60 GB 这个门槛正好卡在 48 GB 与 96 GB 之间。**
+> **所以 96 GB 在训练侧的价值不在 LoRA，而在「同一个 8B 模型改用全量微调」这一步。**
 
 **第三个发现：四张小的可能比两张大的更快** [c-lora-time]：
 
@@ -3609,7 +3620,15 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 
 **4 张 PRO 4500 在总耗时上反超 2 张 PRO 6000**。对小模型微调，"多而小"确实可能优于"少而大"。
 
+> ⚠️ **但这张表有一个必须点明的缺口** [c-lora-bench-limits]：**RTX PRO 6000 只测到 2 卡，原厂没有 4 卡数据**。所以「4×4500 vs 4×6000」这个比较**根本没被做过**——上面的反超只成立于「4 张小的 vs 2 张大的」。
+
 > **这条结论修正了 §8.7 表格里"LoRA 一律选 RTX PRO 6000"的简化表述**。准确的说法是：**该卡的价值在容量与长上下文，不在小模型微调的吞吐**。
+
+**能效也随卡数上升，而不是持平** [c-lora-eff-scales]：4× 4500 达 **13.9 tok/s/W**，比单卡 9.6 高 **约 45%**——因为功耗只涨 2.66 倍（290 W → 772 W），吞吐却涨 3.86 倍。
+
+**换算成可用的容量规划锚点** [c-lora-corpus-time]：4× 4500 的 10,717 tok/s 可在**每 epoch 90 分钟内处理 5,000 万 token**；2× 4500 约需 3 小时。
+
+**70B 才是 96 GB 在训练侧的真正用途** [c-lora-70b-needs-96gb]：微调 Llama-3.1-70B 或 Qwen-72B 需要 RTX PRO 6000 这一级的显存余量（例如 4 位 QLoRA）。⚠️ 这是集成商的建议而非实测，标 `medium`。
 
 **云上成本对照** [c-cloud-rate]：Spheron 上 RTX PRO 6000 按需 $2.35/hr、竞价 $1.11/hr，H100 为 $2.65/$2.20 [e-spheron-price]。
 
@@ -6053,7 +6072,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=163, evidence=1265, claims=823, claims_high=619, claims_disputed=1, trace_events=334, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=163, evidence=1272, claims=830, claims_high=625, claims_disputed=1, trace_events=334, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
