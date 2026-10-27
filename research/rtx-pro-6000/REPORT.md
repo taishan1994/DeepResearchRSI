@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：269 ｜ **证据数**：2141 ｜ **主张数**：1562（高置信 1233，争议 9）
+> **来源数**：271 ｜ **证据数**：2147 ｜ **主张数**：1567（高置信 1238，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -15626,6 +15626,177 @@ export GGML_CUDA_FA_ALL_QUANTS=1 BLACKWELL_NATIVE_FP4=1
 > ⭐ **判据：「同一个模型有多个量化版本」时，
 > 选哪个的第一判据不是精度而是「元数据是否完整」。**
 
+### 10.40 ⭐⭐⭐⭐ 本报告最重要的一份稳定性控制矩阵
+
+**这份矩阵把一个模糊现象变成了一个可测量的阈值** [c-40969-wedge-control-matrix]。
+
+⚠️ 此前的表述是「**跑一会儿就挂**」——
+**那种表述无法被验证、无法被比较、也无法被证伪。**
+⭐ 而这份来自 vllm#40969 的矩阵（8× DGX Spark，TP=8，GLM-5.1-NVFP4，
+vLLM main @ `6232fb4`）把它变成了「**第几个请求**」：
+
+| 配置 | 挂死于第 N 个请求 | 相对基线 |
+|---|---|---|
+| 默认（`FULL_AND_PIECEWISE`） | ⚠️ **7–9** | 基线 |
+| `cudagraph_mode: PIECEWISE` | ⚠️ **8** | **无改善** |
+| `--enforce-eager` | ⚠️ **13** | 约 1.5× 延迟 |
+| ⭐ `--enforce-eager` + `OVERLAP_COMM=1` | **45** | **5× 延迟** |
+| ⭐⭐ **+ NCCL 2.30.4** | ⭐ **不挂（50/50 通过）** | **解决** |
+| `--no-enable-chunked-prefill` | ⚠️ **不可测** | 校验拒绝 |
+
+> ⚠️ 最后一行值得单独记：**校验直接拒绝**
+> 「`max_num_batched_tokens (8192) < max_model_len (65536)`」。
+> **矩阵里留一个「测不了」的格子，比把它删掉更诚实。**
+>
+> **⭐⭐ 判据：**
+> **把一个「现象」变成一个「阈值」，是让一个 bug 可被工程处理的第一步——**
+> **⚠️ 而在那之前，所有关于它的讨论都只是轶事。**
+>
+> ⭐ 而这份矩阵还做了一件极少见的事：**它验证了「配置真的生效了」**——
+> `PIECEWISE` 用引擎配置里的 `<CUDAGraphMode.PIECEWISE: 1>`
+> 加上**实际捕获过的尺寸列表** `[1,2,4,8,16,24,32,40,48,56,64]` 确认；
+> `--enforce-eager` 用 `enforce_eager=True` 加**「无捕获阶段」**确认。
+>
+> **⭐⭐ 判据：**
+> **「我改了配置」与「配置生效了」之间的差距，
+> 恰好是这类实验最容易出错的地方——**
+> **⚠️ 而一个失败的 A/B 里，最常见的错误不是结论错，而是「B 组其实没改成」。**
+
+#### ⭐⭐⭐⭐ 而原始假设是错的：与 CUDA graph 无关
+
+[c-40969-not-cudagraph]
+
+> ⚠️ 原始报告（DeepSeek-V4-Flash，TP=2）给出的假设非常具体：
+> **「`sparse_swa.py` 声明 `_cudagraph_support = AttentionCGSupport.UNIFORM_BATCH`；
+> 开启 chunked prefill 后批次混入变长 prefill 与长度 1 的 decode，
+> 违反 uniform-query-length。要么 (a) 分派器未能在 V4 的稀疏 MLA 路径上
+> 检测到混合批次，要么 (b) 元数据构建器在捕获与重放之间产生了不一致状态。」**
+>
+> ⭐ 而独立复现（**不同模型、不同 MoE 后端、不同量化、不同 TP 规模**）证明：
+> **「纯 eager 模式（完全无图捕获）与 PIECEWISE 一样挂死——只是在稍晚的请求计数上。
+> 这排除了图捕获 / 分派器 / 混合批次检测作为触发条件。」**
+>
+> ⭐ 堆栈把它钉在 Ray 层：`ray/dag/compiled_dag_node.py:2525` →
+> **`RayChannelTimeoutError: Timed out waiting for object available to read`**。
+> ⚠️ 且挂死发生在**一次常规的 1-token 解码步**
+> （`num_running_reqs=1`，`kv_cache_usage=0.03%`）——
+> **「输入没有任何异常，只是第 N 步，而 N 很小。」**
+>
+> **⭐⭐ 判据：**
+> **一个假设的「具体程度」与它的「正确概率」之间没有关系——**
+> **⚠️ 而一个写得越具体的错误假设，越难被推翻，
+> 因为它看起来已经排除了其他可能。**
+>
+> **⭐⭐ 判据：**
+> **「把这个机制整个关掉，问题还在吗」是最省力的证伪实验——**
+> **⚠️ 而它通常比读一百行代码更快。**
+>
+> ⭐ 另一条：**eager 下只是「晚 5 个请求」而不是「不挂」**，
+> **这本身就是「根因在别处、图只调制阈值」的直接证据。**
+
+### 10.41 ⭐⭐⭐⭐ 根因：一个默认随 PyTorch 装进来的 NCCL 竞态
+
+[c-40969-nccl-2289-race]
+
+> ⭐⭐ **NCCL 2.28.9 正是 PyTorch 2.11.0+cu130 的默认版本。**
+>
+> 「🎉 **NCCL 2.30.4 在 8× DGX Spark / TP=8 / GLM-5.1-NVFP4 栈上
+> 修好了这个 wedge**。」
+> ⭐ 运行时确认 `vLLM is using nccl==2.30.4`。
+> ⭐ 结果：**`stops=23 lengths=27 errors=0 wedged_at=(none)`，13.58 out tok/s**——
+> **「这是测过的第一个能让 50 请求扫描完全通过的配置。」**
+>
+> ⭐ 归因：**「Ray 的 `RayChannelTimeoutError` 是下游症状；
+> 真正的挂死发生在 NCCL 集合通信里，在多次连续解码步上累积状态腐坏。」**
+>
+> **⭐⭐ 判据（本节最关键）：**
+> **「报错出现的位置」与「故障发生的位置」可以相差很远——**
+> **⚠️ 这里 Ray 的 `read()` 超时是唯一可见的异常，
+> 而它只是「没等到结果」，不是「结果算错了」。**
+>
+> ⭐⭐ **而这解释了 §10.39 记的另一个观察：
+> 「挂死时 GPU 仍显示 96–99% 占用」——
+> 硬件确实在算，只是算的东西永远不会通过 Ray 通道回来。**
+>
+> ⚠️ **而这条最实用的部分是一个验证陷阱**：
+> **「用 `ctypes.CDLL(.../libnccl.so.2).ncclGetVersion(...)` 验证，
+> 因为 `torch.cuda.nccl.version()` 报的是编译期版本。」**
+> **⭐ 即「我查了版本」这件事本身也可能查到错的版本。**
+
+#### ⚠️⚠️ 跨模型、跨 vLLM 源树：3/4 通过
+
+> ⭐ **GLM-5.1-NVFP4**（754B/40B，haosdent 主线系）**609s，13.58 tok/s，50/50**
+> ⭐ **DeepSeek V4-Flash**（284B，jasl `ds4-sm120-prototype`）**255s，11.35 tok/s，50/50**
+> ⭐ **DeepSeek V4-Pro**（1.6T，同源树）**289s，7.03 tok/s，50/50**
+> ⚠️ **Kimi K2.6-NVFP4**（eugr 第三条源树）**启动即挂**（见下）
+>
+> ⭐⭐ **判据：「主线系与 `ds4-sm120-prototype` 系同等受益 ⇒ 排除了 vLLM 源码层面的原因。」**
+> ⚠️ 但 **K2.6 的失败提示：第三棵树没有验证过，就不能假设它也受益。**
+
+### 10.42 ⚠️⚠️⚠️ 修复本身引入了新回归，且边界精确到「专家数」
+
+[c-nccl-2304-own-regression]
+
+**这是本报告「half a fix can be worse than no fix」的又一实例，
+而形态比 §10.39 那例更隐蔽。**
+
+> ⚠️ NCCL 2.30.4 在 **Kimi K2.6-NVFP4（384 路由专家）** 上
+> **于 MoE 专家权重加载（`_load_w2`）挂死 40+ 分钟**；
+> ⭐ **二分定位**：「**2.30.3 → 可用** ⇒ **回归在 2.30.3→2.30.4 的变更里**」；
+> ✅ **最小绕行**：**仅 `NCCL_NVLS_ENABLE=0`** → **30/30 通过，10.77 tok/s**
+> （不必再加 `NCCL_SYMM_MEM_DISABLE=1`）。
+>
+> ⭐ 假设：「**2.30.4 扩展了 NVLink Sharp（NVLS）集合通信支持。
+> DGX Spark 用 C2C/RoCE（无 NVLink），故 NVLS 本应是空操作——
+> 但 2.30.4 的 NVLS 代码路径显然有一个回归，
+> 在 384 专家 MoE 权重加载上具体触发。**」
+>
+> ⚠️ **规模边界**：**V4-Flash（约 64 专家）、V4-Pro（约 256 专家）
+> 与 GLM-5.1 在同一 2.30.4 构建上都不触发。**
+>
+> **⭐⭐ 判据：**
+> **一个修复如果在一个方向上把阈值推到无穷，
+> 而在另一个方向上把它推到零，那它不是修复，是一次故障迁移。**
+>
+> ⭐⭐ **判据（来自「由专家数决定」）：**
+> **当一个问题由「专家数」而不是「模型大小」或「参数量」决定时，
+> 它指向的是「按专家分片的那个循环」，而不是「计算量」。**
+>
+> **⭐⭐ 判据（来自「NVLS 本应是空操作」）：**
+> **「这个特性在你的硬件上应该是空操作」是一个需要被测试的断言，
+> 而不是一个可以依赖的保证。**
+
+#### ⚠️ 而「等上游修好」不是运维方案
+
+[c-watchdog-as-legitimate-answer]
+
+> 「我们上线 **`--enforce-eager` + `OVERLAP_COMM=1` + 看门狗**：
+> ① **每 120 秒用 5-token 的 `hi` 轮询 `POST /v1/chat/completions`**；
+> ② **连续两次 30 秒超时即判定 wedge**；
+> ③ **触发整簇重启（约 14 分钟冷启动）**；④ 恢复监控。」
+> ⭐ 「**稳态流量下有效在线率约 95%**；**小于 40 个提示的突发在实践中不挂**。」
+>
+> ⚠️ 且指出一个框架限制：
+> **「vLLM v1 的 `ray_executor.py` 硬编码
+> `VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE = shm`，
+> 旧的非 compiled-DAG 执行器已被移除。」**
+> **⭐ 即「关掉这条路」不是选项。**
+>
+> **⭐⭐ 判据：**
+> **「等上游修好」不是运维方案——**
+> **⚠️ 而一个能给出「95% 在线率 + 14 分钟恢复」的临时架构，
+> 比一句「建议升级」有用得多。**
+>
+> ⭐ **而这条里最关键的技术判断是那个框架限制**：
+> **当一条绕行路径在框架层面被删除时，
+> 「换个后端」这个建议就从「配置项」变成了「重写启动脚本」——
+> ⚠️ 而提出建议的人往往不知道这个差别。**
+>
+> ⭐ 另一条：**看门狗用的是「5-token 的 `hi`」而不是真实负载**，
+> **这是对「最小可判活探针」的正确选择**——
+> ⚠️ 与 §10.30 记的「30 万次 soak 不复现」正好互为反面：
+> **探针太大测不出问题，太小又测不出活性。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -18955,6 +19126,12 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 2. [flashinfer-ai/flashinfer issue #2776 — [Bug] NVFP4 MoE models crash on GB10 (SM121) during CUDA graph capture](https://github.com/flashinfer-ai/flashinfer/issues/2776) —（2026-03-12 提出，**至今 open，0 评论**，标签 `op: moe` + `arch: sm12x`）。(a) ⚠️⚠️ **一条错在对齐而非指令的 SM12x 故障**：NVFP4 MoE 在 GB10（SM121）上于 **CUDA graph capture 阶段**崩溃，报 `cudaErrorIllegalAddress`，发生在「**Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 32/51**」；⭐ 可疑根因（**原文标为 suspected**）「**TRTLLM FP4 MoE decode 内核（CUTLASS TMA warp-specialized grouped GEMM）在 SM120/SM121 上要求更严格的内存对齐；`output[:num_decode_tokens]` 对 256 字节对齐 workspace 的切片可能产生亚元素失配的指针**」。(b) ⚠️ **关键区分：稠密 NVFP4 模型（Llama 3.1 8B）不受影响**；✅ 绕行 `VLLM_USE_FLASHINFER_MOE_FP4=0`。(c) ⭐⭐ 判据「**同一个精度、同一张卡、同一个库，稠密能跑而 MoE 崩 ⇒ 问题不在精度格式，而在 MoE 那条路径特有的 workspace 复用方式**」+「**当『同一个新特性在 A 架构上正常、在 B 架构上崩』时，先问『A 与 B 在这个特性上走的是不是同一段代码』——而『稠密正常、MoE 崩』说明连同一张卡内部都有分叉**」；⭐ 「对齐」类 bug 只在特定且看似无关的尺寸组合下触发，**而 CUDA graph capture 恰好遍历一批固定尺寸，故在第 32/51 步稳定复现** — [src-flashinfer-2776]
 
+### 挂死的控制矩阵、NCCL 根因，以及修复自身的回归（第六十七轮补充）
+
+1. [vllm-project/vllm issue #40969 — [Bug]: DeepSeek-V4-Flash hangs after ~6 requests with cudagraph_mode=FULL_AND_PIECEWISE + chunked prefill on SM 12.x (GB10)](https://github.com/vllm-project/vllm/issues/40969) —（2026-04-27 提出，28 评论，**至今 open**，标签 `DSv4`）。(a) ⭐⭐⭐⭐ **本报告最重要的一份稳定性控制矩阵**（8× DGX Spark，TP=8，GLM-5.1-NVFP4，vLLM main @ `6232fb4`）：**默认 `FULL_AND_PIECEWISE` 第 7-9 个请求挂死 / `PIECEWISE` 第 8 个（无改善）/ `--enforce-eager` 第 13 个（只延迟约 1.5×）/ `--enforce-eager` + `OVERLAP_COMM=1` 第 45 个（5× 延迟）/ + NCCL 2.30.4 不挂（50/50）**；⚠️ 且 `--no-enable-chunked-prefill` **不可测**（校验拒绝 `max_num_batched_tokens (8192) < max_model_len (65536)`）——⭐⭐ 判据「**把一个『现象』变成一个『阈值』，是让一个 bug 可被工程处理的第一步；而在那之前，所有关于它的讨论都只是轶事**」；⭐ 且**验证了配置真的生效**（`PIECEWISE` 用实际捕获尺寸 `[1,2,4,8,16,24,32,40,48,56,64]` 确认）——⭐⭐ 判据「**一个失败的 A/B 里，最常见的错误不是结论错，而是『B 组其实没改成』**」。(b) ⭐⭐⭐⭐ **原始假设是错的：与 CUDA graph 无关**——原报告具体地怀疑 `_cudagraph_support = UNIFORM_BATCH` 与 chunked prefill 的混合批次；⚠️ 而独立复现（**不同模型/后端/量化/TP**）证明「**纯 eager 与 PIECEWISE 一样挂死，只是稍晚**」——⭐⭐ 判据「**一个假设的『具体程度』与它的『正确概率』之间没有关系；而写得越具体的错误假设越难被推翻，因为它看起来已经排除了其他可能**」+「**『把这个机制整个关掉，问题还在吗』是最省力的证伪实验，通常比读一百行代码更快**」；⭐ 堆栈钉在 `ray/dag/compiled_dag_node.py:2525` → `RayChannelTimeoutError`，**挂死发生在一次常规 1-token 解码步**（`kv_cache_usage=0.03%`）。(c) ⭐⭐⭐⭐ **根因：NCCL 2.28.9 的竞态，而它正是 PyTorch 2.11.0+cu130 的默认版本**——**NCCL 2.30.4 使 50/50 全通过**（`stops=23 lengths=27 errors=0 wedged_at=(none)`，13.58 out tok/s），**「测过的第一个能让 50 请求扫描完全通过的配置」**；⭐ 归因「**Ray 的超时是下游症状，真正的挂死发生在 NCCL 集合通信里，在多次连续解码步上累积状态腐坏**」——⭐⭐ 判据「**『报错出现的位置』与『故障发生的位置』可以相差很远——这里 Ray 的 `read()` 超时只是『没等到结果』，不是『结果算错了』**」；⭐ 这解释了「挂死时 GPU 仍 96-99% 占用」：**硬件确实在算，只是算的东西永远不会通过 Ray 通道回来**；⚠️ 并给出一条验证陷阱「**用 `ctypes.CDLL(...libnccl.so.2).ncclGetVersion(...)` 验证，因为 `torch.cuda.nccl.version()` 报的是编译期版本**」——即「我查了版本」本身也可能查到错的版本。(d) ⭐⭐ **跨模型跨源树 3/4 通过**：GLM-5.1-NVFP4（609s/13.58 tok/s）、V4-Flash（255s/11.35）、V4-Pro（289s/7.03）——**主线系与 `ds4-sm120-prototype` 系同等受益 ⇒ 排除 vLLM 源码层面的原因**；⚠️ **K2.6（第三条源树）失败**，提示「第三棵树没验证过就不能假设它也受益」。(e) ⚠️ **「等上游修好」不是运维方案**：产线上线 `--enforce-eager` + `OVERLAP_COMM=1` + 看门狗（每 120s 用 5-token `hi` 轮询，连续两次 30s 超时判定 wedge，整簇重启约 14 分钟），**稳态有效在线率约 95%**；⚠️ 且指出框架限制「**vLLM v1 的 `ray_executor.py` 硬编码 `VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE = shm`，旧的非 compiled-DAG 执行器已被移除**」——⭐ 即「关掉这条路」不是选项；⭐⭐ 判据「**当一条绕行路径在框架层面被删除时，『换个后端』这个建议就从『配置项』变成了『重写启动脚本』——而提出建议的人往往不知道这个差别**」 — [src-vllm-40969]
+
+2. [NVIDIA/nccl issue #2167 — 2.30.4 NVLS 回归：高专家数 MoE 在无 NVLink 硬件上权重加载挂死](https://github.com/NVIDIA/nccl/issues/2167) —（2026-05-10 上报）。(a) ⚠️⚠️⚠️ **修复本身引入了新回归，边界精确到「专家数」**：NCCL 2.30.4 在 **Kimi K2.6-NVFP4（384 路由专家）** 上于 **MoE 专家权重加载（`_load_w2`）挂死 40+ 分钟**；⭐ **二分定位「2.30.3 → 可用」⇒ 回归在 2.30.3→2.30.4 的变更里**；✅ **最小绕行：仅 `NCCL_NVLS_ENABLE=0`**（不必再加 `NCCL_SYMM_MEM_DISABLE=1`）→ 30/30 通过，10.77 tok/s。(b) ⭐ 假设：「**2.30.4 扩展了 NVLink Sharp（NVLS）支持；DGX Spark 用 C2C/RoCE（无 NVLink），故 NVLS 本应是空操作——但 2.30.4 的 NVLS 路径显然有回归，在 384 专家权重加载上具体触发**」；⚠️ 规模边界：**V4-Flash（约 64 专家）、V4-Pro（约 256）、GLM-5.1 都不触发**。(c) ⭐⭐ 判据「**一个修复如果在一个方向上把阈值推到无穷，而在另一个方向上把它推到零，那它不是修复，是一次故障迁移**」+「**当一个问题由『专家数』而不是『模型大小』或『参数量』决定时，它指向的是『按专家分片的那个循环』，而不是『计算量』**」+「**『这个特性在你的硬件上应该是空操作』是一个需要被测试的断言，而不是一个可以依赖的保证**」 — [src-nccl-2167]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -19094,7 +19271,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=269, evidence=2141, claims=1562, claims_high=1233, claims_disputed=9, trace_events=599, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=271, evidence=2147, claims=1567, claims_high=1238, claims_disputed=9, trace_events=604, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
