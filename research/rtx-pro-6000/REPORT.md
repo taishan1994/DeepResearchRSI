@@ -861,6 +861,68 @@ Invalid __global__ read of size 4 bytes
 
 > **可信度说明**：该数据来自**整机厂商自测**（ProX PC，2026-01-05），**没有公开方法细节**（未说明 AMBER 参数、GPU 服务版本、编译选项），因此标为 **tertiary / medium**。**数量级可信，精确值需自行复核。**
 
+### 4.8.6 分子动力学的三个补充基准，以及一个必须声明的比较陷阱
+
+§4.8.5 给了 AMBER 的数据。本节补上同一家 HPC 集成商实测的 LAMMPS 与 GROMACS，**结论比 AMBER 复杂得多**。
+
+#### LAMMPS：小体系极亮眼，大体系迅速失去优势
+
+LJ liquid 基准、单张 Server Edition [c-lam-scaling]：
+
+| 原子数 | **tau/day** |
+|---:|---:|
+| 32,000 | **1,513,242** |
+| 500,000 | 110,488 |
+| 1,000,188 | **52,589** |
+
+**原子数扩大 31 倍，性能掉 29 倍。** 32K 那行的数字极震撼，但**不能外推**。
+
+**两个需要警惕的对照**：
+
+1. **对纯 CPU 几乎无优势** [c-lam-cpu-parity]：约 100 万原子上，单张 RTX PRO 6000 的 **52,589** 对比 64 核 CPU 的 **49,489**，**只高约 6%**。
+2. **输给 AMD 数据中心卡** [c-lam-mi210]：同站点 MI210 单卡在约 100 万原子上是 **112,108**，为 RTX PRO 6000 的 **2.13 倍**。
+
+> **这两条与 §4.8.5 的「GPU-resident 让高频率卡占优」形成张力。** 可能的解释是 LAMMPS 的 GPU 路径在此规模下受限于粒子分解与主机通信，而 MI210 的 HBM 带宽更有用——但**两个对照都跨机型，且原子数不完全相同数学口径**，所以只标 medium。
+
+#### GROMACS：一个必须声明的比较陷阱
+
+三个 SKU 都有数据，但**它们跑在完全不同的主机上** [c-gmx-cpu-trap]：
+
+| SKU | 主机 CPU | SIMD | 最好成绩（ns/day） |
+|---|---|---|---:|
+| **Server** | 双路 EPYC 9745 **128C/256T** | AVX_512 | **535.091**（4 procs/64 threads） |
+| RTX 5090 | Ryzen 9 9950X **16C** | AVX_512 | 513.479（4/16） |
+| **Max-Q** | Core Ultra 7 265 **20C** | **AVX2_256** | 424.191（4/16） |
+
+> **GROMACS 对 CPU 线程数极度敏感，所以这组数字不能当作纯 GPU 对比。** Server 版拿了 64 线程，另两个只有 16 线程。
+
+**但同一平台内部的扫描给出了更可靠的结论** [c-gmx-thread-scaling]：Server 平台全程同一张卡，从 2 procs/8 threads 的 **365.463** 涨到 4/64 的 **535.091**（**+46%**）。
+
+> **给这张卡配足够多的 CPU 核心，比换卡更有效。** 这是本节最可操作的一条。
+
+### 4.8.7 一次完整的 LoRA 微调实录：61GB 峰值，9.9 分钟
+
+§5 讨论过「8B LoRA 用不满 96GB」。本节是一份**带 nvidia-smi 现场截图与完整训练日志**的实录，场景不同，结论也不同 [c-lora-alpaca]。
+
+**配置** [e-lora-config]：Llama 3 8B + Alpaca（**2,000 训练 / 200 评估**），LoRA（训练 <1% 参数），**batch 16、16-bit、10 epoch**。
+
+**运行中的 nvidia-smi** [e-lora-mem]：
+
+```
+NVIDIA-SMI 580.65.06    Driver 580.65.06    CUDA 13.0
+RTX PRO 6000 Blac...  65C  P0  573W / 600W
+                      60827MiB / 97887MiB   99% GPU-Util   MIG Disabled
+```
+
+**结果** [e-lora-result]：`train_runtime` **594.63 秒（约 9.9 分钟）**，最终 loss **0.553**，10 epoch 无报错完成。
+
+**两个值得单独指出的点**：
+
+1. **96GB 在这类任务上有真实门槛** [c-lora-48gb-wall]：**峰值 61GB 已超过任何 48GB 卡的上限**。所以「8B LoRA 用不满 96GB」这个说法**取决于 batch 与精度**——batch 16 + 16-bit 就会吃满 61GB。两者不矛盾，但**不能拿小 batch 的结论去否定大 batch 的需求**。
+2. **训练功耗与推理完全不同** [c-lora-power]：**稳定 573W / 600W（95% TDP）、99% 利用率、65°C**。这与 §4.8.3 里推理只有 221W 形成鲜明对比——**「这张卡很省电」只对推理成立，对训练不成立**。
+
+**环境说明** [e-lora-rig2]：Server Edition 装在一台 2U 服务器（双路 EPYC 9745、384GB），**200V 供电、空气冷却、无需特殊制冷设备**——这是 Server 版在**正确的机箱里**的表现，与 §4.8.4 那个「塔式机箱里 500W 就降频」的场景形成对照。
+
 ### 4.9 双卡 TP2：一个可复制的部署单元（192GB 形态）
 
 双卡 192GB 是本报告此前未单独讨论的形态。现在有一份**生产级**的完整配置 [c-tp2-unit]。
@@ -2666,6 +2728,8 @@ sudo nvidia-bug-report.sh
 | q54 | MIG 生产怎么配？ | ✅ | §11.1.0 官方 mixed 策略：整卡+切片混搭 |
 | q55 | 功耗上限原始数据能否复现？ | ✅ | §4.8.4 两卡独立扫描，±5% 分档带 |
 | q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
+| q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
+| q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2690,12 +2754,14 @@ sudo nvidia-bug-report.sh
 | q54 | MIG 生产怎么配？ | ✅ | §11.1.0 官方 mixed 策略：整卡+切片混搭 |
 | q55 | 功耗上限原始数据能否复现？ | ✅ | §4.8.4 两卡独立扫描，±5% 分档带 |
 | q56 | 分子动力学表现如何？ | ✅ | §4.8.5 AMBER 121.56 ns/day，达 H200 的 90% |
+| q57 | LAMMPS / GROMACS 也领先吗？ | ✅ | §4.8.6 否：LAMMPS 大体系仅胜 CPU 6%，输 MI210 2.13× |
+| q58 | 微调到底吃多少显存？ | ✅ | §4.8.7 61GB 峰值、573W、9.9 分钟 |
 
-**完成度：56/57 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：58/59 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **738 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **752 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2807,3 +2873,6 @@ python scripts/validate_research.py research/rtx-pro-6000
 117. [NVIDIA Developer Forums：Support for a RTX Pro 6000 Blackwell Workstation Edition（支持层级排除实录）](https://forums.developer.nvidia.com/t/support-for-a-rtx-pro-6000-blackwell-workstation-edition/366144)（2026-04-09） — [src-nvf-support]
 118. [local-inference-lab：RTX PRO 6000 Blackwell 功耗上限扫描（WS / Server / Max-Q 完整原始数据）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/dd2fba9126ae4a3435a591eef18162a0086bebe3/hardware/blackwell-power-limit-sweep.md) — [src-rtx6k-plsweep]
 119. [ProX PC：分子动力学硬件对比 5090 vs Pro 6000 vs H100/H200（AMBER 24 STMV）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md]
+120. [HPC Technologies：LAMMPS Benchmark（RTX PRO 6000 SE 单卡 LJ liquid）](https://pub.hpc-technologies.co.jp/hpc-benchmark/lammps-benchmark/) — [src-hpct-lammps]
+121. [HPC Technologies：GROMACS Benchmark（Server / Max-Q / RTX 5090 三平台）](https://pub.hpc-technologies.co.jp/hpc-benchmark/gromacs-benchmark/) — [src-hpct-gromacs]
+122. [HPC Technologies：Llama 3 8B LoRA 微调实测（RTX PRO 6000 SE，含 nvidia-smi 截图）](https://pub.hpc-technologies.co.jp/hpc-benchmark/nvidia-rtx-pro-6000-blackwell-server-edition-gpu-llama-finetuning-benchmark/)（2025-09-29） — [src-hpct-lora]
