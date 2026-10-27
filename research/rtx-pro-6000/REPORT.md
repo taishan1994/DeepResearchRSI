@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：233 ｜ **证据数**：1829 ｜ **主张数**：1306（高置信 991，争议 6）
+> **来源数**：234 ｜ **证据数**：1842 ｜ **主张数**：1318（高置信 1003，争议 6）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -6982,6 +6982,192 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 
 > ⚠️ **故本报告把它记为「一个可用且可复现的实测点」，而非「这张卡的 TTS 官方性能」。**
 
+### 7.10 FlashAttention 4 在这张卡上到底支持到什么程度
+
+**§7.9 记录过「FlashAttention-3 只覆盖 Hopper 与 Blackwell-Ultra」。**
+**本节补上更精确的一层：FA4 在 `sm_120` 上有可用实现，但有明确的特性边界** [c-fa4-24-cases-scope]。
+
+#### ⚠️⚠️ 一、先纠正一条错的说法
+
+**这条说法本报告与上游文档都曾用过** [c-fa4-tma-wrong]：
+
+> **「RTX PRO 6000 是 compute capability 12.0；B200 是 10.0。**
+> **两者都是 Blackwell，但使用不同的 FA4 kernel 路径。**
+> **NVIDIA 为 capability 12.0 列出了 Tensor Memory Accelerator (TMA) 支持。**
+> **此前『RTX 缺少 TMA』的说法是不正确的。」**
+
+> ⚠️ **即「硬件缺 TMA」是错的——真实原因是 kernel 选错了路径。**
+>
+> **这个区别决定了对策方向：等硬件，还是升级软件。**
+
+#### ⭐⭐ 二、旧版本失败的精确机制
+
+**不是「不支持」，而是「选错了 epilogue」** [c-fa4-old-pin-cause]：
+
+| 项 | 内容 |
+|---|---|
+| 失败 commit | `0409f9adcbdebff6cc19eb95f370d40e896980bc` |
+| 机制 | ⚠️ **SM80 派生的 kernel 选到了「带未初始化 copy atom 的 TMA 输出 epilogue」** |
+| 上游对应 | **issue 2477** |
+| ⭐ 修复思路 | ⭐ **「把内部代码路径保持在 SM80，而为驻留 GPU 编译」** |
+
+> ⭐ **这个修复思路值得单独记住：**
+> **不是为 SM120 重写 kernel，而是保持 SM80 路径、只为 SM120 编译——**
+> **即「代码路径」与「编译目标」是两件事。**
+
+#### ⭐⭐ 三、依赖是刚性绑定的
+
+**一组不能单独动的版本** [c-fa4-pins-must-match]：
+
+| 组件 | 版本 |
+|---|---|
+| CUDA | **13.0.1**（digest-pinned base） |
+| PyTorch | **2.13.0 cu130** |
+| FA4 | **commit `eed1971f`** |
+| CUTLASS DSL | **4.6.2**（cu13 extra） |
+| Quack kernels | **0.6.4** |
+
+> ⚠️ **原文强调：「FA4/CUTLASS/Quack 三者必须一起更新：Quack 0.6.4 恰好要求 CUTLASS DSL 4.6.2。」**
+>
+> ⭐ **这解释了为什么「换个版本就好了」这类经验在这条路径上不成立——**
+> **三个包的版本是刚性绑定的，单独升一个会引入新问题。**
+
+#### ⭐⭐ 四、24 组限定：精确到参数
+
+**这是本节最有用的部分** [c-fa4-24-cases-scope]：
+
+| 维度 | 取值 |
+|---|---|
+| attention 类型 | **dense / GQA / packed 变长** |
+| 精度 | **FP16 / BF16** |
+| head dim | **64 / 128** |
+| 因果性 | **causal / noncausal** |
+
+**具体尺寸**：
+
+| 类型 | 参数 |
+|---|---|
+| dense / GQA | batch **2**、query **129** tokens、key **193** tokens；GQA 为 **4** query heads / **2** KV heads |
+| packed | query 长度 **17/65/129/33**、key 长度 **31/97/129/65** |
+
+> ⭐ **packed 用例故意选了不对齐的长度（17/33/65/97/129），**
+> **正是为了「exercise uneven tiles and sequence boundaries」。**
+
+#### ⭐ 五、实测误差：一个可量化的门槛
+
+**24 组全通过，但误差不同** [c-fa4-numbers]：
+
+| 精度 | 通过 | 最差输出 rel-L2 | 最差梯度 rel-L2 |
+|---|---:|---:|---:|
+| **FP16** | **12/12** | **0.000272** | **0.000318** |
+| **BF16** | **12/12** | **0.002169** | **0.002618** |
+
+> ⭐ **BF16 的误差约为 FP16 的 8 倍，与两种精度的有效位数差一致。**
+>
+> **即「正确性通过」在这里有可量化含义：相对 FP64 参照的最差 rel-L2 小于 0.003。**
+
+#### ⚠️⚠️ 六、SM120 明确不支持的特性清单
+
+**本节此前完全没有这份清单** [c-fa4-sm120-restrictions]：
+
+| 阶段 | 不支持 |
+|---|---|
+| **前向** | ⚠️ **block sparsity、paged KV、split-KV**（须 `num_splits=1`） |
+| **前向（基线）** | ⚠️ **`pack_gqa=False`（packed-GQA 优化不可用）** |
+| **反向** | ⚠️ **deterministic mode、自定义 score/mask 修饰符** |
+| **head dim** | ⚠️ **192 可能超出反向共享内存容量** |
+| **范围外** | ⚠️ **64/128 以外的维度、dropout、sliding windows、FP8** |
+
+> ⭐ **这份清单的实用价值最高：**
+> **它把「sm_120 支持 FlashAttention」这句话拆成了「支持到这 24 组为止」。**
+>
+> **而 paged KV 与 split-KV 的缺席，直接解释了 §7.9 中某些推理路径为何要绕行。**
+
+#### ⚠️⚠️ 七、一个在 kernel 运行之前就会出错的陷阱
+
+**API 契约层面的坑** [c-fa4-root-adapter-trap]：
+
+> **根适配器只接受 Q/K/V 位置参数，其余选项必须具名，**
+> **因为「FA2 的第四个 dense 参数是 `dropout_p`，而 FA4 的是 `qv`」；**
+> **变长签名为序列元数据分配的位置也不同。**
+> **「盲目转发可能在 kernel 运行之前就误读了一次调用。」**
+
+**允许的具名选项被严格限定** [c-fa4-root-allowed]：
+
+| 接受 | 拒绝（执行前抛错） |
+|---|---|
+| `causal`、`softmax_scale` | 其他关键字 |
+| `dropout_p=0.0`（固定） | 非零 dropout |
+| `pack_gqa=False`（固定） | packed GQA |
+| `num_splits=1`（固定） | split-KV |
+| — | **masks、windows、ALiBi、deterministic mode、辅助返回** |
+
+> ⭐ **关键设计选择：「适配器从不丢弃它们」——宁可报错也不静默降级。**
+>
+> **这与 §7.9 记录的「prefix caching 静默产生空音频」正好相反。**
+
+> ⚠️ **这是本报告记录的第一个「静默参数错位」类型的故障：**
+> **它不报错，只是把 dropout 当成了 qv。**
+> **与 §10.8「静默计算损坏」同类但层次不同——那里是硬件算错，这里是调用约定对不上。**
+
+#### ⭐ 八、48/48：两条 API 路径分别验证
+
+**根适配器的独立验证** [c-fa4-48-cases]：
+
+| 项 | 结果 |
+|---|---|
+| 总组数 | ⭐ **48/48**（= 24 组 × 2 条 API 路径） |
+| 两条路径 | **`flash_attn.cute`** 与 **`flash_attn`** |
+| 最差 rel-L2 | **0.002618** |
+| 额外边界检查 | ✅ **14 项（无需 GPU）** |
+
+> ⭐ **「14 项边界检查无需 GPU」这个细节值得记住：**
+> **API 契约的验证比数值验证便宜得多，可以放进 CI。**
+
+**原文对这件事的措辞，与 §10.16 那条纪律完全一致** [c-fa4-import-not-qualify]：
+
+> **「A successful package import is not GPU qualification.」**
+>
+> **「在一个不同容器里 import 根适配器，并不证明它使用 FA4。」**
+
+> ⭐ **两个彼此独立的来源（本节与 §10.16）给出同一条纪律——**
+> **这在本报告 89% 单来源的背景下，属于少见的交叉印证。**
+
+#### ⚠️⚠️ 九、这份文档自己的范围声明
+
+**必须连带引用，否则会误用上面的数字** [c-fa4-not-perf-proof]：
+
+> **「这是对那些配置的正确性限定。它不确立性能、全模型收敛、分布式扩展，**
+> **也不确立上游 API 所接受的每一个形状都受支持。」**
+>
+> **SDXL 渲染结果被描述为「性能参差」，「不是普遍 FA4 加速或客户训练收敛的证明」。**
+>
+> **「FA4 的 kernel 支持也不改变 GPU 显存带宽、PCIe、NVLink 可用性或节点间网络。」**
+
+> ⭐ **最后那句是对本报告 §5 与 §11 的独立确认：**
+> **一个软件层的修复不会改变硬件带宽。**
+
+#### ⚠️ 十、一个「豁免积累成假象」的记录
+
+**流程上的教训** [c-fa4-no-waiver]：
+
+> **「历史上 Workbench 的运行曾在验证其他操作时豁免了 RTX 上的这个 FA4 失败。**
+> **那些成功标记并不确立 FA4 可用。**
+> **当前的冒烟在每一个架构上对任何 kernel 或数值错误都判失败，**
+> **`--allow-no-tma` 选项已被移除。」**
+
+> ⚠️ **这是一个典型的「为了让其他测试通过而跳过一项，久了就变成『这项是好的』」过程。**
+>
+> **与本报告 §2.4 关于 `high` 置信度的讨论是同一类风险。**
+
+#### ⭐ 十一、so what：三条判断
+
+| 问题 | 答案 |
+|---|---|
+| `sm_120` 能用 FA4 吗 | ✅ **能，但仅限那 24 组配置** |
+| 能开 paged KV / split-KV 吗 | ⚠️ **不能——前向直接拒绝** |
+| 从 FA2 迁移安全吗 | ⚠️ **不能盲目转发参数，须显式具名** |
+
 
 ## 8. 训练与微调：被误解的一侧
 
@@ -12870,6 +13056,10 @@ sudo nvidia-bug-report.sh
 1. [Nebius：sm_120 Image Catalog](https://raw.githubusercontent.com/nebius/nebius-physical-ai/refs/heads/main/docs/workbench/sm120-image-catalog.md) —（2026-08-03）。⭐⭐ 一个真实的 sm_120 生产镜像目录，记录为 RTX PRO 6000 Blackwell 验证过的镜像集合。⭐ 镜像 tag 显式编码全部五个架构（`cuda13-b300-sm80-sm90-sm100-sm103-sm120-...`），并带一个 baked same-major `sm_100` → `sm_103` SASS validator；实机冒烟要求断言 `torch.cuda.get_device_capability() == (12, 0)`。⚠️ 明确告诫「历史 tag 并不证明它们包含 FA4 更新」 — [src-nebius-sm120-catalog]
 2. [Nebius：Blackwell datacenter image compatibility (B200 sm_100 / B300 sm_103)](https://raw.githubusercontent.com/nebius/nebius-physical-ai/refs/heads/main/docs/workbench/blackwell-datacenter-image-compatibility.md) —（2026-08-03）。⭐⭐⭐ 本报告找到的关于 Blackwell 架构兼容性最精确的一份工程文档。⭐⭐⭐ 核心规则「SASS 不跨越 CUDA major」，原文称「在 RTX PRO 6000 上验证通过，对 B200/B300 什么也证明不了——这是『Blackwell-ready』落空最常见的方式」；⚠️⚠️ 并指出两个架构开关只有一个可控：预编译 torch wheel 的 fat-binary 集合不受 `TORCH_CUDA_ARCH_LIST` 影响，cu128/cu130 含 `sm_120` 而 cu124/cu126 止于 `sm_90`，漏掉架构会以 `no kernel image is available for execution on the device` 暴露。⭐⭐⭐ 另**纠正了一条流传的解释**：「先前关于 SM120 缺少 TMA 的解释是错误的：NVIDIA 为 compute capability 12.0 列出了 TMA」——真实原因是 SM80 派生的 FA4 kernel 选到了不兼容的 epilogue 路径（报错 `NoneType._trait` in the TMA epilogue），上游随后修复了 SM120 dispatch 与 backward 初始化。⭐ 方法论上提出「A real capability smoke, not a CUDA probe」——必须让真实 kernel 执行，该做法同时抓到 `loop-eval:0.1.1` 的 sm_120 回归与历史性 FA4 dispatch 失败（此前 import 全通过）。⚠️ 另记录一个真实踩坑：某基础镜像曾把 `TORCH_CUDA_ARCH_LIST` 固定为 `10.3`，致所有继承者只带 B300 SASS；且 `sm_103` 被故意排除在断言外（stock cu130 wheel 只带 `sm_100` SASS，B300 靠前向兼容到达）。⭐ 并确认数据中心 Blackwell 无 RT 核心，渲染必须留在 L40S / RTX PRO 6000 — [src-nebius-blackwell-compat]
 
+### FlashAttention 4 的 sm_120 限定（第三十五轮补充）
+
+1. [Nebius：FlashAttention 4 on RTX PRO 6000](https://raw.githubusercontent.com/nebius/nebius-physical-ai/refs/heads/main/docs/workbench/flash-attention.md) —（2026-09-28）。⭐⭐⭐ 本报告找到的关于该卡 FlashAttention 支持边界最精确的一份文档。⭐⭐⭐ **纠正「RTX 缺少 TMA」之说**：「RTX PRO 6000 是 capability 12.0；B200 是 10.0。两者都是 Blackwell，但使用不同的 FA4 kernel 路径。NVIDIA 为 capability 12.0 列出了 TMA 支持。」旧 pin `0409f9ad` 的真实失败机制是「SM80 派生的 kernel 选到了带未初始化 copy atom 的 TMA 输出 epilogue」（对应上游 issue 2477），修复思路是「把内部代码路径保持在 SM80，而为驻留 GPU 编译」。⭐⭐ 依赖刚性绑定：CUDA 13.0.1 / PyTorch 2.13.0 cu130 / FA4 `eed1971f` / CUTLASS DSL 4.6.2 / Quack 0.6.4，且「三者必须一起更新」。⭐⭐ 24 组限定的确切构成（dense/GQA/packed × FP16/BF16 × head dim 64/128 × causal/noncausal，以 FP64 为参照）；实测 FP16 最差输出 rel-L2 0.000272 / 梯度 0.000318，BF16 为 0.002169 / 0.002618。⚠️⚠️ **SM120 明确不支持**：前向的 block sparsity、paged KV、split-KV；基线的 packed-GQA；反向的 deterministic mode 与自定义 score/mask 修饰符；head dim 192 可能超反向共享内存；64/128 以外维度、dropout、sliding windows、FP8 均在范围外。⚠️⚠️ 根适配器陷阱：只接受 Q/K/V 位置参数，「FA2 的第四个 dense 参数是 dropout_p，而 FA4 的是 qv」，盲目转发会在 kernel 运行前误读调用；允许的具名选项仅 causal / softmax_scale / dropout_p=0.0 / pack_gqa=False / num_splits=1，其余在原生执行前抛错且「适配器从不丢弃它们」。⭐ 48/48 验证（24 组 × 2 条 API 路径），最差 rel-L2 0.002618，另有 14 项无需 GPU 的边界检查。⚠️⚠️ 范围声明：上述仅为正确性限定，「不确立性能、全模型收敛、分布式扩展」；SDXL 渲染「性能参差」；且「FA4 的 kernel 支持也不改变 GPU 显存带宽、PCIe、NVLink 可用性或节点间网络」。⚠️ 另记录一条流程教训：历史上曾豁免此失败，而「那些成功标记并不确立 FA4 可用」，`--allow-no-tma` 已被移除 — [src-nebius-fa4]
+
 
 ## 附录 A：子问题完成度
 
@@ -13010,7 +13200,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=233, evidence=1829, claims=1306, claims_high=991, claims_disputed=6, trace_events=491, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=234, evidence=1842, claims=1318, claims_high=1003, claims_disputed=6, trace_events=494, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
