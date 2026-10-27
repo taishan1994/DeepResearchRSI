@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：215 ｜ **证据数**：1736 ｜ **主张数**：1216（高置信 938，争议 4）
+> **来源数**：216 ｜ **证据数**：1739 ｜ **主张数**：1221（高置信 941，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -6576,6 +6576,19 @@ HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可
 >
 > **这已成为 §14 的一个可跟踪观察点。**
 
+**⚠️ 而本轮为这个观察点找到了一条线索，但未能确认** [c-gaming-grd-unconfirmed]：
+
+| 项 | 状态 |
+|---|---|
+| 第三方驱动库页面出现「RTX PRO 6000 Blackwell Workstation Edition **Game Ready 驱动 v610.47**」条目 | ⚠️ **有** |
+| 从 NVIDIA 官方渠道独立确认 | ❌ **未能做到** |
+
+> ⚠️ **本报告的处理方式是「记录线索但不改结论」。**
+>
+> **§7.8 的表述维持「在没有 Game Ready 驱动的情况下仍胜出」——因为那句话描述的是 der8auer 测试当时的条件，是已确认事实；而「NVIDIA 后来是否发布了 Game Ready 驱动」是另一件事。**
+
+> ⭐ **若后续确认该驱动存在，本节的时间前提需改写为「当时尚无」，而性能差距是否会变化仍需重新实测。**
+
 #### ⚠️ 三、代价是功耗，且几乎等比例
 
 **游戏场景下的能效答案** [c-gaming-power-cost]：
@@ -8047,6 +8060,12 @@ Synopsys 还给出了两个可引用的数字，但按本报告规则**都标为
 
 本报告多处引用了 `595.x` 驱动，但**从未说明该分支还能用多久**。官方驱动生命周期文档给出了硬数据 [c-drv-branches][c-drv-eol]。
 
+> ⚠️ **一个必须先声明的适用范围（本轮更正）**：本节全部分支数据（NFB / PB / LTSB）来自 NVIDIA 的 **Data Center Drivers** 文档，其适用范围明确限定为 **data center GPU** [c-drv-two-systems]。
+>
+> **而 RTX PRO 6000 作为工作站卡，使用的是另一套驱动体系（Studio / Game Ready）。**
+>
+> ⚠️ **两套分支不能互相套用——把 R595 的 2027-03 EOL 当作这张卡的驱动寿命，是没有依据的。**
+
 **驱动分三支**：
 
 | 分支 | 定位 | 发布节奏 | **支持时长** |
@@ -8075,6 +8094,38 @@ Synopsys 还给出了两个可引用的数字，但按本报告规则**都标为
 **CUDA 约束** [c-drv-cuda]：R580 / R595 / R610 均支持 CUDA 13（无需前向兼容包），R535 最高 CUDA 12。
 
 **可自动化** [c-drv-json]：NVIDIA 提供 `releases.json` 供脚本解析（如用 `jq`），可用来构建驱动更新监控与合规检查。
+
+#### 三条本轮补上的细节
+
+**一、完整的分支参数** [c-drv-branch-cadence]：
+
+| 分支 | 主版本节奏 | 支持时长 | 小版本内容 |
+|---|---|---|---|
+| NFB | **至少每 3 个月** | **无承诺** | 无 |
+| PB | **每年两次** | **1 年** | 季度或按需的缺陷与安全更新 |
+| **LTSB** | **每个硬件架构至少一次** | ⭐ **3 年** | 季度或按需的缺陷与安全更新 |
+
+> ⭐ **本报告 §10 与附录 C 记录跨了 11 个驱动版本，但此前从未说明这些版本分属哪些分支——现在有了基准。**
+
+**二、一处包含关系的准确表述** [c-drv-ltsb-nesting]：
+
+> **每一个 LTSB 都是生产分支，但不是每一个生产分支都是 LTSB。**
+
+| 若记反会怎样 | 后果 |
+|---|---|
+| 把 PB 当 LTSB | ⚠️ **把 1 年支持当成 3 年** |
+
+**三、一个期限上的巧合** [c-drv-warranty-match]：
+
+| 项 | 期限 | 出处 |
+|---|---|---|
+| **LTSB 支持** | **3 年** | 本节 |
+| **硬件保修** | **3 年** | §3.6 |
+| AI Enterprise 许可（5 年版） | ⚠️ **5 年** | §12.9 |
+
+> ⭐ **若为数据中心部署选 LTSB，其软件支持周期与硬件保修周期恰好对齐（都是 3 年）；而 5 年版的 AI Enterprise 会同时超出这两个期限。**
+>
+> ⚠️ **需注意：数据中心卡与工作站卡的驱动体系不同，这个类比本身有前提——但它至少说明「3 年」在这套产品逻辑里出现得并不偶然。**
 
 ### 10.5 在役退化风险：这是本报告最需要警示的运维问题
 
@@ -11349,6 +11400,10 @@ sudo nvidia-bug-report.sh
 
 1. [Nvidia RTX Pro 6000 beats the RTX 5090 in gaming](https://www.kitguru.net/components/graphic-cards/joao-silva/nvidia-rtx-pro-6000-beats-the-rtx-5090-in-gaming/) — KitGuru（2025-06-02）。转述 der8auer 的 4K 最高画质实测：Cyberpunk 2077（关闭光追）+14%、1% 低帧 +13%、功耗 +15%；Star Wars Outlaws 与 Remnant 2 各 +11%；Assassin's Creed Mirage +3%；并记录全部成绩是在没有 Game Ready Driver 的情况下取得 — [src-kitguru-gaming]
 
+### 驱动分支适用范围（第二十四轮补充）
+
+1. [Driver Lifecycle — NVIDIA Data Center Drivers](https://docs.nvidia.com/datacenter/tesla/drivers/latest/driver-lifecycle.html) — NVIDIA 官方文档（更新 2026-09-09）。驱动分支完整对照表：NFB 至少每 3 个月主版本、无支持承诺；PB 每年两次、支持 1 年；LTSB 每个硬件架构至少一次、支持 3 年；并明确该文档适用于 data center GPU，不覆盖工作站卡的 Studio / Game Ready 分支 — [src-nv-drv-life2]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -11488,7 +11543,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=215, evidence=1736, claims=1216, claims_high=938, claims_disputed=4, trace_events=441, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=216, evidence=1739, claims=1221, claims_high=941, claims_disputed=4, trace_events=445, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
