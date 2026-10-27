@@ -1489,9 +1489,44 @@ export FLASHINFER_FORCE_SM=120f
 
 **硬门槛**：要让 MIG 在 RTX PRO 6000 WS 上可用，`displaymodeselector` 要求 **VBIOS ≥ `98.02.55.00.00`**。而不少出厂卡带的是 **`98.02.52.00.02`** [e-vb-req]。
 
+> **读这个版本号必须先知道：它是十六进制** [c-vbios-hex]。
+>
+> | 版本 | 第三段按十六进制 | 十进制 | 是否达门槛 |
+> |---|---|---:|---|
+> | `98.02.52.00.02` | 0x52 | **82** | ❌ 不达 |
+> | `98.02.55.00.00` | 0x55 | **85** | — 门槛 |
+> | `98.02.6A.00.03` | 0x6A | **106** | ✅ 达标 |
+>
+> **把 `6A` 当十进制读会得出完全相反的结论。** 这条我上一版没写清楚，现已修正。
+
+**由此得到一个重要更正** [c-vbios-maxq-ok]：**Max-Q 出厂即带可用的 VBIOS**——料号 `900-5G153` 的卡随卡出厂就是 `98.02.6A.00.03`，已有用户在驱动 575.57.08 上**成功启用 MIG** [e-mig44-ok]。**所以 MIG 门槛只影响部分 WS 版本，不是全系通病。**
+
+**启用 MIG 还有两个文档没强调的前提** [c-vbios-secureboot]：
+
+1. 需用 **Display Mode Selector** 把 GPU 切到**计算模式**
+2. **该工具要求关闭 Secure Boot** 才能在 Ubuntu 24.04 上运行
+
+**实例规格可以读出来** [c-mig-instance]：单实例 **188 个 SM**、**4 CE / 4 ENC / 4 DEC / 1 OFA / 4 JPG**、显存约 **97,251 MiB**、BAR1 **131,072 MiB（128GB）** [e-mig44-smi]。
+
 **厂商承认这是一次发布疏漏** [c-vbios-omission]，NVIDIA 员工的原文：
 
 > "**WE omitted to release the board with MIG properly tested and supported to all our partners (20ish) initially**, so all partners received the VBIOS update, and now need to create their own enduser flash routine."
+
+**并为此两次公开致歉** [c-vbios-official-apology]：
+
+> "**apologies for how we handle this situation with our partners**" … "**I'm surprised to read, PNY is not providing the VBIOS update routine for a PNY-sold GPU**" … "**Maybe RMA is the faster option for you to get an updated board?**"
+
+**三个渠道的实际结果分化** [c-vbios-channel-result]：
+
+| 渠道 | 结果 |
+|---|---|
+| **PNY** | ✅ 核实序列号与发票后提供 Linux 现场更新工具，**升级成功** |
+| **Lenovo**（ThinkStation P8） | ❌ Tier 2 书面答复"该卡除标准版外**没有别的 VBIOS**" |
+| **NVIDIA 支持** | ❌ 反复把用户**推回 Lenovo**，尽管用户请求升级到 OEM 固件工程团队 |
+
+> **OEM 渠道是这条链上的断点。** 整机厂把责任推给卡厂、卡厂推给 NVIDIA、NVIDIA 推回整机厂。
+
+**刷写有一个具体操作前提** [c-vbios-flash-cond]：**必须断开系统中其他 GPU**，否则工具不工作。
 
 **于是产生了本报告见过的最糟糕的支持结构** [c-vbios-nocentral]：
 
@@ -1692,6 +1727,79 @@ nvidia-smi -i <gpu> -q -d ECC,ROW_REMAPPER
 > **给训练的实操建议** [e-nvf-s-take]：如果你的 NaN 是**间歇性的、同一输入不复现、且不跟随驱动或代码变更**，**先怀疑硬件，把 ECC 打开**。ECC 把静默损坏变成带物理地址的精确报错。
 >
 > NaN 与 loss 尖峰防护能保住训练（跳过坏步骤），但**抓不到小幅静默错误**，只能算权宜之计。
+
+### 10.9 Xid 143：一个能让整机无法 POST 的固件故障
+
+这是本轮新增的故障家族，**与 §10.7 的 Xid 31/62/79/119/120 不同，必须单列** [c-xid143]。
+
+**特征日志**（两例独立报告）[e-brick-xid143]：
+
+```
+NVRM: Xid (PCI:0000:43:00): 143, Error status 0x65 while polling for FSP boot complete
+NVRM: FSP microcode v4.76
+NVRM: RmInitAdapter failed! (0x62:0x65:2168)
+```
+
+**与 §10.7 的关键区分点** [c-xid143-badreg]：特征寄存器值是 **`0xbadf4100`**（此前记录的是 `0xbadf3200`），出现于 **PGSP 邮箱**，并伴随 `Unknown SYS_PRI_ERROR_CODE`。
+
+**两个必须知道的后果**：
+
+**第一，VBIOS 变得不可读** [e-brick-vbios]：
+
+```
+Video BIOS:   ??.??.??.??.??     GPU Firmware: N/A
+（正常卡对照：98.02.52.00.00     GPU Firmware: 590.48.01）
+```
+
+**第二，也是最严重的——它会拖垮整机启动** [c-brick-post-hang]：
+
+> 故障卡单独插入时**无显示输出**；作为副卡时**主卡停在 POST 的单个下划线**，永不启动。
+
+**这不是一张卡坏了，是整台机器起不来了。**
+
+**修复路径的硬约束** [c-brick-noreflash]：**目前没有公开可用的 VBIOS 重刷工具**。因为固件按板卡伙伴分发（§10.4.1），NVIDIA 不提供通用重刷路径。官方答复就是**走 RMA** [e-brick-rma]。
+
+> **这形成一个闭环困境**：卡刷坏了 → 修需要 VBIOS 工具 → 工具只有伙伴有 → 伙伴说"没有别的 VBIOS" → 最终只能 RMA。**而如果这张卡本身来自有争议的渠道（§12.7），RMA 恰恰是走不通的那条路。**
+
+### 10.10 VFIO 直通的 FLR 缺陷：一次主机挂起 2.7 小时
+
+这是本报告发现的**最严重的虚拟化故障**，发生在一台生产环境的 Supermicro H12SSL-i + EPYC 7303 上 [c-flr-firmware]。
+
+**故障链**（作者分析，且被上游讨论佐证）：
+
+1. guest 被**强杀**（不是干净关机），其驱动**从未向 GSP-RM 发送卸载消息**
+2. 在 GB202 上，**WPR2 区域只有收到该消息后才由固件拆除**
+3. 于是 `vfio-pci` 发出的 **FLR 因 FSP 始终未能完成引导而超时**
+4. 设备此后**返回全 1**（`setpci -s 81:00.0 0.l` → `ffffffff`）
+
+**日志证据** [e-flr-timeout]：
+
+```
+04:30:17  vfio-pci 0000:81:00.0: not ready 1023ms after FLR; waiting ...
+04:31:28  vfio-pci 0000:81:00.0: not ready 65535ms after FLR; giving up
+```
+
+**然后故障被 Linux 内核放大** [c-flr-amplify]：
+
+> 重置失败后，`vfio_pci_core_disable()` **仍然调用** `pci_restore_state()`，在返回全 1 的设备上**遍历扩展能力表**，每次访问都要**等完成超时**。
+
+结果：**191 次软锁死、862 条设备不可达消息、主机挂起约 2.7 小时**（04:31:54 → 07:14），并出现 `Unable to change power state from D0 to D3hot` / `D3cold to D0` [e-flr-lockup][e-flr-d0d3]。
+
+> **注意这是内核侧而非硬件侧的问题**：`pci_save_state()` 与 `pcie_flr()` **已经**通过 `pci_dev_config_accessible()` 做了保护，**`pci_restore_state()` 没有**（截至内核 v7.3 仍未修）。
+
+**恢复只能靠冷断电** [c-flr-recovery]：BMC 关机约 **35 秒**再上电。恢复后卡是完好的——PCIe Gen4 x16、H2D **27.7 GB/s** / D2H 27.6 / D2D 1,439 GB/s、300W 满载通过 [e-flr-recover]。
+
+**次级总线复位无效** [e-flr-sbr]：内核约 90 分钟后尝试了一次 SBR，链路**再没回来**。
+
+**已有社区补丁** [c-flr-patch]：在 `pci_restore_state` 前加 `pci_dev_config_accessible()` 检查，可把 **2.7 小时的软锁死压到约 65 秒 + 一行日志**（作者已提 linux-pci RFC）。但它**不能救活卡**，卡仍需冷断电。
+
+**上游佐证** [e-flr-nova]：作者引用 nova-core 驱动（v7.2 合入）的说明信——其中提到"Blackwell VBIOS 有一个**脏 bug**，有时会在 PCI 复位时把 GPU 弄废"，以及 linux-pci 关于 5090 FLR 的讨论（**被称为已知的设备固件缺陷，有好的和坏的固件版本**）。
+
+**可操作的强制预案** [c-flr-mitigation]：
+
+1. **保证 guest 干净关闭**——guest 驱动要先卸载再销毁 VM，**不要直接 destroy/强杀**
+2. 若必须强杀，**预先确保 BMC 可远程冷断电**，否则一次强杀换来数小时停机
+3. 生产环境为多卡直通配置**带外管理**不是可选项，是必需项
 
 ---
 
@@ -2134,7 +2242,9 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
 | q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
 | q45 | 如何检测静默计算损坏？ | ✅ | §10.8 ECC + 行重映射自查协议 |
-| q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55 门槛 + 无中央分发 |
+| q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55（十六进制）≠ 全系问题 |
+| q47 | 固件故障有哪些家族？ | ✅ | §10.9 Xid 143：0xbadf4100，可致整机无法 POST |
+| q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2148,13 +2258,15 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
 | q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
 | q45 | 如何检测静默计算损坏？ | ✅ | §10.8 ECC + 行重映射自查协议 |
-| q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55 门槛 + 无中央分发 |
+| q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55（十六进制）≠ 全系问题 |
+| q47 | 固件故障有哪些家族？ | ✅ | §10.9 Xid 143：0xbadf4100，可致整机无法 POST |
+| q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
 
-**完成度：45/46 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：48/49 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **590 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **617 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2245,3 +2357,8 @@ python scripts/validate_research.py research/rtx-pro-6000
 96. [NVIDIA Developer Forums：RTX PRO 6000 Blackwell 上的静默 CUDA 计算损坏（最终确认为显存故障）](https://forums.developer.nvidia.com/t/silent-cuda-compute-corruption-on-rtx-pro-6000-blackwell/381759)（2026-08-29 起，2026-10-16 结论） — [src-nvf-silent]
 97. [Joshua Odmark：我从 Provantage 买的 RTX Pro 6000 里面到底是什么](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-odmark]
 98. [NVIDIA Developer Forums：RTX 6000 Pro WS 如何升级 BIOS 至 98.02.55.00.00（MIG 门槛与 VBIOS 分发困境）](https://forums.developer.nvidia.com/t/rtx-6000-pro-ws-bios-update-to-98-02-55-00-00-how/342946)（2025-08-23 起） — [src-nvf-vbios]
+99. [NVIDIA Developer Forums：RTX PRO 6000 Max-Q 的 vBIOS 固件从哪找（含 98.02.6A 与 MIG 可用反例）](https://forums.developer.nvidia.com/t/where-to-find-nvidia-rtx-pro-6000-blackwell-max-q-bios-vbios-firmware-updates/360321)（2026-02-11） — [src-nvf-maxqvb]
+100. [NVIDIA Developer Forums：MIG support on RTX Pro 6000 Blackwell（第 44 帖 Max-Q 成功启用 MIG）](https://forums.developer.nvidia.com/t/mig-support-on-rtx-pro-6000-blackwell/334906/44)（2025-07-30） — [src-nvf-mig44]
+101. [NVIDIA Developer Forums：MIG not available on RTX PRO 6000 Blackwell – VBIOS requirement?](https://forums.developer.nvidia.com/t/mig-not-available-on-rtx-pro-6000-blackwell-vbios-requirement/366155)（2026-04-10 起） — [src-nvf-migreq]
+102. [NVIDIA Developer Forums：How to reflash bricked RTX PRO 6000（Xid 143 / FSP 引导失败）](https://forums.developer.nvidia.com/t/how-to-reflash-bricked-rtx-pro-6000/360472)（2026-02-12 起） — [src-nvf-brick]
+103. [NVIDIA Developer Forums：Max-Q FLR 在 vfio-pci 释放时失败，需冷断电（GB202 固件缺陷）](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-max-q-10de-2bb4-flr-fails-on-vfio-pci-release-after-kvm-guest-shutdown-gpu-inaccessible-until-cold-power-cycle/386790)（2026-10-25） — [src-nvf-flr]
