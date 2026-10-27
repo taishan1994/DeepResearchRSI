@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：148 ｜ **证据数**：1070 ｜ **主张数**：667（高置信 486，争议 1）
+> **来源数**：149 ｜ **证据数**：1092 ｜ **主张数**：679（高置信 498，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1683,6 +1683,71 @@ Qwen3.5-9B 的 AIME 基线 **87.9%**。把循环状态直接套用现成低比�
 - 上下文上限 **524288**，TP2 + DCP1，三个 draft token + verifier bonus token。
 - CUDA 13.4.1。
 - KV 配置差异很大：SGLang 用 HiCache **45 GB/rank**、64 最大序列；vLLM 用 **8 GiB GPU KV/rank**、16 最大序列。
+
+### 4.11.7 功耗下限是 150W：一个此前完全没查过的字段
+
+本报告讨论了十几次功耗墙——600W 上限、450W 线缆封顶、300W Max-Q、400–600W Server 可配。但**从来没有查过下限**。
+
+这一轮拿到了 [c-pwr-floor-150w]：
+
+```
+power.min_limit [W]   power.max_limit [W]   power.limit [W]
+     150.00 W              600.00 W            250.00 W
+```
+
+> **工作站版的功率下限是 150W** —— 即 `nvidia-smi -pl` 的可调范围是 **150–600W**，不是「只能往下降一点」。
+
+#### 250W 是个真实在用的点
+
+这套四卡系统（97,887 MiB/卡、驱动 595.84）把四张卡**全部设在 250W**，并在此设定下长期跑 TP4+DCP4 的生产配置 [c-pwr-250w-real]。
+
+**这补上了本报告的功耗曲线空缺**：此前只有 **300W（Max-Q）/ 450W（线缆封顶）/ 600W（满血）** 三档，250W 是第四个真实数据点。
+
+> **一个值得注意的反例**：该系统用的是 **驱动 595.84**（R595 分支），而本报告 §10.4.2 基于 EOL 时间表建议「生产锁 R580 而非 R595」[c-sero-vram-97887]。
+>
+> 这不是矛盾，而是说明：**EOL 建议是「长期维护」维度的判断，不等于 R595 不能用。** 有人正在 R595 上稳定跑四卡生产负载。
+
+### 4.11.8 热特性该怎么测：一份可复用的实验协议
+
+本报告的散热数据一直偏弱（只有「Server 版被动散热 100°C 自我限流到 125W」这一个极端案例）。这一轮找到一份**方法论级别的协议** [c-sero-thermal-protocol]。
+
+#### 关键设计：无冷却连续扫描
+
+> **C1 → C2 → C4 连续跑，中间不冷却**，每个阶段用精确 8192 token 提示、**所有流开始输出后跑 900 秒**，并**逐秒记录四张卡的温度、功耗、利用率、风扇转速**。
+
+**为什么这个设计重要**：热节流是**累积效应**。单次跑分（冷启动）测不出稳态降频——机器要先热起来才会暴露问题。
+
+> **这解释了为什么很多「首发评测」的功耗/频率数字偏乐观**：它们是冷的。
+
+#### 风扇与安全阈值是显式的
+
+| 对象 | 策略 |
+|---|---|
+| **GPU 风扇** | 50%@30°C，线性激进上升，**100%@80°C** |
+| **CPU 风扇** | 60%@20°C、80%@40°C、100%@55°C |
+| **安全停机** | **CPU 88°C、GPU 82°C** |
+
+> **GPU 82°C 就停机** [c-sero-fan-curve] —— 比本报告此前记录的「Server 版到 100°C 才自我限流」**保守得多**。这说明**「多少度算过热」没有统一标准，取决于你设的保护阈值**。
+
+#### 三个细节体现严谨性
+
+1. **吞吐用精确 token ID 计数，不用服务器日志估算** [c-sero-token-exact]：聚合速度是同时活跃流之和。**日志口径与实测口径不一致是个常见坑。**
+2. **刻意不牺牲推理质量** [c-sero-no-degrade]：不用 eager、不关 CUDA graphs、不加停止序列、不设 token 上限。**很多「优化后」数字是靠牺牲这些换来的。**
+3. **卡死判据被显式定义** [c-sero-stall-signature]：存在未完成请求 **且** 四张 GPU 利用率同时 ≤5% 持续**两分钟**。比单纯看超时准确。
+
+#### 一个数据可得性的诚实边界
+
+> 该仓库**只提交了配置、方法与硬件快照，`results/*.json` 未入库** [c-sero-result-gap]。
+>
+> **所以本节只采用其可核实的硬件事实（150W 下限、250W 设定、97887 MiB、驱动 595.84）与实验协议，不引用其未经发表的吞吐数字。**
+
+这条例外说明：**遇到「方法可信但结果缺失」的来源，正确做法是只用能核实的那部分**，而不是把 README 里提到的数字当结论。
+
+#### 配置要点
+
+- GLM-5.2 **EXL3 3.0bpw**，140,000 上下文，TP4 + DCP4 + MTP3 贪心，最多 8 序列、3,072 批 token、显存利用率 0.95 [c-sero-glm52-cfg]
+- 主板 **ASUS Pro WS WRX90E-SAGE SE**（与 §10.8.1 记录的 16 卡系统同款），CPU 风扇命令**依主板而定**，作者明确警告不要盲目套用 [c-sero-board-specific]
+- 用快照 + `MANIFEST.sha256` 让**配置漂移可见** [c-sero-config-drift]
 
 ### 4.12 生产级延迟画像：128K 上下文 + 48 并发的真实数字
 
@@ -4387,6 +4452,12 @@ sudo nvidia-bug-report.sh
 
 ---
 
+### 独立实测与可复现基准（补充）
+
+- [0xSero（GitHub 复现 bundle）：GLM-5.2 EXL3 四卡复现包：250W 功耗封顶下的热特性与 C1/C2/C4 连续扫描](https://github.com/0xSero/glm52-exl3-4x-rtx-pro-6000)（2026-07-30） — [src-0xsero-glm52]
+
+---
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -4520,7 +4591,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=148, evidence=1070, claims=667, claims_high=486, claims_disputed=1, trace_events=301, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=149, evidence=1092, claims=679, claims_high=498, claims_disputed=1, trace_events=305, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
