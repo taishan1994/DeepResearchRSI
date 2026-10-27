@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：267 ｜ **证据数**：2135 ｜ **主张数**：1556（高置信 1228，争议 9）
+> **来源数**：269 ｜ **证据数**：2141 ｜ **主张数**：1562（高置信 1233，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -15419,6 +15419,213 @@ export GGML_CUDA_FA_ALL_QUANTS=1 BLACKWELL_NATIVE_FP4=1
 > b12x FP4 路径被确认工作：
 > **「4.5.1 为我修好了，虽然是在不同硬件上：RTX PRO 6000 Blackwell，sm_120a。」**
 
+### 10.38 ⚠️⚠️⚠️ 更正上一轮：那不是一个根因，而是四个
+
+**本报告第 140 轮写错了一处归因，本轮读原文后更正** [c-vllm41519-misattribution-fixed]。
+
+> ⚠️ 第 140 轮据 CUTLASS #3227 的**一句转述**，
+> 把 vllm#41519 记为「**shadowlilac-oss 在 RTX PRO 6000 sm_120 上的
+> mimo_v2 复现，同一根因**」。
+>
+> ⚠️ **读原文后发现根因完全不同**：
+> 本 issue 的报错是 **`AssertionError: Sinks are only supported in FlashAttention 3`**。
+>
+> ⭐⭐ 真实根因链：
+> **MiMo-V2.5 同时有两个特性**
+> （① KV head size 与 Q 不同：`v_head_dim=128` vs `head_dim=192`；
+> ② 有 attention sink）；
+> ⚠️ 而 **FA3 在 SM120 上不被支持**，
+> 模型于是回落到 `FlashAttentionDiffKVBackend`（**不是 FA3**），
+> **故 sink 断言触发**。
+>
+> ⭐ **即这不是内核编译问题，而是「模型特性组合在消费级卡上无后端可用」。**
+
+> **⭐⭐ 判据：**
+> **「某 issue 被另一个 issue 引用」不等于「我读过那个 issue」——**
+> **⚠️ 而转述者总是会把它简化成自己那条线索的一部分。**
+>
+> ⭐ 正确的写法本应是
+> **「CUTLASS #3227 声称它与本问题同根因」**——
+> **即把归因的来源也标出来，而不是把归因当作事实。**
+> ⚠️ **这是本报告第 18 次「把 A 的引述当作 A 的原文」类缺陷，
+> 而这次错误只活了一轮。**
+
+#### ⭐⭐ 修正后的图景：SM12x 上至少有四条根因不同的故障
+
+| # | 根因 | 报错形态 | 出处 |
+|---|---|---|---|
+| ⚠️ ① | **wheel 覆盖**（`libs-base` vs `libs-cu13`） | `Unexpected instruction types specified for _mma` | §10.36 / CUTLASS #3227 |
+| ⚠️ ② | **FA3 在 SM12x 不可用**，回落后端不支持 sink | `Sinks are only supported in FlashAttention 3` | §10.38 / vllm #41519 |
+| ⚠️ ③ | **workspace 切片后失配**（256 B 对齐 → 亚元素） | `cudaErrorIllegalAddress` @ graph capture 32/51 | §10.39 / FlashInfer #2776 |
+| ⚠️ ④ | **无 `sm120_*` 内核变体**（mHC 调 `tf32_hc_prenorm_gemm`） | `hyperconnection.hpp:56 Unsupported architecture` | §10.30 / DeepGEMM #236 |
+
+> **⭐⭐ 判据：**
+> **当一个平台上同时存在四条根因不同的故障时，
+> 「SM12x 不支持 XX」这种整体判断几乎总是错的——**
+> **⚠️ 而正确的表述是「XX 的哪一个环节在 SM12x 上怎么了」。**
+>
+> ⭐ 上表本身就是对 §10.30「『不支持』通常是四五个独立缺口，
+> 而不是一个决定」的**直接验证**——**那里是推断，这里是清单。**
+
+#### ⚠️⚠️ 而「显式参数被模型代码静默覆盖」是它难以诊断的原因
+
+[c-vllm41519-flag-silently-overridden]
+
+> ⚠️ 用户**显式指定了** `--attention-backend FLASH_ATTN
+> --attention-config.flash_attn_version=3`，**仍然无效**。
+> ⭐ 原因：「**`mimo_v2.py` 第 296-302 行会覆盖你用的任何 attention 版本。**」
+>
+> ⚠️ **而维护者建议的 `TRITON_ATTN` 也被否掉**：
+> **「Unfortunately it still gets manually overridden in the model file.
+> Triton attn only works in sglang.」**
+>
+> ⚠️ 且 **SM89（Ada）也复现同一 bug**。
+>
+> **⭐⭐ 判据：**
+> **「我传了参数」不等于「参数生效了」——**
+> **⚠️ 而当覆盖发生在模型代码里（而不是 CLI 解析层）时，
+> 连 `--help` 都不会告诉你这件事。**
+>
+> ⭐ 这与 §10.34 记的「CMake 静默把 `120` 改写成 `120a-real`」**是同一族问题**：
+> **配置层面的静默改写比运行时错误更难发现。**
+>
+> ⭐⭐ 另一条：**SM89 也复现** ⇒
+> **这条故障不是 Blackwell 专属，而是「无 FA3 的卡」共性**——
+> **而 SM89 与 SM120 在这一点上是同类（都没有 FA3）。**
+
+### 10.39 ⚠️⚠️⚠️ 三种「修好了但输出是垃圾」的形态
+
+**本轮读到的两个 issue 各给出一例，加上 §10.32 已有的两例，
+构成一组必须单独命名的失败模式。**
+
+#### ⚠️⚠️⚠️ 一、V-padding 修法：能启动、能出 token、不报错，但输出 40 个感叹号
+
+[c-honest-fix-can-still-be-garbage]
+
+> ⚠️ 上游曾有一个兼容回退：
+> **vLLM v0.19.0 的 MiMo-V2 Flash 代码跳过 `FlashAttentionDiffKVBackend`，
+> 做法是把 value head 从 128 补齐到 192。**
+> ⚠️ 新版改成「V 的 head dim 与 K 不同时直接用 `FlashAttentionDiffKVBackend`」，
+> **于是无 FA3 的卡（SM80 / SM89 / SM12x）就没有后端可用。**
+>
+> ⭐ 社区的修法是「**把 V-padding 加回去，只在
+> `fa_version is None or fa_version < 3` 时启用**」。
+>
+> ⚠️ **而这条修法自带一个必须复述的警告**：
+> **「必须使用 Triton attention，flash attention 可能产生垃圾输出——
+> 似乎是因为我们补齐了 v，KV cache 没有对齐。」**
+>
+> ⚠️ **另一个用户实测确认了它**：
+> **「请求模型一直输出 `!!!!!!!!!!!!!!!!!!!`（`finish_reason=length`）。」**
+>
+> ⭐⭐⭐ **判据：**
+> **「能启动、能出 token、不报错」是三个都可以为真、
+> 而结果仍然完全错误的指标——**
+> **⚠️ 而它们恰好是绝大多数「跑通了」的判据。**
+>
+> ⭐ 更值得记的是**为什么**：
+> **V-padding 改变了 KV cache 的布局，
+> 而只有 Triton 后端能容忍这个布局，FlashAttention 不能**——
+> **即修法的正确性依赖于后端。**
+>
+> **⭐⭐ 判据：**
+> **当一个修法引入了一个「必须配某个后端」的隐含约束时，
+> 这个约束必须写进修法本身，而不是留给下一个人去踩。**
+>
+> ⭐ 而那位用户做的正是这件事：
+> **他在给出代码的同时，用一句大写加粗的「必须使用 Triton attention」
+> 标出了这个约束**——
+> **这是本报告推崇的「说清边界比说清结论更重要」的正面样本。**
+
+#### ⚠️⚠️ 二、对齐错：不是指令不可用，而是一个切片不再对齐
+
+[c-fi2776-alignment-not-isa]
+
+> ⚠️ **NVFP4 MoE 模型在 GB10（SM121）上于 CUDA graph capture 阶段崩溃**，
+> 报 **`cudaErrorIllegalAddress`**，
+> 发生在「**Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 32/51**」。
+>
+> ⭐ 可疑根因（**原文明确标为 suspected**）：
+> **「FlashInfer 的 TRTLLM FP4 MoE decode 内核
+> （CUTLASS TMA warp-specialized grouped GEMM）在 SM120/SM121 上
+> 要求更严格的内存对齐；**
+> **`output[:num_decode_tokens]` 对 256 字节对齐 workspace 的切片
+> 可能产生亚元素失配的指针。」**
+>
+> ⚠️ **关键区分：稠密 NVFP4 模型（Llama 3.1 8B）不受影响。**
+> ✅ 绕行 **`VLLM_USE_FLASHINFER_MOE_FP4=0`**。
+> ⚠️ **该 issue 至今 open 且 0 评论**（2026-03-12 提出）。
+>
+> ⭐⭐ **判据（来自「稠密不受影响」）：**
+> **同一个精度、同一张卡、同一个库，稠密能跑而 MoE 崩——**
+> **⚠️ 即问题不在精度格式，而在 MoE 那条路径特有的 workspace 复用方式。**
+>
+> **⭐⭐ 判据：**
+> **当「同一个新特性在 A 架构上正常、在 B 架构上崩」时，
+> 先问「A 与 B 在这个特性上走的是不是同一段代码」——**
+> **⚠️ 而「稠密正常、MoE 崩」说明连同一张卡内部都有分叉。**
+>
+> ⭐ 另一条：「对齐」类 bug 的特征是
+> **只在特定的、看起来无关的尺寸组合下触发**——
+> **⚠️ 而 CUDA graph capture 恰好会遍历一批固定尺寸，
+> 于是它在「第 32/51 步」这个位置稳定复现。**
+
+#### ⚠️⚠️⚠️ 三、短跑测试永远发现不了的一个：NCCL 版本边界
+
+[c-nccl-wedge-version-boundary]
+
+**这条不属于「输出是垃圾」，但它与前两条共享同一个性质：冒烟测试发现不了。**
+
+> **「与 FA3-on-sm_121 无关，在 Ray Compiled-DAG 上有一个 wedge bug
+> （见 #40969），发生在多节点 TP > 2 时。**
+> ⚠️ **NCCL 2.28.9（PyTorch 2.11.0+cu130 的默认版本）
+> 在约 7–45 个连续请求后 wedge；**
+> ✅ **NCCL 2.30.4（最新）消除了这个 wedge。」**
+>
+> ⭐ 实测口径：**8× Spark、GLM-5.1-NVFP4，
+> 「50/50 干净持续的扫描，此前在第 37–45 个请求 wedge」。**
+> ⭐ 安装：`pip install --no-deps --force-reinstall nvidia-nccl-cu13==2.30.4`。
+>
+> **⭐⭐ 判据：**
+> **「跑几十个请求就卡死」这类故障，
+> 在任何一个「跑 5 个请求看看能不能出 token」的冒烟测试里都不会出现——**
+> **⚠️ 而它恰恰是生产环境的默认形态。**
+>
+> ⭐ 这与 §10.30 记的「fence soak 30 万次不复现」**构成一对**：
+> **一个是「长跑不复现」，一个是「长跑必现」。**
+>
+> **⭐⭐ 而更值得记的是版本边界的精确性：2.28.9 必现 / 2.30.4 消除。**
+> ⭐ 这给出一个可直接执行的处置：
+> **在多节点 TP>2 的部署里，NCCL 版本不是「越新越好」的软建议，
+> 而是一个正确性依赖。**
+> ⚠️ 而它的隐蔽性在于：**NCCL 是 PyTorch 的传递依赖**，
+> **故「我装了最新 PyTorch」并不等于「我有可用的 NCCL」。**
+
+#### ⚠️⚠️ 附带一条：量化会破坏模型元数据
+
+[c-nvfp4-strips-automap]
+
+> ⚠️ **「部分 NVFP4 量化会把 `auto_map` 剥成空」**——
+> `lukealonso/MiMo-V2.5-NVFP4` **的 `auto_map` 为空**。
+> ⚠️ 而 vLLM 的 `_CONFIG_REGISTRY` 里有 `mimo_v2_omni` 但**没有纯文本的 `mimo_v2`**。
+> ⚠️ 后果：**即使加 `--trust-remote-code` 也报
+> `model type mimo_v2 but Transformers does not recognize this architecture`。**
+> ✅ 绕行：**把上游两个 `.py` 拷进本地快照，并手工把 `auto_map` 加回 `config.json`。**
+>
+> **⭐⭐ 判据：**
+> **「量化后的模型不是一个更小的同一个模型」——**
+> **⚠️ 它可能丢掉 `auto_map`、丢掉架构名、丢掉 tokenizer 配置；
+> 而这些丢失不会在 perplexity 或 KLD 上体现。**
+> ⭐ 具体后果很尖锐：
+> **模型能加载、数值对得上，但框架认不出它是什么。**
+>
+> ⭐⭐ 而处置方式也值得记：
+> **绕行不是「改 vLLM」，而是「把上游的两个 `.py` 拷进快照」——**
+> **⚠️ 即 `--trust-remote-code` 的语义是「信任远端的代码」，
+> 但当远端（量化者）把代码删了时，你只能自己补回去。**
+> ⭐ **判据：「同一个模型有多个量化版本」时，
+> 选哪个的第一判据不是精度而是「元数据是否完整」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -18742,6 +18949,12 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 1. [NVIDIA/cutlass issue #3227 — `nvidia-cutlass-dsl` 4.5.0: `nvvm.mma.block_scale` lowering produces PTX rejected by ptxas (sm_120/120f/121a)](https://github.com/NVIDIA/cutlass/issues/3227) —（2026-05-11 至 2026-06-02，13 评论，已 closed）。(a) ⭐⭐⭐⭐⭐ **本报告全书最重要的一次结论更正**：一条**手写 PTX 指令** `mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32.ue4m3` **在 `.target sm_120a`、`.target sm_120f` 与 `.target sm_121a` 上全部编译干净**（`ptxas --gpu-name=sm_121a` → `exit=0`）——⭐⭐ **即「没有第三条路」是错的：`120f` 同时拿得到 mxfp4 且在同 major 内向前兼容**；⭐ 判据「**『没有第三条路』这个结论，在『我还没查那个集合划分』时是猜测，⚠️ 在查到之后变成了错误——而两者的措辞差别只有一句『在没有确认的前提下』**」；⭐ 并指出 llama.cpp 与我**都把「`120` 虚拟构建」与「`120f` 家族构建」混为一谈了**。(b) ⚠️⚠️⚠️ **而真正的 bug 根本不是硬件**：`libs-base` 与 `libs-cu13` **在包内完全相同路径下各带一个文件——168 个重叠的 `.py`，包括 `cute/nvgpu/warp/mma.py`，但内容与 SHA256 不同**（`admissible_archs = [sm_120a, sm_121a]` 字符串 vs `[Arch.sm_120a, Arch.sm_121a]` 枚举），**若先前装过任一个 wheel，盘上的文件可能是错的**——⭐⭐ 判据「**当『手写等价物能过、库生成的过不了』时，先怀疑『库的版本不是你以为的那个』**」+「**`pip` 不会报路径冲突，它只会后装的覆盖先装的**」；⭐ 更反直觉的是 **MMA lowering 代码本身没有改动**（4.5.0→4.5.1 只加了一个 `sm_120f` 字符串，4.5.1 与 4.5.2 逐字节相同），**真正的修复在编译后的 `.so` 里**——⭐⭐ 判据「**『源码 diff 里看不出根因』不等于『根因不在源码里』**」。(c) ⭐⭐⭐ **「新硬件被识别成 Unknown」比「不被支持」更危险**：`gpu_arch_map` 缺 `(12, 1)` 条目，**GB10 落到 `("Unknown", "sm_121", ["sm_121"])`——`sm_121` 没有 `a` 后缀**，**须手动设 `CUTE_DSL_ARCH=sm_121a`**；⭐ 判据「**不被支持会失败，被识别成 Unknown 会『成功但降级』**」；⭐ 且 NVIDIA **实际发布的是 `["sm_121a"]`，去掉了作者建议的 `"sm_120f"`**——**即厂商自己选择了「12.1 独立」而非「12.1 属 12.0 家族」**，故任何 `sm_XXXf` 覆盖 `sm_XXX+1` 的假设都必须重验。(d) ⭐⭐ **第一份带完整表格的 NVFP4 vs Marlin 对比**（8× DGX Spark GB10，sm_121a，TP=8）：单路解码 29.4 vs 33.5（**−12%**）、4 并发 69.6 vs 83.8（**−17%**）、⚠️ **16 并发 150.0 vs 201.0（−25%）**、8 并发 26k 上下文 112.7 vs 124.9（**−10%**）——**「跨各配置一致地慢 7-25%，且差距随 batch 增大而扩大」**；⭐ 机理（原文标为推测）：**Marlin 的 FP4→FP8 反量化能跨 batch 摊薄（每专家加载反量化一次，再走调优过的 FP8 GEMM）**；⭐⭐ 判据「**『更低精度』与『更快』之间没有必然联系——缺两段式设计会在小 tile 上输给看似更笨的路线**」+「**当一个差距随 batch 单调扩大时，它指向 per-call 开销而非原始吞吐**」；⚠️ **硬件口径为 GB10 不是 RTX PRO 6000，不外推**。(e) ⚠️⚠️⚠️ **「AOT 兜底」被证伪**：`flashinfer-cubin==0.6.11` **带了 12,681 个 FP4 cubin，但只针对 `Sm100a`/`Sm100f`/`Sm103a`——零个 `sm_120` 或 `sm_121`**，「**故 JIT 路径与 AOT 路径目前都不工作**」；⭐ 判据「**『有 12,681 个 cubin』这个数字会让人以为它覆盖了所有卡**」，与 §10.28「benchmark 数不等于覆盖」同类；⭐ 并补上两个下游 issue（vllm#41519 的 RTX PRO 6000 复现、flashinfer#2776），且这是**本报告第一次看到这张卡上 b12x FP4 路径被确认工作**（「4.5.1 为我修好了……RTX PRO 6000 Blackwell，sm_120a」） — [src-cutlass-3227]
 
+### SM12x 的四条不同根因，与三种「修好了但输出是垃圾」（第六十六轮补充）
+
+1. [vllm-project/vllm issue #41519 — [Bug]: Xiaomi MiMo v2.5 broken on SM12x](https://github.com/vllm-project/vllm/issues/41519) —（2026-05-02 至 2026-06-11，15 评论，已 closed）。(a) ⚠️⚠️⚠️ **本报告第 140 轮的一处归因错误在此更正**：第 140 轮据 CUTLASS #3227 的**一句转述**，把本 issue 记为「同一根因」；⚠️ **读原文后发现报错是 `AssertionError: Sinks are only supported in FlashAttention 3`，根因是 FA3 在 SM120 上不可用**——⭐⭐ 判据「**『某 issue 被另一个 issue 引用』不等于『我读过那个 issue』——而转述者总是会把它简化成自己那条线索的一部分**」，**正确写法应把归因的来源也标出来**（「CUTLASS #3227 声称同根因」），而非把归因当事实。(b) ⭐⭐ **修正后的图景：SM12x 上至少有四条根因不同的故障**——① wheel 覆盖（`_mma` lowering，§10.36）② **FA3 不可用致后端缺失（本条）** ③ **workspace 切片失配（FlashInfer #2776，§10.39）** ④ **无 `sm120_*` 内核变体（DeepGEMM #236，§10.30）**——⭐⭐ 判据「**当一个平台上同时存在四条根因不同的故障时，『SM12x 不支持 XX』这种整体判断几乎总是错的，正确表述是『XX 的哪一个环节在 SM12x 上怎么了』**」；⭐ 上表直接验证了 §10.30「『不支持』通常是四五个独立缺口」的推断。(c) ⚠️⚠️ **「显式参数被模型代码静默覆盖」是它难诊断的原因**：用户显式指定 `--attention-backend FLASH_ATTN` 与 `flash_attn_version=3` **仍然无效**，因「`mimo_v2.py` 第 296-302 行会覆盖你用的任何 attention 版本」；维护者建议的 `TRITON_ATTN` 也被否（「Triton attn only works in sglang」）；⚠️ **SM89（Ada）也复现** ⇒ 这是「无 FA3 的卡」共性，不是 Blackwell 专属。(d) ⭐⭐⭐ **NCCL 版本边界（一条与 FA3 无关的独立故障）**：**Ray Compiled-DAG 的 wedge bug（#40969），多节点 TP>2，NCCL 2.28.9（PyTorch 2.11.0+cu130 默认）在约 7-45 个连续请求后 wedge，NCCL 2.30.4 消除**（8× Spark / GLM-5.1-NVFP4，「50/50 干净持续扫描，此前第 37-45 个请求 wedge」）——⭐⭐ 判据「**『跑几十个请求就卡死』这类故障，在任何『跑 5 个请求看看能不能出 token』的冒烟测试里都不会出现，而它恰恰是生产环境的默认形态**」；⭐ 与 §10.30「fence soak 30 万次不复现」构成一对；⭐⭐ 且「**NCCL 是 PyTorch 的传递依赖**，故『我装了最新 PyTorch』不等于『我有可用的 NCCL』」。(e) ⚠️⚠️ **量化会破坏模型元数据**：「部分 NVFP4 量化会把 `auto_map` 剥成空」（`lukealonso/MiMo-V2.5-NVFP4`），加 `--trust-remote-code` 仍报「Transformers does not recognize this architecture」——⭐⭐ 判据「**『量化后的模型不是一个更小的同一个模型』：它可能丢掉 `auto_map`、架构名、tokenizer 配置，而这些丢失不会在 perplexity 或 KLD 上体现**」；⭐ 「同一个模型有多个量化版本时，选哪个的第一判据不是精度而是『元数据是否完整』」。(f) ⚠️⚠️⚠️ **「修好了但输出是垃圾」的最强实例**：v0.19.0 曾用「把 value head 从 128 补齐到 192」跳过 DiffKV 后端，新版去掉后无 FA3 的卡无后端可用；社区修法是「把 V-padding 加回去，只在 `fa_version is None or fa_version < 3` 时启用」，**但自带警告「必须使用 Triton attention，flash attention 可能产生垃圾输出——补齐 v 后 KV cache 没有对齐」**，⚠️ **另一用户实测确认：「请求模型一直输出 `!!!!!!!!!!!!!!!!!!!`（`finish_reason=length`）」**——⭐⭐⭐ 判据「**『能启动、能出 token、不报错』是三个都可以为真、而结果仍然完全错误的指标，而它们恰好是绝大多数『跑通了』的判据**」；⭐⭐ 且「**当一个修法引入了『必须配某个后端』的隐含约束时，这个约束必须写进修法本身**」——⭐ 那位用户用一句大写加粗的「必须使用 Triton attention」标出了它，是「说清边界比说清结论更重要」的正面样本 — [src-vllm-41519]
+
+2. [flashinfer-ai/flashinfer issue #2776 — [Bug] NVFP4 MoE models crash on GB10 (SM121) during CUDA graph capture](https://github.com/flashinfer-ai/flashinfer/issues/2776) —（2026-03-12 提出，**至今 open，0 评论**，标签 `op: moe` + `arch: sm12x`）。(a) ⚠️⚠️ **一条错在对齐而非指令的 SM12x 故障**：NVFP4 MoE 在 GB10（SM121）上于 **CUDA graph capture 阶段**崩溃，报 `cudaErrorIllegalAddress`，发生在「**Capturing CUDA graphs (mixed prefill-decode, PIECEWISE): 32/51**」；⭐ 可疑根因（**原文标为 suspected**）「**TRTLLM FP4 MoE decode 内核（CUTLASS TMA warp-specialized grouped GEMM）在 SM120/SM121 上要求更严格的内存对齐；`output[:num_decode_tokens]` 对 256 字节对齐 workspace 的切片可能产生亚元素失配的指针**」。(b) ⚠️ **关键区分：稠密 NVFP4 模型（Llama 3.1 8B）不受影响**；✅ 绕行 `VLLM_USE_FLASHINFER_MOE_FP4=0`。(c) ⭐⭐ 判据「**同一个精度、同一张卡、同一个库，稠密能跑而 MoE 崩 ⇒ 问题不在精度格式，而在 MoE 那条路径特有的 workspace 复用方式**」+「**当『同一个新特性在 A 架构上正常、在 B 架构上崩』时，先问『A 与 B 在这个特性上走的是不是同一段代码』——而『稠密正常、MoE 崩』说明连同一张卡内部都有分叉**」；⭐ 「对齐」类 bug 只在特定且看似无关的尺寸组合下触发，**而 CUDA graph capture 恰好遍历一批固定尺寸，故在第 32/51 步稳定复现** — [src-flashinfer-2776]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -18881,7 +19094,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=267, evidence=2135, claims=1556, claims_high=1228, claims_disputed=9, trace_events=591, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=269, evidence=2141, claims=1562, claims_high=1233, claims_disputed=9, trace_events=599, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
