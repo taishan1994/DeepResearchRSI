@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：158 ｜ **证据数**：1198 ｜ **主张数**：773（高置信 574，争议 1）
+> **来源数**：159 ｜ **证据数**：1208 ｜ **主张数**：783（高置信 583，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2663,6 +2663,11 @@ score = 613,491 / 几何均值(monster, junkshop, classroom 的 total_render_tim
 
 > **为 Blender/Cycles 渲染堆多张 RTX PRO 6000 缺乏数据支持，收益可能接近零甚至为负** [c-mg-out-of-scope-advice]。
 >
+> ⚠️ **这个结论仅限 Blender/Cycles。** §7.3.13 用 OctaneBench 官方数据证明：
+> **同一批卡在 OctaneRender 上 2 卡 2.00×、4 卡 3.99×、8 卡 7.61×（效率 88%–103%）。**
+> **原因是 OctaneRender 逐 GPU 独立调度，不要求设备间同步同一帧。**
+> **所以「该买几张卡」必须先看主力渲染器，不能一概而论。**
+>
 > **大场景的正确做法仍是单卡大显存，或者增加机器而不是增加卡。**
 >
 > ⚠️ **§7.3.11 把这个结论补充完整了**：**「增加机器」对动画有效（实测帧级并行 41 GPU 秒 → 15 秒墙钟，约 2.7×），
@@ -3128,6 +3133,9 @@ issue #150282 报告 **5.0 在部分重型场景上渲染时间接近翻倍**：
 | **动画** | **跨帧并行**（多机 / 多租） | 实测 41 GPU 秒 → 15 秒墙钟（约 2.7×） |
 | **单张静帧** | **只能靠单卡性能与显存** | §7.3.7：同帧多卡加速比接近 1.0，甚至 0.96× |
 
+> ⚠️ **「跨帧并行」不是唯一出路。** §7.3.13 显示：**若渲染器支持逐 GPU 独立调度（如 OctaneRender），
+> 多卡可近似线性扩展（8 卡 7.61×）——同一个「多卡」在 Blender 里几乎无效，在 Octane 里却是常规手段。**
+
 > **所以不是笼统的「多卡无用」，而是「多卡要用来分帧，不要用来分同一帧」。**
 >
 > **静帧场景没有这个选项——这是 96GB 真正不可替代的地方。**
@@ -3219,6 +3227,100 @@ D&R 给了一个具体对照 [c-dr-farm-48x]：
 #### 未采到的来源
 
 **Puget Systems 的 RTX PRO 6000 Content Creation Review** 三次尝试均返回 **HTTP 403**（Cloudflare 验证页）。**这是本报告最遗憾的一个缺口**——Puget 的方法学（多轮重复、公开测试文件）本是裁决 D&R 冲突的理想第三方。
+
+#### 7.3.13 推翻了：「多卡无用」只是 Blender 的结论，Octane 上能到 7.61 倍
+
+§7.3.7 和 §7.3.11 都说了同一件事：**Blender 里多卡几乎不加速（1.04–1.07×，甚至有 0.96× 负收益）**。这一轮拿到 **OctaneBench 官方结果库**，发现**同一个问题在另一个渲染器上答案完全相反**。
+
+#### OctaneBench 的多卡扩展接近线性
+
+| 配置 | 分数 | 相对单卡 | **扩展效率** |
+|---|---:|---:|---:|
+| 1× WS | 1,750 | 1.00× | — |
+| **2× WS** | 3,503 | **2.00×** | **100.1%** |
+| **3× WS** | 5,256 | **3.00×** | **100.1%** |
+| **4× WS** | 6,983 | **3.99×** | **99.8%** |
+| 2× Server | 3,313 | 2.02× | 100.9% |
+| 4× Server | 6,489 | 3.95× | 98.9% |
+| **8× Server** | **12,493** | **7.61×** | **95.2%** |
+| 2× Max-Q | 3,161 | 1.97× | 98.7% |
+| 4× Max-Q | 6,448 | 4.03× | 100.7% |
+| 7× Max-Q | 11,549 | 7.21× | 103.1% |
+
+> **在 2 到 8 卡范围内，扩展效率从未低于 88%** [c-ob-scaling-near-linear]。
+>
+> **8 卡能跑到 7.61 倍。**
+
+#### 和 Blender 对比：差一个数量级
+
+| 渲染器 | 双卡相对单卡 |
+|---|---:|
+| **OctaneBench** | **2.00×** |
+| **Blender（bmw27）** | **1.04–1.07×** |
+
+> **Blender 的多卡效率约为 OctaneRender 的 2%–4%** [c-ob-vs-blender]。
+
+#### 机制：两种完全不同的多卡方式
+
+**这不是「Octane 优化得更好」，而是调度模型不同** [c-ob-why-differs]。
+
+OctaneBench 官方说明原文 [c-ob-multi-counted]：
+
+> *"As **OctaneRender uses each GPU separately**, OctaneBench counts each GPU used, not the number of video cards."*
+
+| | OctaneRender | Blender Cycles |
+|---|---|---|
+| 多卡方式 | **每张 GPU 独立使用** | **同一帧内分割 tile/采样** |
+| 需要设备间同步 | **几乎不需要** | **需要** |
+| 理论扩展 | **接近线性** | 受同步与负载均衡限制 |
+
+> **增加 GPU 在 Octane 里等于增加并行渲染单元；在 Blender 里等于让多个设备协作画同一张图，同步成本吃掉了收益。**
+
+#### 所以必须收缩前面的结论
+
+> **§7.3.7 / §7.3.11 的「多卡几乎不加速」必须限定为 Blender/Cycles 的结论，不能写成渲染类工作的通例** [c-ob-revise-multigpu]。
+>
+> **对支持逐 GPU 调度的渲染器（如 OctaneRender），实测扩展效率 88%–103%，多卡是有效手段。**
+
+#### 同一个采购决策，两种工作流下结论相反
+
+| 主力渲染器 | 最优策略 |
+|---|---|
+| **OctaneRender** | **可以堆多卡**，8 卡达 7.61× |
+| **Blender Cycles** | **不要堆同帧多卡**；改为分帧并行（§7.3.11）或单卡大显存 |
+
+> **同一笔预算，在两种工作流下的正确配置是相反的** [c-ob-selection]。**所以「该买几张卡」这个问题，不先问「你用什么渲染器」是无法回答的。**
+
+#### 一个意外收获：反证了 D&R 的数据来源
+
+OctaneBench 单卡分数与 Drop & Render 记录**逐位吻合** [c-ob-vs-dnr-single]：
+
+| 卡 | OctaneBench 官方 | Drop & Render |
+|---|---:|---:|
+| WS 版 | **1,750** | **1,750** |
+| Server 版 | **1,641** | **1,641** |
+
+> **完全一致。** 结合 D&R 自承会补充「Public benchmark data」（§7.3.12），**这实证了它的 OctaneBench 数字确实取自公开榜单，而非自测。**
+>
+> **这反过来加强了对 D&R 数据构成的理解：它的 OctaneBench 列是转载，不是独立测量。**
+
+#### 单卡排序：WS 领先
+
+| 卡 | OctaneBench 单卡 | 相对 WS |
+|---|---:|---:|
+| **WS 版** | **1,750** | — |
+| Server 版 | 1,641 | **−6.2%** |
+| Max-Q | 1,601 | **−8.5%** |
+
+**注意这个排序与 Blender 不同**——Blender 里 Max-Q（18,678）略高于 WS（18,571），而 Octane 里 Max-Q 最低。
+
+#### 必须声明的局限
+
+> **这些多卡数字来自不同用户的独立提交，不是同一台机器上的受控扩展测试** [c-ob-caveat]。
+>
+> 页面可在 Maximum / Average / Minimum 三种视图间切换，**本轮抓取为默认视图，未标注每条记录的视图口径**。
+>
+> **所以「近似线性」应理解为本库呈现的整体趋势，而非精确的受控测量结果。**
 
 ### 7.4 视频与专业特性
 
@@ -5403,6 +5505,7 @@ sudo nvidia-bug-report.sh
 - [JANCTION Render — Blender on an RTX PRO 6000 (96 GB), paid by the second：实测每帧 GPU 秒与价格](https://render.janction.jp/rtx-pro-6000-blender-rendering)（2026-10-26） — [src-janction]
 - [JANCTION Render — Benchmarks：按分辨率/帧数/采样数的 GPU 秒矩阵（含 CSV 原始数据与可复现场景 zip + sha256）](https://render.janction.jp/benchmarks)（2026-10-01） — [src-janction-bench]
 - [Drop & Render（blendercloudrender.com）— RTX PRO 6000 Blackwell Workstation Edition 渲染基准页，含 Methodology 段（自建测试 + 机器学习推算 + 公开数据三类混合）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-workstation-edition)（2026-10-26） — [src-dnr-gpu-bench]
+- [OTOY — OctaneBench 2025.2 Results（官方结果数据库，含 2x–8x 多 GPU 配置）](https://render.otoy.com/octanebench/results.php)（2026-10-27） — [src-octanebench]
 
 ---
 
@@ -5539,7 +5642,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=158, evidence=1198, claims=773, claims_high=574, claims_disputed=1, trace_events=324, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=159, evidence=1208, claims=783, claims_high=583, claims_disputed=1, trace_events=326, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
