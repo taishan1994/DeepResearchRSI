@@ -1491,20 +1491,46 @@ export FLASHINFER_FORCE_SM=120f
 
 > **读这个版本号必须先知道：它是十六进制** [c-vbios-hex]。
 >
-> | 版本 | 第三段按十六进制 | 十进制 | 是否达门槛 |
+> | 版本 | 第三段按十六进制 | 十进制 | 含义 |
 > |---|---|---:|---|
-> | `98.02.52.00.02` | 0x52 | **82** | ❌ 不达 |
-> | `98.02.55.00.00` | 0x55 | **85** | — 门槛 |
-> | `98.02.6A.00.03` | 0x6A | **106** | ✅ 达标 |
+> | `98.02.52.00.02` | 0x52 | **82** | WS 出厂常见版本，不达门槛 |
+> | `98.02.55.00.00` | 0x55 | **85** | **WS 门槛** |
+> | `98.02.6A.00.00` | 0x6A | **106** | **Max-Q 门槛** |
+> | `98.02.6A.00.03` | 0x6A | **106** | Max-Q 出厂版本，达标 |
 >
-> **把 `6A` 当十进制读会得出完全相反的结论。** 这条我上一版没写清楚，现已修正。
+> **把 `6A` 当十进制读会得出完全相反的结论。**
 
-**由此得到一个重要更正** [c-vbios-maxq-ok]：**Max-Q 出厂即带可用的 VBIOS**——料号 `900-5G153` 的卡随卡出厂就是 `98.02.6A.00.03`，已有用户在驱动 575.57.08 上**成功启用 MIG** [e-mig44-ok]。**所以 MIG 门槛只影响部分 WS 版本，不是全系通病。**
+**官方门槛是按 SKU 分别规定的** [c-mig-vbios-per-sku]（一手来源，非推断）：
 
-**启用 MIG 还有两个文档没强调的前提** [c-vbios-secureboot]：
+| SKU | 最低 vBIOS |
+|---|---|
+| RTX PRO 6000 **WS** | `98.02.55.00.00` |
+| RTX PRO 6000 **Max-Q** | `98.02.6A.00.00` |
+| RTX PRO 5000 | `98.02.73.00.00` |
 
-1. 需用 **Display Mode Selector** 把 GPU 切到**计算模式**
-2. **该工具要求关闭 Secure Boot** 才能在 Ubuntu 24.04 上运行
+**由此得到两个更正** [c-vbios-maxq-ok]：
+
+1. **Max-Q 门槛不是 `98.02.55` 而是 `98.02.6A`**——我上一版按同一门槛推断，不准确
+2. **但 Max-Q 出厂即达标**：料号 `900-5G153` 的卡出厂就是 `98.02.6A.00.03`，已有用户在驱动 575.57.08 上**成功启用 MIG** [e-mig44-ok]
+
+> **所以真实情况是：Max-Q 开箱即用，WS 才是需要升级的那一档**（出厂 `98.02.52` < 门槛 `98.02.55`）。
+
+**MIG 是全系支持，不是部分版本特性** [c-mig-official-support]：官方支持列表里 **Server / WS / Max-Q 三款全在列**，均为 GB202、CC 12.0、96GB、**最多 4 个实例** [e-miggpu-table]。
+
+**官方最低驱动** [c-mig-driver-min]：**R575（≥ 575.51.03）配 CUDA 12**，覆盖全部三款 SKU。
+
+**官方对 VBIOS 的指引与社区实测完全一致** [c-mig-reseller-official]：「**请联系你的经销商或系统供应商**」[e-migstart-reseller]——官方本身不提供下载，印证了下面的分发结构。
+
+**启用 MIG 的两个前提，其中一个是致命陷阱**：
+
+1. 需用 **DisplayModeSelector ≥ 1.72.0** 把显示模式从默认的 graphics 切为 **compute**（WS 与 Max-Q 需要，Server 不需要）[c-mig-compute-mode]
+2. ⚠️ **切模式会关闭物理显示输出** [c-mig-display-trap]——如果这张卡是主显示适配器：
+
+> 官方原文：*"setting display mode to compute will **disable physical display output**. **Ensure SSH access is available before proceeding.**"*
+
+**单卡工作站照做就会失去本地控制台。** 多卡系统则不要把主显示卡切为 compute。
+
+补充社区实测的第三个前提 [c-vbios-secureboot]：**DisplayModeSelector 要求关闭 Secure Boot** 才能在 Ubuntu 24.04 上运行。
 
 **实例规格可以读出来** [c-mig-instance]：单实例 **188 个 SM**、**4 CE / 4 ENC / 4 DEC / 1 OFA / 4 JPG**、显存约 **97,251 MiB**、BAR1 **131,072 MiB（128GB）** [e-mig44-smi]。
 
@@ -2245,6 +2271,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55（十六进制）≠ 全系问题 |
 | q47 | 固件故障有哪些家族？ | ✅ | §10.9 Xid 143：0xbadf4100，可致整机无法 POST |
 | q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
+| q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2261,12 +2288,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55（十六进制）≠ 全系问题 |
 | q47 | 固件故障有哪些家族？ | ✅ | §10.9 Xid 143：0xbadf4100，可致整机无法 POST |
 | q48 | VFIO 直通有何风险？ | ✅ | §10.10 FLR 超时→主机挂起 2.7 小时，需 BMC 冷断电 |
+| q49 | MIG 的官方门槛与陷阱？ | ✅ | §10.4.1 按 SKU 分列 vBIOS；切 compute 会关显示输出 |
 
-**完成度：48/49 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：49/50 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **617 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **625 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2362,3 +2390,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 101. [NVIDIA Developer Forums：MIG not available on RTX PRO 6000 Blackwell – VBIOS requirement?](https://forums.developer.nvidia.com/t/mig-not-available-on-rtx-pro-6000-blackwell-vbios-requirement/366155)（2026-04-10 起） — [src-nvf-migreq]
 102. [NVIDIA Developer Forums：How to reflash bricked RTX PRO 6000（Xid 143 / FSP 引导失败）](https://forums.developer.nvidia.com/t/how-to-reflash-bricked-rtx-pro-6000/360472)（2026-02-12 起） — [src-nvf-brick]
 103. [NVIDIA Developer Forums：Max-Q FLR 在 vfio-pci 释放时失败，需冷断电（GB202 固件缺陷）](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-max-q-10de-2bb4-flr-fails-on-vfio-pci-release-after-kvm-guest-shutdown-gpu-inaccessible-until-cold-power-cycle/386790)（2026-10-25） — [src-nvf-flr]
+104. [NVIDIA：MIG User Guide —— Supported GPUs（三款 RTX PRO 6000 SKU 均支持，最多 4 实例）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/supported-gpus.html)（更新 2026-10-13） — [src-nv-mig-gpus]
+105. [NVIDIA：MIG User Guide —— Getting Started with MIG（RTX PRO Blackwell 附加前提：最低 vBIOS 按 SKU 分列）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/getting-started-with-mig.html)（更新 2026-10-13） — [src-nv-mig-start]
