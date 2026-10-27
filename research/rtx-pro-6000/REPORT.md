@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：178 ｜ **证据数**：1388 ｜ **主张数**：917（高置信 685，争议 1）
+> **来源数**：180 ｜ **证据数**：1399 ｜ **主张数**：927（高置信 687，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1781,6 +1781,85 @@ VLLM_ATTENTION_BACKEND=FLASH_ATTN
 2. **该组合会导致初始化挂死**（worker 卡在 100% CPU），解法是**确保无孤儿 GPU 进程后用 systemd 干净重启并给足初始化时间**。
 
 **性能结论要打折看** [c-vf-pcie-viable]：该配置达到 **85–95 tok/s**（llama.cpp 基线 67.41），但作者自己标注"仍在用负载做基准"。**这个数字明显低于 §4.9 的 388 tok/s**——说明**配方差异对结果的影响，可能大于硬件差异**。
+
+#### 4.9.3 四卡整机的真实配置：一份商用案例的硬件清单
+
+§4.9 讲的是双卡部署单元。**四卡形态此前只有零散数据**（§11 的 P2P、§3.5 的改水实测）。第 55 轮找到的改水实测已给出四卡性能，本节补一台**商用集成整机**的实际配置清单。
+
+**HYPERPC（迪拜）的客户案例** [c-hp-four-server-edition]：
+
+| 部件 | 型号 |
+|---|---|
+| **GPU** | **4 × RTX PRO 6000 Blackwell Server Edition**（各 96 GB） |
+| **总显存** | **384 GB** |
+| CPU | Threadripper PRO **7995WX**（96 核 / 192 线程） |
+| 主板 | **ASUS PRO WS WRX90E-SAGE SE** |
+| 内存 | **2048 GB**（8 × 256 GB）三星 ECC DDR5-4800 |
+| 硬盘 | 4 × 4 TB 三星 9100 PRO（读速最高 14.8 GB/s） |
+| 机箱 | CORSAIR 9000D RGB AIRFLOW White |
+| 电源 | **3000 W 白金** |
+
+> **注意这是 Server Edition**——与 §3.1 的三 SKU 对照可对上：Server 版是被动散热、面向服务器风道。
+
+#### 一、四卡的硬性平台门槛
+
+**这份案例明确写出了装四卡的前提** [c-hp-4gpu-needs-x16x4]：
+
+> **需要一块有足够 PCIe 5.0 通道、能以 `x16/x16/x16/x16` 运行的主板。**
+>
+> **即并非任意 WRX90 板都能装四卡全速。**
+
+**选 CPU 的理由**：96 核可有效并行化送入 GPU 前的数据预处理。
+
+#### 二、电源：3 kW 不是过度配置
+
+**案例自述** [c-hp-power-3000w]：
+
+| 项 | 数值 |
+|---|---|
+| 整机峰值功耗 | **超过 2 kW** |
+| 电源 | **3000 W**（留 12V 余量、白金认证降损） |
+
+> **这与本报告 §6.4.1「GPU 遥测漏掉 41–45%、需三源核算」一致**——**按四张卡的 600 W 相加（2.4 kW）只是 GPU 部分，整机还需 CPU、内存、硬盘、风扇与转换损耗。**
+>
+> **所以「四卡配 2.4 kW 电源」是不够的。**
+
+#### ⚠️ 三、这份案例自身有一处矛盾
+
+**同一页面两处描述冲突** [c-hp-cooling-contradiction]：
+
+| 位置 | 说法 |
+|---|---|
+| **Configuration 栏** | 「Individual air cooler circuit, **18 Thermalright TL-B12-EXTREM fans**」（独立风冷回路 + 18 风扇） |
+| **Selection process 段** | 「实现了**覆盖 CPU 与所有 GPU 的自定义水冷系统**」，满载 **55–60°C** |
+
+> **因此不能据此页判断该整机究竟用风冷还是水冷，其温度数字也随之不可归因。**
+>
+> **这是「同一页面内两处描述冲突」的又一实例**，与 §3.5（五）Alphacool 材质矛盾同属厂商资料内部不一致。
+
+#### 四、客户决策：放弃云租赁
+
+**案例给出的结论** [c-hp-abandon-cloud]：
+
+> **该方案使客户放弃租用云算力，改用本地计算；工作站 7×24 稳定运行。**
+
+> **这与本报告 §12.8 的回收期推算方向一致**（大规模长期使用通常指向自购），但**属集成商自述、无成本明细，不能作为定量依据**。
+
+#### 五、与 §3.5 改水实测的对照
+
+两份四卡案例放在一起，能看出两条不同的工程路线：
+
+| | **本案例（商用整机）** | **§3.5（自建改水）** |
+|---|---|---|
+| SKU | **Server Edition** | Workstation Edition |
+| 散热 | 风冷/水冷**自相矛盾** | **明确水冷**（2 × 1260 mm 冷排） |
+| 温度 | 55–60°C（不可归因） | **54–58°C（有完整实测表）** |
+| 显存 | 384 GB | 384 GB |
+| 电源 | 3000 W | 双 1500 W（3 kW） |
+| 性能数据 | **无数值** | **41,081 tok/s、837.6 TFLOPS** |
+| 数据可信度 | 厂商自述 | **一手实测（primary）** |
+
+> **结论：商用整机给的是「能买到什么」，自建改水给的是「能做到什么」。前者无性能数据，后者有。**
 
 ### 4.10 官方参考架构：集群配比与一个与实测冲突的论断
 
@@ -6509,6 +6588,60 @@ sudo nvidia-bug-report.sh
 
 > **单卡试用与 8 卡部署面对的供应商集合并不相同。**
 
+#### 六点五、第三个价格源：中位价比起价稳定得多
+
+**Aquanode 是第四个独立来源** [c-an-third-price-source]（前三个：InferenceHub、GPUPerHour，以及 §12.8 已引的供应商页）：
+
+| 来源 | 起价 /GPU-hr | 中位 /GPU-hr |
+|---|---:|---:|
+| GPUPerHour | **$0.69** | $2.38 |
+| InferenceHub | **$0.92** | $2.45 |
+| **Aquanode** | **$1.66** | **$2.19** |
+| **极差** | **2.4×** | **11%** |
+
+> **这是本节最有用的一条结论** [c-an-median-more-stable]：
+>
+> **三个源的中位价高度一致（2.19 / 2.38 / 2.45，极差 11%），而起价相差 2.4 倍。**
+>
+> **因此引用租赁成本时应以中位价为准——起价只反映市场上存在个别极低价供给，不代表典型成本。**
+
+**而且 Aquanode 页面自身也有内部矛盾** [c-an-internal-price-conflict]：
+
+| 位置 | 最低价 |
+|---|---|
+| 正文与 FAQ | **$1.66** |
+| 下方价格表 | **$1.98** |
+
+> 未说明区别。**这进一步说明聚合站价格只能作量级参考。**
+
+#### 六点六、⚠️ 聚合站的规格表也会错，而且错在关键项
+
+**这条值得单独警告** [c-an-fp4-omission]：
+
+> **Aquanode 把 RTX PRO 6000 的硬件精度列为 FP32 / FP16 / BF16 / FP8 / INT4，漏掉了 FP4。**
+
+**而 FP4 正是 Blackwell 的关键能力**：本报告 §3.1 的官方规格有明确 FP4 条目，§4.4.1 的 NVFP4 实测也完全建立在 FP4 之上。
+
+> **漏掉 FP4 会直接导致误判「这张卡不能跑 NVFP4」。**
+>
+> **所以聚合站的规格表不可作为能力依据，须回到官方规格核对。**
+
+#### 六点七、兄弟型号的边界很清楚
+
+**RTX PRO 5000 vs 6000** [c-an-5000-comparison]：
+
+| 项 | RTX PRO 5000 | RTX PRO 6000 |
+|---|---:|---:|
+| **显存** | **48 GB** | **96 GB** |
+| **带宽** | **1,344 GB/s** | **1,792 GB/s** |
+| **TDP** | **300 W** | **600 W** |
+| 租赁起价 | **$0.955**（**便宜 43%**） | $1.66 |
+| 计算能力 | 12.0 | 12.0 |
+
+> **判据是「96 GB 是否为硬性门槛」**——是则选 6000，48 GB 够用则选 5000。
+>
+> **这与本报告 §4.1 的容量优先结论一致**
+
 #### ⚠️ 七、证据等级说明
 
 **这两个来源的 `trust_tier` 均为 `secondary`（聚合站，非一手供应商报价）**，因此本节的四条价格主张按不变量 **C1** 已全部降为 `medium`。
@@ -6828,6 +6961,8 @@ sudo nvidia-bug-report.sh
 - [FormulaMod — Bykski RTX PRO 6000 全覆盖水冷头 N-RTXPRO6000-SR](https://www.formulamod.net/products/bykski-gpu-water-block-for-nvidia-rtx-pro-6000-all-metal-structure-water-cooling-cooler-n-rtxpro6000-sr)（2026-10-27） — [src-formulamod-bykski]
 - [FormulaMod — Bykski RTX PRO 6000 600W 一体式水冷 B-FRD-RTXPRO6000-WS](https://www.formulamod.net/products/bykski-all-in-one-gpu-water-cooling-for-nvidia-rtx-pro-6000-water-cooling-system-liquid-cooler-360-radiator-b-frd-rtxpro6000-ws)（2026-10-27） — [src-formulamod-aio]
 - [Ever Awake (Sabareesh) — 4× RTX PRO 6000 Blackwell on Water, and the One Card That Wouldn't Behave](https://sabareesh.com/posts/blackwell-waterblock/)（2026-06-12） — [src-sabareesh-waterblock]
+- [HYPERPC — AMPERE X ULTRA：4× RTX 6000 Blackwell 计算工作站客户案例](https://hyperpc.ae/project/clients/ampere-x-ultra-for-ai)（2026-10-27） — [src-hyperpc-ampere]
+- [Aquanode — RTX PRO 5000 vs RTX PRO 6000: Specs, VRAM & Price](https://www.aquanode.io/compare/gpu/rtx-pro-5000-vs-rtx-pro-6000)（2026-10-27） — [src-aquanode-compare]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -7063,7 +7198,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=178, evidence=1388, claims=917, claims_high=685, claims_disputed=1, trace_events=357, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=180, evidence=1399, claims=927, claims_high=687, claims_disputed=1, trace_events=361, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
