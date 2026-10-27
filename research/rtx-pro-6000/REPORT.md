@@ -1151,6 +1151,23 @@ export FLASHINFER_FORCE_SM=120f
 | 无 NVLink | 多卡走 PCIe，P2P 关闭时延迟 14μs | [c-nvlink-absent] |
 | **夜构建解码回退** | 仅换镜像 tag，单流 decode −7.5% | [c-j8-vllm-regress] |
 | **主机 KV 缓存静默答错** | HiCache 竞态导致通顺但错误的回答 | [c-j8-hicache-bug] |
+| **vLLM 跑 MiniMax 崩溃** | MoE gate 层 CUDA illegal memory access，三个版本均复现 | [c-j8-mm-vllm-bug] |
+| **镜像 tag 与驱动不匹配** | latest-cu130 在 CUDA 13.1 上报 Error 803 | [c-j8-cuda-tag] |
+
+#### 10.3.0 一个可直接照抄的单卡 139B 配置
+
+并非所有坑都需要自己踩。MiniMax-M2.5（139B MoE / 10B 激活）在单卡 96GB 上有一份经过验证的配置 [c-j8-mm-deploy]：**68–69 tok/s、64K 上下文、权重占 81.6GB**。
+
+**两个非默认参数是关键** [c-j8-mm-kv][c-j8-mm-memfrac]：
+
+| 参数 | 默认/模型卡建议 | **必须改为** | 原因 |
+|---|---|---|---|
+| `--kv-cache-dtype` | bf16（模型卡建议） | **`fp8_e5m2`** | BF16 只有 **33K** token 容量，FP8 翻倍到 **67K**，才够用满 65K 上下文 |
+| `--mem-fraction-static` | 0.85–0.88 | **0.95** | 权重已占 81.6GB，默认值留不出 KV cache 空间 |
+
+**而 vLLM 在这条路上完全走不通** [c-j8-mm-vllm-bug]：0.15.1、0.16.0 与 cu130 夜构建**三个版本全部**在 MoE gate 层触发 `CUDA illegal memory access`，CUTLASS 与 Marlin 两种 GEMM 后端**均复现**（已提 issue #35566）。SGLang 的 FlashInfer MoE kernel 则无此问题。
+
+> **这是一个典型的"引擎选择决定可行性"案例**——不是快慢问题，是能不能跑的问题。
 
 #### 10.3.1 主机内存 KV 缓存会静默给出错误答案（本报告发现的最危险软件缺陷）
 
@@ -1201,6 +1218,12 @@ export FLASHINFER_FORCE_SM=120f
 - **NVFP4 是 SM120 的关键能力**，也是本地推理最重要的优化点 [c-nvfp4-native]
 - 投机解码需要 checkpoint 自带 draft head（Qwen3.5/3.6/3.8 系列支持）[c-mtp-benefit]
 - 训练侧：`gpu_burn` 类合成负载与真实推理对功耗墙的响应完全不同，**不要用合成负载推断推理性能** [c-memclock-invariant]
+
+**引擎更新的真实收益可以量化** [c-j8-version-gain]：同硬件、同模型、同脚本，一个月内 vLLM NVFP4 **+4.9%**、vLLM GPTQ +2.9%、SGLang +1.0%、Ollama +4.2%，**排序未变**。按此速度年化约 **30–50%**，不换硬件就能拿到。
+
+> **但"配置比版本更重要"** [c-j8-config-wins]：该实验室测到的**最大单项性能差距不是软件更新**，而是修正 Ollama 的并行请求设置。
+>
+> **这与本报告 §4.3.3 的 NCCL 结论完全同向**（一条 `NCCL_MIN_NCHANNELS=8` 带来 +69%，远超任何版本升级）。**先调参，再升级。**
 
 ### 10.5 在役退化风险：这是本报告最需要警示的运维问题
 
@@ -1698,7 +1721,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **455 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **466 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1771,3 +1794,5 @@ python scripts/validate_research.py research/rtx-pro-6000
 73. [Joshua8.AI：追踪 vLLM 夜构建中 8% 的解码回退](https://joshua8.ai/vllm-nightly-decode-regression-qwen35/)（2026-04-13） — [src-j8-nightly]
 74. [Joshua8.AI：同一张卡快一倍——Qwen3.8-Flash-Next 在 RTX PRO 6000 Max-Q 上的八周](https://joshua8.ai/qwen38-flash-next-penny-royal-rtx-pro-6000/)（2026-10-22） — [src-j8-penny]
 75. [Joshua8.AI：为什么投机解码没有加速我的 120B 模型](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
+77. [Joshua8.AI：在单张 RTX 6000 上运行 MiniMax-M2.5（68 tok/s / 64K 上下文完整配置）](https://joshua8.ai/minimax-m25-rtx-6000-blackwell-sglang-guide/)（2026-02-28） — [src-j8-minimax]
+78. [Joshua8.AI：推理引擎的版本更新真的更快吗（月度同口径对比）](https://joshua8.ai/llm-inference-benchmark-update/)（2026-02-15） — [src-j8-update]
