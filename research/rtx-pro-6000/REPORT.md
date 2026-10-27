@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：70 ｜ **证据数**：426 ｜ **主张数**：279（高置信 195，争议 1）
+> **来源数**：75 ｜ **证据数**：455 ｜ **主张数**：298（高置信 213，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -245,6 +245,20 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 
 **容量结论**：单卡舒适区是 20B–35B；70B 需量化；235B 级不该考虑单卡 [c-96gb-band]。
 
+#### 4.1.1 容量上限的例外：127GB 模型能跑在 96GB 卡上
+
+上面的表是"权重必须装进显存"的假设。**这个假设可以被打破** [c-j8-127gb]。
+
+一个 127GB 的模型（Qwen3.8-Flash-Next NVFP4）实际跑在了 96GB 的 Max-Q 上，做法是：
+
+> **48GB 的 PLE n-gram 嵌入表放在主机内存**，而不是显存。
+
+关键差异在于**引擎支持程度**：
+- **SGLang 开箱支持**这种 CPU offload
+- **vLLM 的 PLE CPU offload 在 TP=1 下死锁**（两处），作者"从未让 vLLM 在这张卡上成功响应过一个请求"
+
+**这扩展了"96GB 能装什么"的上限**——代价是主机内存占用与一点延迟。对**单卡部署 100B+ 模型**的场景，这是一条此前本报告未记录的可行路径。
+
 ### 4.2 单卡实测吞吐
 
 | 模型 | 参数 | TTFT p95 | TPOT | 单流 tok/s | 精度 |
@@ -262,6 +276,32 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 峰值与预填充：
 - llama-3.1-8B 峰值输出约 **11,500 tok/s**；gpt-oss-20b 约 **8,900 tok/s**（单卡）[c-single-gpu-8b-peak]
 - 8k 提示词 prefill 约 **170k–220k tok/s** → 长上下文与 RAG 是该卡最具成本优势的场景 [c-prefill-throughput]
+
+#### 4.2.1 Max-Q 的完整并发曲线（此前是本报告的明确缺口）
+
+本报告此前多次标注"Max-Q 缺少独立实测吞吐"。现补齐 [c-j8-maxq-thr]。
+
+**测试条件**：Qwen3-VL-30B-A3B-Instruct、AWQ-4bit、fp8 KV、`max-model-len=16384`、vLLM v0.16.0rc2 [e-j8-v016-setup]。
+
+| 并发 | **Max-Q (300W)** | RTX 5090 (575W) |
+|---:|---:|---:|
+| 1 | 228 | **259** |
+| 2 | 357 | **404** |
+| 4 | 648 | **728** |
+| 16 | 2,134 | **2,322** |
+| 32 | 3,446 | **3,855** |
+| 64 | 5,295 | 显存不足 |
+| **128** | **7,844** | 显存不足 |
+
+**第一个反直觉结论** [c-j8-maxq-vs-5090]：**在 1–32 并发区间，RTX 5090 比 Max-Q 稳定快 11–13%**——尽管 Max-Q 的核心数更多（24,064 vs 21,760）。
+
+原因是**功耗预算**，不是核心数：**575W vs 300W**，几乎翻倍的热余量直接转化为更高的有效频率 [e-j8-v016-cap]。
+
+**第二个结论** [c-j8-maxq-scale]：扩展倍数差异巨大——**5090 从 c=1 到 c=32 提升 16.2 倍；Max-Q 从 c=1 到 c=128 提升 34.4 倍**。**96GB 的容量优势只在高并发时才兑现**。
+
+**必须记住的前提** [c-j8-maxq-600w]：作者明确指出这是 **300W Max-Q**，600W 版在 prefill 上应更快、decode 上也略快，因此**以上数字应视为 600W 版的性能下限**。
+
+**这修正了一个简化认知** [c-j8-decode-cap]：通常说"decode 受带宽限制、不触功耗墙"。但在**投机解码**下这不成立——每步验证 4–8 个草稿 token 是**真实计算**，实测 decode 期间 **54% 的忙碌采样处于功耗封顶状态**（SM 2,010–2,295 MHz，上限 3,090 MHz）。
 
 ### 4.3 多卡扩展与通信约束
 
@@ -503,6 +543,38 @@ Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存
 **一个有用的交叉验证** [c-500w-tie]：500W 功耗墙下，同一模型在 llama.cpp 与 vLLM 上分别跑到 70.3 与 72.1 tok/s，**基本持平** [e-t2-speed]。这从第二条软件路径独立佐证了 §6.4 的结论：**500W 与 600W 在推理上差异很小**。
 
 **实际可用的上下文能力** [c-longctx-256k]：双卡各 500W 的部署中，每副本 4 槽、池化 1,048,576 token，单槽硬上限 **262,144 token** [e-t2-ctx]。这是 96GB + Q8_0 KV 的真实可用值，不是营销数字。
+
+### 4.8 投机解码不总是有效：一个必须并列的反面证据
+
+本报告 §4.4、§4.5.1 用大量数据显示 MTP 带来 +51%~+72% 的加速。**但这不是普遍规律**——同一实验室在另一组合上得到完全相反的结论 [c-j8-eagle3-fail]。
+
+**测试**：GPT-OSS-120B（MXFP4，117B 总参/5.1B 激活）、单卡 RTX PRO 6000 Max-Q、vLLM v0.12.0、Eagle3 草稿模型。
+
+| 配置 | 创意写作 | 摘要任务 |
+|---|---:|---:|
+| **基线（无投机）** | **~180** | **~180** |
+| Eagle3（2 token） | 146 | 177 |
+| Eagle3（4 token） | 118 | 154 |
+
+**基线获胜**。摘要任务上 Eagle3 追到基线的 98%（在误差内），但**从未更快**；创意写作上全面落后。
+
+**根因分析很清晰** [c-j8-eagle3-cond]：
+
+| 条件 | 本次测试 | 投机解码需要 |
+|---|---|---|
+| 瓶颈类型 | **带宽饱和**（单流已吃满 1792 GB/s） | 计算受限 |
+| 草稿接受率 | **~45%**（创意任务） | **>60%** |
+| 并发 | 1 | 多并发 |
+| 任务类型 | 创意/开放 | 摘要/RAG/代码（高输入输出重叠） |
+
+作者原话："I'm already saturating memory bandwidth at 180 tok/s with autoregressive decoding. **There's no latency to hide.**"
+
+> **如何与 MTP 的正面结果共存**：两者不矛盾，但必须看清楚差异。
+> - MTP 是**模型自带的草稿头**（权重与目标模型同源），接受率高；Eagle3 是**独立草稿模型**，接受率低
+> - MTP 的正面数据多在 **NVFP4 + 高并发**下取得（计算受限）；Eagle3 的反例是 **单流 + 带宽饱和**
+> - **§4.5.1 的 MTP 数据确实是并发 1–32 全面提升**，说明关键在于草稿头质量而非仅并发
+>
+> **可操作的判据**：上投机解码前，先测**草稿接受率**。低于 60% 就别上。
 
 ---
 
@@ -1077,7 +1149,52 @@ export FLASHINFER_FORCE_SM=120f
 | Server 版早期无 Windows 驱动 | Linux 需内核 6+ / GCC 12 | [c-driver-gap] |
 | 塔式机箱散热不足 | Server 版 >500W 降频 | [c-thermal-chassis-limit] |
 | 无 NVLink | 多卡走 PCIe，P2P 关闭时延迟 14μs | [c-nvlink-absent] |
+| **夜构建解码回退** | 仅换镜像 tag，单流 decode −7.5% | [c-j8-vllm-regress] |
+| **主机 KV 缓存静默答错** | HiCache 竞态导致通顺但错误的回答 | [c-j8-hicache-bug] |
 
+#### 10.3.1 主机内存 KV 缓存会静默给出错误答案（本报告发现的最危险软件缺陷）
+
+这是本轮最重要的软件发现 [c-j8-hicache-bug]。
+
+**现象**：开启主机内存 KV 缓存（HiCache / 分级缓存，把 GPU 淘汰的 radix 缓存留在系统内存）后——
+
+> **18 项针测试只有 12 项通过，18 次回复中只有 3 次与冷启动一致。模型流利但错误地回答。作者原话："That's the worst failure mode there is."**
+
+**为什么这比崩溃更危险**：
+- **无任何报错**，服务器指标全部正常
+- 输出**语法正确、语义通顺**，肉眼无法识别
+- 只有在**同一问题对比冷启动答案**时才能发现
+- 而缓存命中本来就是为了"快回来"，**没人会再验一遍**
+
+**根因** [c-j8-hicache-root]：**缺少一个等待**——QSA 压缩键读取器在读取前，没有等待该层的 host→GPU 拷贝完成，形成竞态。上游 SGLang 已修复同一竞态。
+
+**修复后验证** [c-j8-hicache-root]：9/9 针测试通过且与冷启动**完全一致**；1 小时 4 客户端浸泡测试 **516/516** 通过。
+
+**可操作的教训** [c-j8-cache-verify]：
+1. **必须测缓存命中，而不只是冷启动**——"A wrong answer from a fast cache hit looks exactly like a right one"
+2. **用唯一提示词做基准**——复用填充内容测的是缓存命中，不是 prefill
+3. **锁定镜像 digest 并校验**，不要跟着移动 tag 走
+
+#### 10.3.2 夜构建可能比上个月更慢：一次可复现的 8% 回退
+
+"升级到最新版"不总是更快 [c-j8-vllm-regress]。同一张卡、同一配置、同一命令，**只改镜像 tag**：
+
+| 镜像 | 单流 | 2 并发 | 4 并发 | 8 并发 |
+|---|---:|---:|---:|---:|
+| `cu130-nightly-mar23` | **198.3** | 342.3 | 653.9 | **1,119.1** |
+| `cu130-nightly`（当前） | 183.5 | 298.7 | 582.0 | 1,030.8 |
+
+**单流 −7.5%，8 并发 −7.9%**。
+
+**根因** [c-j8-vllm-cause]：PR #38152，**8 行改动**，移除了 Qwen3/Qwen3.5 输入投影的**双流并行执行**（改为顺序执行）。作者二分了 **315 个 commit** 才定位到它。
+
+而 PR 描述是**诚实的**：
+
+> "This will regress cold compile times by ~4x. So this PR temporarily reverts dual stream optimization... TODO: Re-enable dual stream after #38123 and upgrade to Pytorch 2.11."
+
+> **这是一个"以运行时换编译时"的自觉取舍，不是 bug**。教训是：**读 PR 描述，而不只是看 diff**。性能回退常常以"权衡"的形式出现。
+
+**三条应对**：锁定旧镜像 digest / 覆盖那 5 行 Python 恢复并行分支 / 等官方修复。
 
 ### 10.4 软件栈现状
 
@@ -1570,12 +1687,18 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q30 | Server 版 TDP 与散热约束？ | ✅ | §3.1 注释（400–600W 可配 + 被动散热） |
 | q31 | 采购渠道有什么风险？ | ✅ | §12.7 保修归属真空 + 假卡物证 |
 | q32 | 真实生产场景的墙钟时间？ | ✅ | §7.2.1 Corona/Vantage 实测 |
+| q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
+| q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
+| q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
+| q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
+| q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
+| q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
 
-**完成度：31/32 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：34/35 已答（1 项按 C3 永久并列）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **426 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **455 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1583,7 +1706,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=70, evidence=426, claims=279, claims_high=195, claims_disputed=1`
+当前校验结果：`sources=75, evidence=455, claims=298, claims_high=213, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1634,3 +1757,17 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 69. [NVIDIA Developer Forums：NVIDIA 品牌 RTX PRO 6000 WE 保修归属争议（PNY 书面否认序列号）](https://forums.developer.nvidia.com/t/nvidia-branded-rtx-pro-6000-we-warranty-claim-pny-denies-serial-in-writing-enterprise-support-closes-case-same-day-who-services-warranty-for-nvidi/380744/4)（2026-10-07） — [src-nvf-warranty]
 70. [Joshua Odmark：从 Provantage 买的 RTX Pro 6000 拆开是什么（假卡物证）](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-provantage-fake]
+### 引擎实测与软件缺陷（第七轮补充）
+
+71. [Joshua8.AI：Blackwell GPU 上的 LLM 运行指南（总览）](https://joshua8.ai/blackwell-inference/) — [src-j8-guide]
+72. [Joshua8.AI：vLLM v0.16.0 在 Blackwell 上吞吐提升至 20%（Max-Q 并发曲线）](https://joshua8.ai/vllm-v016-blackwell-throughput-benchmark/)（2026-02-25） — [src-j8-v016]
+73. [Joshua8.AI：追踪 vLLM 夜构建中 8% 的解码回退](https://joshua8.ai/vllm-nightly-decode-regression-qwen35/)（2026-04-13） — [src-j8-nightly]
+74. [Joshua8.AI：同一张卡快一倍——Qwen3.8-Flash-Next 在 RTX PRO 6000 Max-Q 上的八周](https://joshua8.ai/qwen38-flash-next-penny-royal-rtx-pro-6000/)（2026-10-22） — [src-j8-penny]
+75. [Joshua8.AI：为什么投机解码没有加速我的 120B 模型](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
+### 引擎实测与软件缺陷（第七轮补充）
+
+71. [Joshua8.AI：Blackwell GPU 上的 LLM 运行指南（总览）](https://joshua8.ai/blackwell-inference/) — [src-j8-guide]
+72. [Joshua8.AI：vLLM v0.16.0 在 Blackwell 上吞吐提升至 20%（Max-Q 并发曲线）](https://joshua8.ai/vllm-v016-blackwell-throughput-benchmark/)（2026-02-25） — [src-j8-v016]
+73. [Joshua8.AI：追踪 vLLM 夜构建中 8% 的解码回退](https://joshua8.ai/vllm-nightly-decode-regression-qwen35/)（2026-04-13） — [src-j8-nightly]
+74. [Joshua8.AI：同一张卡快一倍——Qwen3.8-Flash-Next 在 RTX PRO 6000 Max-Q 上的八周](https://joshua8.ai/qwen38-flash-next-penny-royal-rtx-pro-6000/)（2026-10-22） — [src-j8-penny]
+75. [Joshua8.AI：为什么投机解码没有加速我的 120B 模型](https://joshua8.ai/speculative-decoding-experiment/)（2025-12-12） — [src-j8-eagle3]
