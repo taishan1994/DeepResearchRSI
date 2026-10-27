@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：157 ｜ **证据数**：1194 ｜ **主张数**：765（高置信 569，争议 1）
+> **来源数**：158 ｜ **证据数**：1198 ｜ **主张数**：773（高置信 574，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2403,7 +2403,12 @@ Blender 的 Server 版成绩，两个来源相差 **99%**（第 32 轮用原始�
 | Blender Open Data（众测） | **18,580** | 50 个完整 run 原始复算 [c-bsn-server-real]；原记 15,821 无法复现 |
 | Drop & Render（自建库） | **9,382** | 农场方自测，标注"3 of 4 benchmarks" [e-dr-se-blender] |
 
-**本报告不对该冲突做裁决** [c-blender-conflict]。可能原因：Blender 版本不同、测试场景子集不同、Server 卡在测试机箱内的散热条件不同（被动散热卡对风道极敏感，见 §6.5）。
+**本报告不对该冲突做裁决** [c-blender-conflict]。
+
+> ⚠️ **但两侧的证据等级并不对等**（§7.3.12 取到 Drop & Render 方法学后修订）[c-dr-conflict-revised]：
+> **Open Data 一侧可用 `613491/几何均值` 逐条复算且 WS 侧已验证吻合；
+> Drop & Render 一侧自承数据为「自测 + 机器学习推算 + 公开数据」三类混合，且未公开 Blender 分的版本、场景子集与运行次数。**
+> **所以「两个对等实测并列」这个框架应当放弃，改为「一手可复算数据 vs 方法未完全公开的聚合值」。冲突保留，但需按此权重阅读。**可能原因：Blender 版本不同、测试场景子集不同、Server 卡在测试机箱内的散热条件不同（被动散热卡对风道极敏感，见 §6.5）。
 
 #### 7.3.1 本轮补充到的冲突元数据（仍不足以裁决）
 
@@ -3126,6 +3131,94 @@ issue #150282 报告 **5.0 在部分重型场景上渲染时间接近翻倍**：
 > **所以不是笼统的「多卡无用」，而是「多卡要用来分帧，不要用来分同一帧」。**
 >
 > **静帧场景没有这个选项——这是 96GB 真正不可替代的地方。**
+
+#### 7.3.12 找到 Drop & Render 的方法学了：它的分数有一部分是机器算出来的
+
+前面几节反复出现一个未解的冲突：**同一张 Server 卡，Open Data 给 18,580，Drop & Render 给 9,382**。这一轮终于**取到了 D&R 自己的方法学说明**——而它改变了这个冲突的性质。
+
+#### D&R 自承：分数含机器学习推算
+
+其 Methodology 段原文 [c-dr-ml-estimated]：
+
+> *"Once we have **two or more benchmarks** for a device we can perform some **machine learning computations** to estimate a realistic score in any of the other benchmarks we list. These are always marked with an asterisk (*), and while usually accurate shouldn't be taken as the complete truth."*
+
+**数据是三类混合** [c-dr-three-parts]：
+
+| 来源 | 说明 |
+|---|---|
+| 自建测试 | 10 年、1000+ GPU、500+ CPU |
+| **机器学习推算** | 带 `*` 号 |
+| 公开基准站数据 | 可能补充 OctaneBench / V-Ray / Blender Benchmark |
+
+> **所以它不是「独立第三方实测」，也不是「纯自测」——而是一个混合聚合库。**
+
+#### 但 Blender 那个 16,272 不是推算的
+
+这点必须说清，否则会误伤 [c-dr-blender-not-estimated]：
+
+> **页面标注 `Measured: 3 of 4 benchmarks`（四个基准实测三个），而带星号的只有 Cinebench 58,099。**
+>
+> **Blender 16,272 不带星号** → 属实测或取自公开 Blender Benchmark 数据。
+
+#### 真正被削弱的是「两源对等」这个前提
+
+**关键点** [c-dr-se-blender-suspect]：
+
+> D&R **未公开**其 Blender 分数的**版本、场景子集、运行次数**三者中的任何一个。
+>
+> 结合它自承存在多源混合，**9,382 不能被当作与 Open Data 同口径的实测值。**
+
+**这直接修订了 §7.3 的处置方式** [c-dr-conflict-revised]：
+
+| | Open Data | Drop & Render |
+|---|---|---|
+| 可复算性 | **可用 `613491/几何均值` 逐条复算**，WS 侧已验证吻合 | 方法未完全公开 |
+| 数据性质 | 一手众测原始记录 | **自测 + ML 推算 + 公开数据混合** |
+| 证据等级 | **较高** | **较低** |
+
+> **冲突仍然存在，但两侧的证据等级不对等。**
+>
+> **所以本报告不改 `disputed` 状态，只把描述从「两个对等实测并列」改为「一手数据 vs 方法未公开的聚合值」。**
+
+#### 最有价值的新证据：V-Ray 上方向反转
+
+这是本轮**最能推进诊断的一条** [c-dr-se-vray-leads]：
+
+| 渲染器 | WS 版 | Server 版 | 方向 |
+|---|---:|---:|---|
+| **Blender** | 16,272 | **9,382** | **Server 落后 42%** |
+| **V-Ray** | 11,994 | **14,827** | **Server 领先 24%** |
+
+> **同一站、同一方法、同一对卡，两个渲染器给出相反的方向。**
+>
+> **这说明「Server 版渲染更差」不是普遍结论，而可能是特定于 Blender 的现象。**
+
+#### 整个「渲染性能」排序是渲染器依赖的
+
+| 卡 | Blender | OctaneBench | V-Ray |
+|---|---|---|---|
+| **WS 版** | **#1 / 493** | **#1 / 156** | #2 / 210 |
+| **Server 版** | **#17 / 493** | #4 / 156 | **#1 / 210** |
+
+> **Server 版在 V-Ray 是第 1，在 Blender 只排第 17** [c-dr-renderer-dependent]。
+>
+> **选型必须按渲染器分别看，不能用单一的「渲染性能」排序做决策。**
+
+#### 顺带：农场的 48 倍
+
+D&R 给了一个具体对照 [c-dr-farm-48x]：
+
+| | 250 帧、每帧 5 分钟 |
+|---|---:|
+| 本地单张 RTX PRO 6000 | **20 小时 50 分** |
+| 其农场（Diamond 档） | **26 分钟**（约 48×） |
+| 费用 | 自 140.44 欧元起 |
+
+> **与本报告 §7.3.11 的帧级并行结论方向一致**——但 **48 倍需要约 48 台以上机器同时可用**，属服务商最优情形，标 `medium`。
+
+#### 未采到的来源
+
+**Puget Systems 的 RTX PRO 6000 Content Creation Review** 三次尝试均返回 **HTTP 403**（Cloudflare 验证页）。**这是本报告最遗憾的一个缺口**——Puget 的方法学（多轮重复、公开测试文件）本是裁决 D&R 冲突的理想第三方。
 
 ### 7.4 视频与专业特性
 
@@ -5309,6 +5402,7 @@ sudo nvidia-bug-report.sh
 - [Blender Foundation — 官方 issue #147954（Cycles 基准场景 GPU 占用率，open）与 #150282（5.0 重型场景翻倍，closed）](https://projects.blender.org/blender/blender/issues/147954)（2025-10-13 / 2025-11-20） — [src-blender-issues]
 - [JANCTION Render — Blender on an RTX PRO 6000 (96 GB), paid by the second：实测每帧 GPU 秒与价格](https://render.janction.jp/rtx-pro-6000-blender-rendering)（2026-10-26） — [src-janction]
 - [JANCTION Render — Benchmarks：按分辨率/帧数/采样数的 GPU 秒矩阵（含 CSV 原始数据与可复现场景 zip + sha256）](https://render.janction.jp/benchmarks)（2026-10-01） — [src-janction-bench]
+- [Drop & Render（blendercloudrender.com）— RTX PRO 6000 Blackwell Workstation Edition 渲染基准页，含 Methodology 段（自建测试 + 机器学习推算 + 公开数据三类混合）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-workstation-edition)（2026-10-26） — [src-dnr-gpu-bench]
 
 ---
 
@@ -5445,7 +5539,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=157, evidence=1194, claims=765, claims_high=569, claims_disputed=1, trace_events=322, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=158, evidence=1198, claims=773, claims_high=574, claims_disputed=1, trace_events=324, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
