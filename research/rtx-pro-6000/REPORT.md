@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：162 ｜ **证据数**：1248 ｜ **主张数**：812（高置信 609，争议 1）
+> **来源数**：163 ｜ **证据数**：1265 ｜ **主张数**：823（高置信 619，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1984,6 +1984,113 @@ TTFT P95 只从 198 降到 179 ms（−10%），而 TPOT 降了 41% [c-mtp-ttft-
 **结论**：如果你的模型本来就能塞进 32GB，PRO 6000 只快 15–20%（实测口径），价格却是 3–8 倍 [c-vs-5090-15-20]。**溢价买的是"装得下"和"跑得稳"，不是"算得快"**。
 
 ---
+
+### 5.3 一台机器上的并排对照：五项领先、两项落后
+
+前面几节的对比都来自**不同来源、不同机器**。这一节补上**真正的受控并排测试**——StorageReview 在**同一台 Threadripper 64 核水冷平台**上同时测了 RTX PRO 6000 WS、RTX 5090 FE、RTX 4090 FE、RTX 6000 Ada 四张卡 [e-sr-platform]。
+
+#### 结论先说：不是全项领先
+
+| 测试 | PRO 6000 | RTX 5090 | **差距** | 谁赢 |
+|---|---:|---:|---:|---|
+| **Blender 4.4**（三场景均） | — | — | **+6.3%** | PRO 6000 |
+| LuxMark Hall | 52,588 | 51,725 | +1.7% | PRO 6000 |
+| Geekbench 6 OpenCL | 384,158 | 374,807 | +2.5% | PRO 6000 |
+| Procyon SD 1.5 FP16 | 8,869 | 8,193 | +8.3% | PRO 6000 |
+| **V-Ray 6** | **12,128** | **14,764** | **−21.7%** | **5090** |
+| **Procyon SDXL FP16** | **6,991** | **7,179** | **−2.6%** | **5090** |
+| Procyon SD 1.5 INT8 | 79,064 | 79,272 | −0.3% | 打平 |
+
+> **五项领先、两项落后、一项打平** [c-sr-renderer-split]。
+>
+> **所以「PRO 6000 是否比 5090 快」在所有测试上都没有统一答案。**
+
+#### Blender 的差距比想象中小得多
+
+| 场景 | PRO 6000 | RTX 5090 | 差距 |
+|---|---:|---:|---:|
+| Monster | 7,870.17 | 7,421.50 | **+6.0%** |
+| Junkshop | 4,158.91 | 3,980.15 | **+4.5%** |
+| Classroom | 4,041.11 | 3,732.63 | **+8.3%** |
+
+> **三场景平均只领先 6.3%，是全套测试里差距最小的一组** [c-sr-blender-narrow]。
+>
+> **这与 Open Data 众测「两者几乎相同」的结论方向一致**——两套完全不同的方法在同一结论上收敛。
+
+#### V-Ray 上 5090 领先 21.7%
+
+> **14,764 对 12,128** —— 这是**第三个独立来源**确认「消费级 5090 在 V-Ray 上不吃亏」，且给出了比 Open Data 和 Drop & Render 更大的差距 [c-sr-vray-loses]。
+
+#### INT8 上两者完全打平，原因说得很清楚
+
+| 测试 | PRO 6000 | RTX 5090 |
+|---|---:|---:|
+| SD 1.5 **FP16** | **8,869** | 8,193 |
+| SD 1.5 **INT8** | 79,064 | **79,272** |
+
+> **FP16 上 PRO 6000 领先 8.3%，INT8 上反而落后 0.3%。**
+>
+> **评测者的解释**：INT8 负载对**显存带宽与容量的依赖较低**，所以差异消失 [c-sr-int8-saturates]。
+
+#### 96 GB 的价值在这一项上无可争议
+
+**LM Studio 多模型推理**（同一 500 词提示）[e-sr-lmstudio]：
+
+| 模型 | tok/s | 首字延迟 | 总时长 |
+|---|---:|---:|---:|
+| **GPT-OSS 120B** | **163.15** | 0.193 s | 9.543 s |
+| Gemma 3 4B | **226.73** | 0.113 s | 3.51 s |
+| Llama 3.1 8B | 197.07 | 0.062 s | 4.171 s |
+| Gemma 3 12B | 117.15 | 0.068 s | 8.06 s |
+| Gemma 3 27B | 68.06 | 0.221 s | 12.048 s |
+| Llama 3.1 70B | **31.84** | 0.159 s | 27.227 s |
+| Llama 3.3 70B | 31.74 | 0.323 s | 25.329 s |
+
+> **评测者明确指出：RTX 5090 这类卡无法加载或执行 120B 模型，甚至常常处理不了 70B，因为显存不足** [c-sr-96gb-unique]。
+>
+> **这是本报告迄今对「96 GB 买到的是能力而非速度」最直接的一次实证**——PRO 6000 能用 163 tok/s 跑 120B，而 5090 根本跑不了。
+
+**但也要看非线性** [c-sr-70b-slowdown]：
+
+> **4B → 226.73 tok/s，27B → 68.06（降 3.3 倍），70B → 31.8（相对 8B 降 6.2 倍）。**
+>
+> **96 GB 解决的是「能不能跑」，不解决「跑得多快」。**
+
+#### 一个口径陷阱：token 速率会低估差距
+
+| 模型 | PRO 6000 总分 | 5090 总分 | 分差 | **token 速率差** |
+|---|---:|---:|---:|---:|
+| Phi | 6,775 | 5,749 | **+17.8%** | **+3.6%** |
+| Mistral | 7,346 | 6,267 | **+17.2%** | **+6.2%** |
+| Llama3 | 6,501 | 6,104 | **+6.5%** | **+5.7%** |
+| Llama2 | 8,008 | 6,591 | **+21.5%** | **+8.2%** |
+
+> **总分差 6.5%–21.5%，但 token 速率差只有 3.6%–8.2%** [c-sr-token-vs-score]。
+>
+> **因为总分里还含首字延迟等分量。只看 token/s 会系统性低估工作站卡的相对优势。**
+
+#### 整机功耗：与 4090 完全相同
+
+| 卡 | SDXL FP16 总能耗 |
+|---|---:|
+| RTX 5090 | **1.16 Wh** |
+| **RTX PRO 6000** | **1.35 Wh** |
+| RTX 4090 | **1.35 Wh** |
+| RTX 6000 Ada | 1.76 Wh |
+
+> 区间 **5.3 秒**、平均系统功耗 **918.5 W**、峰值 **1,036.3 W**、空闲 **152.3 W** [c-sr-power-918w]。
+>
+> ⚠️ **这是整机功耗，与 §6 的卡级读数不是同一口径，不可混算。**
+
+**评测者的判断** [c-sr-power-converged]：
+
+> **同为 GB202 的新 Blackwell 卡能效特征非常接近，差异主要来自 TDP——这一代是在细化每瓦性能，而非大幅改变它。**
+
+#### 顺带：一个价格冲突
+
+**StorageReview 记录首发价 8,500 美元** [c-sr-price-8500]，而 Drop & Render 记录街价 **17,999 美元**——**相差一倍以上**。
+
+> **方向与「首发价之后应降价」相反**，所以更可能是**两个来源口径不同**（首发建议价 vs 稀缺期零售价），而非价格真在上涨。标 `medium`，本报告无法判断哪个对应真实成交价。
 
 ## 6. 功耗与能效：600W 是否值得
 
@@ -5809,6 +5916,7 @@ sudo nvidia-bug-report.sh
 - [local-inference-lab / rtx6kpro — PCIe Bandwidth & P2P Performance（RTX PRO 6000 多卡 P2P / NCCL 实测汇总）](https://github.com/local-inference-lab/rtx6kpro/blob/main/hardware/pcie-bandwidth.md)（2026-10-27） — [src-rtx6kpro-pcie]
 - [local-inference-lab / rtx6kpro — Collapse Report：PCIe 交换机拓扑下跨交换机 P2P 写带宽塌陷 75–93% 的复现](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/collapse-report.md)（2026-10-27） — [src-6kpro-collapse]
 - [local-inference-lab / rtx6kpro — 8-GPU Group Comparison: Shared vs Separate CPU Root Complexes（root 布局受控对照）](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/wrx90-cpayne-8gpu-root-topology-comparison.md)（2026-10-27） — [src-6kpro-root-topo]
+- [StorageReview — NVIDIA RTX PRO 6000 Workstation GPU Review: Blackwell Architecture and 96 GB for Pro Workflows](https://www.storagereview.com/review/nvidia-rtx-pro-6000-workstation-gpu-review-blackwell-architecture-and-96-gb-for-pro-workflows)（2025-10-07） — [src-storagereview]
 
 ---
 
@@ -5945,7 +6053,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=162, evidence=1248, claims=812, claims_high=609, claims_disputed=1, trace_events=332, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=163, evidence=1265, claims=823, claims_high=619, claims_disputed=1, trace_events=334, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
