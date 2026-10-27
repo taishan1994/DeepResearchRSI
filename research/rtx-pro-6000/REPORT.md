@@ -1583,6 +1583,47 @@ export FLASHINFER_FORCE_SM=120f
 
 补充社区实测的第三个前提 [c-vbios-secureboot]：**DisplayModeSelector 要求关闭 Secure Boot** 才能在 Ubuntu 24.04 上运行。
 
+**但必须给上面的结论加一个限定：vBIOS 版本是必要条件，不是充分条件** [c-mig-vbios-not-sufficient]。
+
+一张 Max-Q 卡带 **`98.02.6A.00.03`**（满足门槛），直接执行：
+
+```
+$ nvidia-smi -i 0 -mig 1
+Unable to enable MIG Mode for GPU 00000000:01:00.0: Not Supported
+```
+
+**报 Not Supported。** 原因不是 vBIOS——**是漏了 `displaymodeselector` 切 compute 这一步**。同一用户在补上该步骤后成功启用 [e-l1t-why]。
+
+> **这是个高频误判**：看到 `Not Supported` 就以为版本不够，然后去追 vBIOS。**先确认显示模式。**
+
+**官方文档本身也有过错值** [c-mig-doc-typo]：2025-06 时点该页写的是 Max-Q 需 **`98.02.6A.00.08`**，后来出现的 `98.02.6A.00.00` **被社区确认为笔误** [e-l1t-typo-confirm]。**所以门槛数字本身也有噪音，不能当作精确判据。**
+
+**启用过程在实践中不稳定，且与操作系统相关** [c-mig-flaky]：
+
+| 环境 | 结果 |
+|---|---|
+| Linux（关 Secure Boot、卸载 nvidia 模块） | `displaymodeselector` 报 **PROGRAMMING error - HW address** |
+| Windows（关内存完整性） | 切模式成功，但 MIG 仍 **Not Supported** |
+| 回到 Linux 再试 | **反而成功了** |
+
+另有用户报告 **Windows 11 完全无法启用 MIG**（怀疑与 Hyper-V 有关）[e-l1t-win]。
+
+**「放弃物理显示输出」已被坐实** [c-mig-headless]：社区确认**完全没有任何物理输出**，单卡机器只能纯无头运行或另装一张卡；替代方案是 **Looking Glass** [e-l1t-nophys]。
+
+**MIG 实例直通虚拟机在实践中很难** [c-mig-passthru-hard]：有用户明确表示截至 2025-08 **未能成功**，仅 Wendell 在 Arch 上做到但他人**无法复现** [e-l1t-passthru]。这与 §10.10 的 VFIO 风险叠加。
+
+**渠道差异可以量化** [c-mig-channel-var]：
+
+| 渠道 | 结果 |
+|---|---|
+| **PNY** | ✅ 工单 **24 小时内**给出 Google Drive 链接（Linux + Windows 两套工具） |
+| **Exxact** | ⏳ 称"尚未拿到，正在联系" |
+| 某渠道伙伴 | ❌ 根本拿不到 |
+
+**终点版本** [c-mig-update-result]：升级后为 **`98.02.81.00.07`**（原 `98.02.52.00.02`），该用户升级后成功启用 MIG 并分配 profile。
+
+**刷写有变砖风险** [c-mig-brick-risk]：社区建议**必须经由自己的销售代表操作**以留证据链 [e-l1t-brickrisk]。这与 §10.9 的「无公开重刷工具」构成叠加风险——**刷坏了很可能只能 RMA**。
+
 **实例规格可以读出来** [c-mig-instance]：单实例 **188 个 SM**、**4 CE / 4 ENC / 4 DEC / 1 OFA / 4 JPG**、显存约 **97,251 MiB**、BAR1 **131,072 MiB（128GB）** [e-mig44-smi]。
 
 **厂商承认这是一次发布疏漏** [c-vbios-omission]，NVIDIA 员工的原文：
@@ -2347,7 +2388,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **637 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **652 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2446,3 +2487,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 104. [NVIDIA：MIG User Guide —— Supported GPUs（三款 RTX PRO 6000 SKU 均支持，最多 4 实例）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/supported-gpus.html)（更新 2026-10-13） — [src-nv-mig-gpus]
 105. [NVIDIA：MIG User Guide —— Getting Started with MIG（RTX PRO Blackwell 附加前提：最低 vBIOS 按 SKU 分列）](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/latest/getting-started-with-mig.html)（更新 2026-10-13） — [src-nv-mig-start]
 106. [llama.cpp Discussion #24622：One million tokens prompt club（百万上下文实测与 32 位溢出修复）](https://github.com/ggml-org/llama.cpp/discussions/24622)（至 2026-10-27 仍活跃） — [src-llama-1m]
+107. [Level1Techs：Question regarding MIG support on RTX Pro 6000（40 帖完整时间线，含官方文档笔误确认）](https://forum.level1techs.com/t/question-regarding-mig-support-on-rtx-pro-6000/232627)（2025-06-27 起） — [src-l1t-mig]
