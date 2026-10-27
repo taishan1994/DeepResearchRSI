@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：221 ｜ **证据数**：1757 ｜ **主张数**：1236（高置信 947，争议 4）
+> **来源数**：222 ｜ **证据数**：1758 ｜ **主张数**：1240（高置信 951，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -125,6 +125,84 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 > 这些缺口不改变主要结论（多个独立来源已相互印证），但**若要用于采购决策，建议补测专业应用分项**。
 
 ---
+### 2.4 本报告自身有多可靠：一次证据强度审计
+
+**§2.2 讲了来源如何分级，但没讲过一件事：这些分级最后形成了什么样的证据结构。本轮补上这个自审计** [c-audit-single-source-89]。
+
+#### ⚠️ 一、89% 的主张只有单一来源
+
+**对本数据集逐条统计**（1236 条主张 × 1757 条证据）：
+
+| 来源数量 | 主张数 | 占比 |
+|---:|---:|---:|
+| **1 个** | ⚠️ **1100** | ⚠️ **89.0%** |
+| 2 个 | 106 | 8.6% |
+| 3 个 | 26 | 2.1% |
+| **4 个** | ⭐ **4** | **0.3%** |
+
+> ⚠️ **即本报告的绝大多数结论并非「多源交叉验证」的产物。**
+
+> ⚠️ **只有 30 条主张（2.4%）有 3 个或以上来源** [c-audit-4plus-rare]。
+
+#### ⭐ 二、但 `high` 没有一条建立在薄的二手来源上
+
+**按 trust_tier 与 confidence 交叉** [c-audit-high-single-primary]：
+
+| 来源层级 | high | medium | low | disputed |
+|---|---:|---:|---:|---:|
+| **primary** | ⭐ **852** | 108 | 5 | 2 |
+| secondary | **0** | 106 | 1 | 1 |
+| tertiary | **0** | 22 | 3 | 0 |
+
+> ⭐ **852 条单来源的 `high` 主张，其唯一来源全部为 `primary`。**
+>
+> **没有一条 `high` 建立在 secondary 或 tertiary 的单来源之上。**
+
+**这是不变量 C1 在起作用的直接证据**——它确实拦住了「单薄的二手来源被标成高置信」。
+
+#### ⭐⭐ 三、一个必须说清的设计边界
+
+**这是本节最重要的一句话** [c-audit-c1-not-multisource]：
+
+> ⚠️ **不变量 C1 校验的是「有没有 `primary` 的 `supports` 证据」，而不校验来源数量。**
+
+**故 89% 的单来源比例并不违反任何不变量。** 两者的分工是：
+
+| 项 | C1 保证 | C1 不保证 |
+|---|---|---|
+| 来源类型 | ✅ **一手而非转述** | — |
+| 证据姿态 | ✅ **`supports` 而非 `context`** | — |
+| 证据行数 | ✅ **至少 1 条** | — |
+| **独立复现** | — | ❌ **完全不保证** |
+| **多方印证** | — | ❌ **完全不保证** |
+
+> ⚠️ **因此把 `high` 读成「已被多方证实」是对本报告的误读。**
+>
+> **正确的读法是：「这个结论来自一个一手来源，且该来源直接支持它」。**
+
+#### ⭐ 四、这解释了为什么 §13 的 `disputed` 策略是必要的
+
+**一个由数据得出的方法论理由** [c-audit-4plus-rare]：
+
+> **既然 89% 的主张根本没有第二个来源可用于裁决，那么遇到两个来源冲突时，「强行统一」在方法上就是不可行的。**
+>
+> ⭐ **保留为 `disputed` 并并列双方证据，不是一种妥协，而是唯一诚实的选择。**
+
+#### ⚠️ 五、这条审计本身的局限
+
+**必须说明**：
+
+| 项 | 状态 |
+|---|---|
+| 统计口径 | 按 `evidence_ids` 反查 `source_id` 去重 |
+| **不区分** | ❌ **同一来源的不同文章**（同一 publisher 的两个页面算两个来源） |
+| **不衡量** | ❌ **来源之间的真正独立性**（如两份都转述同一原始测试） |
+| **不衡量** | ❌ **证据质量**（一条引文与一整篇分析等价计为 1） |
+
+> ⚠️ **故 89% 是一个上界意义上的粗略读数，真实的多源支持比例只会更低而非更高。**
+>
+> **因为「同一原始测试被两家媒体转述」在这里会被算成 2 个来源。**
+
 
 ## 3. 规格解剖：三个 SKU 到底是什么关系
 
@@ -11657,6 +11735,10 @@ sudo nvidia-bug-report.sh
 3. [美对华电子产品关税再推迟一年 GPU涨价风险暂缓](https://www.c114.net.cn/industry/41777.html) — C114 通信网转述集微网（2025-12-04）。白宫将对华电子产品（含主板、机箱、显卡）加征 301 条款关税的实施日期自 2025-11-29 推迟至 2026-11-10；25% 关税提案与 CTA 反对意见；301 条款自 2018 年提出、七年多从未全面实施 — [src-c114-tariff]
 4. [Nvidia's Blackwell Chips Made in Arizona Still Head to Taiwan for Final Assembly](https://iconnect007.com/article/147447/nvidias-blackwell-chips-made-in-arizona-still-head-to-taiwan-for-final-assembly/147444) — I-Connect007 转述 The Register（2025-10-27）。⭐ 关键产地事实：B100/B200/GB200 因需 TSMC CoWoS 而必须运回台湾封装（TSMC 所有 CoWoS 设施均在台湾），而 RTX Pro 6000 工作站 GPU 与多数 RTX 游戏卡采用更简单设计、可完全在美国境内制造 — [src-iconnect-cowos]
 
+### 证据强度自审计（第二十七轮补充）
+
+1. [本数据集证据强度分布自审计](https://github.com/taishan1994/DeepResearchRSI/blob/main/research/rtx-pro-6000/claims.csv) — 对 `research/rtx-pro-6000` 下 `claims.csv` 与 `evidence.csv` 的逐条统计（2026-10-27）。⚠️ 这不是外部信息源，而是对本报告自身证据结构的度量：1236 条主张中 1100 条（89.0%）仅有单一来源，仅 4 条有四个来源；852 条单来源 `high` 主张的来源层级全部为 `primary`，无一建立在 secondary 或 tertiary 之上 — [src-self-audit-94]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -11796,7 +11878,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=221, evidence=1757, claims=1236, claims_high=947, claims_disputed=4, trace_events=458, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=222, evidence=1758, claims=1240, claims_high=951, claims_disputed=4, trace_events=460, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
