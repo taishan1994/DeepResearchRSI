@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：186 ｜ **证据数**：1553 ｜ **主张数**：1054（高置信 811，争议 1）
+> **来源数**：186 ｜ **证据数**：1561 ｜ **主张数**：1061（高置信 818，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2527,6 +2527,95 @@ RTX PRO 6000 Blac...  65C  P0  573W / 600W
 > **R37 镜像把 PyTorch 预填充从 O(N²) 降为 O(N)**，在 4 张 Max-Q（**300 W**、TP4/DCP1、Engram RAM、DSpark K7）上，**无缓存预填充比 r36 快 52–54%**——**8k 从 8,198 升到 12,579 tok/s**。
 
 > ⚠️ **这是本报告记录到的单次最大预填充改进，且发生在 300 W 上限的卡上**——**与 §6.6 同向。**
+
+### 4.8.10 CPU 卸载：一个被社区判死、又被一个优化救活的路线
+
+**§4.8.9 的 Engram 外置特定参数。** 本节讲另一条外置路线：**把 MoE 专家放到 CPU**——以及它「判死 → 复活」的完整过程。
+
+#### 一、早期基线确实很差
+
+**两个被明确判定的配置** [c-hybrid-baseline-bad]：
+
+| 模型 | 配置 | 结果 |
+|---|---|---|
+| **GLM-5** | ktransformers，70k 上下文 | **9 tok/s**，预填充 **300 秒** |
+| **Kimi K2.6** | 2 卡 + **2 TB DDR5** | c=1 **35 tok/s**，但 **>64K 上下文即 OOM**，工具调用失败 |
+
+> ⚠️ **注意 K2.6 的 35 tok/s 其实不算差**——**瓶颈在「超过 64K 就 OOM」与工具调用失败。**
+
+#### ⭐ 二、社区共识被判死，但共识是错的
+
+**一个 +43% 的优化推翻了它** [c-hybrid-consensus-wrong]：
+
+> **社区曾明确判其不可行**：**TTFT 极差、不论内存多快 CPU 算力都是瓶颈。**
+>
+> **但 aikitoria 的「驻留优化」通过热跟踪活跃专家，把 DeepSeek-V4-Pro 从 46 提到 66 t/s（+43%）。**
+
+> ⭐ **即瓶颈不是 CPU 算力本身，而是专家驻留策略。**
+>
+> **「不可行」往往是「当前实现不可行」**——**这是本报告元教训的又一实例。**
+
+#### 三、单卡上的极限配置说明这条路实际可用
+
+**两个极端但可用的配置** [c-hybrid-single-card]：
+
+| 配置 | 结果 |
+|---|---|
+| 单张 RTX 6000 + **768 GB DDR5**，全部专家放 CPU | **64k 上下文 17.5 tok/s**（fp8 + AMXINT4） |
+| 单张 RTX 6000 | **320k 上下文只用 44 GB 显存** |
+
+> **这两条与 §4.8.9 的 Engram 是同一思路的两种实现**：**Engram 外置特定参数，ktransformers 外置 MoE 专家。**
+
+#### ⚠️ 四、但实现层问题密集
+
+**四种不同的失效** [c-hybrid-offload-bug]：
+
+| 现象 | 机制 |
+|---|---|
+| **草稿 token 降到 0**（约 4 并发） | 简单 CPU offload 连接器**彻底破坏投机解码** |
+| 常规 offload 连接器 | **不兼容 qsa ring** |
+| CPU 卸载不生效 | 命令选项无效，无环境变量可绕 |
+| **历史图像每次重预填充** | 视觉输入不留在 LMCache，**每图多约 3 秒** |
+
+> ⚠️ **「草稿 token 掉到 0」是最隐蔽的一种**——**服务不报错，但投机解码完全失效。**
+
+#### 五、正在被修好
+
+**两个具体的修复** [c-hybrid-offload-fixed]：
+
+> **对 Qwen3.8-Flash-Next，常规 KV offloader 已能正确配合 QSA**；**而简单 CPU offload 只在先前 mamba 块尚未从缓存驱逐时才工作，常规 offloader 正是为避免这一点。**
+>
+> **另有报告用 `VLLM_PLE_CPU_OFFLOAD=1` 在单卡上达约 100–200 tok/s 解码。**
+
+> ⚠️ **单卡 100–200 tok/s 是这条路线的高水位**——**但它依赖 PLE（可卸载嵌入表）而非 MoE 专家。**
+
+#### 六、训练侧有对称结论
+
+**SM120 上多数加速库坏了，但有一条路能用** [c-hybrid-train-fsdp]：
+
+| 组件 | 状态 |
+|---|---|
+| FA2 | ❌ **坏** |
+| TE NVFP4 | ❌ **坏** |
+| bnb 4 比特 | ❌ **坏** |
+| **BF16 FSDP2 的 HYBRID SHARD** | ✅ **跨 4+4 张 PCIe 卡（无 NVLink）可用** |
+
+> **已有 350M 与 1B 的 Qwen3 形状模型被训练并经 vLLM 服务。**
+>
+> ⭐ **这是本报告训练侧最实用的一条。**
+
+#### 七、与 Engram 的比较：外置对象决定代价
+
+**同一思路，代价差很多** [c-hybrid-vs-engram]：
+
+| 路线 | 外置对象 | 代价 |
+|---|---|---|
+| **Engram** | **特定参数类型（203 GB）** | **约 7%**，KV 池不打折 |
+| **ktransformers** | **MoE 专家** | 128k 下**预填充 703 tok/s、解码 21 tok/s**；**>64K 易 OOM** |
+
+> ⭐ **Engram 明显更划算，因为它外置的是访问模式可预测的静态参数，而 MoE 专家是每 token 动态选择的。**
+>
+> **即「外置什么」比「外置多少」更重要。**
 
 ### 4.9 双卡 TP2：一个可复制的部署单元（192GB 形态）
 
@@ -8806,7 +8895,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=186, evidence=1553, claims=1054, claims_high=811, claims_disputed=1, trace_events=373, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=186, evidence=1561, claims=1061, claims_high=818, claims_disputed=1, trace_events=373, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
