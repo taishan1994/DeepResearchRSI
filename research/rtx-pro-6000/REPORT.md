@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：243 ｜ **证据数**：1912 ｜ **主张数**：1379（高置信 1058，争议 7）
+> **来源数**：244 ｜ **证据数**：1924 ｜ **主张数**：1390（高置信 1069，争议 7）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -1300,6 +1300,208 @@ TPOT 几乎不变（12.63 → 12.82 ms），说明 **EP 优化的是通信与调
 
 **原因是同一个**：跨 socket 时每一个同步点都要走 Infinity Fabric，
 而 system-scope barrier 的成本随 NUMA 距离跳变。
+
+
+#### 4.3.9 ⭐⭐ 一个常量如何吃掉 69% 的性能：NCCL 不认识 AMD
+
+**§4.3.3 记录了 NCCL 调优能带来 +69% 带宽、−46% 延迟、+63% 吞吐。**
+**本轮找到了这条因果链的源头——它不是一个「调优」问题，而是一个常量写错了** [c-nccl-amd-bw-bug]。
+
+#### ⚠️⚠️ 一、源码里的一行
+
+**NCCL v2.28.3 的 `src/graph/topo.h`：**
+
+```
+#define AMD_BW 16.0
+```
+
+> ⚠️⚠️ **对所有历史上出现过的 AMD CPU，用同一个带宽常数。**
+>
+> **而 EPYC 9575F Turin（xGMI3）实际为 192–256 GB/s——**
+> **低估 12–16 倍。**
+
+**为什么协议选择如此关键** [c-nccl-proto-boundary]：
+
+| 协议 | 机制 | 适合 |
+|---|---|---|
+| **LL** | 完成标志内联 **8 字节**数据 | **<64 KB**、推理 |
+| **LL128** | 128 字节低延迟变体 | 中等消息 |
+| **SIMPLE** | 标准缓冲 | **>256 KB**、训练 |
+
+> ⭐ **原文判断：「LL 是推理加速的关键驱动。NCCL 只在它认为互连足够快时才选 LL。**
+> **⚠️ 在 AMD 系统上 NCCL 的带宽探测是坏的，导致它对小消息选择 SIMPLE 而非 LL。」**
+>
+> **即推理的小消息本该走 LL、实际走了 SIMPLE，**
+> **而选择依据正是那个被写成 16 GB/s 的常数。**
+
+#### ⚠️ 二、连锁后果四项
+
+| 环节 | 实际应为 | NCCL 判定 |
+|---|---|---|
+| 带宽估计 | 192–256 GB/s | ⚠️ **16 GB/s**（甚至压到 **0.1**） |
+| 协议选择 | **LL**（适合 <64 KB） | ⚠️ **SIMPLE** |
+| 连接类型 | **PHB / PIX** | ⚠️ **SYS / SYS**（最差） |
+| 通道数 | 4+ | ⚠️ **2**（最小值） |
+
+> ⭐ **因果链是完整的：**
+> **一个常量 → 一个带宽估计 → 一个协议选择 → 一个 1.5–1.9 倍的性能差。**
+
+#### ⭐ 三、绕过手段：一行 XML
+
+**实测对照** [c-nccl-graph-xml]：
+
+| 参数 | 不加 XML | 加 XML |
+|---|---|---|
+| 带宽估计 | ⚠️ **0.1 GB/s** | **24 GB/s** |
+| 连接类型 | SYS / SYS | **PHB / PIX** |
+| 通道数 | 2 | **4** |
+| 小消息协议 | SIMPLE | **LL** |
+
+**XML 全文只有一行**，通过 `NCCL_GRAPH_FILE` 加载：
+
+```xml
+<graph id="0" pattern="4" nchannels="2" speedintra="24" speedinter="24"
+       typeintra="PHB" typeinter="PIX" samechannels="1">
+```
+
+> ⚠️ **「带宽估计 0.1 GB/s」这个数字最有说服力：**
+> **它意味着 NCCL 认为卡间链路比拨号上网还慢，**
+> **于是图搜索当然会选最保守的协议与最少的通道。**
+>
+> ⭐ **这不是「调优」，而是「纠正一个错误的输入」——**
+> **这一区分很重要：它意味着不能靠反复试参数绕过，必须直接改那个估计值。**
+
+#### ⭐ 四、收益随消息变大而下降
+
+**AllReduce 延迟** [c-nccl-xml-gain]：
+
+| 消息大小 | 无 XML | 有 XML | 加速 |
+|---|---:|---:|---:|
+| 32 KB | 48.16 μs | 26.20 μs | **1.84×** |
+| 64 KB | 48.69 μs | 25.59 μs | ⭐ **1.90×** |
+| 128 KB | 51.56 μs | 32.09 μs | 1.61× |
+| 256 KB | 56.48 μs | 37.26 μs | 1.52× |
+
+> ⭐ **收益单调下降（1.90× → 1.52×），**
+> **与 §4.3.8 的 oneshot 曲线方向一致：**
+> **小消息由协议开销主导、大消息由带宽主导。**
+>
+> ⚠️ **故「小消息优化」的收益天花板取决于消息有多小。**
+
+#### ⭐⭐ 五、预填充侧的独立验证
+
+**Kimi-K2.5、TRITON_MLA、fp8 KV、DCP=8、`max_tokens=1`、无前缀缓存——**
+**刻意隔离 prefill 而非 decode** [c-nccl-kimi-prefill]：
+
+| 模式 | 并发 | 平均 TTFT | 聚合 prompt |
+|---|---:|---:|---:|
+| XML | 1 | **0.310 s** | 20.7k tok/s |
+| ⚠️ 无 XML | 1 | ⚠️ **1.329 s** | 6.75k tok/s |
+| XML | 16 | 0.903 s | 115.3k tok/s |
+| 无 XML | 16 | 0.999 s | 108.1k tok/s |
+
+> ⚠️ **一个必须标注的口径差异：**
+> **按 TTFT 之比算是 1.329 / 0.310 = 4.29 倍，**
+> **而原文自述为约 3.07 倍——**
+> **3.07 应是由 prompt tok/s 算得（20.7k / 6.75k = 3.07），而非 TTFT 之比。**
+>
+> **本报告保留两个数并说明来源，不擅自统一——**
+> **因为 TTFT 含固定开销，两者虽近似倒数但基准不同。**
+
+#### ⭐ 六、调试输出证明问题不在传输层
+
+**两边都用 `P2P/CUMEM`** [c-nccl-debug-diff]：
+
+| | 有 XML | 无 XML |
+|---|---|---|
+| Pattern 4 | `bw 38/32`、`PHB/PIX` | ⚠️ `bw 15/15`、`SYS/PIX` |
+| Pattern 1 | `bw 38/32`、`PHB/PIX` | ⚠️ `bw 0.1/0.1`、`SYS/SYS` |
+| 通道数 | **4** | ⚠️ **2** |
+
+> ⭐ **「传输层相同、只差图搜索」这个区分很关键：**
+> **它排除了「P2P 没生效」「驱动没配好」这类常见怀疑方向，**
+> **把排查范围收窄到单一环节。**
+>
+> **⚠️ 这正是 §4.3.7 所说「NCCL 跑得正常不能证明 P2P 配好了」的反面——**
+> **这里 NCCL 没跑正常，但原因也不是 P2P。**
+
+#### ⭐⭐ 七、上游修复：PR #2127
+
+**草稿 PR `NVIDIA/nccl#2127` 做三件事** [c-nccl-pr2127]：
+
+1. 改进图比较/搜索，聚合带宽相同时**优先选多通道**候选
+2. 把 `AMD_ZEN5_BW` 从 **32.0 提高到 40.0**
+3. 增加**仅针对 Turin** 的提升路径，处理病态的 `Pattern 4 / bw 15/15 / SYS/PIX / nChannels 2` 环
+
+**单次冷 8k 预填充复现验证：**
+
+| 模式 | TTFT | prompt tok/s |
+|---|---:|---:|
+| ⚠️ 修复前（无 XML） | ⚠️ **9.138 s** | 875.98 |
+| PR#2127 后 | **1.074 s** | 7,455.28 |
+| XML 基线 | 1.071 s | 7,477.64 |
+
+> ⭐⭐ **修复后与 XML 基线只差 0.3%——**
+> **即 XML 这个 workaround 的效果可以被上游复现，**
+> **说明它纠正的是真实缺陷，而非特例调参。**
+>
+> ⚠️ **但 PR 仍是草稿。原文明确：**
+> **「当前公开配方仍在用 `NCCL_GRAPH_FILE`，因为那是已经发布并文档化的做法」——**
+> **即在 PR 合入前，workaround 仍是唯一可靠路径。**
+
+#### ⭐ 七·补：调优总账
+
+| 指标 | 调优前 | 调优后 | 变化 |
+|---|---:|---:|---:|
+| AllReduce 总线带宽 | 22.2 GB/s | **37.6 GB/s** | ⭐ **+69%** |
+| 32 KB AllReduce 延迟 | 48.16 μs | **26.20 μs** | **−46%** |
+| Kimi K2.5 推理吞吐 | 约 40 tok/s | 约 **65–68 tok/s** | **+63%** |
+
+> ⭐ **这三组数字与本报告 §4.3.3 已记录的完全一致，**
+> **⚠️ 但此前未记录其根因——**
+> **本轮补上的正是那条因果链：同一组数字，此前只知道有效、现在知道为什么有效** [c-nccl-tuning-total]。
+
+**另有一个常被忽略的前提** [c-nccl-highconc-needs-more]：
+**高并发走 DRAM 路由时，「只设 `NCCL_P2P_DISABLE=1` 是不够的」——**
+**通道数与缓冲区必须一起改：**
+
+| 项 | 轻量版 | 重量版 |
+|---|---|---|
+| `NCCL_MIN_NCHANNELS` | 16 | 32 |
+| `NCCL_MAX_NCHANNELS` | 32 | 64 |
+| `NCCL_BUFFSIZE` | 33,554,432 | 67,108,864 |
+| `CUDA_DEVICE_MAX_CONNECTIONS` | 32 | 64 |
+
+> ⚠️ **且该方案假设 DRAM 通道已全部插满**——
+> **与 §4.3.8 记录的「24×64 GB 全通道插满」互相印证。**
+
+#### ⚠️⚠️ 八、一个直觉做法被证明无效
+
+**强制 `NCCL_MIN_NCHANNELS=8 NCCL_MAX_NCHANNELS=8` 没有帮助** [c-nccl-minchannels-nohelp]：
+
+| 场景 | 结果 |
+|---|---|
+| 真实复现器 | ⚠️ **只有噪声级差异** |
+| 合成集合通信 | ⚠️ **可能明显更差** |
+
+> ⭐ **这是 §4.3.3「NCCL 调优 +69%」的一个重要限定：**
+> **「把通道数拉满」这个直觉做法在该缺陷上无效——**
+> **⚠️ 因为问题不在通道数，而在「图搜索选错了通道数」。**
+>
+> **两者看起来是同一件事，但前者是「给足资源」、后者是「纠正判断」。**
+
+#### ⚠️ 九、两个必须同时做的修复
+
+| # | 内容 |
+|---|---|
+| ① | `/etc/modprobe.d/uvm.conf`：`options nvidia_uvm uvm_disable_hmm=1` |
+| ② | 内核参数：`iommu=off amd_iommu=off` |
+
+> ⚠️ **缺任一条 NCCL P2P 会挂死** [c-nccl-uvm-iommu-must]。
+>
+> ⚠️ **该结论来源为 Level1Techs 论坛一个双 Max-Q 的具体帖子，**
+> **而非官方文档——本报告照实标注。**
+
 
 #### ⚠️⚠️ 一、一个已定位到确切触发条件的硬件 bug
 
@@ -14388,6 +14590,10 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 3. [rtx6kpro — ASUS ESC8000A-E13P PEX890xx Bug Report](https://github.com/local-inference-lab/rtx6kpro/blob/master/troubleshooting/asus-esc8000a-e13p-pex890xx-bug-report.md) —（2026-03-17）。⭐⭐⭐ posted-write 仲裁 bug 的**厂商升级报告原件**：序列号 T9S0CG000107、BIOS AMI v1104、驱动 595.58.03 / CUDA 13.2、24×64 GB DDR5-6400 全通道插满、可复现脚本。比总览文档多出三项独立性证据（**内核 6.17.0-19/20、驱动 595.45.04/595.58.03、ACS 开关均不影响该崩溃**），以及 MaxReadReq 固件锁定 128B、交换机寄存器全只读、Broadcom SDK 读内部寄存器报错 524 这三层「无法自救」的约束 — [src-r6k-pex-bugrep]
 
 
+### NCCL 与 AMD 平台（第四十三轮补充）
+
+1. [rtx6kpro — NCCL Tuning Guide](https://github.com/local-inference-lab/rtx6kpro/blob/master/optimization/nccl-tuning.md) —（2026-04-20）。⭐⭐⭐ 定位到 NCCL v2.28.3 源码 `src/graph/topo.h` 的 `#define AMD_BW 16.0`——对所有 AMD CPU 用同一带宽常数，而 Turin xGMI3 实为 192–256 GB/s，**低估 12–16 倍**。连锁后果：协议选 SIMPLE 而非 LL、连接类型判 SYS 而非 PHB/PIX、通道数只取最小值 2。含 XML 绕过方案（带宽估计 0.1 → 24 GB/s）、逐尺寸加速比（1.52–1.90×）、Kimi MLA 预填充验证（TTFT 1.329 → 0.310 s）、上游修复 PR `NVIDIA/nccl#2127` 的复现数据（9.138 → 1.074 s），以及一条负面结果（强制 8 通道无效）— [src-r6k-nccl-tuning]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -14527,7 +14733,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=243, evidence=1912, claims=1379, claims_high=1058, claims_disputed=7, trace_events=516, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=244, evidence=1924, claims=1390, claims_high=1069, claims_disputed=7, trace_events=519, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
