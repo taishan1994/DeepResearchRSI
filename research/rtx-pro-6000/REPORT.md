@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：222 ｜ **证据数**：1761 ｜ **主张数**：1244（高置信 955，争议 4）
+> **来源数**：222 ｜ **证据数**：1765 ｜ **主张数**：1248（高置信 958，争议 4）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -6528,6 +6528,68 @@ OctaneBench 单卡分数与 Drop & Render 记录**逐位吻合** [c-ob-vs-dnr-si
 
 **这是本代在视频领域少有的"质变"而非"量变"**——跑分体现不出来，但对体积视频/点云直播这类场景是能力边界的变化。
 
+#### ⭐⭐ 一个旧归档漏掉的关键数据：编码负载只用 99 W
+
+**同一篇论文的功耗实验，本报告此前完全没有记录** [c-vpcc-power-99w]：
+
+| 编码格式（8K 持续，4 路） | **整卡功耗** | 芯片功耗 |
+|---|---:|---:|
+| HEVC 8-bit 4:2:0 | **93.4 W** | 36.0 W |
+| ⭐ **HEVC 10-bit 4:2:2** | ⭐ **99.3 W** | **38.2 W** |
+| AV1 8-bit 4:2:0 | **100.1 W** | 38.5 W |
+
+> ⭐⭐ **一张标称 300W 档（Max-Q）的卡，在 8K 编码满载下只用 99.3 W。**
+>
+> **即约三分之一的功耗即可跑满 4 个编码器。**
+
+> ⚠️ **测试对象是 Max-Q Workstation Edition，驱动 R580 U5（581.80），非 600W 的 Workstation 版。**
+
+#### ⭐⭐ 更反直觉的是：4 倍吞吐几乎不增加功耗
+
+**从 1 路扩到 4 路 NVENC** [c-vpcc-power-scaling-flat]：
+
+| 项 | 增加量 |
+|---|---:|
+| **芯片功耗** | ⭐ **仅 +2.9 W**（平均每路 **0.97 W**） |
+| **整卡功耗** | ⭐ **仅 +7.4 W** |
+
+**原因是一个架构行为**：
+
+> **启用 NVENC 必须把 SM 核心从 P8 低功耗状态唤醒，因而存在一个显著的泄漏功耗基线；**
+>
+> ⭐ **在此基线之上，增加编码器的边际成本极低。**
+
+> ⭐ **这解释了一件对采购很重要的事：多编码器的收益是线性的，成本却近乎为零。**
+>
+> **若你的负载是「多路并发编码」，这张卡的 4 个 NVENC 几乎是免费的。**
+
+#### ⚠️ 但编码格式的选择对能耗影响很小
+
+**三种格式的功耗排序** [c-vpcc-codec-power-rank]：
+
+| 排序 | 格式 | 四路整卡功耗 |
+|---|---|---:|
+| 最省 | HEVC 8-bit 4:2:0 | 93.4 W |
+| 中间 | HEVC 10-bit 4:2:2 | 99.3 W |
+| 最费 | AV1 8-bit 4:2:0 | 100.1 W |
+
+> ⚠️ **三者差距不到 7 W（7.2%）——不应把能耗作为选择编码格式的主要依据。**
+
+#### ⚠️ 一个与 §6 对照才看得出的差异
+
+**「这张卡很费电」这个印象，只对计算密集负载成立** [c-vpcc-power-vs-inference]：
+
+| 负载类型 | 整卡功耗量级 | 出处 |
+|---|---|---|
+| **推理（agent / 服务）** | 长时间贴近功耗墙 | §6 |
+| ⭐ **8K 媒体编码** | ⭐ **99.3 W** | 本节 |
+
+> ⚠️ **两类负载不可直接换算，但量级差异足以说明问题：**
+>
+> **把「600W 卡」这个标签不加区分地套到所有负载上，会严重高估媒体工作站的实际电费与散热需求。**
+
+
+
 ### 7.5 整机形态验证
 
 HP Z8 Fury G6i 实际产品印证了 Max-Q 的定位 [c-hpz8-config]：单机可配 **4 张 Max-Q（384GB）** 或 **1 张 600W Workstation 版**，配 2700W 双电源 [e-hpz8-4gpu][e-hpz8-psu]。
@@ -11950,7 +12012,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=222, evidence=1761, claims=1244, claims_high=955, claims_disputed=4, trace_events=460, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=222, evidence=1765, claims=1248, claims_high=958, claims_disputed=4, trace_events=461, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
