@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：32 ｜ **证据数**：188 ｜ **主张数**：120（高置信 79，争议 1）
+> **来源数**：40 ｜ **证据数**：238 ｜ **主张数**：158（高置信 102，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -45,7 +45,7 @@ RTX PRO 6000 Blackwell 不是"更快的 RTX 5090"，而是**同一颗 GB202 die 
 **④ 最大的采购风险是价格，不是性能。**
 发布时渠道价约 $8,435–8,565 [c-price-launch]；2026-08 官方调价至 $16,000 [c-price-now]；**2026-10-27 实际街价已达 $17,999** [c-price-17999]，是同期 RTX 5090（$4,996）的 **3.6 倍** [c-price-ratio]。涨价主因是高端 GDDR7 供应紧张 [c-price-cause]。
 
-按每美元渲染性能计，该卡在其基准库的 33 张有价卡片中**排最后一名** [c-value-worst]——纯渲染用途下 RTX 5090 的每美元性能约为它的 **3 倍** [c-render-value]。
+按**零售价/渲染性能**计，该卡在其基准库的 33 张有价卡片中**排最后一名** [c-value-worst]——纯渲染用途下 RTX 5090 的每美元性能约为它的 **3 倍** [c-render-value]。但按**持有型 TCO** 计它反而最便宜（$0.68/chip/hr，H200 为 $1.22）[c-tco-rtx-cheaper]。**两个口径不能混用。**
 
 **⑤ 训练侧并非全面劣势，取决于序列长度。**
 短序列（<4K）全参 SFT 上，RTX PRO 6000 比 GH200 快最多 1.8 倍；超过约 8K 后 GH200 反超并稳定在 1.7–1.8 倍 [c-ft-crossover]。单卡可完成 GPT-OSS-120B 的 4bit QLoRA 微调 [c-ft-120b-single]，但**优化器卸载在 PCIe 上几乎不可用**（慢 12–25 倍）[c-ft-offload]。
@@ -55,6 +55,19 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 
 **⑦ 一个尚未被评测覆盖、但已有多例报告的运维风险：在役性能退化。**
 多名用户在 NVIDIA 官方论坛报告，长期高负载运行后出现"假高功耗读数"导致的 SW Power Cap 锁频，FP32 掉到正常值的 1/10–1/20 [c-degradation][c-degradation-scale]。该故障**不产生任何错误日志**，多卡训练时只表现为整体变慢 [c-degradation-silent]。厂商尚未公告，样本有限，但采购高负载长期运行场景应提前建立基线跑分与监控 [c-degradation-procurement]。
+
+**⑧ 本报告最需要警示的是三个与性能无关的风险。**
+
+| 风险 | 后果 | 证据强度 |
+|---|---|---|
+| **在役退化**（§10.5） | 性能掉到 1/10–1/20，无任何错误日志 | 5+ 用户报告，厂商未公告 |
+| **供电接口熔毁**（§10.6） | PSU 侧熔毁，保修可能被拒 | 单一案例 + 3 月先例 |
+| **RTX 5090 可能停产**（§12.5） | 3.6 倍比价可能收窄，"5090 更划算"结论失效 | 爆料级，厂商未确认 |
+
+三者都不体现在任何跑分里，但都会改变持有成本。
+
+**⑨ 两个看似矛盾的价格结论，必须按口径分开看。**
+按**零售单卡价**（$17,999），每美元渲染性能在 33 张有价卡片中垫底，RTX 5090 是它的 3 倍 [c-value-worst][c-render-value]。按**大规模自持 TCO**（$0.68/chip/hr），它反而比 H100（$1.17）、H200（$1.22）、B200（$1.73）、B300（$2.26）都便宜 [c-tco-rtx-cheaper]。买一张卡和运营一万张卡是两套经济学，**不要混用口径**。
 
 **一句话选型**：需要 96GB 单卡装大模型 / 长上下文 / 4 路 MIG 隔离 / 微调 100B+ 量化模型 → 值得；纯渲染、双精度 HPC、长序列全参训练 → 不值得（FP64 仅约 2 TFLOPS，1:64）[c-not-for-fp64]。
 
@@ -100,9 +113,10 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 | Puget Systems 内容创作评测 | 403 Just a moment | 缺少 V-Ray/SPECviewperf 完整数据 |
 | Phoronix Linux 性能评测 | 403 | 缺少 Linux 下的横向对比 |
 | TechPowerUp 评测与 GPU 数据库 | 404 / 机器人校验 | 缺少部分规格交叉验证 |
-| SPECviewperf 15 结果页 | 请求超时 | 缺少专业 CAD 视口分项 |
-| MLPerf Inference 官方提交 | PDF 不可解析 | 缺少封闭分区成绩 |
-| GigAGPU / WindowsReport | 403 | 缺少 70B 单卡与 6000D 拆解细节 |
+| SPECviewperf 15 结果页 | 请求超时 | 缺少专业 CAD 视口分项（NVIDIA 仅给出"Server 版最高"） |
+| ~~MLPerf Inference 官方提交~~ | **已补齐** | 改由 Cisco UCS X580p 白皮书取得封闭分区数据 [c-mlperf-closed-available] |
+| GigAGPU / WindowsReport | 403 | 缺少 70B 单卡细节（6000D 已由中关村在线补齐） |
+| Comino Grando 4U 液冷整机 | 403 | 缺少 8 卡 768GB 一体机实测 |
 
 > 这些缺口不改变主要结论（多个独立来源已相互印证），但**若要用于采购决策，建议补测专业应用分项**。
 
@@ -149,6 +163,33 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 - **FP64 惨烈**：1.968 TFLOPS（1:64）[e-sr-fp64-ratio]
 
 这解释了为什么游戏/图形差距小（同带宽、同 die），而大模型差距大（显存容量与容量压力）。
+
+### 3.3 第四个 SKU：中国特供 RTX 6000D
+
+此前只能看到拆解传闻的 RTX 6000D，现有完整实测数据 [c-6000d-spec]。它是标准 Server 版的规格削减型号：
+
+| 项目 | RTX PRO 6000 | RTX 6000D | 变化 |
+|---|---|---|---|
+| CUDA 核心 | 24,064 | **19,968** | -17% |
+| Tensor 核心 | 752 | 624 | -17% |
+| RT 核心 | 188 | 156 | -17% |
+| 加速频率 | 2617 MHz | 2430 MHz | -7% |
+| 显存 | 96GB / 512-bit | **84GB / 448-bit** | -13% 容量 |
+| 带宽 | 1792 GB/s | **1570 GB/s** | -13% |
+| FP32 | 126 TFLOPS | **97.04 TFLOPS** | -23% |
+| 峰值功耗 | 600W | ~400W | -33% |
+
+**关键细节**：
+- PCB 布局与标准版**完全一致**，差异只是显存颗粒从 32 颗减为 28 颗 [e-6000d-pcb]——这是纯粹的规格切割，不是新设计
+- 性能降幅（23%）**大于**核心数降幅（17%），因为频率与带宽同时下调 [c-6000d-perf]
+- 四个 DisplayPort **不具备视频输出能力**，Windows 下默认加载 TCC 纯计算驱动 [c-6000d-tcc-only]——它不能当工作站显示卡用
+- 定位：FP32 略低于 Max-Q，明显高于 RTX PRO 5000 48GB [c-6000d-position]
+
+**实测参考**：LMStudio 跑 DeepSeek R1 70B（8K 上下文）约 **24.79 tok/s**，比 RTX PRO 5000 快 10%+ [c-6000d-llm]。注意这是 LMStudio 口径，不能与 vLLM 数字直接比。
+
+**市场反应冷淡** [c-6000d-demand-weak]：据行业反馈实际需求有限，未形成稳定采购意向。考虑到它既不能输出视频、性能又低 23%，这个结果并不意外。
+
+**容量换算**：四卡 336GB、八卡 672GB，可支撑量化后的 671B 模型 [c-6000d-capacity]。
 
 ---
 
@@ -236,6 +277,25 @@ RTX PRO 6000 **没有 NVLink**，多卡走 PCIe 5.0 [c-nvlink-absent]。实测�
 来源 [e-6k-concurrency][c-concurrency-scale]
 
 短上下文批处理是 AWQ 的唯一优势区间；长上下文必须切 NVFP4。
+
+### 4.6 MLPerf 官方封闭分区数据（此前缺失的第三方口径）
+
+此前本报告把"MLPerf 封闭分区成绩"列为证据缺口。现由 Cisco UCS X580p 白皮书补齐 [c-mlperf-closed-available]。
+
+**这是唯一一套经过 MLCommons 方法论约束、且由第三方（Cisco）提交的数据**，价值在于口径统一、可跨系统比较。
+
+| 项目 | 内容 |
+|---|---|
+| 基准版本 | MLPerf Inference **v6.0 Datacenter, Closed Division** |
+| 测试配置 | **4× RTX PRO 6000** PCIe（对比 4× H200 NVL、4× RTX PRO 4500） |
+| 覆盖模型 | Llama2-70B、Llama3.1-8B、Whisper、Mixtral-7×8B、GPT-OSS-120B [c-mlperf-models] |
+| 场景 | Offline（吞吐）+ Server（延迟约束） |
+
+**一个结构性发现**：同一节点上 **H200 NVL 可用两路 NVLink 桥，而 RTX PRO 6000 只能走 PCIe** [c-mlperf-nvlink-asym]。这印证并强化了 §4.3 的结论——该卡的多卡推理劣势是**架构性的、在系统设计层面就被固定的**，不是驱动或软件问题。
+
+**引用注意** [c-mlperf-caveat]：白皮书中部分图表是提交截止后的初步结果，**未经 MLCommons 正式验证**。引用时必须区分"已认证"与"未认证"数据点，不能一概当作官方成绩。
+
+Mixtral-7×8B 与 GPT-OSS-120B 的纳入尤其有价值：前者是 MoE（显存带宽敏感），后者是 120B 级大模型（容量敏感），正是该卡最该被检验的两类负载。
 
 ---
 
@@ -414,7 +474,19 @@ Blender 的 Server 版成绩，两个来源相差 **69%**：
 - 4× DisplayPort 2.1（8K@240Hz / 16K@60Hz）
 - ISV 认证驱动（DCC/CAD 应用）
 
-消费级 5090 编码器数量更少、无 ISV 认证。**这是视频工作站的真实差异点**，跑分体现不出来。
+消费级 5090 编码器数量更少、无 ISV 认证 [c-nvenc]。
+
+**4:2:2 不是规格表上的装饰，有同行评议的实测支撑**。一篇 ICIP 2026 Workshops 论文以"四编码器 Blackwell GPU"为测试台，做了 8K 10bit 4:2:2 HEVC 的 V-PCC 编码实验 [c-vpcc-422-milestone]：
+
+| 指标 | 结果 |
+|---|---|
+| 4 路分帧编码吞吐 | **122 fps**（8K 10bit 4:2:2 HEVC） |
+| 是否满足实时 | ✅ 高密度 V-PCC 要求最高 120 fps [c-vpcc-8k-demand] |
+| 代价 | BD-Rate 劣化最高 **5%**（切片边界无法利用空间冗余）[c-vpcc-cost] |
+
+**为什么这件事重要**：过去 GPU 编码器不支持 4:2:2，实时 V-PCC 只能靠定制 ASIC。Blackwell 的 10bit 4:2:2 硬件支持让通用 GPU 首次能承担这个负载 [c-vpcc-422-milestone]。
+
+**这是本代在视频领域少有的"质变"而非"量变"**——跑分体现不出来，但对体积视频/点云直播这类场景是能力边界的变化。
 
 ### 7.5 整机形态验证
 
@@ -571,23 +643,53 @@ RTX PRO 6000 用 **SM120**（GB202），数据中心 Blackwell 用 **SM100**。�
 
 **实际后果**：新模型/新量化格式在 SM120 上往往需要 nightly 构建或补丁（HOSTKEY 测 WAN 2.2 时需 `--pre` 安装 cu129 nightly PyTorch）[c-driver-gap]。
 
-### 10.2 已知具体坑
+**这不是抽象风险，有精确的实例**（详见 §10.2）：NVIDIA 自己的 TensorRT-LLM 在 sm120 上无法服务 Qwen3-Next，而官方同时把两者都列为"支持" [c-trtllm-misleading]。
+
+### 10.2 案例：TensorRT-LLM 在 sm120 上开箱失败
+
+这是 SM120 生态缺口最清晰的一份证据，值得完整记录。
+
+**现象** [c-trtllm-sm120-gap]：用 `trtllm-serve` 加载 `nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4`（`Qwen3NextForCausalLM`，混合 Gated-DeltaNet + MoE），服务启动后在 GDN prefill 预热阶段直接崩溃：
+
+```
+RuntimeError: delta rule kernel does not support this device major version: 12
+```
+
+**根因** [c-trtllm-root-cause]：TensorRT-LLM 1.3.0rc19 捆绑 **flashinfer 0.6.12**，其 `chunk_gated_delta_rule` / `gdn_prefill` kernel **只编译了 Hopper（sm90）**，硬拒绝 compute capability 12.0。错误栈里的路径 `gdn_prefill_sm90/` 直接暴露了范围。
+
+**讽刺之处** [c-trtllm-misleading]：NVIDIA 把 Qwen3-Next 和 Blackwell 都列在支持列表里，组合起来却开箱即失败。**"支持列表"不等于"可部署"**。
+
+**修复已存在但没进发行版** [c-trtllm-fix-available]：flashinfer ≥0.6.13 已加入 sm120 GDN kernel（2026-06-17 合并）。绕过方案（已验证）：
+
+```bash
+pip install --upgrade "flashinfer-python>=0.6.13"
+export FLASHINFER_CUDA_ARCH_LIST=12.0f
+export FLASHINFER_FORCE_SM=120f
+```
+
+**这不是孤例** [c-trtllm-not-isolated]：同一 GPU 上 MoE 路径（issue #11932）、以及 #14973/#14780 等多个 issue 呈现同类 sm120 失败。现有 fallback 是设备无关的 Triton 实现，比原生 kernel 慢 [c-trtllm-triton-fallback]。
+
+**实操含义**：在 RTX PRO 6000 上部署新架构模型前，**必须核对捆绑库的 arch 覆盖**，而不是核对模型支持列表。
+
+### 10.3 已知具体坑
 
 | 坑 | 说明 | 来源 |
 |---|---|---|
+| TensorRT-LLM GDN 仅 sm90 | Qwen3-Next 在 sm120 预热崩溃 | [c-trtllm-sm120-gap] |
 | AWQ + MTP 长上下文崩塌 | 128k 时 -73%，32k 起 MTP 有害 | [c-awq-longctx-collapse] |
 | SGLang 长上下文劣势 | 128k 下比 vLLM 慢 4.2× | [c-vllm-longctx] |
 | Server 版早期无 Windows 驱动 | Linux 需内核 6+ / GCC 12 | [c-driver-gap] |
 | 塔式机箱散热不足 | Server 版 >500W 降频 | [c-thermal-chassis-limit] |
 | 无 NVLink | 多卡走 PCIe，P2P 关闭时延迟 14μs | [c-nvlink-absent] |
 
-### 10.3 软件栈现状
+
+### 10.4 软件栈现状
 
 - **NVFP4 是 SM120 的关键能力**，也是本地推理最重要的优化点 [c-nvfp4-native]
 - 投机解码需要 checkpoint 自带 draft head（Qwen3.5/3.6/3.8 系列支持）[c-mtp-benefit]
 - 训练侧：`gpu_burn` 类合成负载与真实推理对功耗墙的响应完全不同，**不要用合成负载推断推理性能** [c-memclock-invariant]
 
-### 10.4 在役退化风险：这是本报告最需要警示的运维问题
+### 10.5 在役退化风险：这是本报告最需要警示的运维问题
 
 **评测网站在测新卡，但用户论坛在报旧卡性能退化。** 两者不冲突，只是观察窗口不同。
 
@@ -621,6 +723,32 @@ RTX PRO 6000 用 **SM120**（GB202），数据中心 Blackwell 用 **SM100**。�
 | 部署监控告警 | 跟踪 `clocks_event_reasons.sw_power_cap` 与频率/功耗比 |
 | 关注空闲功耗 | 有报告空闲 200–300W 偏高 [c-idle-power-high]，可作为早期信号 |
 | 多卡训练加看门狗 | 检测单卡吞吐偏离集群中位数 |
+
+### 10.6 供电接口熔毁：另一个与性能无关的硬件风险
+
+600W 全部通过单个 12V-2x6（16-pin）接口输入，这是该卡最脆弱的物理环节。
+
+**已发生的事件** [c-melt-incident]：一台配 ASRock Taichi TC-1650T 电源的 RTX PRO 6000 WS 整机，**接头在电源侧熔毁并熔进插座**，而两端都已完全插到位 [e-melt-event]。显卡本身未损坏，损伤限于电源侧 [c-melt-gpu-survived]。
+
+**根因指向传感器位置** [c-melt-root]：该电源的 NTC 温度传感器被装在**接地线侧而非 12V 侧**，可能因此没能及时捕捉升温 [e-melt-sensor]。
+
+**这不是偶发** [c-melt-recurring]：同一 GPU + PSU 组合在 **2026-03 已发生过一次**类似熔毁。
+
+**保护机制不可依赖** [c-melt-protection-unreliable]：ASRock 的 TempGuard 曾在另一个场景成功拦截 1350W 改装的 5090，但这次没拦住。**"有保护"不等于"保护会生效"**。
+
+**保修风险真实存在** [c-melt-warranty-risk]：已有厂商（PNY）拒绝 16-pin 熔毁的保修索赔，理由是"原生 PSU 线材不在保修范围"。
+
+**采购/部署建议**：
+
+| 措施 | 说明 |
+|---|---|
+| 优先选原生 12V-2x6 线材 | 避免转接头，减少接触电阻 |
+| 确认线材完全插到位 | 该案例中已插到位仍失效，故需更保守 |
+| 优先选带 12V 侧温度监测的电源 | 接地线侧传感可能漏检 |
+| 确认 PSU 线材的保修条款 | 部分厂商明确不覆盖 |
+| 高密度部署考虑 8-pin 多路方案 | 分散单点电流，牺牲便利换安全 |
+
+**诚实标注**：这是基于单一维修技师报告 + 历史先例的分析，**不是统计意义上的故障率**。但它与 RTX 5090 上已大量出现的同类事件同源（同一连接器标准），因此不应被当作孤例忽略。
 
 ---
 
@@ -683,7 +811,29 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 
 **当前价格比 = 3.6 倍** [c-price-ratio]。涨价主因是高端 GDDR7/DRAM 供应紧张，且预期持续多年 [c-price-cause]。
 
-### 12.2 每美元性能：一个残酷的结论
+### 12.2 另一种口径：持有型 TCO 下它反而最便宜
+
+上面的 $17,999 是**零售单卡价**。大规模自持部署看的是**每芯片每小时持有成本**（含折旧、电力、机房、运维），两者结论相反。
+
+SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
+
+| 芯片 | TCO（$/chip/hr） |
+|---|---|
+| **RTX PRO 6000** | **0.68** |
+| H100 SXM | 1.17 |
+| H200 SXM | 1.22 |
+| B200 | 1.73 |
+| B300 | 2.26 |
+
+按此口径，RTX PRO 6000 的每小时成本约为 **H200 的 56%、H100 的 58%**，是所列芯片中最低的 [c-tco-rtx-cheaper]。
+
+**为什么两个口径差这么大**：零售价被渠道溢价和 GDDR7 短缺推高，而 TCO 模型按大规模采购折旧摊分，且该卡 600W 的功耗在机房层面不构成主要成本项。**买一张卡和运营一万张卡，是两套经济学。**
+
+**但这个口径不能直接换算成每 token 成本** [c-tco-unmeasured]：SemiAnalysis 在 Qwen3.5-397B 的 65/105/144 tok/s/user 三个档位上**都没有 RTX PRO 6000 的实测吞吐**，只有 H200 的 $0.67/$0.96/$1.19 每百万 token。缺吞吐数据就无法算每 token 成本 [c-tco-not-comparable]。
+
+**诚实结论**：低每小时成本是必要条件，不是充分条件。要判断推理经济性，仍需该卡在目标模型上的实测吞吐——而这一环目前公开数据缺失。
+
+### 12.3 每美元性能：一个残酷的结论（零售口径）
 
 按渲染性能/价格计，RTX PRO 6000 在该基准库 33 张有价卡片中**排最后一名** [c-value-worst]：
 
@@ -695,25 +845,45 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 
 这个结论必须在报告里说清楚：RTX PRO 6000 的价值**不在渲染**，而在"渲染 + 大模型同机共存"。如果不需要 96GB 显存跑模型，纯渲染买它是严重浪费。
 
-### 12.3 同代产品价格锚点
+### 12.4 同代产品价格锚点
 
 | 产品 | 显存 | 价格 |
 |---|---|---|
 | RTX PRO 6000 WS | 96GB | **$17,999**（2026-10） |
+| RTX PRO 5500 | 84GB | 已发布，21,760 CUDA（=5090 核心数）[c-eol-pro5500] |
 | RTX PRO 5000 72GB | 72GB | $9,999 MSRP / £6,899 街价（2025-12）[c-price-5000-72g] |
-| RTX 5090 | 32GB | **$4,996**（2026-10） |
+| RTX 5090 | 32GB | **$4,996**（2026-10），且可能停产 |
 
-### 12.4 采购建议
+### 12.5 一个会改变比价逻辑的变量：RTX 5090 可能停产
+
+**本报告的 3.6 倍比价建立在"5090 现价 $4,996"上。这个分母可能不再稳定。**
+
+有两条独立爆料称，NVIDIA 已停止向 RTX 5090 分配 GB202 晶圆，未来全部 GB202 供给 RTX Pro 系列 [c-eol-5090]。另有爆料称停产日期定在 2027 年 1 月 [c-eol-jan-date]。
+
+**证据等级必须说清楚**：这是**爆料级**信息，NVIDIA 未确认 [c-eol-unconfirmed]。但它有旁证——RTX PRO 5500 已发布，用 5090 的核心数（21,760）配 84GB 显存 [c-eol-pro5500]，正是"GB202 转向 Pro 线"的产物。
+
+**对选型的影响** [c-eol-price-impact]：
+
+| 情形 | 后果 |
+|---|---|
+| 5090 真停产 | 其价格进一步上涨，**3.6 倍比价收窄** |
+| 5090 供给枯竭 | "用 5090 做纯渲染更划算"的建议**时效性变短** |
+| 需要长期供货保障 | RTX Pro 系列反而是更稳的选择 |
+
+**这是本报告唯一一个"结论可能因供给变化而反转"的地方**。如果 5090 涨到 $8,000，每美元渲染性能的 3 倍优势就缩到 1.8 倍，选型逻辑会明显松动。
+
+### 12.6 采购建议
 
 **这是本报告最需要强调的时点问题**：所有基于 2025 年 $8,500 价位的"性价比"论证**在 2026 年已失效**。当前 $17,999 下：
 
 | 情形 | 建议 |
 |---|---|
 | 必须单卡 96GB 跑大模型/长上下文 | 无可替代，接受溢价 |
-| 只需 72GB 容量 | 考虑 RTX PRO 5000 72GB（约一半价格，58% 算力） |
-| 纯渲染/可视化 | ❌ 选 RTX 5090，每美元性能约 3 倍 |
+| 只需 72–84GB 容量 | 考虑 RTX PRO 5000 72GB（约一半价格）或 PRO 5500 84GB |
+| 纯渲染/可视化 | ❌ 选 RTX 5090，每美元性能约 3 倍（**但注意停产风险**） |
 | 可用多卡替代单卡 | 重新计算总拥有成本（2×5090 的 64GB 仍不及单卡 96GB 的易用性） |
 | 数据中心多卡推理 | 对比 H100/H200 的每 token 成本，而非单卡价格 |
+| 高负载 7×24 运行 | ⚠️ 先读 §10.5 退化风险与 §10.6 供电风险，要求书面 RMA 政策 |
 
 ---
 
@@ -733,13 +903,13 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 
 本报告**未能**取得以下一手资料，已在 §2.3 详列：
 
-1. **MLPerf Inference 官方提交**中 RTX PRO 6000 的封闭分区成绩（PDF 不可解析）
-2. **SPECviewperf 15** 可解析结果页（请求超时）
-3. **Puget Systems / Phoronix / TechPowerUp** 完整评测正文（Cloudflare 403）
-4. **SPECworkstation** 分项数据（V-Ray 已由 Drop & Render 补上）
-5. **Max-Q 的实际推理吞吐**（社区仅提供遥测，无 Gflop/s 或 tok/s）
-6. **RTX 6000D（中国特供 84GB）** 的独立验证（仅见拆解报道，未能取得原文）
-7. **Blender Server 版冲突的仲裁**（需要同机同版本同场景的三方复测）
+1. **SPECviewperf 15** 可解析结果页（请求超时；NVIDIA 仅给出"Server 版最高"的结论）
+2. **Puget Systems / Phoronix / TechPowerUp** 完整评测正文（Cloudflare 403）
+3. **SPECworkstation** 分项数据（V-Ray 已由 Drop & Render 补上）
+4. **Max-Q 的实际推理吞吐**（社区仅提供遥测，无 Gflop/s 或 tok/s）
+5. **Comino Grando 4U 液冷整机（8× 768GB）** 的完整评测正文（StorageReview 403）
+6. **Blender Server 版冲突的仲裁**（需要同机同版本同场景的三方复测）
+7. **MLPerf 具体吞吐数字**（Cisco 白皮书正文以图表呈现，可解析文本未含数值表）
 
 ### 13.3 对结论稳健性的影响
 
@@ -757,7 +927,7 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 | 观察项 | 为什么重要 | 触发条件 |
 |---|---|---|
 | GDDR7 供应缓解 | 价格可能回落，性价比结论反转 | DRAM 厂商扩产公告 |
-| `RTX 6000D` 国内版本 | 84GB / 削减规格，可能改变国内选型 | 独立评测出现 |
+| `RTX 6000D` 国内市场接受度 | 规格已明确（§3.3），但需求疲弱，可能影响后续 SKU 策略 | 出货数据或停产公告 |
 | SM120 内核优化进展 | 当前软件劣势可能缩小 | vLLM/SGLang 为 SM120 专门优化 |
 | AWQ + MTP 长上下文问题修复 | 可能让 AWQ 重新可用于长上下文 | vLLM issue 关闭 |
 | Max-Q 实测吞吐公布 | 决定它是否真是 decode 最优 SKU | 第三方测试 |
@@ -820,6 +990,26 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 31. [NVIDIA Developer Forums：PRO 6000 Blackwell WS — SW Power Cap ~600MHz @ 600W/35°C](https://forums.developer.nvidia.com/t/pro-6000-blackwell-ws-sw-power-cap-600-mhz-600-w-35-c-fix-or-rma/376937)（2026-07-15） — [src-forum-swcap]
 32. [NVIDIA Developer Forums：Wrong temperature thresholds causes SW Power Cap, throttled to 510MHz](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-wrong-temperature-thresholds-causes-sw-power-cap-gpu-throttled-to-510mhz-1-6-performance/362488)（2026-03-05） — [src-forum-thresh]
 
+### 软件生态实证与 TCO
+
+33. [NVIDIA/TensorRT-LLM Issue #15634：Qwen3-Next 在 sm120（RTX PRO 6000）预热失败](https://github.com/NVIDIA/TensorRT-LLM/issues/15634)（2026-06-25） — [src-trtllm-15634]
+34. [SemiAnalysis InferenceX：Qwen3.5-397B H200 vs RTX PRO 6000 每美元性能](https://inferencex.semianalysis.com/compare-per-dollar/qwen-3-5-h200-vs-rtx6000pro)（2026-07 定价） — [src-inferencex-tco]
+35. [SemiAnalysis InferenceX：AI Chips for LLM Inference（规格与云定价索引）](https://inferencex.semianalysis.com/chips) — [src-inferencex-chips]
+
+### 中国特供型号
+
+36. [中关村在线：RTX 6000D 中国特供版深度拆解 — 性能降约 23%](https://diy.zol.com.cn/1133/11334549.html)（2026-02-12） — [src-zol-6000d]
+
+### MLPerf 与专业媒体实测
+
+37. [Cisco：MLPerf Inference on UCS X580p with H200 NVL and RTX PRO 6000（白皮书）](https://www.cisco.com/c/en/us/products/collateral/servers-unified-computing/ucs-x-series-modular-system/mlperf-inference-ucs-x580p-wp.html)（更新 2026-09-30） — [src-cisco-mlperf]
+38. [arXiv:2606.29179：8K 10-bit 4:2:2 硬件编码性能分析（ICIP 2026 Workshops）](https://arxiv.org/abs/2606.29179)（2026-06-28） — [src-arxiv-vpcc]
+
+### 硬件安全与产品生命周期
+
+39. [TechPowerUp：ASRock TempGuard 未能阻止 RTX PRO 6000 的 PSU 侧接口熔毁](https://www.techpowerup.com/352658/asrocks-tempguard-failed-to-stop-a-psu-side-connector-meltdown-on-a-usd-15-000-rtx-pro-6000-rig)（2026-09-14） — [src-tpu-melt]
+40. [TechPowerUp：NVIDIA 据称终止 RTX 5090，GB202 晶圆留给工作站卡](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-eol]
+
 ---
 
 ## 附录 A：子问题完成度
@@ -834,16 +1024,23 @@ RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 
 | q6 | 600W 是否值得 | ✅ | §6.3–6.4 能效曲线与推理实测 |
 | q7 | 价格变化 | ✅ | §12.1 价格时间线至 2026-10-27 |
 | q8 | 软件生态限制 | ✅ | §10 SM120 分裂与具体坑 |
-| q9 | vs H100/L40S/Ada 边界 | ✅ | §8 训练交叉点 + §9.1 全象限对比（MLPerf 封闭分区仍缺，但不影响结论） |
+| q9 | vs H100/L40S/Ada 边界 | ✅ | §8 训练交叉点 + §9.1 全象限对比 + §4.6 MLPerf 封闭分区 |
 | q10 | MIG / vGPU 虚拟化 | ✅ | §11.1 官方 SPECviewperf 与共享吞吐数据 |
 | q11 | 机密计算性能代价 | ✅ | §11.2 厂商 1-8% 与学术 13-27% 并列，含回收手段 |
-| q12 | 长期运行是否可靠？ | ✅ | §10.4 社区故障报告与运维建议 |
+| q12 | 长期运行是否可靠？ | ✅ | §10.5 社区故障报告与运维建议 |
+| q13 | 部署新架构模型的软件风险？ | ✅ | §10.2 TensorRT-LLM sm120 实证案例 |
+| q14 | 大规模自持的 TCO 如何？ | ✅ | §12.2 SemiAnalysis 持有型 TCO 口径 |
+| q15 | 中国特供 6000D 的规格与定位？ | ✅ | §3.3 完整削减规格与实测 |
+| q16 | 视频编码能力有多强？ | ✅ | §7.4 8K 4:2:2 的 122fps 实测 |
+| q17 | MLPerf 官方成绩如何？ | ✅ | §4.6 封闭分区数据 |
+| q18 | 长期高负载有哪些硬件风险？ | ✅ | §10.5 退化 + §10.6 供电熔毁 |
+| q19 | 产品生命周期与停产风险？ | ✅ | §12.5 RTX 5090 停产传闻 |
 
-**完成度：12/12 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：19/19 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **188 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **238 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -851,7 +1048,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=32, evidence=188, claims=120, claims_high=79, claims_disputed=1`
+当前校验结果：`sources=40, evidence=238, claims=158, claims_high=102, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
