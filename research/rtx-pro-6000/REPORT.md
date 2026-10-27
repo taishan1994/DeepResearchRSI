@@ -907,7 +907,64 @@ Invalid __global__ read of size 4 bytes
 
 > 注意 **8,430 tok/s** 与 §4.8.2 的 Qwen3-30B-A3B（133 tok/s 总吞吐）不矛盾：**模型规模差 4 倍，且一个是 8B 的小模型在批量下**。**引用引擎数字时必须同时说明模型、量化格式与 batch**，否则会把不同量级的数字放在一起比较。
 
-### 4.8.6 分子动力学的三个补充基准，以及一个必须声明的比较陷阱
+### 4.8.5.2 一张卡能跑多大的稠密模型：128B 在双卡上的真实边界
+
+前面几节的强项都是 MoE（稀疏激活）。**稠密模型是另一回事**，本轮找到一份完整可运行的 128B 稠密案例 [c-mm128-dense-tp2]。
+
+**配置**：Mistral-Medium-3.5-128B（**稠密 128B**），2× RTX PRO 6000，**TP=2** [e-mm-launch]：
+
+```
+--tensor-parallel-size 2
+--max-model-len 131072
+--max-num-seqs 1
+--max-num-batched-tokens 8192
+--gpu-memory-utilization 0.90
+--kv-cache-dtype fp8
+--load-format/--tokenizer-mode/--config-format mistral
+```
+
+**显存账** [c-mm-dense-vs-moe]：**权重约 140GB，两张卡共 196GB，占 71%**。剩下的 56GB 要装 131K 上下文的 FP8 KV——**代价是 `--max-num-seqs 1`**。
+
+> **这就是双卡 192GB 跑 128B 稠密模型的真实边界：能跑，但并发能力几乎为零。**
+>
+> 与 §4.9 的 MoE 案例（Qwen3.5-397B 在 4 卡上并发服务）形成鲜明对照——**MoE 的稀疏激活让它能在同样的显存里保留并发，稠密模型不行。**
+
+**SM120 编译的一个精确化** [c-sm120-arch-flag]：本报告此前记录的构建标志是 `TORCH_CUDA_ARCH_LIST="12.0 12.1"`。**更准确的写法是**：
+
+```bash
+export TORCH_CUDA_ARCH_LIST="12.0a;12.0f"
+```
+
+理由（原文）：*"Use `12.0a` + `12.0f` together so kernels with **arch-specific (`a`)** and **family-specific (`f`)** variants both get compiled."*
+
+> **两个后缀不是重复，是两类不同的内核变体。** 只写版本号会漏掉其中一类。
+
+**构建门槛也被量化了** [c-mm-build-cost]：**至少 64GB 主机内存 + 100GB 空闲磁盘**（权重另需 ~140GB），且需 `MAX_JOBS=8 NVCC_THREADS=2` 限制并行，**否则主机 OOM**。
+
+#### 投机解码：最优点取决于负载
+
+这份记录最有价值的是**EAGLE 的逐档实测** [c-mm-eagle-sweet-spot]（Spec Decode 2，即预测 2 个 token）：
+
+| 负载 | 生成吞吐 | 平均接受长度 | 平均接受率 | **逐位接受率** |
+|---|---|---:|---:|---|
+| **通用文本** | 26–35 tok/s | 1.89–1.98 | 45–49% | **~60% / ~32%** |
+| **编码** | **37–43 tok/s** | **2.34–2.70** | **67–85%** | **74–91% / 59–80%** |
+
+**逐位数据解释了全部机制** [c-mm-accept-split]：通用文本**第 2 位骤降到 ~32%**，而编码任务第 2 位**仍有 59–80%**——**接近 2 倍**。
+
+> **所以 3-token 只在编码上划算**：通用文本上第 3 位接受率预计只有 20–50% [e-mm-spec3]，**增加的开销抵不过收益**（作者实测 Spec Decode 3 在讲故事上「略有下降」）。
+
+**作者的实际建议** [e-mm-spec2]：**通用文本用 2-token，编码可用 3-token。**
+
+#### 一个与直觉相反的结论
+
+> *"I don't really see any benefit at longer contexts. I actually see Spec Decode acceptance rate **drop slightly** over the context."* [e-mm-context]
+
+**上下文越长，投机解码接受率反而略降。** 作者推测原因是「人类持续添加的上下文与训练分布不匹配」。
+
+> **这否证了一个常见假设**——「长上下文更该用投机解码」在本案例中**得不到支持**。本报告标为 medium（单一用户实测），但它至少说明**这个假设不能默认成立**。
+
+
 
 §4.8.5 给了 AMBER 的数据。本节补上同一家 HPC 集成商实测的 LAMMPS 与 GROMACS，**结论比 AMBER 复杂得多**。
 
@@ -2895,6 +2952,7 @@ sudo nvidia-bug-report.sh
 | q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
 | q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
 | q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
+| q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2924,12 +2982,13 @@ sudo nvidia-bug-report.sh
 | q59 | Blender 争议能裁决吗？ | ⚠️ C3 | §7.3.2 同源比值差 48%，散热不足以解释，仍并列 |
 | q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
 | q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
+| q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
 
-**完成度：61/62 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：62/63 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **770 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **780 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -3048,3 +3107,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 124. [PassMark Videocard Benchmark：RTX PRO 6000 Blackwell Server Edition（G3D Mark 与横向对比）](http://216.146.218.45/gpu.php?gpu=RTX+PRO+6000+Blackwell+Server+Edition&id=6962)（截至 2026-10-27） — [src-passmark-se]
 125. [TechPowerUp：NVIDIA 已设定 RTX 5090 / 5080 16GB 的一月停产日期（含官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 126. [TechPowerUp：NVIDIA 据称终止 RTX 5090，GB202 硅片留给工作站卡](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
+127. [Hugging Face：Mistral-Medium-3.5-128B 在 2× RTX PRO 6000 上运行的完整配置与 EAGLE 实测](https://huggingface.co/mistralai/Mistral-Medium-3.5-128B/discussions/17)（2026-05-02 起） — [src-hf-mm35]
