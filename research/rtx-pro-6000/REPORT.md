@@ -2489,6 +2489,47 @@ nvidia-smi --query-gpu=index,pci.bus_id,pcie.link.gen.current,pcie.link.width.cu
 
 **官方选型结论**：RTX PRO 6000 Server Edition 是高性能 vWS 部署的推荐 GPU（SPECviewperf 15 @ 4K 原生性能最高）[c-vgpu-best]。
 
+### 11.1.2 官方 vGPU 支持矩阵：两条硬版本门槛
+
+NVIDIA 官方文档给出了虚拟化部署的明确门槛，本报告此前未记录 [c-vgpu-version-floor]：
+
+| 平台 | RTX PRO 6000 Blackwell Server Edition 的最低要求 |
+|---|---|
+| **VMware Cloud Foundation (VCF)** | **9.0.1 或更高** |
+| **VMware vSphere (ESXi) 8.0** | **8 Update 3g 或更高** |
+
+> 官方原文特别强调：**"Earlier VMware vSphere Hypervisor (ESXi) 8.0 builds are not supported."**
+>
+> 即 **8.0u3 P06 以下完全不支持**。这解释了为何旧 ESXi 环境里这张卡「插上但不工作」——**不是配置问题，是版本不支持**。
+
+**同一个列表还包括 RTX PRO 4500 Blackwell Server Edition 与 6000 SE 液冷版**——三者是同一批加入支持矩阵的。
+
+#### 一个与既有诊断吻合的官方确认
+
+官方表明确写：**RTX PRO 6000 Blackwell Server Edition（含液冷版）出厂即为 `Display-off` 模式**，而 RTX 6000 Ada 是 `Display enabled` [c-vgpu-display-off]。
+
+> **这与 §10.4.1 记录的 MIG 报错根因完全吻合**——当时诊断出「`98.02.6A.00.03` 满足 vBIOS 门槛却仍报 `Not Supported`，原因是缺 `displaymodeselector` 计算模式切换」。**现在有了官方文档层面的印证：这张卡出厂就是 display-off，切换必须用那个工具。**
+
+#### 多卡直通的 MMIO 陷阱
+
+一个容易踩的坑 [c-vgpu-mmio]：该卡 **BAR1 = 128 GiB**，直通给 VM 时必须按**卡数 × 128 GiB** 预留 MMIO：
+
+```
+四卡直通 → 4 × 128 GiB = 512 GiB
+需设：pciPassthru.use64bitMMIO = "TRUE"
+      pciPassthru.64bitMMIOSizeGB = "512"
+```
+
+**漏设的后果**（官方给出的报错）：
+
+```
+NVRM: BAR1 is 0M @ 0x0 (PCI:0000:02:02.0)
+NVRM: The system BIOS may have misconfigured your GPU.
+nvidia: probe of 0000:02:02.0 failed with error -1
+```
+
+> 注意这条报错的措辞**会误导人**——它说"system BIOS may have misconfigured"，**实际原因是 VM 的 MMIO 空间没配够**，不是 BIOS 问题。
+
 ### 11.2 机密计算：厂商说 98%，学术说 73–87%
 
 RTX PRO 6000 **硬件内置 CC 支持**，与 HGX B200/B300 同属支持 CC 的 Blackwell 产品 [c-cc-supported]。这是消费级 RTX 5090 完全没有的能力。
@@ -2555,6 +2596,56 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 按此口径，RTX PRO 6000 的每小时成本约为 **H200 的 56%、H100 的 58%**，是所列芯片中最低的 [c-tco-rtx-cheaper]。
 
 **为什么两个口径差这么大**：零售价被渠道溢价和 GDDR7 短缺推高，而 TCO 模型按大规模采购折旧摊分，且该卡 600W 的功耗在机房层面不构成主要成本项。**买一张卡和运营一万张卡，是两套经济学。**
+
+#### 12.2.1 一个必须说清的悖论：每小时最便宜，每 token 最贵
+
+SemiAnalysis InferenceX 的官方数据页给出了本报告最直接的每美元对比 [c-ix-perdollar]。**Qwen 3.5 397B-A17B，8k/1k 序列，FP4**：
+
+| 目标交互性 | GB300 NVL72 | **RTX PRO 6000** | GB300 效率高 |
+|---|---:|---:|---:|
+| 56 tok/s/user | $0.017 | **$0.194** | **+1047%** |
+| 88 tok/s/user | $0.018 | **$0.250** | **+1320%** |
+| 121 tok/s/user | $0.021 | **$0.365** | **+1597%** |
+
+**然后看同一张表里的并发数** [c-ix-why]：
+
+| 目标交互性 | GB300 并发 | **RTX PRO 6000 并发** |
+|---|---:|---:|
+| 56 tok/s/user | ~2,983 | **~10** |
+| 88 tok/s/user | ~1,205 | **~4** |
+| 121 tok/s/user | ~1,088 | **~2** |
+
+> **差距的机制不是芯片价格，而是并发数。** RTX PRO 6000 在 397B 这种超大 MoE 上**装不下**，只能以个位数并发运行——**摊销不了任何固定成本**。
+
+#### 但它的每小时成本是全场最低的
+
+完整的 hyperscaler 自有 TCO（$/chip/hr）[c-ix-tco-table]：
+
+| 卡 | $/chip/hr |
+|---|---:|
+| **RTX PRO 6000** | **0.68** |
+| MI300X | 0.95 |
+| TPU v7 | 1.03 |
+| H100 | 1.17 |
+| H200 | 1.22 |
+| B200 | 1.73 |
+| B300 | 2.26 |
+| **GB300 NVL72** | **2.31** |
+| VR200 | 3.61 |
+
+**于是出现一个悖论** [c-ix-paradox]：
+
+> **RTX PRO 6000 的 $/chip/hr 最低（0.68，只有 GB300 的 29%），但每百万 token 成本最高（$0.19–0.36，是 GB300 的 10–18 倍）。**
+>
+> **低芯片成本弥补不了低并发——买得起不等于用得起。**
+
+#### 这个结论不能外推
+
+必须说清适用范围 [c-ix-scope-caveat]：以上全部基于 **Qwen 3.5 397B-A17B**——一个**单卡装不进 96GB** 的超大 MoE，且是 **8k/1k、FP4** 的默认配置。
+
+> **对能装进 96GB 的模型（8B–70B），并发数差距会小得多，结论可能完全反转。** 页面自身也声明：分离式推理配置与聚合配置的每 token 成本对比「并不完全等价」。
+
+**所以正确的读法是**：这张卡在「大模型 + 高并发服务」场景下每 token 成本劣势巨大；在「模型装得进单卡 + 单用户或低并发」场景下，它的低芯片成本才是优势——**这正是 §4 各节实测覆盖的区间**。
 
 **但这个口径不能直接换算成每 token 成本** [c-tco-unmeasured]：SemiAnalysis 在 Qwen3.5-397B 的 65/105/144 tok/s/user 三个档位上**都没有 RTX PRO 6000 的实测吞吐**，只有 H200 的 $0.67/$0.96/$1.19 每百万 token。缺吞吐数据就无法算每 token 成本 [c-tco-not-comparable]。
 
@@ -2634,6 +2725,56 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 **对采购者的实际含义** [c-5090-buyer-implication]：
 
 > **不要基于传闻做紧急决策**，但应把"5090 供应可能收紧"作为比价时的**风险因子**——因为它的现价（>$4,500）已远超首发（$1,999），**这个价差本身就是供需紧张的读数**，不管停不停产。
+
+### 12.5.2 一个此前完全未覆盖的维度：出口管制
+
+本报告此前只把 **RTX 6000D** 当作一个「中国特供 SKU」描述（§3.3），**没有追问它为何存在**。本轮补上政策维度 [c-bis-parent-rule]。
+
+**2026-05-31，美国商务部工业与安全局（BIS）发布指引**，确立了一条关键原则：
+
+> **许可要求的关键不是芯片的最终收货地，而是采购方总部或最终母公司是否位于 EAR 的 D:5 国家组或中国澳门。**
+
+**D:5 国家组**含中国、俄罗斯、朝鲜、伊朗、叙利亚、白俄罗斯、缅甸等 **22 个国家/地区**。
+
+**这意味着**：即使芯片发往**马来西亚、新加坡的子公司**，只要最终母公司在中国，**出口方仍须向 BIS 申请许可证** [e-bis-verify]。
+
+#### 这不是新规，是澄清
+
+一个容易误解的点 [c-bis-not-new]：相关许可要求**最早在 2023-11-17 就已引入**，适用于 ECCN **3A090.a / 3A090.b / 4A090.a / 4A090.b** 等先进计算产品。**此次指引的作用是明确它并未因 2025 年 5 月「AI 扩散规则」被撤销而失效。**
+
+**中间存在约一年的执法空窗期** [c-bis-enforcement-gap]：2025 年 5 月「AI 扩散规则」撤销后，「总部在中国、子公司设海外」的买家是否需要许可证变得模糊——**该期间境外子公司可以合规取得高端 AI 芯片**。指引关闭了这个口子。
+
+#### 实际可行性：推定拒绝
+
+审查政策是「**推定拒绝**」（Presumption of Denial）[c-bis-presumption-denial]：
+
+> 原则上相关申请**不予批准**。出口商需承担极重举证责任，证明出口「不会危害美国国家安全」——**实操中几乎不可能实现**。
+
+#### 对已采购用户：好消息
+
+**存量部署被明确豁免** [c-bis-existing-ok]：
+
+> 合规运营的数据中心**不需要**因该指引停止正在进行的使用、存储、处置或**维修服务**。
+
+**影响集中在新增采购与「绕道采购」，而非已部署的芯片和服务器。** 这一点对本报告读者很重要——**已买到手的卡不会因为这个指引变成烫手山芋**。
+
+#### 这解释了 RTX 6000D 为何长成那样
+
+把政策与规格接起来看 [c-bis-rtx6000d-rationale]，§3.3 那个「**BF16 只保留 35.9%**」的怪异削减就有了另一层解释：
+
+> **规格削减不只是产品分层，也是合规切割。** 在 ECCN 的算力密度门槛下，削低互连与低精度算力是满足出口条件的常见手段。
+
+这也解释了 6000D 为何**砍掉 DisplayPort 输出能力、默认 TCC 模式**——它被定位成纯计算卡，而非工作站显示卡。
+
+#### 给采购者的合规清单
+
+| 你的情况 | 结论 |
+|---|---|
+| 最终母公司位于 D:5 国家组或澳门，**通过第三国子公司采购** | **面临「推定拒绝」**，实操上不可行 |
+| **已部署**（含维修、存储、处置） | **不受影响**，明确豁免 |
+| 你是**系统集成商/分销商** | 必须核实买方**最终母公司**，不是收货地址 |
+
+**这条对集成商尤其重要** [c-bis-buyer-checklist]——过去核验收货地址可能已经足够，现在不够了。
 
 ### 12.6 采购建议
 
@@ -2953,6 +3094,8 @@ sudo nvidia-bug-report.sh
 | q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
 | q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
 | q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
+| q63 | 出口管制如何影响采购？ | ✅ | §12.5.2 BIS 2026-05-31 看总部不看收货地，存量豁免 |
+| q64 | 每 token 成本比 H100/GB300 如何？ | ✅ | §12.2.1 $/chip/hr 最低但每 token 最贵，差 10-18 倍 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2983,12 +3126,14 @@ sudo nvidia-bug-report.sh
 | q60 | PassMark 怎么解释？ | ✅ | §7.2.1 样本仅 5 个且含 553 异常值，且它是图形 API 坐标系 |
 | q61 | RTX 5090 停产了吗？ | ⚠️ 不确定 | §12.5.1 NVIDIA 官方已否认，但渠道行为相反 |
 | q62 | 双卡能跑 128B 稠密模型吗？ | ✅ | §4.8.5.2 能，TP=2 + 权重 140GB，但并发仅 1 |
+| q63 | 出口管制如何影响采购？ | ✅ | §12.5.2 BIS 2026-05-31 看总部不看收货地，存量豁免 |
+| q64 | 每 token 成本比 H100/GB300 如何？ | ✅ | §12.2.1 $/chip/hr 最低但每 token 最贵，差 10-18 倍 |
 
-**完成度：62/63 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：64/65 已答（4 项按 C3 或不确定标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **780 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **800 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -3108,3 +3253,6 @@ python scripts/validate_research.py research/rtx-pro-6000
 125. [TechPowerUp：NVIDIA 已设定 RTX 5090 / 5080 16GB 的一月停产日期（含官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 126. [TechPowerUp：NVIDIA 据称终止 RTX 5090，GB202 硅片留给工作站卡](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 127. [Hugging Face：Mistral-Medium-3.5-128B 在 2× RTX PRO 6000 上运行的完整配置与 EAGLE 实测](https://huggingface.co/mistralai/Mistral-Medium-3.5-128B/discussions/17)（2026-05-02 起） — [src-hf-mm35]
+128. [电子工程专辑：美国出台新规，禁止向中企境外子公司出口 AI 芯片（BIS 2026-05-31 指引）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
+129. [SemiAnalysis InferenceX：Qwen 3.5 397B-A17B 在 GB300 NVL72 与 RTX PRO 6000 上的每美元性能](https://inferencex.semianalysis.com/zh/compare-per-dollar/qwen-3-5-gb300-vs-rtx6000pro)（截至 2026-10-27） — [src-inferencex-gb300]
+130. [NVIDIA Virtual GPU Software：VMware vSphere 已验证平台（含 RTX PRO 6000 Server Edition）](https://docs.nvidia.com/vgpu/latest/grid-vgpu-release-notes-vmware-vsphere/validated-platforms.html) — [src-vgpu-validated]
