@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：153 ｜ **证据数**：1174 ｜ **主张数**：746（高置信 554，争议 1）
+> **来源数**：155 ｜ **证据数**：1184 ｜ **主张数**：756（高置信 562，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2913,6 +2913,119 @@ monster 场景中慢于 34 s 的占比 [c-slow-cluster-sku]：
 
 **标 `medium`**：5.x 组的样本只有 **n=8**，且**未验证 5.x 在其它场景是否引入了新的回归**。
 
+### 7.3.10 拿到官方基准源码后：这个分数到底在测什么
+
+前几节的所有数字都来自 Open Data 的 `total_render_time`。**这一轮拿到了官方基准脚本的源码，终于可以确认那个「分数」到底是怎么算出来的——结果发现它比我以为的更脆弱。**
+
+#### 确凿参数：30 秒时限，1677 万采样上限
+
+从 `blender-benchmark-script-3.1.1/render.py` 直接读出 [c-bb-params]：
+
+```python
+scene.cycles.samples = 1 << 24      # 16,777,216
+scene.cycles.time_limit = 30        # 30 秒
+scene.cycles.use_adaptive_sampling = False   # 两处强制关闭
+```
+
+> **每次测量都是「跑满 30 秒即停」。** 采样上限 1677 万只是保证「快到足以跑满 30 秒」，**实际完成的采样数由设备速度决定**。
+
+#### 测量的不是总时间，是平均每样本时间
+
+脚本明确测量 `Average time per sample`，注释原文 [c-bb-metric]：
+
+> *"We are measuring average time per sample, which is not compatible with adaptive sampling."*
+
+并且关闭 auto tile，以保证取得整帧计时。
+
+官方对分数的定义 [c-bb-score-def]：
+
+> **Benchmark Score = 每分钟采样子数，对所有场景求和。**
+
+> **所以本报告全篇使用的 `total_render_time` 与官方分数只是单调相关，不是同一个量。** 这一点此前没有说清。
+
+#### 预热存在，但不彻底
+
+脚本在正式测量前单独跑一次 `samples = 1` 的预热 [c-bb-warmup]，注释说目的是让设备**完全就绪**。
+
+> **但预热只跑 1 个样本，首个被计时的样本仍含部分首次开销。**
+
+#### 官方自己承认：结果对首样本极度敏感
+
+issue #147954 的标题就是结论 [c-bb-first-sample]：
+
+> **Spring 场景的测量性能，对「渲染第一个样本所需时间」的细微变化极为敏感，尤其当场景施加严格时限或低采样数时。**
+
+机制在维护者评论里写得很清楚 [c-bb-null-scattering]：
+
+> **null scattering 变更后，现在总是至多调度 2^x 个样本，导致前若干个样本的 GPU 占用率极低；渲染更多样本后会好转（仍更慢，但没那么慢）。**
+
+报告者用 RTX 4090 + OptiX 实测每样本时间：
+
+| 版本 | 每样本时间 |
+|---|---:|
+| Blender 4.5 | **0.0658 s** |
+| Blender 5.0 | **0.1637 s** |
+| 5.0 + PR !147950 | 0.1334 s |
+
+**报告者本人强调：这主要是调度与 GPU 占用率问题，不是真实渲染能力回归。**
+
+#### 这正好解释了 §7.3.8 的双峰
+
+把三件事串起来 [c-bb-explains-bimodal]：
+
+1. **固定 30 秒时限** → 慢机器采到的样本更少
+2. **前若干样本占用率极低** → 首样本开销被摊到更少的样本上
+3. **官方承认结果对首样本敏感**
+
+> **于是形成正反馈：单样本越慢 → 30 秒内样本越少 → 首样本与低占用样本权重越高 → 平均每样本时间被进一步推高。**
+>
+> **落点不是连续分布，而是集中在「快」与「慢」两个吸引域附近——这正是双峰的形态。**
+
+#### 但官方不会修
+
+维护者已明确降低优先级 [c-bb-deprioritized]：
+
+> *"As discussed in the weekly catchup meeting we will lower the priority of this, as for longer renders this should be less of an issue."*
+
+> **这意味着短时限基准的占用率偏差将长期存在。** 用 Open Data 分数横向比较设备时，必须自行承担这部分误差。
+
+#### 一个容易混淆的陷阱：两个不同的时限
+
+| 出处 | 采样数 | 时限 |
+|---|---:|---:|
+| **Open Data 基准脚本** | **1 << 24** | **30 秒** |
+| Blender 性能测试套件 `cycles.py` | 16,384 | **10 秒** |
+
+> **引用 Blender 内部「10 秒时限」的结论来推断 Open Data 分数是不成立的** [c-bb-two-timelimits]。**两份官方源码用的常量不同。**
+
+#### 必须修正上一节的建议范围
+
+§7.3.9 建议「升级到 Blender 5.x 以规避慢簇」。**这个建议需要加限制** [c-bb-5x-risk]：
+
+issue #150282 报告 **5.0 在部分重型场景上渲染时间接近翻倍**：
+
+| 测试 | 4.5.5 | 5.0 | 倍数 |
+|---|---:|---:|---:|
+| 测试 1（带 light tree） | 2.22 min | **5.04 min** | **2.27×** |
+| 测试 2（带 light tree） | 4.00 min | **8.47 min** | **2.12×** |
+
+**但报告者同时说明**：官方演示场景（**barbershop、classroom** 等）在 5.0 上耗时**相近或更好**。
+
+> **所以「升级到 5.x 更快」只对基准场景成立，不能推广到任意生产场景。**
+>
+> **升级的收益是场景相关的，重型自定义场景甚至可能翻倍变慢。**
+
+#### 小结：这个基准能用于什么，不能用于什么
+
+**可以**：
+- 同一台机器上比较不同版本/驱动的**相对**变化
+- 大样本、同条件下的卡型**量级**排序
+
+**不可以**：
+- 当作「实际项目渲染时间」的预测
+- 把 1% 级别的分差当作真实差距（占用率噪声就超过这个量级）
+- 用来裁决 Drop & Render 那类差异（见 §7.3.9：全库无记录超过 41.4 s）
+
 ### 7.4 视频与专业特性
 
 - **4× 第 9 代 NVENC + 6× 第 6 代 NVDEC** [c-nvenc][c-nvdec]——**解码器数量多于编码器**，适合"多路解码 + 少量编码"的转码/分析流水线
@@ -5091,6 +5204,8 @@ sudo nvidia-bug-report.sh
 ### 补充来源
 
 - [Blender Foundation — Blender Open Data 原始快照：Blender Open Data 全量快照 opendata-2026-10-27（434,774 行 / 1,040,927 条记录 / 1.8GB）](https://opendata.blender.org/snapshots/opendata-latest.zip)（2026-10-27） — [src-blender-snapshot]
+- [Blender Foundation — Blender Benchmark Script 3.1.1 官方源码（blender-benchmark-script-3.1.1.tar.gz，含 render.py / main.py）](https://opendata.blender.org/cdn/BlenderBenchmark2.0/script/blender-benchmark-script-3.1.1.tar.gz)（2026-10-27） — [src-bb-script]
+- [Blender Foundation — 官方 issue #147954（Cycles 基准场景 GPU 占用率，open）与 #150282（5.0 重型场景翻倍，closed）](https://projects.blender.org/blender/blender/issues/147954)（2025-10-13 / 2025-11-20） — [src-blender-issues]
 
 ---
 
@@ -5227,7 +5342,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=153, evidence=1174, claims=746, claims_high=554, claims_disputed=1, trace_events=315, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=155, evidence=1184, claims=756, claims_high=562, claims_disputed=1, trace_events=319, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行

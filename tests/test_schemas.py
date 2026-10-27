@@ -580,6 +580,45 @@ def test_evidence_ids_reject_claim_prefix() -> None:
     return None
 
 
+def test_evidence_ids_hint_e_prefix_claim_twin() -> None:
+    """回归：用 e- 前缀引用一个真实 claim 名时，报错须点明对应的 c- 名字。
+
+    这是 c- 前缀检查的补集。历史上实际错法是把 claim 名冠以 e-
+    （例如 claim `c-bb-x` 被写成 `e-bb-x`），此时 id 本身以 e- 开头，
+    旧检查完全无法提示成因。
+    """
+    def _build(root: Path, mode: str) -> None:
+        _write(root, "sources.csv", "source_id,url,fetched_at,trust_tier\n",
+               ["src-a,https://a,2026-10-27T00:00:00+00:00,primary"])
+        _write(root, "evidence.csv", "evidence_id,source_id,quote,stance\n",
+               ["e-a,src-a,原文片段,supports"])
+        header = "claim_id,statement,claim_type,as_of,confidence,evidence_ids,counter_evidence_ids"
+        # c-target 是真实存在的 claim；错误引用写作 e-target
+        if mode == "evidence_ids":
+            rows = ["c-target,某事实,spec,2026-10-27,medium,e-a,",
+                    "c-user,另一事实,spec,2026-10-27,medium,e-target,"]
+        else:
+            rows = ["c-target,某事实,spec,2026-10-27,medium,e-a,",
+                    "c-user,另一事实,spec,2026-10-27,medium,e-a,e-target"]
+        _write(root, "claims.csv", header + "\n", rows)
+        (root / "REPORT.md").write_text("引用 [c-target] [c-user] [e-a]。\n", encoding="utf-8")
+
+    for mode in ("evidence_ids", "counter_evidence_ids"):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / mode
+            root.mkdir()
+            _build(root, mode)
+            try:
+                validate_research_dir(root)
+            except ValidationError as exc:
+                msg = str(exc)
+                assert "c-target" in msg, msg
+                assert "claim_id" in msg, msg
+            else:
+                raise AssertionError(f"{mode} 中的 e- 前缀 claim 孪生未被提示")
+    return None
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in tests:

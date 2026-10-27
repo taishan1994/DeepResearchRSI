@@ -119,6 +119,14 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
         if sid and sid not in source_ids:
             errors.append(f"evidence.csv[{eid}]: 引用了不存在的 source {sid}")
 
+    # 预先收集全部 claim 名，供 evidence 引用错误时给出「e-xxx 其实是 c-xxx」的提示。
+    # 必须在遍历 claims 之前算好，否则后出现的 claim 无法被前面的引用提示到。
+    claim_names: set[str] = {
+        (row.get("claim_id") or "").strip()
+        for row in claims
+        if (row.get("claim_id") or "").strip().startswith("c-")
+    }
+
     claim_ids: set[str] = set()
     for row in claims:
         cid = (row.get("claim_id") or "").strip()
@@ -133,7 +141,14 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
             errors.append(f"claims.csv[{cid}]: 没有任何证据（不变量 C1）")
         for eid in eids:
             if eid not in evidence_ids:
-                hint = "（疑把 claim_id 当成 evidence_id 引用）" if eid.startswith("c-") else ""
+                hint = ""
+                if eid.startswith("c-"):
+                    hint = "（疑把 claim_id 当成 evidence_id 引用）"
+                elif eid.startswith("e-"):
+                    # 常见错法：把 claim 名加上 e- 前缀当作 evidence_id。
+                    twin = "c-" + eid[2:]
+                    if twin in claim_names:
+                        hint = f"（{twin} 是 claim_id；应以真实 evidence id 引用其证据）"
                 errors.append(f"claims.csv[{cid}]: 引用不存在的 evidence {eid}{hint}")
             elif eid.startswith("c-"):
                 errors.append(
@@ -142,7 +157,13 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
         ceids = [x.strip() for x in (row.get("counter_evidence_ids") or "").split(";") if x.strip()]
         for eid in ceids:
             if eid not in evidence_ids:
-                hint = "（疑把 claim_id 当成 evidence_id 引用）" if eid.startswith("c-") else ""
+                hint = ""
+                if eid.startswith("c-"):
+                    hint = "（疑把 claim_id 当成 evidence_id 引用）"
+                elif eid.startswith("e-"):
+                    twin = "c-" + eid[2:]
+                    if twin in claim_names:
+                        hint = f"（{twin} 是 claim_id；应以真实 evidence id 引用其证据）"
                 errors.append(f"claims.csv[{cid}]: 引用不存在的反证 {eid}{hint}")
             elif eid.startswith("c-"):
                 errors.append(
