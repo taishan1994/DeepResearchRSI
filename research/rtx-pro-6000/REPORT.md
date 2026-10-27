@@ -1483,6 +1483,38 @@ export FLASHINFER_FORCE_SM=120f
 >
 > **这与本报告 §4.3.3 的 NCCL 结论完全同向**（一条 `NCCL_MIN_NCHANNELS=8` 带来 +69%，远超任何版本升级）。**先调参，再升级。**
 
+#### 10.4.1 VBIOS：MIG 的隐形门槛，以及一个没有中央分发渠道的困境
+
+这是本报告此前**完全未覆盖**的维度，且它会直接让 §11.1 的 MIG 能力**开箱不可用** [c-vbios-mig-gate]。
+
+**硬门槛**：要让 MIG 在 RTX PRO 6000 WS 上可用，`displaymodeselector` 要求 **VBIOS ≥ `98.02.55.00.00`**。而不少出厂卡带的是 **`98.02.52.00.02`** [e-vb-req]。
+
+**厂商承认这是一次发布疏漏** [c-vbios-omission]，NVIDIA 员工的原文：
+
+> "**WE omitted to release the board with MIG properly tested and supported to all our partners (20ish) initially**, so all partners received the VBIOS update, and now need to create their own enduser flash routine."
+
+**于是产生了本报告见过的最糟糕的支持结构** [c-vbios-nocentral]：
+
+| 事实 | 后果 |
+|---|---|
+| **VBIOS 不集中分发**，NVIDIA 按板卡伙伴分别管理版本 | 没有官方统一下载入口 |
+| NVIDIA **明确表示**"无法确认任意版本可跨版本刷写" | 不能自己找版本试 |
+| **降级尤其危险** | 刷错有变砖风险 |
+| 官方刷写工具**只允许特定版本升级路径** | 说明文档常常自相矛盾 |
+
+**必须找对上游伙伴** [c-vbios-partner]：PNY、TDsynnex、Leadtek、ELSA JP，或 OEM（Dell/HP/Lenovo）。**但用户往往查不到自己的卡来自哪个上游**——因为 [c-vbios-ident]：
+
+> **三款 SKU 的 PCI Device ID 完全相同**，只能靠 `SubSystemVendor ID` 或板上 **`900-xxxxx-yyyy-zzz`** 格式的小标签区分。
+
+**一个具体到荒诞的流程陷阱** [c-vbios-trap]：某用户按流程拿到升级说明，但说明要求"**必须已经处于或高于 `98.02.55.00.00`**"，而他手上的卡正是 `98.02.52.00.02`——**说明本身自相矛盾**，且给出的下载版本是 `98.02.81.00.07`。
+
+> **这解释了为什么 §12.7.1 的"保修真空"不是偶然**：它是同一个结构性问题的两面——**这张卡没有"制造商"这个可求助的对象，只有一层层的上游伙伴**，而 NVIDIA 明确表示无法直接受理终端用户退货 [c-vbios-warranty-src]。
+
+**两条对验收清单的修正**：
+
+1. **缺零售包装 ≠ 假卡** [c-vbios-bulk]：官方说明这是 **bulk 版**（面向系统集成商，省去拆包与包装处理）。因此 §12.7.2 的验收清单必须修正——**"无彩盒/配件少"本身不构成假卡判据**，需与**封条破损、残留测试针、手工硅脂**等硬物证合并判断。
+2. **MIG 可能不是你要的** [c-vbios-mig-advice]：官方建议，**只是在一张卡上并行跑多个任务并不需要 MIG**——GPU 自身调度即可，甚至可能塞下第 5 个任务。MIG 的真实价值是**可预测的低延迟**与**多租户隔离**（与 §11.1 一致）。
+
 ### 10.5 在役退化风险：这是本报告最需要警示的运维问题
 
 **评测网站在测新卡，但用户论坛在报旧卡性能退化。** 两者不冲突，只是观察窗口不同。
@@ -1883,7 +1915,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 
 | 检查项 | 假卡表现 |
 |---|---|
-| 防静电袋封条 | **已破损**，且缺配件 [e-fake-seal] |
+| 防静电袋封条 | **已破损**，且缺配件 [e-fake-seal]（注意：**缺彩盒/配件少本身不是假卡信号**，bulk 版本就没有零售包装 [c-vbios-bulk]） |
 | PCB 背面 | **残留两颗金色测试针**——出厂零售卡不会带 [e-fake-pins] |
 | 板面清洁度 | 整板有黏性残留（疑为助焊剂），未清洗 [e-fake-pins] |
 | 硅脂 | **手工涂抹**，溢出芯片边缘到基板；产线不会这样 [e-fake-paste] |
@@ -2102,6 +2134,7 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
 | q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
 | q45 | 如何检测静默计算损坏？ | ✅ | §10.8 ECC + 行重映射自查协议 |
+| q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55 门槛 + 无中央分发 |
 | q33 | Max-Q 的独立吞吐？ | ✅ | §4.2.1 完整并发曲线（此前缺口已关闭） |
 | q34 | 投机解码是否普适？ | ❌ | §4.8 Eagle3 反例：接受率<60% 时无效 |
 | q35 | 96GB 能装多大的模型？ | ✅ | §4.1.1 127GB 模型经 CPU offload 可行 |
@@ -2115,12 +2148,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q43 | 整机能耗如何正确核算？ | ✅ | §6.4.1 GPU 遥测漏掉 41–45%，需三源 |
 | q44 | 功耗墙的安全区间？ | ✅ | §6.4.1 学术验证 400–600W 无差异，300W 断崖 |
 | q45 | 如何检测静默计算损坏？ | ✅ | §10.8 ECC + 行重映射自查协议 |
+| q46 | MIG 为何开箱不可用？ | ✅ | §10.4.1 VBIOS ≥98.02.55 门槛 + 无中央分发 |
 
-**完成度：44/45 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：45/46 已答（3 项按 C3 或无解标注）**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **576 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **590 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -2210,3 +2244,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 95. [arXiv 2606.23969：串行化之桥——Blackwell 机密计算下的 LLM 服务性能](https://arxiv.org/abs/2606.23969)（2026-06-22，v2 2026-07-09） — [src-arx-cc]
 96. [NVIDIA Developer Forums：RTX PRO 6000 Blackwell 上的静默 CUDA 计算损坏（最终确认为显存故障）](https://forums.developer.nvidia.com/t/silent-cuda-compute-corruption-on-rtx-pro-6000-blackwell/381759)（2026-08-29 起，2026-10-16 结论） — [src-nvf-silent]
 97. [Joshua Odmark：我从 Provantage 买的 RTX Pro 6000 里面到底是什么](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-odmark]
+98. [NVIDIA Developer Forums：RTX 6000 Pro WS 如何升级 BIOS 至 98.02.55.00.00（MIG 门槛与 VBIOS 分发困境）](https://forums.developer.nvidia.com/t/rtx-6000-pro-ws-bios-update-to-98-02-55-00-00-how/342946)（2025-08-23 起） — [src-nvf-vbios]
