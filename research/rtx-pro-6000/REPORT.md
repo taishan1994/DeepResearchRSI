@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：155 ｜ **证据数**：1184 ｜ **主张数**：756（高置信 562，争议 1）
+> **来源数**：157 ｜ **证据数**：1194 ｜ **主张数**：765（高置信 569，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -2659,6 +2659,10 @@ score = 613,491 / 几何均值(monster, junkshop, classroom 的 total_render_tim
 > **为 Blender/Cycles 渲染堆多张 RTX PRO 6000 缺乏数据支持，收益可能接近零甚至为负** [c-mg-out-of-scope-advice]。
 >
 > **大场景的正确做法仍是单卡大显存，或者增加机器而不是增加卡。**
+>
+> ⚠️ **§7.3.11 把这个结论补充完整了**：**「增加机器」对动画有效（实测帧级并行 41 GPU 秒 → 15 秒墙钟，约 2.7×），
+> 对单张静帧无效**（静帧无法跨帧拆分）。
+> **所以准确说法是「多卡要用来分帧，不要用来分同一帧」——而静帧才是 96GB 真正不可替代的场景。**
 
 这条建议标 `medium` 而非 `high`，因为：**bmw27 是旧场景、卡型较老，Blackwell 与 NVLink/PCIe 拓扑可能改变结论**。但结合本报告已记录的「H200 NVL 上 NVLink 在 2/4 卡时反而有害」，**方向是一致的**。
 
@@ -3025,6 +3029,103 @@ issue #150282 报告 **5.0 在部分重型场景上渲染时间接近翻倍**：
 - 当作「实际项目渲染时间」的预测
 - 把 1% 级别的分差当作真实差距（占用率噪声就超过这个量级）
 - 用来裁决 Drop & Render 那类差异（见 §7.3.9：全库无记录超过 41.4 s）
+
+### 7.3.11 独立实测交叉验证：96GB 的每帧优势只有 1.3–1.6 倍
+
+前几节全基于 Blender Open Data 快照。**这一节引入一个完全独立的来源：JANCTION 在其商用云渲染服务上的单卡实测**——它带有**可下载的场景与 sha256**，因此可以复现。
+
+#### 拿到了此前缺失的量：绝对每帧时间
+
+| 场景 | 设置 | **GPU 秒/帧** | 价格/帧 |
+|---|---|---:|---:|
+| **Blender Classroom** | 1080p / 128 samples / 降噪 | **8.93 s** | 0.89 JPY |
+| Barcelona Pavilion | 1080p / 128 samples / 降噪 | **10.55 s** | 1.05 JPY |
+
+**均在单张 RTX PRO 6000 Blackwell Max-Q（96GB）、Blender 5.2 上测得** [c-jan-classroom-cost]。
+
+> **两份场景文件都公开了 zip 与 sha256**，可以在自己的机器上用相同设置复现。**这是本报告第一次拿到「官方演示场景 + 固定设置 + 可复现文件」的绝对每帧时间。**
+
+#### 关键对比：和一张笔记本游戏卡比
+
+**同一份 `classroom.zip`（sha256 校验一致）** [c-jan-laptop-ratio]：
+
+| 场景 | RTX 5070 Ti 笔记本（12GB） | **RTX PRO 6000 Max-Q（96GB）** | **倍数** |
+|---|---:|---:|---:|
+| Classroom | 14.0 s/帧 | **8.9 s/帧** | **1.6×** |
+| Barcelona | 13.9 s/帧 | **10.6 s/帧** | **1.3×** |
+
+> **一张 12GB 的笔记本游戏卡，在这两个场景上只比 96GB 工作站卡慢 1.3–1.6 倍。**
+>
+> **而且这个比值对服务侧有利**：笔记本侧**不含** Blender 启动与场景读取，服务侧**包含**。真实渲染速度差距应更小。
+
+#### 96GB 买的是容量，不是速度
+
+服务商自己写得很直白 [c-jan-96gb-is-capacity]：
+
+> **"一帧只需数秒的小场景，大部分时间花在固定工作上，因此近期游戏卡每帧速度接近；差异在于 96GB 能容纳 8-16GB 卡会 out of memory 的重场景。"**
+
+**他们甚至承认自家更慢**：
+
+| | 简单 1080p 帧 |
+|---|---:|
+| RTX 5070 Ti 笔记本 | **6.0 s** |
+| 该 96GB 服务 | **6.7 s** |
+
+> **96GB 卡在简单场景上反而慢了 12%。**
+
+#### 固定开销主导：采样数翻 4 倍只慢 11.6%
+
+同一简单场景只改采样数 [c-jan-fixed-cost]：
+
+| 分辨率 | 32 samples | 64 samples | 128 samples |
+|---|---:|---:|---:|
+| 1280×720（24 帧） | 56.5 s | 59.0 s | **63.05 s** |
+
+> **采样数从 32 增到 128（4 倍），总时间只增加 11.6%。**
+>
+> **对应固定成本约 2.4 秒/720p 帧、5.2 秒/1080p 帧**——场景构建、降噪、写文件。
+
+**这一条独立量化了本报告反复出现的「小场景由固定开销主导」。**
+
+#### 两个独立来源在同一结论上收敛
+
+| 来源 | 方法 | 结论 |
+|---|---|---|
+| **Blender Open Data 快照**（§7.3.7） | 社区全量数据统计 | 官方三场景峰值显存最大 **5750 MiB = 96GB 的 5.8%** |
+| **JANCTION 实测**（本节） | 商用服务单卡测量 | 96GB 卡每帧优势仅 **1.3–1.6 倍** |
+
+> **两条完全不同的路径得出同一结论：官方基准场景用不到 96GB，因此大显存不转化为基准速度** [c-jan-cross-validates]。
+
+#### 但口径不可混算
+
+**必须声明** [c-jan-not-pure-render]：
+
+| | JANCTION 的「GPU 秒」 | Open Data 基准 |
+|---|---|---|
+| 计时边界 | **含 Blender 启动与场景读取** | 仅渲染（有 warmup） |
+| 降噪 | **开启** | 不适用 |
+| 测的是 | **每帧** | **平均每样本时间** |
+
+> **把两边的秒数直接比较是错误的。** 本节只用它的**内部比值**（笔记本 vs 96GB），这个比值不受口径影响。
+
+**另外**：这些是**单次生产测量，不是均值或中位数** [c-jan-single-measurements]，页面自己声明「不是速度保证」，并提示复杂几何、体积、大贴图会改变结果。**适合作为量级与口径参考，不适合统计推断。**
+
+#### 一个重要的补充：并行发生在帧层面
+
+该服务把 24 帧动画**切成 3 块并行** [c-jan-parallel-frames]：
+
+> **13.6 / 13.9 / 13.7 GPU 秒三块并行执行，41 GPU 秒只占了 15 秒墙钟时间。**
+
+**这让 §7.3.7 的结论更完整了** [c-jan-revise-multigpu]：
+
+| 目标 | 正确做法 | 依据 |
+|---|---|---|
+| **动画** | **跨帧并行**（多机 / 多租） | 实测 41 GPU 秒 → 15 秒墙钟（约 2.7×） |
+| **单张静帧** | **只能靠单卡性能与显存** | §7.3.7：同帧多卡加速比接近 1.0，甚至 0.96× |
+
+> **所以不是笼统的「多卡无用」，而是「多卡要用来分帧，不要用来分同一帧」。**
+>
+> **静帧场景没有这个选项——这是 96GB 真正不可替代的地方。**
 
 ### 7.4 视频与专业特性
 
@@ -5206,6 +5307,8 @@ sudo nvidia-bug-report.sh
 - [Blender Foundation — Blender Open Data 原始快照：Blender Open Data 全量快照 opendata-2026-10-27（434,774 行 / 1,040,927 条记录 / 1.8GB）](https://opendata.blender.org/snapshots/opendata-latest.zip)（2026-10-27） — [src-blender-snapshot]
 - [Blender Foundation — Blender Benchmark Script 3.1.1 官方源码（blender-benchmark-script-3.1.1.tar.gz，含 render.py / main.py）](https://opendata.blender.org/cdn/BlenderBenchmark2.0/script/blender-benchmark-script-3.1.1.tar.gz)（2026-10-27） — [src-bb-script]
 - [Blender Foundation — 官方 issue #147954（Cycles 基准场景 GPU 占用率，open）与 #150282（5.0 重型场景翻倍，closed）](https://projects.blender.org/blender/blender/issues/147954)（2025-10-13 / 2025-11-20） — [src-blender-issues]
+- [JANCTION Render — Blender on an RTX PRO 6000 (96 GB), paid by the second：实测每帧 GPU 秒与价格](https://render.janction.jp/rtx-pro-6000-blender-rendering)（2026-10-26） — [src-janction]
+- [JANCTION Render — Benchmarks：按分辨率/帧数/采样数的 GPU 秒矩阵（含 CSV 原始数据与可复现场景 zip + sha256）](https://render.janction.jp/benchmarks)（2026-10-01） — [src-janction-bench]
 
 ---
 
@@ -5342,7 +5445,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=155, evidence=1184, claims=756, claims_high=562, claims_disputed=1, trace_events=319, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=157, evidence=1194, claims=765, claims_high=569, claims_disputed=1, trace_events=322, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
