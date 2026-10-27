@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：170 ｜ **证据数**：1330 ｜ **主张数**：869（高置信 654，争议 1）
+> **来源数**：171 ｜ **证据数**：1338 ｜ **主张数**：876（高置信 661，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -603,6 +603,80 @@ TPOT 几乎不变（12.63 → 12.82 ms），说明 **EP 优化的是通信与调
 **引擎选择同样关键**：128k 上下文下 vLLM 比 SGLang 快 **4.2 倍**（带 MTP）/ **2.2 倍**（不带）[e-6k-vllm-sglang][c-vllm-longctx]。
 
 **投机解码的整体收益**：短上下文 26–57% 吞吐提升 [c-mtp-benefit]；Qwen3.8-27B 上单 token 延迟 22ms→13ms，同延迟预算内并发 32→64 [e-eco-mtp]。且 GPQA Diamond 上无显著精度损失（+0.76pp，p=0.18）[c-mtp-quality]。
+
+#### 4.4.1 位宽本身不带来速度：NVFP4 比 FP8 慢 8–12%
+
+§4.4 比的是**格式族**（AWQ vs NVFP4）在长上下文下的稳定性。这里补一个更基础的对照：**同为 Blackwell 原生格式，4bit 的 NVFP4 与 8bit 的 FP8 谁快**。
+
+**同机、同模型、各占一张卡**：`nvidia/Qwen3.6-27B-NVFP4`（4bit）对 `Qwen/Qwen3.6-27B-FP8`（8bit），各一张 RTX PRO 6000 Blackwell 96GB，两侧都开 MTP 投机解码（3 token）[c-nv4-fp4-slower]。
+
+#### 四场景直比
+
+| 场景 | 指标 | **NVFP4** | **FP8** | 胜者 |
+|---|---|---:|---:|---|
+| 单流小请求 | decode tok/s | 77.1 | **84.7** | **FP8 +10%** |
+| | TTFT（热态） | 0.09 s | 0.09 s | 平 |
+| 大请求（约 22.3k 输入） | decode tok/s | 98.7 | **111.0** | **FP8 +12%** |
+| | prefill tok/s / TTFT | 约 5,700 / 3.9 s | **约 7,000 / 3.2 s** | **FP8** |
+| **16 路并发** | **聚合** tok/s | 891.7 | **963.3** | **FP8 +8%** |
+| | 每请求 decode tok/s | 67.4 | 68.5 | 基本平 |
+| | 端到端 p95 | 58.6 s | **55.6 s** | FP8 |
+| **4 路并发大请求** | **聚合** tok/s | **358.9** | 342.5 | **NVFP4 +5%** |
+| | 每请求 decode tok/s | 100.4 | 103.7 | 基本平 |
+
+> **FP8 在每一个解码受限场景都快 8–12%** [c-nv4-full-table]。
+>
+> **NVFP4 只在 prefill 受限的大并发下反超 5%。**
+
+#### 为什么 prefill 反而反超
+
+**这一格恰好说明了机制** [c-nv4-prefill-vs-decode]：
+
+| 瓶颈 | 谁赢 |
+|---|---|
+| **解码受权重带宽限制** | **FP8 赢**（位宽低的优势没兑现，反而吃解量化开销） |
+| **prefill 受算力限制** | 打平或 **NVFP4 略胜** |
+
+> **判据：位宽收益只在解码受权重带宽限制时才体现；瓶颈一转算力侧，量化精度可能因解量化开销吃亏。**
+>
+> 这与 §4.14（带宽决定批处理策略）、§6（带宽受限）**是同一条主线**。
+
+#### 根因：这不是位宽问题，是配方问题
+
+**评论区给出的解释** [c-nv4-w4a16]：
+
+> **该 NVFP4 checkpoint 只量化权重、不量化激活——仍是 W4A16。**
+>
+> **所以它的主要收益只是省显存、精度几乎等同 FP8，没有算力侧加速。**
+
+**同时量化 MLP 与激活的 checkpoint 在 Blackwell 上能显著快过 FP8。**
+
+> **结论：「用 NVFP4」不等于「更快」，取决于量化配方而非位宽。**
+
+#### 质量打平，所以选快的没有代价
+
+**逻辑谜题、边界情况 Python、严格 schema 长上下文 JSON 全部无差异**；捷克语两者都原生无瑕疵（FP8 略干净）；**都没有灾难性退化** [c-nv4-quality-tied]。
+
+> **因此在本组对照里，选 FP8 不是拿质量换速度。**
+
+#### ⚠️ 一个反向混杂因素，反而加强了结论
+
+> **两侧跑不同 vLLM 构建**：NVFP4 用 **0.24.0**，FP8 用 **0.23.1rc1-dev** [c-nv4-caveat-favors-fp4]。
+>
+> **较新构建按理对 NVFP4 有利——而它仍然没赢。**
+>
+> **所以这是保守估计，不是高估。**
+
+#### 顺带：聚合值与单请求值给出不同排序
+
+| 指标 | NVFP4 | FP8 | 差 |
+|---|---:|---:|---:|
+| 16 路**聚合** | 891.7 | **963.3** | **+8%** |
+| 16 路**单请求解码** | 67.4 | 68.5 | **几乎持平** |
+
+> **高并发下的差距主要来自调度与排队效率，不是单请求解码速度** [c-nv4-aggregate-vs-per-request]。
+>
+> **只看单请求 tok/s 会漏掉这一点**——这是本报告反复出现的「聚合值掩盖分布」的又一实例。
 
 ### 4.5 并发扩展
 
@@ -6261,6 +6335,7 @@ sudo nvidia-bug-report.sh
 - [arXiv 2608.23834 — Minima-KV: Retention-Preserving KV Cache Compression with Mixed-Format Paged Attention](https://arxiv.org/html/2608.23834)（2026-08-31） — [src-arxiv-minimakv]
 - [HF 讨论区 — Serving notes: single RTX PRO 6000 Blackwell (96 GB)，587k KV tokens at 123–143 tok/s](https://huggingface.co/RadixArk/Qwen3.8-Flash-Next-NVFP4/discussions/15)（2026-09-13） — [src-hf-radixark-587k]
 - [HF 讨论区 — Kolibri-1 FP8 on one RTX PRO 6000：BEAM 100K 的 262K 窗口 vs 7K 记忆页](https://huggingface.co/Aleph-Alpha/Kolibri-1/discussions/10)（2026-08-31） — [src-hf-kolibri-beam]
+- [HF 讨论区 — NVFP4 vs FP8 on an RTX PRO 6000 Blackwell (vLLM 0.24)](https://huggingface.co/nvidia/Qwen3.6-27B-NVFP4/discussions/8)（2026-09-20） — [src-hf-nvfp4-vs-fp8]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
 - [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
@@ -6490,7 +6565,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=170, evidence=1330, claims=869, claims_high=654, claims_disputed=1, trace_events=348, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=171, evidence=1338, claims=876, claims_high=661, claims_disputed=1, trace_events=350, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
