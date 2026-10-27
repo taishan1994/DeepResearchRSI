@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：57 ｜ **证据数**：344 ｜ **主张数**：226（高置信 155，争议 1）
+> **来源数**：58 ｜ **证据数**：359 ｜ **主张数**：234（高置信 163，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -185,9 +185,39 @@ MIG 硬件隔离带来可预测 QoS，多 VM 共享提升总吞吐（2 VM +34%�
 - 四个 DisplayPort **不具备视频输出能力**，Windows 下默认加载 TCC 纯计算驱动 [c-6000d-tcc-only]——它不能当工作站显示卡用
 - 定位：FP32 略低于 Max-Q，明显高于 RTX PRO 5000 48GB [c-6000d-position]
 
+#### 3.3.1 重要修正：削减不是按比例的，Tensor Core 被砍掉约三分之二
+
+上面那张表会让人以为 6000D 只是"整体弱 17%–23%"。**这是错的。** 一份同软件栈、同矩阵尺寸（16384²）、5 轮 × 30 次迭代的稳态实测给出了完全不同的图景 [c-cn-tensor-cut]：
+
+| 精度 | RTX 6000D | RTX PRO 6000 | 倍数 | **6000D 保留率** |
+|---|---:|---:|---:|---:|
+| BF16 GEMM | 144.09 TFLOPS | **401.01 TFLOPS** | **2.78×** | **35.9%** |
+| FP16 GEMM | 144.02 TFLOPS | **397.67 TFLOPS** | **2.76×** | **36.2%** |
+| TF32 GEMM | 72.05 TFLOPS | **194.99 TFLOPS** | **2.71×** | **37.0%** |
+| INT8→INT32 | 140.32 TOPS | 238.41 TOPS | 1.70× | 58.9% |
+| FP32 GEMM | 66.67 TFLOPS | 75.48 TFLOPS | 1.13× | **88.3%** |
+| 显存拷贝带宽 | 1279.44 GB/s | 1460.68 GB/s | 1.14× | **87.6%** |
+
+**结论非常清晰**：FP32 和带宽几乎没动（保留 ~88%），但 **BF16/FP16/TF32 只剩约 36%** [c-cn-tensor-cut]。
+
+**决定性证据是 TF32 的异常** [c-cn-tf32-anomaly]：6000D 的 TF32 只比自己的 FP32 快 **8%**，而 PRO 6000 的 TF32 是 FP32 的 **2.58 倍**。也就是说 **6000D 的 TF32 路径几乎没有获得任何 Tensor Core 增益**——被砍的正是 Tensor Core 本身。
+
+**这排除了"降频导致"的解释** [c-cn-freq-not-cause]：6000D 的 SM 中位频率 2422 MHz（接近满频 2430），PRO 6000 因撞 600W 功耗墙反而只有 2167 MHz——**频率更低的那张卡快 2.78 倍**。
+
+**实践含义** [c-cn-advice]：
+
+| 你的负载 | 6000D 是否合适 |
+|---|---|
+| 传统 FP32 计算 | ✅ 保留 88%，性价比极高 |
+| 带宽受限的单流 decode | ✅ 保留 88%，差距远小于 2.78× [c-cn-bw-close] |
+| 量化推理（INT8） | ⚠️ 保留 59%，需评估 |
+| **BF16/FP16 训练或高吞吐推理** | ❌ **只有 36%，应选 PRO 6000 或多卡弥补** |
+
+**两条卡相同的参数**：Compute Capability 均为 12.0、最大 SM 时钟均为 2430 MHz、显存时钟均为 12481 MHz、功耗上限均为 600 W、BAR1 均为 128GB [c-cn-same-sku-base][c-cn-bar1]。**正因为纸面几乎一致，才最容易误判**。
+
 **实测参考**：LMStudio 跑 DeepSeek R1 70B（8K 上下文）约 **24.79 tok/s**，比 RTX PRO 5000 快 10%+ [c-6000d-llm]。注意这是 LMStudio 口径，不能与 vLLM 数字直接比。
 
-**市场反应冷淡** [c-6000d-demand-weak]：据行业反馈实际需求有限，未形成稳定采购意向。考虑到它既不能输出视频、性能又低 23%，这个结果并不意外。
+**市场反应冷淡** [c-6000d-demand-weak]：据行业反馈实际需求有限，未形成稳定采购意向。考虑到它既不能输出视频、Tensor Core 又只剩 36%，这个结果并不意外。
 
 **容量换算**：四卡 336GB、八卡 672GB，可支撑量化后的 671B 模型 [c-6000d-capacity]。
 
@@ -1324,12 +1354,13 @@ SemiAnalysis InferenceX 的 2026-07 定价模型 [c-tco-rtx-hourly]：
 | q23 | SPECviewperf 15 分项成绩？ | ✅ | §7.1.1 官方 11 项分项 + 代际/竞品对比 |
 | q24 | 多卡部署的正确调优方式？ | ✅ | §4.3.2–4.3.4 链路抖动、NCCL、接地 |
 | q25 | 长上下文的关键使能技术？ | ✅ | §4.5.2 DCP 与量化版本选择 |
+| q26 | RTX 6000D 究竟被砍了什么？ | ✅ | §3.3.1 Tensor Core 实测保留率 |
 
-**完成度：25/25 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
+**完成度：26/26 已答**（q9 由 partial 升级为 answered——训练侧交叉点、FP64/BF16/带宽三维对比、优化器卸载约束已补齐，足以给出可执行边界）。
 
 ## 附录 B：本报告的可复现性
 
-本报告全部数字可追溯到 `evidence.csv` 中的 **344 条**原文片段。校验命令：
+本报告全部数字可追溯到 `evidence.csv` 中的 **359 条**原文片段。校验命令：
 
 ```bash
 python scripts/validate_research.py research/rtx-pro-6000
@@ -1337,7 +1368,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=57, evidence=344, claims=226, claims_high=155, claims_disputed=1`
+当前校验结果：`sources=58, evidence=359, claims=234, claims_high=163, claims_disputed=1`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -1366,3 +1397,4 @@ python scripts/validate_research.py research/rtx-pro-6000
 55. [PCIe 拓扑与 GPU 互连](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/hardware/topology.md) — [src-rtx6kpro-topo]
 56. [常见问题排查（NCCL/CUDA/SM120/PCIe 稳定性）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/troubleshooting/common-issues.md) — [src-rtx6kpro-issues]
 57. [Blackwell 瓦特-性能交互面板](https://shihanqu.github.io/Blackwell-Wattage-Performance/) — [src-wattage-dash]
+58. [CSDN：RTX 6000D 与 RTX PRO 6000 同口径实测对比（中文）](https://fjiang.blog.csdn.net/article/details/162849417)（2026-07-14） — [src-cn-6000d]
