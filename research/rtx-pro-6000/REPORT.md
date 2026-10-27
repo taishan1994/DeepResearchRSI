@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：160 ｜ **证据数**：1220 ｜ **主张数**：795（高置信 594，争议 1）
+> **来源数**：161 ｜ **证据数**：1235 ｜ **主张数**：804（高置信 602，争议 1）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -4831,6 +4831,10 @@ PCIe Gen5 x16 下 [c-p2p-bandwidth]：
 | **双向** | **103–111 GB/s** | 64–99 GB/s |
 
 > **理论最大 63 GB/s 单向，实测约 56 GB/s = 89% 效率。**
+>
+> ⚠️ **但这是单流/正常模式的最好情况。** §11.11 记录了同一批卡在**跨交换机、多目的 root 的并发写**下
+> **带宽塌陷 75%–93%（每对低至 1.35 GB/s）**，且六类升级手段都修不好。
+> **所以这个数字不能直接用来估算多卡训练/推理的通信上限。**
 
 **跨 NUMA 的代价很具体**：在一台双 Turin 系统（4× WS + 2× RTX 5090）的完整矩阵里，**跨 NUMA 那块卡的带宽从 56/111 降到 51/99 GB/s**。
 
@@ -4922,6 +4926,102 @@ PCIe Gen5 x16 下 [c-p2p-bandwidth]：
 > **但实测显示：通过 PCIe 交换拓扑 + P2P + 调优后的 NCCL，8 卡仍可达到 41.1 GB/s 的 AllReduce 总线带宽** [c-p2p-revise-nvlink]。
 >
 > **「没有 NVLink」不等于「不能多卡」，只是小消息延迟不如 NVLink 系统。** 标 `medium`：本报告未取得与 NVLink 系统的同条件对照。
+
+### 11.11 多卡互联的真实杀手：P2P 写带宽会塌陷 75%–93%
+
+§11.10 给出了 53–56 GB/s 的 P2P 带宽。**但那是最好情况。** 这一节记录一个本报告此前完全没有的缺陷类别 [c-col-exists]：
+
+> **在 AMD 主机的 PCIe 交换机拓扑上，跨交换机的并发 P2P 写带宽会塌陷 75%–93%。**
+
+#### 触发条件是两个条件的合取
+
+这不是「一多卡就坏」，规则很精确 [c-col-rule]：
+
+> **同时满足**：
+> **1. 两个或更多并发 P2P 写流源自同一个 PCIe 交换机**（共享一条上游 x16 到同一 CPU root port）
+> **2. 目的地分属两个或更多不同 CPU root complex**
+
+真值表（TR Pro + Microchip，4 GPU/交换机）：
+
+| 源交换机 | 目的 root | 结果 |
+|---|---|---|
+| 1 | 1（同一 root） | ✅ 满带宽 |
+| **1** | **2 个以上** | ❌ **塌陷，约 6 GB/s/对** |
+| 2 个以上不同 | 2 个以上不同 | ✅ 满带宽 |
+| 2 个以上不同 | 1 个共同 | ✅ 满带宽 |
+
+#### 只发生在写上，读完全正常
+
+**这是最关键的诊断指纹** [c-col-write-only]：
+
+> **把同一个传输反向拉取（从源 GPU 看变成读），在包括触发模式在内的所有模式下都给满约 53 GB/s。**
+
+**这意味着：只测读、或只测单对的基准，会 100% 漏掉这个问题。**
+
+#### 平台间的阈值差别很大
+
+| 平台 | 触发阈值 | 塌陷后带宽 |
+|---|---|---|
+| **Broadcom PEX890xx + 双 EPYC Turin** | **仅 2 个并发源 GPU** | **2.7 GB/s**（每对 1.35，**塌陷 93%**） |
+| Microchip + TR Pro，16 卡 4 交换机（每交换机 4 卡） | 2 个并发源即触发 | 13.5 GB/s（每对 6.8，**塌陷 75%**） |
+| Microchip + TR Pro，8 卡 2-VS-per-chip（每 VS 2 卡） | **不触发** | 54–56 GB/s（上游饱和） |
+
+**Broadcom 那组数据最刺眼** [c-col-broadcom-threshold]：
+
+| 模式 | 聚合写带宽 | 每对 |
+|---|---:|---:|
+| 1 流 | 36.8 GB/s | 36.8 |
+| 2 流**不同 VS** | **76.4 GB/s** | 38.2 ✅ |
+| 2 流**同 VS + 双目的 root** | **2.7 GB/s** | **1.35** ❌ |
+
+> **同一条上游链路，仅仅因为两个目的 root 不同，从 76.4 掉到 2.7 GB/s。**
+
+#### 同机器同 CPU，换个布局就不塌
+
+**这一点推翻了「同一 CPU 就该有同一阈值」的直觉** [c-col-layout-dependent]：
+
+> **同一台 TR Pro + Microchip 机器上**：
+> **16 卡 4 交换机布局（每交换机 4 GPU）→ 2 个并发源即塌陷 75%–92%**
+> **8 卡 2-VS-per-chip 布局（每 VS 2 GPU）→ ASUS 报告的同等模式完全不塌陷**
+
+#### 六类手段都修不好
+
+| 尝试 | 有效？ |
+|---|---|
+| 更新内核（6.8 → 6.18.24） | ❌ |
+| 更新驱动（575 → 595.58.03） | ❌ |
+| `iommu=off` 或 `iommu=pt` | ❌ |
+| 每个交换机换独立 root port | ❌ |
+| Genoa 家族 → Turin 家族 | ❌ |
+| 换交换机厂商（Microchip ↔ Broadcom） | ❌ |
+
+> **唯一能掩盖它的是 `iommu=on`（完整地址翻译），但代价是单流带宽再损失约 15%，且 8 卡以上出现可复现的 NCCL all-reduce 挂起** [c-col-not-fixable]。
+>
+> **「升级能修好」在这里是不成立的。**
+
+#### 根因未确证，而且作者自己推翻了先前的结论
+
+> 两个候选假设——**AMD IOD 的 scalable-data-fabric 仲裁**、**交换机内部的 posted-write 仲裁**——**都不足以解释全部数据** [c-col-root-cause-open]。
+>
+> 作者**主动推翻了自己先前「AMD IOD 是共同根因」的论证**：那套论证依赖的 16 卡测试与 ASUS 8 卡测试并非同等受控，而**更受控的 8 卡 TR Pro 测试反而不塌陷**。
+
+> **这种「新数据不支持自己的旧结论，于是撤回」的做法，是本报告采信该来源的主要原因。**
+
+#### 所以 §11.10 的带宽数字要加边界
+
+> **§11.10 的 53–56 GB/s 是单流/正常模式带宽，是「最好情况」** [c-col-revise-pcie-section]。
+>
+> **在多交换机、多 root 的 8–16 卡配置下，跨 root 并发写的实际有效带宽可能只有每对 1.35–6.8 GB/s。**
+>
+> **因此那个数字不能直接用来估算多卡训练/推理的通信上限。**
+
+#### 对选型的直接影响
+
+> 张量并行的激活传输与参数广播，**正是「跨 root 并发写」的形态** [c-col-nccl-implication]。
+>
+> **所以 8–16 卡 RTX PRO 6000 系统在交换机拓扑上可能遭受远高于预期的通信开销；而直连（非交换机）拓扑不受此缺陷影响。**
+>
+> **选多卡主板时，拓扑形态比交换机品牌更关键。**（标 `medium`：该来源只测了 P2P 带宽，未直接测 TP 推理吞吐。）
 
 ## 12. 价格与采购时机
 
@@ -5613,6 +5713,7 @@ sudo nvidia-bug-report.sh
 - [Drop & Render（blendercloudrender.com）— RTX PRO 6000 Blackwell Workstation Edition 渲染基准页，含 Methodology 段（自建测试 + 机器学习推算 + 公开数据三类混合）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-workstation-edition)（2026-10-26） — [src-dnr-gpu-bench]
 - [OTOY — OctaneBench 2025.2 Results（官方结果数据库，含 2x–8x 多 GPU 配置）](https://render.otoy.com/octanebench/results.php)（2026-10-27） — [src-octanebench]
 - [local-inference-lab / rtx6kpro — PCIe Bandwidth & P2P Performance（RTX PRO 6000 多卡 P2P / NCCL 实测汇总）](https://github.com/local-inference-lab/rtx6kpro/blob/main/hardware/pcie-bandwidth.md)（2026-10-27） — [src-rtx6kpro-pcie]
+- [local-inference-lab / rtx6kpro — Collapse Report：PCIe 交换机拓扑下跨交换机 P2P 写带宽塌陷 75–93% 的复现](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/collapse-report.md)（2026-10-27） — [src-6kpro-collapse]
 
 ---
 
@@ -5749,7 +5850,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=160, evidence=1220, claims=795, claims_high=594, claims_disputed=1, trace_events=328, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=161, evidence=1235, claims=804, claims_high=602, claims_disputed=1, trace_events=330, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
