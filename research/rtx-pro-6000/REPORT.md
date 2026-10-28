@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：348 ｜ **证据数**：2509 ｜ **主张数**：1818（高置信 1471，争议 9）
+> **来源数**：349 ｜ **证据数**：2516 ｜ **主张数**：1823（高置信 1476，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -26059,6 +26059,211 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **「一个项目的证据强度」可以按制品链与运行时链分别评估——**
 > **⚠️ 而两者常常一强一弱，且弱者不会因为强者强而变强。**
 
+### 10.274 🔥🔥🔥🔥🔥 RTX PRO 6000 的实测吞吐一直就在这里：**43.16 / 84.70 tok/s**
+
+[c-rtx-pro-6000-measured-43-16-84-70]
+
+> `llama-bench -ngl 99 -p 512 -n 128 -r 3`，制品 8,392,369,600 字节，
+> KV 为 FP16，CUDA 架构 `sm_120a`，97,887 MiB 显存。
+> 三次采样生成 `42.83 / 43.35 / 43.30`，预填 `84.28 / 84.91 / 84.91`。
+
+> **🔥🔥🔥🔥🔥 这条推翻了本报告坚持了一百多轮的一个判断**：
+> **我一直在「未获取项」里写「原版 llama.cpp 在 RTX PRO 6000 上的
+> `llama-bench` 数字缺失」——而这份文档 2026-07-19 就存在，
+> 就在 `docs/` 里，且它用的正是 `llama-bench`。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个缺口在写进待办之前，必须先查它是不是已经在被读过的那棵树里。**
+> **这一百多轮我一直往外部找，没往项目自己的 `docs/` 里找。**
+>
+> ⭐⭐ **而这条给出准确的量级**：
+> **生成 43.16 tok/s，预填 84.70 tok/s。预填只有生成的 1.96 倍。**
+>
+> **⭐⭐ 判据：**
+> **一个模型的预填/生成比反映它的权重带宽占比；**
+> **这个接近 2:1 的比例说明瓶颈几乎全在权重读取。**
+>
+> ⭐⭐ **而这条也让本报告 §4 系列那些二手数字有了一个可信的锚**：
+> **它带了全套前置条件（`-ngl 99`、KV FP16、`sm_120a`、97,887 MiB、
+> 三次采样、41.03 秒总时长），故它是可复现的。**
+>
+> **⭐⭐ 判据：**
+> **一条速度数字的完整形式必须包含工具、参数、采样数与制品哈希；**
+> **而这份文档只缺哈希（Metal 文档补了），其余全有。**
+>
+> ⭐⭐ **而这条还有一层：41.03 秒包含模型加载**。
+> **故加载 8.39 GB 的时间被压在了这 41 秒里，**
+> **这本身就说明权重没有被重排成别的布局。**
+>
+> **⭐⭐ 判据：**
+> **一次基准的总时长是排除「暗中做了预处理」最省事的证据，**
+> **因为重排 8.39 GB 不可能在 41 秒内完成。**
+
+### 10.275 🔥🔥🔥🔥🔥 同一个制品有**三个不同的字节数**
+
+[c-three-byte-counts-for-one-artifact]
+
+> speed 文档 **8,392,369,600**、release 报告 **8,391,269,600**、
+> Metal 文档 **7.81 GiB（=8,385,923,645）**。最大差 **6,445,955** 字节。
+
+> **🔥🔥🔥🔥🔥 这条把一个我一直当作单一真值的东西拆成了三个**：
+> **我在 §10.262 里用 8,391,269,600 算过组件占比，
+> 而 speed 文档写 8,392,369,600——差 1,100,000 字节。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **同一个制品的字节数在三个地方不同，只有两种可能：**
+> **① 它们不是同一个制品；② 其中至少两个不是测出来的。**
+> **而 Metal 文档写的 `7.81 GiB` 明显是四舍五入到两位小数，**
+> **故它必然是不精确的那个。**
+>
+> ⭐⭐ **而 1,100,000 这个差还有一层含义**：
+> **它不是 1024 的任何幂（1 MiB = 1,048,576），也不是它的整数倍，**
+> **故这不是「MiB 与 MB 混淆」，而是两个不同的构建产物。**
+>
+> **⭐⭐ 判据：**
+> **一个字节差如果是 1000 或 1024 的整数倍，就是单位问题；**
+> **否则就是两个东西；而 1,100,000 两者都不整除。**
+>
+> ⭐⭐ **而这条的实际影响是有限的、但必须标注**：
+> **§10.262 里那些百分比的分母是 release 报告的口径，
+> 若换成 speed 文档的口径，每个百分比会变 0.0131%——**
+> **故结论不变，但引用时必须写明用哪个分母。**
+>
+> **⭐⭐ 判据：**
+> **一个百分比的可复现性取决于分母有没有被写下来，**
+> **而这三份文档里两份根本没写分母是怎么来的。**
+>
+> ⭐⭐ **而 Metal 文档给了第四个数：`7.81 GiB` 与一个 SHA-256**：
+> **`2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c`。**
+> **故「哪一个是真制品」这件事可以被裁决：有哈希的那个才是可指认的。**
+>
+> **⭐⭐ 判据：**
+> **三个数字争一个事实时的裁决权不在数字，而在哈希，**
+> **而这里只有一个数字带哈希。**
+
+### 10.276 🔥🔥🔥🔥🔥 CUDA 仍然**不是**端到端的
+
+[c-cuda-still-not-end-to-end]
+
+> 「CUDA currently accelerates repeating AVQ2 decoder projections.
+> It does not yet implement the INT4 or compressed vocabulary custom operations,
+> so no end-to-end CUDA throughput claim should be made from
+> the standalone CUDA projection benchmark.」
+
+> **🔥🔥🔥🔥🔥 这条与 §10.274 合起来构成一个必须一起读的对**：
+> **一方面「CUDA 不能引用单算子基准做端到端声明」，
+> 另一方面 speed 文档确实给出了端到端数字——**
+> **故那份数字用的不是单算子基准，而是 `llama-bench` 整模跑。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个数字能不能被引用取决于它来自哪一层；**
+> **单算子基准不能外推到整模，反之亦然。**
+>
+> ⭐⭐ **而这条也回答了我此前的一个困惑**：
+> **我在 §10.258 里读到「CUDA 从未被编译」，
+> 而这里 CUDA 明明跑出了 43.16 tok/s。两者并不矛盾：**
+> **前者说的是这台开发机没编译，后者说的是另一台带 RTX PRO 6000 的机器跑过。**
+>
+> **⭐⭐ 判据：**
+> **一个后端有没有被跑过，这个断言必须带在哪台机器上；**
+> **而「本机没有 NVCC」与「别处跑通了」可以同时为真。**
+>
+> ⭐⭐ **而这条最重要的实用含义是**：
+> **「CUDA 支持 AVQ2」这个说法是部分真的：**
+> **真在 AVQ2 投影，假在 INT4 与压缩词表。**
+>
+> **⭐⭐ 判据：**
+> **一个后端支持某格式应该按算子枚举，而不是按格式打勾，**
+> **而这里恰好是「同一个格式的四个算子里支持了两个」。**
+>
+> ⭐⭐ **而这让 speed 文档的 43.16 更值得注意**：
+> **既然 INT4 与压缩词表没有 CUDA 实现，
+> 那 43.16 tok/s 这个数字必然包含了回退，而文档没有说回退到了哪里。**
+>
+> **⭐⭐ 判据：**
+> **一条性能数字如果它的一条路径是回退，那这条数字测的是混合系统，**
+> **而混合系统的数字不能用来论证任何单一后端的效率。**
+
+### 10.277 ⭐⭐⭐⭐⭐ 作者对跑不动的卡**拒绝给数字**
+
+[c-author-refuses-to-estimate-4050]
+
+> RTX 4050 Laptop 6GB 的两栏都写 `No credible full-GPU estimate`，Fit 写 `No`。
+> 理由：`6GB of VRAM, below the 8.39GB weight file before KV cache
+> and runtime allocations`。
+
+> **⭐⭐⭐⭐⭐ 这条是本轮最值得学的一个写法**：
+> **一张表里三行，两行给区间，一行写 `No credible estimate`——**
+> **而那一行恰恰是最诚实的一行。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一张投影表的可信度不取决于它的区间有多窄，**
+> **而取决于它有没有一行写着不知道；**
+> **而全区间、无空白的表，通常是每一格都被填满而不是每一格都被算过。**
+>
+> ⭐⭐ **而作者给的拒绝理由是可计算的**：
+> **6 GB 显存小于 8.39 GB 权重，故必须 CPU offload，
+> 故应当被描述成 low-single-digit、system-dependent 的 fallback，
+> 而不是 supported full-GPU target。**
+> **故这个拒绝不是态度，而是一次不等式。**
+>
+> **⭐⭐ 判据：**
+> **一个「不知道」要成立，也必须有一个可验证的理由；**
+> **而「显存小于权重」正是一个可以在十秒内验证的理由。**
+>
+> ⭐⭐ **而这条与本报告的一个长期自我批评接上**：
+> **我在很多节里写了「未获取」，而很少写出为什么它获取不到；**
+> **故那些「未获取」读者无法判断是「不存在」还是「我没找」。**
+>
+> **⭐⭐ 判据：**
+> **一个缺口的写法应该像这张表：说清「缺什么」，
+> 并给出「为什么它缺」的可验证条件；**
+> **而缺后者时，那个缺口对读者是不透明的。**
+>
+> ⭐⭐ **而这条也解释了为什么这份 1,957 字节的文档质量高**：
+> **它有三样东西：实测（带参数）、投影（带方法与免责）、拒绝（带不等式）。**
+>
+> **⭐⭐ 判据：**
+> **一份性能文档的成熟度可以按它有没有第三样判断，**
+> **而第三样是唯一不能靠多跑一次基准得到的。**
+
+### 10.278 ⭐⭐⭐⭐⭐ 投影带恰好**夹住**了实测值
+
+[c-projection-band-brackets-the-measurement]
+
+> RTX 5090 的估计是 **39–44 tok/s** 生成、**75–88 tok/s** 预填，
+> 而 RTX PRO 6000 的实测是 **43.16 / 84.70** —— 两者都落在带内。
+
+> **⭐⭐⭐⭐⭐ 这条是一个可检验的预测被自己的数据证实的实例**：
+> **作者先说「两者同为 1,792 GB/s 且同为 Blackwell，故接近持平」，
+> 然后给出 39–44 的带，而实测 43.16 落在带内。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个投影的价值不在于它准，而在于它在测量之前就写下了；**
+> **而这里两者在同一份文档里，故无法排除「照结果画带」——**
+> **但带是 39–44，实测 43.16 并不在带的中心（41.5），而偏上。**
+>
+> ⭐⭐ **而这条给「RTX 5090 与 RTX PRO 6000 谁快」一个可引用的答案**：
+> **前者合理预期 39–44，后者实测 43.16，即差距在 ±10% 以内，
+> 而不是某些二手源说的数倍。**
+>
+> **⭐⭐ 判据：**
+> **「两张卡差不多快」这个结论，只有在带宽与代际都相同时才成立；**
+> **而这里的判据是可查的：1,792 GB/s 与 Blackwell，两项都对得上。**
+>
+> ⭐⭐ **而这条也解释了 84.70 这个预填数为什么偏低**：
+> **预填是算力受限的，而 PRO 6000 的算力远高于 5090——**
+> **故若预填真的只差 10%，那说明预填路径没有被算力喂饱。**
+>
+> **⭐⭐ 判据：**
+> **同一个模型在两个算力不同的卡上预填接近，意味着瓶颈不在算力；**
+> **而这里最可能的瓶颈是那个「AVQ2 内核重复做输入变换」的缺陷。**
+>
+> ⭐⭐ **而这条与 Metal 文档那句自述形成闭环**：
+> **「its current fused kernel repeats input transforms
+> across output-row blocks」——**
+> **故预填低不是因为卡不行，而是因为内核在重复劳动。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -30421,6 +30626,55 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 「**"""Read-only, mmap-backed safetensors access without importing Torch."""**」——**故导出 8.4 GB 不需要把权重读进内存**；
  — [src-btl3-tools-metadata-py] [src-btl3-tools-qwen35-py] [src-btl3-tools-safetensor-view-py]
 
+### RTX PRO 6000 实测速度与 Metal 运行时（第一百二十轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `docs/rtx-pro-6000-speed-2026-07-19.md`（1,957 字节，58 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/rtx-pro-6000-speed-2026-07-19.md)
+ —（2026-07-19 测量，2026-10 抓取）。
+🔥🔥🔥🔥🔥 **这是全项目唯一一份 RTX PRO 6000 实测吞吐**：
+「**| 512-token prompt processing | 84.70 tok/s | 0.37 tok/s | | 128-token generation | 43.16 tok/s | 0.29 tok/s |**」——
+**三次采样 42.83 / 43.35 / 43.30 与 84.28 / 84.91 / 84.91**；
+⭐⭐ 判据（本轮最重要）「**一个缺口在写进待办之前，必须先查它是不是已经在**被读过的那棵树**里**」；
+⭐⭐ 判据「**一个模型的**预填/生成比**反映它的**权重带宽占比**；这个接近 2:1 的比例说明瓶颈几乎全在权重读取**」；
+⭐⭐ 判据「**一条速度数字的完整形式必须包含**工具、参数、采样数与制品哈希****」；
+⭐⭐ 判据「**一次基准的总时长是排除「暗中做了预处理」最省事的证据，因为重排 8.39 GB 不可能在 41 秒内完成**」；
+(a) ⭐⭐⭐⭐⭐ **完整可复现条件**：
+「**llama-bench -m /vol/release/compact/BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json**」「**KV types: FP16**」「**CUDA architecture: sm_120a**」「**GPU memory: 97,887 MiB reported by nvidia-smi**」；
+(b) ⭐⭐⭐⭐⭐ **41.03 秒包含模型加载**：
+「**The measured benchmark body, including model load, completed in 41.03 seconds.**」；
+(c) 🔥🔥🔥🔥🔥 **同一个制品三个字节数**：
+speed 文档「**File bytes: 8,392,369,600**」、release 报告「**"output_bytes": 8391269600**」、Metal 文档「**7.81 GiB**」（=8,385,923,645）——**最大差 6,445,955 字节**；
+⭐⭐ 判据「**一个字节差如果是 1000 或 1024 的整数倍，就是**单位问题**；否则就是**两个东西****」；
+⭐⭐ 判据「**三个数字争一个事实时的裁决权不在数字，而在**哈希****」——**而这里只有一个数字带哈希**；
+(d) ⭐⭐⭐⭐⭐ **投影带夹住实测值**：
+「**RTX 5090 32GB | 39-44 tok/s | 75-88 tok/s | Yes**」——**而 PRO 6000 实测 43.16 / 84.70 都落在带内**；
+⭐⭐ 作者给的理由「**The RTX PRO 6000 and RTX 5090 both advertise 1,792 GB/s memory bandwidth and share the Blackwell generation, so near-parity is the reasonable batch-one decode hypothesis.**」；
+⭐⭐ 判据「**一个投影的价值不在于它准，而在于它在**测量之前**就写下了**」；
+(e) ⭐⭐⭐⭐⭐ **对跑不动的卡拒绝给数字**：
+「**RTX 4050 Laptop 6GB | No credible full-GPU estimate | No credible full-GPU estimate | No**」「**A literal RTX 4050 Laptop has only 6GB of VRAM, below the 8.39GB weight file before KV cache and runtime allocations; it therefore requires CPU offload**」；
+⭐⭐ 判据「**一张投影表的可信度不取决于它的区间有多窄，而取决于**它有没有一行写着不知道****」；
+⭐⭐ 判据「**一个「不知道」要成立，也必须有一个**可验证的理由****」；
+⭐⭐ 判据「**一份性能文档的成熟度可以按它有没有**第三样**判断（实测、投影、拒绝）——而第三样是唯一不能靠多跑一次基准得到的**」；
+(f) ⭐⭐⭐⭐⭐ **作者声明 CUDA 尚未端到端**（见下条 Metal 文档）；
+2. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-metal-runtime-2026-07-19.md`（2,601 字节，69 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-metal-runtime-2026-07-19.md)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **CUDA 尚未端到端**：
+「**CUDA currently accelerates repeating AVQ2 decoder projections. It does not yet implement the INT4 or compressed vocabulary custom operations, so no end-to-end CUDA throughput claim should be made from the standalone CUDA projection benchmark.**」——
+**故「CUDA 支持 AVQ2」是**部分真**：真在 AVQ2 投影，假在 INT4 与压缩词表**；
+⭐⭐ 判据「**一个后端支持某格式应该按**算子**枚举，而不是按**格式**打勾**」；
+⭐⭐ 判据「**一条性能数字如果它的一条路径是回退，那这条数字测的是**混合系统****」；
+(a) ⭐⭐⭐⭐⭐ **placement 两个标记的理由**：
+「**Packed tensor placement uses two markers. Repeating AVQ2 tensors use the cross-backend marker supported by Metal and CUDA. INT4, rescued vocabulary, and non-repeating vocabulary AVQ tensors use a Metal-only marker. This keeps CUDA from accepting storage for custom operations it cannot execute.**」；
+(b) ⭐⭐⭐⭐⭐ **四条 parity 的最大相对误差跨三个数量级**：
+AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedding rows `5.96046e-08`——**最好与最差相差 615 倍**；
+(c) ⭐⭐⭐⭐⭐ **M2 上 placement 修复带来 13.9 倍**：
+「**Prompt processing | 0.609 tok/s | 2.297 tok/s**」「**Token generation | 0.178 tok/s | 2.483 tok/s**」；
+(d) 🔥🔥🔥🔥🔥 **作者自述 AVQ2 内核的结构缺陷**：
+「**AVQ2 remains the dominant custom operator and its current fused kernel repeats input transforms across output-row blocks. A future three-stage implementation can compute the input transform once, run a coalesced decoder matmul, and transform the output in place.**」——**与本报告 §10.262 那条「inverse_sqrt_128 在 code_index 循环内」是同一事实的两种说法**；
+(e) ⭐⭐⭐⭐⭐ **单算子耗时与字节不成比例**：
+「**AVQ2 4096 x 4096 x 4: 2.49 ms, 42.8x over the scalar CPU reference**」「**full 248,320 x 5,120 vocabulary head: 22.15 ms**」「**weighted representative AVQ2 decoder suite: about 735.6 ms**」「**weighted representative INT4 decoder suite: about 70.4 ms**」——**AVQ2 suite 是 INT4 的 10.45 倍，而字节只差 6.3 倍**；
+ — [src-btl3-doc-rtx-pro-speed] [src-btl3-doc-metal-runtime]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -30560,7 +30814,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=348, evidence=2509, claims=1818, claims_high=1471, claims_disputed=9, trace_events=765, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=349, evidence=2516, claims=1823, claims_high=1476, claims_disputed=9, trace_events=767, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
