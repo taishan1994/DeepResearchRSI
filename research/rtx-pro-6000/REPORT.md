@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：299 ｜ **证据数**：2271 ｜ **主张数**：1671（高置信 1328，争议 9）
+> **来源数**：300 ｜ **证据数**：2277 ｜ **主张数**：1676（高置信 1333，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -19167,6 +19167,197 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > 故 §10.101 那个 `pp512` 的异常不是「算错了」，而是「算得慢」——**
 > **⚠️ 而这正是 §10.102 那三种假设里 ① 与 ② 的分界。**
 
+### 10.125 🔥🔥🔥🔥🔥 字节账本：**BF16 岛占 14.39%，AVQ2 只占 65.60%**
+
+[c-byte-ledger-bf16-islands-are-14pct]
+
+| 分量 | 字节 | 占比 | 张量数 |
+|---|---|---|---|
+| AVQ2 | 5,498,130,320 | **65.60%** | 1,615 |
+| **BF16 岛** | **1,205,862,400** | **14.39%** | **12** |
+| 仿射 INT4 | 875,438,080 | 10.45% | 189 |
+| 词表 / head | 667,713,856 | 7.97% | 13 |
+| 紧凑状态 | 57,767,936 | 0.69% | 449 |
+| INT4 降级 | 43,909,120 | 0.52% | 6 |
+| 行为 LoRA | 32,440,320 | 0.39% | 132 |
+| **张量合计** | **8,381,262,032** | | **2,416** |
+| GGUF 元数据 + 对齐 | 11,107,568 | | |
+| **最终文件** | **8,392,369,600** | | |
+
+> **⭐⭐⭐ 判据（本轮最重要）：**
+> **「2.5 比特」这个标题让所有人以为「这个模型几乎全是 2 比特权重」，
+> 而实际是「65.6% 的字节是 2 比特，14.4% 是 16 比特，10.5% 是 4 比特」——**
+> **⚠️ 而「字节占比」与「计算量占比」又不是一回事。**
+>
+> ⭐⭐ **换算成参数个数会更清楚**：
+> **BF16 岛的 1,205,862,400 字节 = 602,931,200 个 BF16 参数（约 6.03 亿）；
+> 而 AVQ2 的 5,498,130,320 字节，若按 2 比特/权重算，约合 219.9 亿参数——**
+> **⚠️ 即「参数个数」维度上 BF16 岛只占约 2.7%，而在「字节」维度上占 14.39%。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个分量占多少」这个问题有两个完全不同的答案，
+> 取决于你数的是「参数」还是「字节」——**
+> **⚠️ 而性能关心的是第三个量：「访存字节 × 调用次数」。**
+>
+> ⭐⭐ **这是 §10.122 那条推断的定量版本**：
+> **12 个 BF16 岛在「字节」上占 14.4%，
+> 但在「每一次前向都必须全部读一遍」这个意义上，
+> 它们占的是「每 token 固定开销的 14.4%」——**
+> **⚠️ 而 AVQ2 的 65.6% 也不是「读一遍」，是「解包再算」。**
+>
+> ⚠️ **边界**：**本报告没有「每个分量的实际调用次数」，
+> 故「计算量占比」仍未知。**
+
+### 10.126 🔥🔥🔥🔥 12 个 BF16 岛集中在**第 10-16 层**
+
+[c-bf16-islands-in-layers-10-to-16]
+
+> 「**The BF16 islands were concentrated in layers 10 through 16,
+> with later islands at layers 33 and 36.**」
+>
+> 覆盖「**selected linear-attention input/output projections,
+> attention output/value projections, MLP gates, and MLP down projections**」。
+>
+> 而作者对这张分布图的定性极其克制：
+> **「This pattern is a record of observed cliffs,
+> not a general claim about Qwen sensitivity.」**
+
+> **⭐⭐⭐ 这条推翻了一个自然假设：「精度岛应该均匀撒在所有层」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个不均匀的分布」有两种解释：
+> ① 那些位置真的更敏感；
+> ② 那些位置是我第一个测到的——**
+> **⚠️ 而作者明确选了 ②：这是「观察到的悬崖的记录」，不是「敏感性理论」。**
+>
+> ⭐⭐ **对本报告主题的具体含义**：
+> **如果 12 个岛集中在第 10-16 层，那么「层间负载不均衡」是必然的——
+> 第 10-16 层要比第 17-32 层多做约 8 倍的访存——**
+> **⚠️ 即这个模型在 pipeline 并行下会遇到严重的「阶段不均衡」。**
+>
+> **⭐⭐ 判据：**
+> **「混合精度」在单卡上是「平均比特数」问题，
+> 在流水线并行上是「最慢阶段」问题——**
+> **⚠️ 而后者与前者的比值，取决于「岛」的分布，不是「岛」的总量。**
+>
+> ⭐⭐ **这与 §10.105 那份双卡配方形成呼应**：
+> **那位用户用的是 `split-mode=layer` 与 `tensor-split=46,54`——
+> ⚠️ 而一个「第 10-16 层更重」的模型，在 `layer` 切分下会让两张卡严重失衡。**
+>
+> ⚠️ **边界**：**本报告不知道 BTL-3 的 64 层在双卡上如何切分，
+> 也不知道「岛更重」是否足以造成可测的失衡。**
+
+### 10.127 ⭐⭐⭐ AVQ2 只用于 **336 个矩阵**，INT4 只用于 **64 个**
+
+[c-avq2-is-336-matrices]
+
+> 「**The complete source decoder contained 336 AVQ2 vector matrices,
+> 64 group-128 affine INT4 matrices on full-attention paths,
+> one measured AVQ2-to-INT4 island, and 14 behavior-proven BF16 islands.**」
+>
+> ⚠️ **64 个 INT4 矩阵正好「每层一个」，而 AVQ2 平均每层 5.25 个。**
+
+> **⭐⭐⭐ 这条揭示的是「按模块类型分配精度」，比「按层分配」更细致**：
+> **`linear_attn` 的输入/输出投影走 AVQ2（336 个），
+> `full-attention` 的投影走 group-128 INT4（64 个，每层一个）——**
+> **⚠️ 即这不是「某些层用高精度」，而是「某些模块用高精度」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「混合精度」的粒度有三个层次：按层、按模块、按张量——**
+> **⚠️ 而每一个层次对「访存模式」的影响不同：
+> 按层切分可以整层换 kernel，
+> 按模块切分需要在一层内切换两次，
+> 按张量切分则每次矩阵乘都可能换。**
+>
+> ⭐⭐ **对 RTX PRO 6000 的读者有一个直接含义**：
+> **一个模型里存在 3 种以上张量格式时，kernel launch 的次数会显著增加——
+> ⚠️ 而「kernel launch 开销」在 Blackwell 上是否被 PDL 抵消，
+> 本报告不知道（§10.105 那份配方里恰好有 `GGML_CUDA_PDL=1`）。**
+>
+> **⭐⭐ 判据：**
+> **「一个模型的量化方案」不只是「多少个比特」，
+> 还包括「几种格式」与「每种格式的张量数」——**
+> **⚠️ 而后面两个数字决定「调度开销」，第一个只决定「访存开销」。**
+
+### 10.128 ⭐⭐⭐ 两次「字节交换」只回收 **123.86 MB（1.48%）**
+
+[c-byte-exchange-is-1p5pct]
+
+| 张量 | BF16 | INT4 |
+|---|---|---|
+| L13 in-proj QKV | 104.86 MB | 27.44 MB |
+| L33 in-proj Z | 62.91 MB | 16.47 MB |
+| **回收** | **123.86 MB** | |
+
+> **⚠️ 把 2 个 BF16 岛降级为 INT4，只回收了 1.48% 的空间——
+> 却要让「词表救援」得以进行。**
+>
+> **⭐⭐⭐ 这是本报告见过的「最精确的一次工程取舍记录」**：
+> **作者不是「降级到预算够」，
+> 而是「先算出还差多少，再精确选择降级哪两个岛，
+> 并记录回收了多少字节」——**
+> **⚠️ 而 1.48% 说明「预算的缺口非常小」，小到只需要动 2 个张量。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个精确的字节预算」会强迫出一套「可审计的取舍记录」——**
+> **⚠️ 因为每一字节都要有出处，而「大概降一点」这种做法在账本上留不下痕迹。**
+>
+> ⭐⭐ **这与 §10.62–§10.85 那十轮的主题形成尖锐对比**：
+> **llama.cpp 的量化选择是「一个类型枚举」，
+> 用户选 `Q4_K_M` 就完了，没有账本；
+> 而这里的选择是「2,416 个张量各自的格式 + 一份按分量汇总的字节表」。**
+>
+> **⭐⭐ 判据：**
+> **「量化」这个动作的「可审计性」，
+> 取决于「它是选一个类型还是排一张表」——**
+> **⚠️ 而只有后者能回答「为什么这个张量是 16 比特」。**
+>
+> ⭐⭐ **实际意义**：
+> **当读者问「为什么这个模型这么快/这么慢」时，答案在账本里；
+> 而当模型是一个 `Q4_K_M` 单文件时，答案不存在。**
+
+### 10.129 ⭐⭐⭐ 行为适配器：**运行时组合的 rank-8 LoRA**
+
+[c-adapter-scope-is-layers-40-63]
+
+> 「**rank-8 LoRA with alpha 16, no dropout, AdamW betas (0.9,0.95),
+> zero weight decay, gradient norm 1.0, sequence length 1,024,
+> and 100 optimizer steps in the saved state.**」
+> 「**Restricted to layers 40 through 63 and to four module families:
+> `linear_attn.in_proj_z`, `linear_attn.out_proj`,
+> `self_attn.o_proj`, and `mlp.down_proj`.**」
+> 「**The adapter is not merged into the low-bit codes;
+> the packed matmul and low-rank path are composed at runtime.
+> Its counted payload is 32,440,320 bytes.**」
+
+> **⭐⭐⭐ 「不合并进低位码，运行时组合」是本轮最有工程含义的一句**：
+> **它意味着「每次前向，在那 4 类模块上要额外跑一个 rank-8 的 LoRA」——
+> ⚠️ 而这不是「一次性的量化误差」，是「每个 token 的固定开销」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「把校正项合并进权重」与「运行时加一个低秩路径」是两种完全不同的产品决策：
+> 前者零开销但不可逆，后者可逆但每 token 都要付钱——**
+> **⚠️ 而后者通常被描述成「可插拔」，前者被描述成「永久」。**
+>
+> ⭐⭐ **对速度的估算**：
+> **`32,440,320` 字节的 LoRA，作用在 24 层（40-63）× 4 类模块 = 96 个位置；
+> rank-8 的前向是「两次小矩阵乘」，计算量很小，
+> 但它引入了 96 次额外的 kernel launch 或 96 次额外的访存——
+> ⚠️ 而「小矩阵乘」在 GPU 上恰恰是「利用率最低」的形态。**
+>
+> **⭐⭐ 判据：**
+> **「低秩校正」在精度上几乎免费，在速度上不免费——**
+> **⚠️ 因为它把「一次大矩阵乘」拆成了
+> 「一次大矩阵乘 + 两次形状极不规则的瘦矩阵乘」，
+> 而后者在 GPU 上的效率很低。**
+>
+> ⭐⭐ **与 §10.112 那条形成叠加**：
+> **AVQ2 的 matvec 没有 batch 维度，LoRA 的瘦矩阵乘也没有——
+> ⚠️ 两个「低利用率」的开销叠在一起，
+> 可能才是 `43.16 tok/s` 的真正来源。**
+>
+> ⚠️ **边界**：**本报告没有这两个开销的实测分解，故上面是推断。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -22598,6 +22789,9 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 2. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/CLAIMS.md`（5,252 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/CLAIMS.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **速度被作者列在「需要更多证据的主张」里**：「**Claims that need more evidence — The following are research hypotheses, not launch claims: ... the approach provides a production speedup before kernel optimization**」——⚠️ **「这个方案在内核优化之前就有生产级加速」是作者自己都认为尚未证实的一条**；(a) ⭐⭐⭐⭐ **另有一节「Claims that must not be made」，8 条明令禁止**：「**Do not call 92.2% "intelligence retained."**」「**Do not claim compatibility with stock Ollama or LM Studio engines; the included bridges use BTL's custom packed backend.**」「**Do not call the compression method "lossless."**」「**Do not claim MLX, WebGPU, phone readiness, or unmeasured device throughput.**」；⭐⭐⭐⭐ **这是本报告在方法学上最有收获的一次「遇到同行」**：**本报告一直在做「口径纪律」，而这份材料把同一件事做成了一个「负面清单」——它不写「我的主张是什么」，而写「我不能声称什么」**；⭐⭐ 判据（本轮最重要）「**『我不能声称什么』比『我能声称什么』更难写，也更有信息量——因为前者要求作者预先想到『读者会怎么误读』，而后者只要求作者想到『我想说什么』**」；⭐⭐ 判据「**当一份材料的『禁止声称』清单里出现了我犯过的那个错时，说明那个错是『设计上预期会被犯的』**」——**而「stock engine 兼容性」正是本报告 §10.106 犯的那个错**；(b) 🔥🔥🔥 **最终产物是 10 种表示的混合**：「**AVQ2 vector codes for compatible decoder matrices; group-128 affine INT4 for full-attention projections; 12 physically retained BF16 islands; two measured BF16-to-INT4 demotions; one measured AVQ2-to-INT4 precision island; a 2.099-bpw embedding with 4,096 INT8-rescued rows; a 2.000-bpw language-model head; a rank-32 activation-weighted head residual; a 32.46 MB rank-8 behavior adapter; and compact non-matrix text state**」——⚠️ **「Under 2.5 effective bits per parameter」是这个混合的平均值**；⭐⭐⭐ 判据（本轮最重要）「**当一份报告的标题写『2.5 比特模型』时，它实际描述的是『一个加权平均』，而那个平均里可能包含 12 个 16 比特的层——而『平均』这个词在性能上几乎没有意义，因为速度由最慢的那一环决定**」；⭐⭐ 判据「**『混合精度模型的速度』不能用『平均比特数』预测——因为它由『哪一部分在什么时候被调用』决定**」 — [src-btl3-paper-claims]
 
 3. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/ARTICLE.md`（19,240 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/ARTICLE.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **作者对那两个数字的定位，一句话说明**：「**These two system measurements prove native execution; they are not universal performance claims. Broader consumer-device profiling remains future work.**」——⚠️ 即 **`84.70 / 43.16` 与 M2 的 `2.30 / 2.48` 是同一类证据：「证明原生执行」，不是「性能基准」**；⭐⭐ 判据（本轮最重要）「**当我在三轮里不断重新解释同一个数字时，我一直没有问的那个问题是『作者自己怎么定位它』——而这个问题只需要读一节 `CLAIMS.md`**」；⭐⭐ 判据「**『能跑』与『多快』是两个不同的证据等级，而它们的区别不在于数字的精度，而在于『有没有对照组』——一份没有对照组的测量，即使 σ 只有 0.37，也只能证明『存在』，不能证明『优劣』**」；⭐ 另有七条产物校验，其中 **「exact AVQ2 CUDA-kernel parity with the unpacked reference」与「maximum INT4 kernel error of 3.0517578125e-05（= 2^-15）」**；⭐⭐ 判据「**『我读了两份代码，它们看起来不一致』与『我跑了两个实现，它们的输出逐位相同』是两个完全不同强度的证据——而前者经常被写成后者**」 — [src-btl3-paper-article]
+### 字节账本、BF16 岛的位置、与运行时的 rank-8 LoRA（第八十九轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/PAPER.tex`（23,347 字节，338 行）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/PAPER.tex) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **「the canonical research-paper source」，含「the executed recipe, rejected stages, exact settings, artifact ledger, and claim limits」**。(a) 🔥🔥🔥🔥🔥 **完整字节账本（`tab:bytes`）**：「**AVQ2 & 1,615 & 5,498,130,320 | Affine INT4 & 189 & 875,438,080 | BF16 islands & 12 & 1,205,862,400 | INT4 demotions & 6 & 43,909,120 | Vocabulary/head & 13 & 667,713,856 | Behavior LoRA & 132 & 32,440,320 | Compact state & 449 & 57,767,936 | Tensor total & 2,416 & 8,381,262,032**」，加「**GGUF metadata and alignment: 11,107,568 bytes**」，最终 **8,392,369,600 bytes**；⭐⭐⭐ 判据（本轮最重要）「**『2.5 比特』这个标题让所有人以为『这个模型几乎全是 2 比特权重』，而实际是『65.6% 的字节是 2 比特，14.4% 是 16 比特，10.5% 是 4 比特』——而『字节占比』与『计算量占比』又不是一回事**」；⭐⭐ 判据「**『一个分量占多少』这个问题有两个完全不同的答案，取决于你数的是『参数』还是『字节』——而性能关心的是第三个量：『访存字节 × 调用次数』**」；⚠️ 百分比为本报告自算（字节数 / tensor total），非论文给出。(b) 🔥🔥🔥🔥 **12 个 BF16 岛集中在第 10-16 层**：「**The BF16 islands were concentrated in layers 10 through 16, with later islands at layers 33 and 36. They covered selected linear-attention input/output projections, attention output/value projections, MLP gates, and MLP down projections. This pattern is a record of observed cliffs, not a general claim about Qwen sensitivity.**」；⭐⭐ 判据（本轮最重要）「**『一个不均匀的分布』有两种解释：① 那些位置真的更敏感；② 那些位置是我第一个测到的——而作者明确选了 ②**」；⭐⭐ 判据「**『混合精度』在单卡上是『平均比特数』问题，在流水线并行上是『最慢阶段』问题——而后者与前者的比值，取决于『岛』的分布，不是『岛』的总量**」；(c) ⭐⭐⭐ **336 个 AVQ2 矩阵 / 64 个 INT4 矩阵 / 14 个 behavior-proven BF16 岛**：「**The complete source decoder contained 336 AVQ2 vector matrices, 64 group-128 affine INT4 matrices on full-attention paths, one measured AVQ2-to-INT4 island, and 14 behavior-proven BF16 islands.**」——⚠️ **64 个 INT4 矩阵正好「每层一个」**；⭐⭐⭐ 判据（本轮最重要）「**『混合精度』的粒度有三个层次：按层、按模块、按张量——而每一个层次对『访存模式』的影响不同**」；⭐⭐ 判据「**『一个模型的量化方案』不只是『多少个比特』，还包括『几种格式』与『每种格式的张量数』——而后面两个数字决定『调度开销』，第一个只决定『访存开销』**」；(d) ⭐⭐⭐ **两次字节交换只回收 123.86 MB（1.48%）**：「**L13 in-proj QKV: 104.86 MB -> 27.44 MB；L33 in-proj Z: 62.91 MB -> 16.47 MB；Recovered 123.86 MB**」；⭐⭐ 判据（本轮最重要）「**『一个精确的字节预算』会强迫出一套『可审计的取舍记录』——因为每一字节都要有出处，而『大概降一点』这种做法在账本上留不下痕迹**」；⭐⭐ 判据「**『量化』这个动作的『可审计性』，取决于『它是选一个类型还是排一张表』——而只有后者能回答『为什么这个张量是 16 比特』**」；(e) ⭐⭐⭐ **行为适配器是「运行时组合」的 rank-8 LoRA，不合并进低位码**：「**rank-8 LoRA with alpha 16, no dropout, AdamW betas (0.9,0.95), zero weight decay, gradient norm 1.0, sequence length 1,024, and 100 optimizer steps in the saved state**」、「**restricted to layers 40 through 63 and to four module families: `linear_attn.in_proj_z`, `linear_attn.out_proj`, `self_attn.o_proj`, and `mlp.down_proj`**」、「**The adapter is not merged into the low-bit codes; the packed matmul and low-rank path are composed at runtime. Its counted payload is 32,440,320 bytes.**」；⭐⭐ 判据（本轮最重要）「**『把校正项合并进权重』与『运行时加一个低秩路径』是两种完全不同的产品决策：前者零开销但不可逆，后者可逆但每 token 都要付钱**」；⭐⭐ 判据「**『低秩校正』在精度上几乎免费，在速度上不免费**」；⭐ 与 §10.112 叠加：**AVQ2 的 matvec 没有 batch 维度，LoRA 的瘦矩阵乘也没有——两个「低利用率」的开销叠在一起，可能才是 `43.16 tok/s` 的真正来源**（⚠️ 无实测分解，为推断）；(f) 🔥🔥🔥🔥 **论文对那三个数字的措辞比 ARTICLE.md 更精确**：「**Three full-offload `llama-bench` runs on an RTX PRO 6000 Blackwell measured 84.70±0.37 prompt tokens/s and 43.16±0.29 generated tokens/s for a 512-token prompt and 128-token generation. An Apple M2 16 GB compatibility smoke measured 2.30 prompt tokens/s and 2.48 generated tokens/s. These are measurements of two systems, not a general performance model.**」 — [src-btl3-paper-tex]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -22737,7 +22931,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=299, evidence=2271, claims=1671, claims_high=1328, claims_disputed=9, trace_events=667, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=300, evidence=2277, claims=1676, claims_high=1333, claims_disputed=9, trace_events=669, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
