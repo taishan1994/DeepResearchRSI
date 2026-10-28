@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：402 ｜ **证据数**：2710 ｜ **主张数**：1913（高置信 1565，争议 9）
+> **来源数**：405 ｜ **证据数**：2718 ｜ **主张数**：1921（高置信 1573，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -29792,6 +29792,216 @@ exit 0
 > **我说「`real-eval` 这个文件名暗示它有真实接受率数据」——它没有。**
 > **文件名说的是「这个框架测的是真模型」，不是「这里有真结果」。**
 
+### 10.370 🔥🔥🔥🔥🔥 被捕获的五层隐藏态**只贡献 K/V，不贡献任何计算**
+
+[c-dspark-context-rows-contribute-only-kv]
+
+> **`src/models/dspark.cpp` 22-26 行**：
+> 「**The two K/V sets are concatenated and attended to with a single, fully
+> unmasked (non-causal) softmax ... Q only ever exists for the draft block:
+> the context rows never issue a query, never run through the FFN, and never
+> join the residual stream.**」
+
+> **🔥 故「特征复用」的成本是「读多少」而不是「算多少」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「特征复用」设计如果只把被复用的特征当 K/V，
+> 那它的成本是「读多少」而不是「算多少」；
+> 而这两者在并行硬件上的可加速性完全不同。**
+>
+> **⭐⭐ 故「五层捕获」（§10.363）与「只做 K/V」（本节）
+> 合起来才是完整的成本结构**：
+> **目标模型吐五个中间层，草稿器把它们只当键值。**
+
+### 10.371 ⚠️⚠️⚠️ 它算了一整宽的 Q，再把多出来的列**切掉**
+
+[c-dspark-computes-then-slices-context-rows]
+
+> **`src/models/dspark.cpp` 28-40 行**：
+> 「**we set `n_tokens = n_ctx_rows + n_draft` ..., compute Q/K/V uniformly over
+> that full width each layer ..., then slice the attention OUTPUT back down to
+> the trailing `n_draft` columns before the residual add. The "wasted" query
+> rows computed for the context positions are discarded immediately and are
+> provably harmless: attention output is row-independent (each output row
+> depends only on its own Q row dotted against the shared K/V), so slicing them
+> away here is bit-identical to never having computed them.**」
+>
+> **而 367 行的 `ggml_view_2d(ctx0, cur, n_embd, n_draft, cur->nb[1], cur->nb[1] * n_ctx_rows)`
+> 就是那一次切片。**
+
+> **⭐⭐ 判据（本轮重要）：**
+> **「多算再切掉」与「不算」在数学上等价，但在【成本】上不等价——
+> 浪费随 `n_ctx_rows` 线性增长。**
+>
+> **⭐⭐ 判据：**
+> **故这句「provably harmless」是关于正确性的，不是关于性能的；
+> 而它把 `n_ctx_rows` 这个成本项藏进了一个「证明无害」的句子里。**
+
+### 10.372 ⚠️⚠️⚠️ 两个辅助头**被加载但不进图**
+
+[c-two-aux-heads-loaded-but-not-wired]
+
+> **`src/models/dspark.cpp` 45-51 行**：
+> 「**the markov_head / confidence_head auxiliary tensors are loaded below but
+> not wired into this graph: their application is a small, sequential,
+> host-side resample loop ... that belongs to Phase 2. `res->t_logits` here is
+> the BASE trunk logits (dspark.fc -> trunk -> output_norm -> output),
+> pre markov-bias.**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个张量被加载进 GGUF 并映射进 tensor 表，
+> 与它被接进计算图，是两个可独立验证的事实。**
+>
+> **⭐⭐ 判据：**
+> **故「这个模型有 Markov 头」不能从「仓库里有 `markov_head` 张量」推出；
+> 要推出它，必须找到那个乘它的地方。**
+>
+> **⭐⭐ 而这条与 §10.362 的静默降级正好互补**：
+> **那条说「权重读不出就不修正」，这条说「权重**读出了也不修正**」。**
+> **两条一起推出：在这个 commit 里，`markov_rank > 0` 与 `markov_rank = 0`
+> 在**前向图**上没有任何差别。**
+
+### 10.373 🔥🔥🔥🔥🔥 词表宽度由**一个张量的形状**决定
+
+[c-vocab-width-comes-from-a-tensor-shape]
+
+> **`src/models/dspark.cpp` 100-108 行**：
+> 「**dspark ships no tokenizer of its own (converter calls `_set_vocab_none()`:
+> it ties to the TARGET model's vocab), so `vocab.n_tokens()`
+> (LLAMA_LOAD_LOCALS' `n_vocab`) is 0 here. The real vocab width only exists as
+> the `token_embd` tensor's own shape in the GGUF -- peek at it before creating
+> anything.**」
+>
+> **而代码用 `ml.get_tensor_meta(...)->ne[1]` 取那个宽度。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个模型的某个维度「没有元数据」时，
+> 它往往以「某个张量的形状」的形式存在——
+> 而形状是比元数据更可靠的一等公民，因为它必须与文件里真实存在的数据一致。**
+>
+> **⭐⭐ 判据：**
+> **故「元数据缺失」不等于「信息缺失」；它可能只是「信息存放在另一层」。**
+
+### 10.374 🔥🔥🔥🔥🔥 `min_log_snr` / `max_log_snr` 的数值**对输出没有任何影响**
+
+[c-log-snr-bounds-have-no-effect-on-output]
+
+> **`src/models/dspark.cpp` 266-268 行**：
+> ```cpp
+> const float log_snr = (pos % bsz == 0) ? max_snr : min_snr;
+> const float t       = (log_snr - min_snr) / (max_snr - min_snr) * 1000.0f;
+> ```
+
+> **🔥 `log_snr` 只取两个端点值，故 `t` 也只能取两个值**：
+> ```
+> pos % bsz == 0  (anchor)  ->  t = (max - min)/(max - min) * 1000 = 1000.0
+> 否则        (mask)        ->  t = (min - min)/(max - min) * 1000 =    0.0
+> ```
+> **而 `t = 0` 那一行是 `[0, ..., 0, 1, ..., 1]`（`sin(0)` / `cos(0)`），是常数行。**
+
+> **本次验算三组完全不同的 `(min, max)`，都给出同一对 `t`**：
+> ```
+> min =  -6.0  max =   8.0  ->  t = (1000.000, 0.000)
+> min = -10.0  max =  10.0  ->  t = (1000.000, 0.000)
+> min =  -0.5  max =   0.5  ->  t = (1000.000, 0.000)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个做了归一化的特征，如果它的输入只取两个端点值，
+> 那么归一化参数就被约掉了；
+> 此时这两个参数只通过「`max > min` 且有限」这个布尔条件起作用。**
+>
+> **⭐⭐ 判据：**
+> **而 ggml 的张量缓存按形状与类型做键，不按内容，
+> 故「同一形状但锚点位置不同」的两张图会被判为同一张图。**
+
+> **⭐⭐ 这是本报告找到的最强的一条「元数据字段与其实际作用不匹配」的证据**：
+> **作者为它写了两道运行时检查（`isfinite` 与 `max > min`，第 71-76 行），
+> 而它们守护的那个量对输出没有任何影响。**
+>
+> ⚠️ **而这条也解释了为什么作者可以为它写「the divide is safe」**——
+> **分母恒为 `max - min`，而 `max > min` 已被检查；这是对的，只是无关。**
+
+### 10.375 ⚠️⚠️⚠️ 那个被称作「**bit-accurate**」的门禁，比的是**两个率**
+
+[c-the-forward-gate-is-not-bit-accurate]
+
+> **`tests/test-dspark-forward.cpp` 328-346 行**：
+> 「**// Gate on agreement with the Python reference. Both metrics are
+> scale-invariant rates in [0,1]: a correct C++ drafter matches the reference
+> argmax on nearly every position and shares nearly all of its top-5 ...**
+> **if (argmax_match_rate < min_argmax_match_rate) { ... fail ... }
+> if (mean_top5_overlap < min_top5_overlap) { ... fail ... }**」
+>
+> **而门限默认值在 370-371 行是 `0.90` 与 `0.90`。**
+
+> **⚠️ `tol` 与 `1e-` 在全文出现 `0` 次。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「逐位相同」的断言，如果它的实现是两个 `[0,1]` 区间上的率，
+> 那它最多能证明「行为近似」，不能证明「数值相同」。**
+>
+> **⭐⭐ 判据：**
+> **而这两个指标是尺度无关的——它们不看 logits 的绝对值，只看排序。**
+>
+> **⭐⭐ 故「DSpark 的前向图与参考实现逐位相同」这个说法，
+> 在本仓库里没有任何一条能支持它的代码路径；
+> 能支持的是一个弱得多的断言。**
+
+> **⭐⭐ 而注释里那句「without this the test passed on any finite output
+> (even zero matches)」反而证明作者知道原门禁有多弱**：
+> **他把门禁加固到了 `0.90` 的两个率，而不是加固到逐位比较。**
+> **这本身是对「逐位比较在这个图上做不到」的一次承认。**
+
+### 10.376 ⚠️⚠️⚠️ 数值门禁**只在 CPU 上跑**
+
+[c-the-numerical-gate-runs-on-cpu-only]
+
+> **`tests/test-dspark-forward.cpp` 第 158 行与第 259 行都是**：
+> ```cpp
+> mparams.n_gpu_layers = 0; // CPU: deterministic, no Metal precision surprises
+> ```
+> **而 `tests/test-dspark-loop.cpp` 第 119 行同样如此。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个数值正确性门禁如果只在 CPU 上跑，
+> 那它证明的是「这份图在 CPU 后端上对」，而不是「这份图对」。**
+>
+> **⭐⭐ 判据：**
+> **而作者的诚实值得记：他把「避免 Metal 精度意外」写进了注释，
+> 而不是假装这个门禁覆盖了 GPU。**
+>
+> **⭐⭐ 故「DSpark 的数值正确性」至今只在 CPU 后端上被验证过，
+> 而 RTX PRO 6000 是 CUDA 后端。**
+
+> ⚠️ **而这条与 §10.350 那条「函数等价、非逐位相同」正好接上**：
+> **那条说的是 CUDA 与 host 之间的差，
+> 这条说的是「CUDA 从未被任何数值门禁覆盖」。**
+
+### 10.377 ⚠️⚠️⚠️ 「bit-accurate」是一个**跨文件的转述**
+
+[c-bit-accurate-is-a-cross-file-claim]
+
+> **`tests/test-dspark-loop.cpp` 1-8 行**：
+> 「**Phase 1 (`src/models/dspark.cpp`, the forward graph for a single call) is
+> already gated bit-accurate against the Python reference's real
+> `Qwen3DSparkModel` -- see `test-dspark-forward.cpp`.**」
+>
+> **而 `test-dspark-loop.cpp` 自身不做任何数值比对**：
+> **`tol` 与 `1e-` 在它里面也出现 `0` 次；全文是 18 处 `fail(` 的机制断言。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个断言出现在文件 A 里、而被引用的证据在文件 B 里时，
+> 必须先读 B，再信 A；
+> 因为 A 的作者引用的是他的印象，而 B 是实现。**
+>
+> **⭐⭐ 判据：**
+> **而这条是本报告第 20 条同型错误的一个正面案例——
+> 我这次确实去读了 B，于是发现 A 的用词比 B 的实现强得多。**
+>
+> **⭐⭐ 故「注释里的形容词」是仓库里最不可靠的一类证据，
+> 而它恰好是最容易被引用的一类。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -35030,6 +35240,53 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐ **而这条正好回答了我上一轮的猜测：我说「real-eval 这个文件名暗示它有真实接受率数据」——它没有；文件名说的是「这个框架测的是真模型」，不是「这里有真结果」**；
  — [src-btl3-test-dspark-real-eval]
 
+### DSpark 的前向图与它的两道门禁（第一百四十三轮补充）
+
+继续按上一轮的待追项推进。上一轮结尾说「读 src/models/dspark.cpp（22,582 字节）与 test-dspark-loop.cpp / test-dspark-forward.cpp」。
+本轮三个都读完，而得到的最重的一条是：**一个被反复引用的「bit-accurate」门禁，实际比的是两个尺度无关的率**。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/src/models/dspark.cpp`（22,582 字节，409 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/models/dspark.cpp)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **被捕获的五层隐藏态只贡献 K/V，不贡献任何计算**：
+「**Q only ever exists for the draft block: the context rows never issue a query, never run through the FFN, and never join the residual stream**」——**故「特征复用」的成本是「读多少」而不是「算多少」**；
+⭐⭐ 判据（本轮最重要）「**一个「特征复用」设计如果只把被复用的特征当 K/V，那它的成本是「读多少」而不是「算多少」；而这两者在并行硬件上的可加速性完全不同**」；
+⭐⭐ **故「五层捕获」（§10.363）与「只做 K/V」（本节）合起来才是完整的成本结构：目标模型吐五个中间层，草稿器把它们只当键值**；
+(a) ⚠️⚠️⚠️ **它算了一整宽的 Q，再把多出来的列切掉**：
+「**we set n_tokens = n_ctx_rows + n_draft ..., compute Q/K/V uniformly over that full width each layer ..., then slice the attention OUTPUT back down to the trailing n_draft columns before the residual add. The "wasted" query rows ... are provably harmless: attention output is row-independent ..., so slicing them away here is bit-identical to never having computed them**」——**367 行的 ggml_view_2d 即那一次切片**；
+⭐⭐ 判据「**「多算再切掉」与「不算」在数学上等价，但在【成本】上不等价——浪费随 n_ctx_rows 线性增长**」——**故这句「provably harmless」是关于正确性的，不是关于性能的；而它把 n_ctx_rows 这个成本项藏进了一个「证明无害」的句子里**；
+(b) ⚠️⚠️⚠️ **两个辅助头被加载但不进图**：
+「**the markov_head / confidence_head auxiliary tensors are loaded below but not wired into this graph ... res->t_logits here is the BASE trunk logits (dspark.fc -> trunk -> output_norm -> output), pre markov-bias**」——
+⭐⭐ 判据「**一个张量被加载进 GGUF 并映射进 tensor 表，与它被接进计算图，是两个可独立验证的事实**」；
+⭐⭐ **而这条与 §10.362 的静默降级正好互补：那条说「权重读不出就不修正」，这条说「权重读出了也不修正」；两条一起推出在这个 commit 里 markov_rank > 0 与 markov_rank = 0 在前向图上没有任何差别**；
+(c) 🔥🔥🔥🔥🔥 **词表宽度由一个张量的形状决定**：
+「**dspark ships no tokenizer of its own (converter calls _set_vocab_none()), so vocab.n_tokens() is 0 here. The real vocab width only exists as the token_embd tensor's own shape in the GGUF -- peek at it before creating anything**」——**代码用 get_tensor_meta(...)->ne[1] 取它**；
+⭐⭐ 判据「**当一个模型的某个维度「没有元数据」时，它往往以「某个张量的形状」的形式存在——而形状是比元数据更可靠的一等公民，因为它必须与文件里真实存在的数据一致**」；
+(d) 🔥🔥🔥🔥🔥 **min_log_snr / max_log_snr 的数值对输出没有任何影响**：
+「**const float log_snr = (pos % bsz == 0) ? max_snr : min_snr; const float t = (log_snr - min_snr) / (max_snr - min_snr) * 1000.0f;**」——
+**因为 log_snr 只取两个端点值，故 t 只能取 1000.0（anchor 位）或 0.0（mask 位）；我验算了三组完全不同的 (min,max)，都给出同一对 t = (1000.000, 0.000)（-6/8、-10/10、-0.5/0.5）**；
+⭐⭐ 判据（本轮最重要）「**一个做了归一化的特征，如果它的输入只取两个端点值，那么归一化参数就被约掉了；此时这两个参数只通过「max > min 且有限」这个布尔条件起作用**」；
+**而 t = 0 的那一行是 [0,...,0,1,...,1]（sin(0)/cos(0)），是常数行；而 ggml 的张量缓存按形状与类型做键，不按内容**；
+⭐⭐ **这是本报告找到的最强的一条「元数据字段与其实际作用不匹配」的证据：作者为它写了两道运行时检查（isfinite 与 max > min），而它们守护的那个量对输出没有任何影响**；
+2. [GitHub / Badtheorylabs — `native/llama.cpp/tests/test-dspark-forward.cpp`（16,148 字节，381 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/tests/test-dspark-forward.cpp)
+ —（2026-10 抓取）。
+⚠️⚠️⚠️ **那个被称作「bit-accurate」的门禁，实际比对的是 argmax 匹配率与 top-5 重叠率**：
+「**Both metrics are scale-invariant rates in [0,1]: a correct C++ drafter matches the reference argmax on nearly every position and shares nearly all of its top-5 ... if (argmax_match_rate < min_argmax_match_rate) ... if (mean_top5_overlap < min_top5_overlap) ...**」——**而门限默认值在 370-371 行是 0.90 与 0.90；tol 与 1e- 在全文出现 0 次**；
+⭐⭐ 判据（本轮最重要）「**一个「逐位相同」的断言，如果它的实现是两个 [0,1] 区间上的率，那它最多能证明「行为近似」，不能证明「数值相同」**」；
+⭐⭐ **而这两个指标是尺度无关的——它们不看 logits 的绝对值，只看排序；故「DSpark 的前向图与参考实现逐位相同」这个说法，在本仓库里没有任何一条能支持它的代码路径**；
+⭐⭐ **注释里那句「without this the test passed on any finite output (even zero matches)」反而证明作者知道原门禁有多弱——他把门禁加固到了 0.90 的两个率，而不是加固到逐位比较；这本身是对「逐位比较在这个图上做不到」的一次承认**；
+(e) ⚠️⚠️⚠️ **数值门禁只在 CPU 上跑**：第 158 行与第 259 行都是「**mparams.n_gpu_layers = 0; // CPU: deterministic, no Metal precision surprises**」；test-dspark-loop.cpp 第 119 行同样如此——
+⭐⭐ 判据「**一个数值正确性门禁如果只在 CPU 上跑，那它证明的是「这份图在 CPU 后端上对」，而不是「这份图对」**」——**故「DSpark 的数值正确性」至今只在 CPU 后端上被验证过，而 RTX PRO 6000 是 CUDA 后端**；
+3. [GitHub / Badtheorylabs — `native/llama.cpp/tests/test-dspark-loop.cpp`（12,212 字节，283 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/tests/test-dspark-loop.cpp)
+ —（2026-10 抓取）。
+⚠️⚠️⚠️ **「bit-accurate」这个说法只出现在这个文件的注释里，而它自身不做任何数值比对**：
+「**Phase 1 (src/models/dspark.cpp, the forward graph for a single call) is already gated bit-accurate against the Python reference's real Qwen3DSparkModel -- see test-dspark-forward.cpp**」——**tol 与 1e- 在它里面也出现 0 次；全文是 18 处 fail( 的机制断言**；
+⭐⭐ 判据（本轮最重要）「**当一个断言出现在文件 A 里、而被引用的证据在文件 B 里时，必须先读 B，再信 A；因为 A 的作者引用的是他的印象，而 B 是实现**」；
+⭐⭐ **而这条是本报告第 20 条同型错误的一个正面案例：我这次确实去读了 B，于是发现 A 的用词比 B 的实现强得多**；
+ — [src-btl3-model-dspark-cpp] [src-btl3-test-dspark-forward] [src-btl3-test-dspark-loop]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -35169,7 +35426,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=402, evidence=2710, claims=1913, claims_high=1565, claims_disputed=9, trace_events=875, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=405, evidence=2718, claims=1921, claims_high=1573, claims_disputed=9, trace_events=881, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
