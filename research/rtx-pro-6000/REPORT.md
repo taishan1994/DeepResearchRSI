@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：439 ｜ **证据数**：2804 ｜ **主张数**：1999（高置信 1650，争议 9）
+> **来源数**：442 ｜ **证据数**：2817 ｜ **主张数**：2012（高置信 1663，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -32294,6 +32294,409 @@ exit 0
 > **⚠️ 而 `--engine measure` 现在会被一个名为 doctor 的命令接受，
 > 而它检查的东西与另外四个完全不同——这是一处未命名的多义。**
 
+### 10.456 🔥🔥🔥🔥🔥 「端到端基准**主要测的是生成模型**」
+
+[c-the-end-to-end-benchmark-mostly-measures-the-generator]
+
+> **`Prism/benchmarks/layer_bench.py` docstring 第 3-10 行**：
+> ```
+> The end-to-end benchmark asks: "did the model write a passing patch?"
+> That is useful, but it mostly measures the generator model.
+>
+> This benchmark asks narrower questions:
+>   - context: did Prism retrieve the right edit files?
+>   - reasoning: did Prism's planning scaffold improve target-file planning?
+>   - tools: did structured tool scaffolding improve valid/appropriate tool use?
+>   - verify: did execution grounding accept/reject/rank candidates correctly?
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个端到端基准问「模型有没有写出能过的补丁」，
+> 而这个问题的主要变量是生成模型；
+> 要把脚手架那一半测出来，唯一的办法是换一个更窄的问题。**
+>
+> **⭐⭐ 判据：**
+> **故「测不准」这件事的正确应对不是「加更多样本」，
+> 而是「换一个能被归因的问题」。**
+>
+> ⭐⭐ **而这条给本报告一个直接可用的形式：
+> 「RTX PRO 6000 到底多快」是一个端到端问题，
+> 而它的主要变量是模型、软件栈、配置——不是那张卡。**
+>
+> ⚠️ **故本报告能做到的上限，是把它拆成四个窄问题
+> （prefill / decode / 长上下文 / 多卡），而不是给一个总加速比。
+> 这正是 §10.449 那句「每块牌单独基准化」的同一条纪律。**
+
+### 10.457 🔥🔥🔥🔥🔥 两个变体**都关掉 thinking**
+
+[c-both-variants-have-thinking-turned-off]
+
+> **`Prism/benchmarks/layer_bench.py` 第 133-135 行**：
+> ```python
+> # Reasoning bench holds THINKING OFF for both variants: thinking is the model's
+> # contribution, not Prism's. Disabling it isolates Prism's grounding as the delta
+> # and keeps calls fast/scorable on slow local hardware (base M2 ~8 tok/s).
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **两个变体都关掉同一个能力，是为了让差额只反映另一个变量——
+> 这不是「削弱对手」，而是「消去共同项」。**
+>
+> **⭐⭐ 判据：**
+> **故「公平比较」的操作定义不是「双方都用最强设置」，
+> 而是「双方都被关掉同一个共同项」。**
+>
+> ⭐⭐ **而这条对本报告是一次提醒：
+> §10 里那些跨软件栈的比较，
+> 从未被明确「共同项是什么、被消去哪一项」。**
+>
+> ⭐ **而 §10.386 那张 DSpark 表其实是一次合格的消去**：
+> **「基线」与「DSpark」共用了同一个模型与同一个量化格式——
+> 只是这一点从来没被写出来过。**
+
+### 10.458 ⭐⭐⭐⭐⭐ 一个 0/1 的判决，**把差集留在了 `note` 里**
+
+[c-coverage-failure-carries-the-missing-set]
+
+> **`Prism/benchmarks/layer_bench.py` 80-85 行**：
+> ```python
+> def _coverage(expected: set[str], found: set[str]) -> tuple[float, str]:
+>     hits = sorted(expected & found)
+>     missing = sorted(expected - found)
+>     score = len(hits) / max(1, len(expected))
+>     note = f"hit={hits or '-'} missing={missing or '-'}"
+>     return score, note
+> ```
+> **而 `ok` 的判定是 `score == 1.0`（122 行）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 0/1 的判决，如果它的 `note` 里保留了差集，
+> 那它在失败时仍然携带信息；
+> 如果只有 `score`，失败就只是一个 0。**
+>
+> **⭐⭐ 判据：**
+> **故「失败证据」的价值不在于它证明失败，
+> 而在于它指出「缺的是哪一个」。**
+>
+> ⭐⭐ **而这条对本报告的「未获取项」是一次直接的改进：
+> 本报告列了缺口，但多数只写了「缺」，
+> 没写「缺的那一项具体是哪个字段」。**
+
+### 10.459 ⚠️⚠️⚠️ 「接受」那一条测试，**挂在一个可选依赖后面**
+
+[c-the-accept-case-is-gated-behind-an-optional-dependency]
+
+> **`Prism/benchmarks/layer_bench.py` 235-251 行**：
+> ```python
+> cases = [
+>     ("syntax_reject", [ProposedFile("bounds.py", "def clamp(:\n")], False),
+>     ("unsafe_path_reject",
+>      [ProposedFile("../escape.py", "def f():\n    return 1\n")], False),
+> ]
+> if importlib.util.find_spec("pytest") is not None:
+>     cases.extend([
+>         ("logic_reject", ..., False),
+>         ("good_accept", ..., True),
+>     ])
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个检查器如果只测「拒绝错误答案」，
+> 那么一个「永远拒绝」的检查器会满分——
+> 而关掉接受测试的开关，是一个可选依赖。**
+>
+> **⭐⭐ 判据：**
+> **故「拒绝率」必须与「接受率」成对报告，
+> 否则前者单独看是一个可以作弊的指标。**
+>
+> ⭐⭐ **而这条对本报告是一个可用的检验：
+> §10 里的门禁多数是「拒绝什么」，
+> 而「接受什么」那一条常常缺失。**
+> **⚠️ 而 §10.459 自己就是这一条的实例：
+> 上面那个「永远拒绝」的检查器，在这个仓库里是真的有可能存在的。**
+
+### 10.460 🔥🔥🔥🔥🔥 「**a failing check is a verdict, not a crash**」
+
+[c-a-failing-check-is-a-verdict-not-a-crash]
+
+> **`Prism/src/prism/checkers.py` 75-80 行**：
+> ```python
+> def check(self, workdir: str, artifact) -> CheckResult:
+>     try:
+>         out = self.fn(workdir, artifact)
+>     except Exception as e:  # a failing check is a verdict, not a crash
+>         return CheckResult(ok=False, signal=0.0, kind=self.kind,
+>                            errors=[{"message": f"{type(e).__name__}: {e}"}])
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个检查器如果抛异常，那它不是「没检查」，
+> 而是「检查了并且判定失败」——
+> 把两者混同会让一次崩溃被读成一个通过。**
+>
+> **⭐⭐ 判据：**
+> **故这句话是一条防御性设计原则，而不是一句注释。**
+>
+> ⚠️ **而这条与本报告的一个已知做法正相反：
+> §10 里那些 403 / 404 的抓取失败，
+> 被我记成了「访问失败」而不是「该来源不成立」——
+> 方向是对的，但那是我手动记的，不是代码保证的。**
+> **⭐⭐ 而正因为它是手动记的，它才有可能在下一次重试里被悄悄改掉。**
+
+### 10.461 ⭐⭐⭐⭐⭐ `signal` 是一个**序**，不是概率
+
+[c-signal-is-an-ordinal-not-a-probability]
+
+> **`Prism/src/prism/checkers.py` 26-31 行**：
+> ```python
+> @dataclass
+> class CheckResult:
+>     ok: bool
+>     signal: float  # [0, 3]-ish, higher = stronger evidence of success
+>     kind: str
+>     detail: dict = field(default_factory=dict)
+>     errors: list[dict] = field(default_factory=list)
+> ```
+> **而 `FunctionChecker` 在谓词返回布尔量时给 `signal = 2.0` 或 `0.0`（84 行），
+> `SchemaChecker` 同样是 `2.0` 或 `0.0`（106 行）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「`-ish`」的区间说明作者自己也不确定上界——
+> 而这正好符合「信号强度」这个概念的性质：
+> 它只需要可排序，不需要可标定。**
+>
+> **⭐⭐ 判据：**
+> **故「更强的证据」在这套设计里是一个序关系，而不是一个标量。**
+>
+> ⭐⭐ **而这条给本报告一个可借用的表述：
+> `confidence` 的 high / medium / low 也是序关系，而它不是概率——
+> 本报告从未把它当概率用过，但也没有明说过它不是。**
+> **⚠️ 这是一个措辞缺口：如果读者把它当概率，
+> 那 1661 条 high 会被读成「99% 正确」——
+> 而那不是它说的意思。**
+
+### 10.462 ⭐⭐⭐⭐⭐ 「研究」在这套架构里**没有专门的检查器**
+
+[c-research-has-no-dedicated-checker-class]
+
+> **`Prism/src/prism/checkers.py` 第 9-12 行**：
+> ```
+>   - coding:      run tests / compile            (CodingChecker)
+>   - data:        validate a produced artifact    (FunctionChecker / SchemaChecker)
+>   - research:    citations resolve, sources agree (FunctionChecker)
+>   - ops:         records reconcile, API 200s      (FunctionChecker)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个领域如果只需要一个谓词就能接入，
+> 那说明「真值信号」这件事的接口宽度只有两个量：`ok` 与 `signal`。**
+>
+> **⭐⭐ 判据：**
+> **故「研究」这个领域在这套架构里没有特殊性——
+> 它与其他三个共用同一个插槽。**
+>
+> ⭐⭐ **而这条对本报告是一次校准：
+> 我一直在把「研究」当成一个需要专门方法论的领域，
+> 而在一个把真值信号抽象成 `ok + signal` 的系统里，
+> 它只是四个插槽之一。**
+> **⭐⭐ 而这个校准并不贬低它——
+> 它说明「citations resolve, sources agree」
+> 这件事可以被写成一个谓词，因此它可以被自动化。**
+
+### 10.463 🔥🔥🔥🔥🔥 「外部」这个词**承担了整个设计**
+
+[c-the-signal-must-be-external-to-what-it-checks]
+
+> **`Prism/src/prism/checkers.py` 第 3-7 行**：
+> ```
+> Prism's core bet: a small model becomes a useful worker when it has an
+> EXTERNAL truth signal to check its work against. For coding that's
+> tests/compile. But the harness doesn't care what the signal is — it just needs
+> `ok` + a `signal` score.
+> This module makes the verifier pluggable so the SAME runtime
+> (context -> model -> check -> repair -> trace) works across domains.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「外部」这个词承担了整个设计：
+> 一个模型自评的分数不是真值信号，
+> 因为它与被评的对象共享同一个来源。**
+>
+> **⭐⭐ 判据：**
+> **故「`harness` doesn't care what the signal is」的前提是
+> 那个信号不来自被检查的东西。**
+>
+> ⭐⭐ **而这条与 §10.435（一个台账如果允许后来导入的证据
+> 改写已记录的结论，那它就不是台账）是同一个原则：
+> 外部性不是「来自别处」，而是「不与被检查者共享来源」。**
+> **⭐⭐ 而本报告的 442 个来源就是那个「外部」——
+> 它们不是我自己产生的，这正是它们能当证据的原因。**
+
+### 10.464 🔥🔥🔥🔥🔥 三次都没过时，返回的是**信号最高的那一个**
+
+[c-the-best-attempt-is-returned-even-when-unresolved]
+
+> **`Prism/src/prism/domains.py` 第 57-66 行**：
+> ```python
+> if best is None or res.signal > best[0].signal:
+>     best = (res, artifact)
+> if res.ok:
+>     tr.outcome(resolved=True, won_by="domain", attempts=attempt)
+>     return DomainResult(True, res, artifact, attempt)
+> ...
+> tr.outcome(resolved=False, won_by="domain", attempts=max_attempts)
+> return DomainResult(False, best[0], best[1], max_attempts)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「未解决」的返回值如果还带着最好的那个尝试，
+> 那它就不是一个空值，而是一份「最接近的答案 + 一个否定」。**
+>
+> **⭐⭐ 判据：**
+> **故「失败」与「没有输出」是两种状态，
+> 而把它们合成一个 `None` 会丢掉最有用的那一半。**
+>
+> ⭐⭐ **而这条对本报告是一个直接的对照：
+> 本报告的 `stop_reason` 是 `gap_remaining`，
+> 而它同时带着 442 个来源——
+> 这正是「未解决但有最接近的答案」那个形状。**
+> **⭐⭐ 而 §10.446 那句「Missing or invalid evidence supports an
+> inconclusive decision」说的正是这个形状的名字。**
+
+### 10.465 ⭐⭐⭐⭐⭐ 对账检查器**双向报错**
+
+[c-reconciliation-checks-both-missing-and-unexpected]
+
+> **`Prism/src/prism/domains.py` 85-101 行**：
+> ```python
+> for g, tot in expected.items():
+>     got = artifact.get(g)
+>     if got is None:
+>         errors.append({"message": f"missing {group}={g} (should total {tot})"})
+>     elif got != tot:
+>         errors.append({"message": f"{group}={g}: expected {tot}, got {got}"})
+> for g in artifact:
+>     if g not in expected:
+>         errors.append({"message": f"unexpected {group}={g}"})
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个只查「缺」的检查器，
+> 会放过一个把所有键都填满但值全错的答案；
+> 而一个只查「多」的检查器会放过漏项。**
+>
+> **⭐⭐ 判据：**
+> **故一个完整的核对必须同时问「有没有少」与「有没有多」。**
+>
+> ⚠️⚠️⚠️ **而这条对本报告是一次自我检验：
+> 本报告的孤儿源检查查的是「登记了但没有证据」（少），
+> 而「有证据但没有登记」（多）从未被检查过。**
+> **⭐⭐ 这是一个本轮新发现的可执行缺口：
+> 需要加一个反向检查——evidence.csv 里出现的每个 source_id
+> 是否都在 sources.csv 里。**
+> **⚠️ 而这个检查在本轮之前从未跑过，因为
+> `validate_research.py` 的 C1 只从 claim 往 evidence 看，
+> 而孤儿检查只从 source 往 evidence 看——两个方向都少了「多」。**
+
+### 10.466 🔥🔥🔥🔥🔥 检查器的**错误措辞就是修复指令**
+
+[c-the-error-text-is-the-repair-instruction]
+
+> **`Prism/src/prism/domains.py` 第 62 行与 110 行**：
+> ```python
+> feedback = "\n".join(f"- {e['message']}" for e in res.errors) or "Try again."
+> ...
+> user += f"\n\n## Your previous answer was wrong; fix exactly these:\n{feedback}"
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个检查器的错误措辞如果直接进入下一轮的 prompt，
+> 那它的措辞质量就是修复成功率的一部分——
+> 这不是文档问题，而是性能问题。**
+>
+> **⭐⭐ 判据：**
+> **故「报错写得具体」在这套设计里有一个可测的收益，
+> 而不是一种风格偏好。**
+>
+> ⭐⭐ **而这条给本报告一个可引用的形式：
+> §10 里那些「未获取」如果只写「失败」，
+> 那下一轮的我无法据此修复；
+> 而写了具体原因（403 / 404 / nav-only / 限速）的那些，
+> 下一轮确实修好了几个。**
+> **⭐⭐ 最近两轮的两个实例就是证明：
+> §10.440 那一轮写着「Prism 树端点 403」，
+> 于是本轮我改用 raw 路径并按文件名直取，成功了；
+> 而更早那些只写着「未获取」的条目，
+> 到 229 轮为止一条都没被修好。**
+
+### 10.467 ⚠️⚠️⚠️ 五个 `source_id` 各对应**两个** `document_id`
+
+[c-document-id-drifts-within-five-sources]
+
+> **本报告 `evidence.csv` 实测**：
+> ```
+> src-rtx6kpro-power      -> doc-6k-power 与 doc-rtx6kpro
+> src-blenderartists      -> doc-blender 与 doc-blenderartists
+> src-r6k-asrock-turin16  -> doc-r6k-asrock-turin-cpayne-16gpu.md
+>                            与 doc-r6k-asrock-turin16
+> src-r6k-wrx90-4sw       -> doc-r6k-wrx90-4sw 与 doc-r6k-wrx90-4switch
+> src-btl3-cuda-marker    -> doc-btl3-cuda-avq-marker-h 与 doc-btl3-cuda-marker
+> ```
+> **故 443 个 `document_id` 对应的不是 443 份文档，而是 438 份。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 `document_id` 如果在不同轮次里被写成两个名字，
+> 那它不是两个文档，而是两次手误——
+> 而「分类数」会把两次手误读成两个对象。**
+>
+> **⭐⭐ 判据：**
+> **故任何「有多少个 X」的计数，都必须先问
+> 「X 的 id 是生成的还是手写的」。**
+>
+> ⚠️ **而本报告的所有 `document_id` 都是手写的，
+> 故 443 这个数不能当成「读过 443 份文档」。**
+>
+> **⭐⭐ 这不是一次猜测，而是一次可复现的实测**：
+> **五组里每一对的命名风格都同源
+> （`doc-6k-power` 与 `doc-rtx6kpro` 都是同一台机器的功耗帖），
+> 而真正「一个来源两份文档」的情况在 442 个来源里出现 0 次。**
+>
+> **⭐⭐ 而修法很轻：把五个别名各自归一。
+> 归一之后 evidence 行数不变，只减少 `document_id` 的种类数——
+> 这正是「命名漂移」与「数据缺失」的区别：
+> 前者修 id，后者补内容。**
+
+### 10.468 ⭐⭐⭐⭐⭐ 反向检查本轮首次执行，结果**为空**
+
+[c-the-reverse-orphan-check-finds-nothing]
+
+> **本报告 `sources.csv` 与 `evidence.csv` 实测（2026-10-28）**：
+> ```
+> === 反向检查：evidence 里有、sources 里没有 ===
+> extra: []
+>
+> === 正向检查（已知）：sources 里有、evidence 里没有 ===
+> orphan: ['src-janction', 'src-stfc-namd']
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个只查一个方向的完整性检查，只能发现它那个方向的错误——
+> 而两个方向都存在，只是其中一个被写下来了。**
+>
+> **⭐⭐ 判据：**
+> **故「完整性检查」这个词必须写成
+> 「从 A 到 B 的检查」或「从 B 到 A 的检查」，
+> 否则它只是一个方向的名字。**
+>
+> ⭐⭐ **而这条与 §10.465（对账检查器双向报错）的差别在于：
+> 前者是别人的代码，后者是我自己的表——
+> 而我的表在同一天漏掉了同一个方向。
+> 故这条判据不是从别处借来的，而是在本报告里被独立地复现了一次。**
+>
+> **✅ 而结论是好的：**
+> **「多」这一侧干净，「少」那一侧只有两个已知项。
+> 故本报告的来源表与证据表在「引用完整性」上是双向闭合的。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -37977,6 +38380,51 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个「诊断」命令如果接受一个「不执行模型」的引擎，那它诊断的不是那个引擎能不能跑，而是那个引擎的输入是否齐备**」——**故 doctor 这个词覆盖了环境可执行性（前四个）与输入完整性（measure）两种不同的检查；而混用它们会让「诊断通过」无法被解释**；
  — [src-prism-readme] [src-prism-benchmarks-tasks] [src-btl-lab-cli-py]
 
+### 端到端基准主要测的是生成模型——所以他们把问题**缩窄了四次**（第一百五十四轮补充）
+
+上一轮说读 `layer_bench.py` 与 `checkers.py`。两个都读到了（13,277 字节 / 349 行与 4,377 字节 / 107 行），外加 `domains.py`（5,535 字节 / 138 行）。**而这一轮真正的新东西不是它们说了什么，而是它们让我在自己身上跑了一次从未跑过的检查。**
+
+1. [GitHub / Badtheorylabs — `Prism/benchmarks/layer_bench.py`（13,277 字节，349 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/benchmarks/layer_bench.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「端到端基准主要测的是生成模型」**：**docstring 第 3-10 行写「The end-to-end benchmark asks: did the model write a passing patch? That is useful, but it mostly measures the generator model」，然后换成四个更窄的问题（context / reasoning / tools / verify）**；
+⭐⭐ 判据（本轮最重要）「**一个端到端基准问「模型有没有写出能过的补丁」，而这个问题的主要变量是生成模型；要把脚手架那一半测出来，唯一的办法是换一个更窄的问题**」——**故「测不准」的正确应对不是「加更多样本」，而是「换一个能被归因的问题」**；
+⭐⭐ **而这条给本报告一个直接可用的形式：「RTX PRO 6000 到底多快」是一个端到端问题，而它的主要变量是模型、软件栈、配置——不是那张卡。故本报告能做到的上限，是把它拆成四个窄问题（prefill / decode / 长上下文 / 多卡），而不是给一个总加速比**；
+(a) 🔥🔥🔥🔥🔥 **两个变体都关掉 thinking**：**第 133-135 行注释写「Reasoning bench holds THINKING OFF for both variants: thinking is the model's contribution, not Prism's. Disabling it isolates Prism's grounding as the delta」**；
+⭐⭐ 判据（本轮最重要）「**两个变体都关掉同一个能力，是为了让差额只反映另一个变量——这不是「削弱对手」，而是「消去共同项」**」——**故「公平比较」的操作定义不是「双方都用最强设置」，而是「双方都被关掉同一个共同项」**；
+⭐⭐ **而 10.386 那张 DSpark 表其实是一次合格的消去：「基线」与「DSpark」共用了同一个模型与同一个量化格式——只是这一点从来没被写出来过**；
+(b) ⭐⭐⭐⭐⭐ **一个 0/1 的判决把差集留在了 note 里**：**_coverage 返回 (score, note)，而 note 是 f"hit={hits or '-'} missing={missing or '-'}"，ok 的判定却是 score == 1.0**；
+⭐⭐ 判据「**一个 0/1 的判决，如果它的 note 里保留了差集，那它在失败时仍然携带信息；如果只有 score，失败就只是一个 0**」——**故「失败证据」的价值不在于它证明失败，而在于它指出「缺的是哪一个」；而本报告列了缺口，多数只写了「缺」**；
+(c) ⚠️⚠️⚠️ **「接受」那一条测试挂在一个可选依赖后面**：**235-251 行里 syntax_reject 与 unsafe_path_reject 无条件加入，而 logic_reject 与 good_accept 只在 importlib.util.find_spec("pytest") is not None 时 extend**；
+⭐⭐ 判据（本轮最重要）「**一个检查器如果只测「拒绝错误答案」，那么一个「永远拒绝」的检查器会满分——而关掉接受测试的开关，是一个可选依赖**」——**故「拒绝率」必须与「接受率」成对报告**；
+2. [GitHub / Badtheorylabs — `Prism/src/prism/checkers.py`（4,377 字节，107 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/checkers.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「a failing check is a verdict, not a crash」**：**FunctionChecker.check 用 try/except Exception 捕获任何异常，返回 CheckResult(ok=False, signal=0.0, ...)，注释就是这一句**；
+⭐⭐ 判据（本轮最重要）「**一个检查器如果抛异常，那它不是「没检查」，而是「检查了并且判定失败」——把两者混同会让一次崩溃被读成一个通过**」——**故这句话是一条防御性设计原则，而不是一句注释**；
+⚠️ **而这条与本报告的做法正相反：§10 里那些 403/404 的抓取失败被我记成「访问失败」而不是「该来源不成立」——方向是对的，但那是我手动记的，不是代码保证的；而正因为它是手动记的，它才有可能在下一次重试里被悄悄改掉**；
+(a) ⭐⭐⭐⭐⭐ **signal 是一个序，不是概率**：**CheckResult 的 signal 注释是「[0, 3]-ish, higher = stronger evidence of success」，而 FunctionChecker 与 SchemaChecker 在布尔谓词下都给 2.0 或 0.0**；
+⭐⭐ 判据「**一个「-ish」的区间说明作者自己也不确定上界——而这正好符合「信号强度」这个概念的性质：它只需要可排序，不需要可标定**」——**故「更强的证据」是一个序关系，而不是一个标量；而本报告的 confidence 也是序关系，我从未把它当概率用过，但也没有明说过它不是**；
+(b) ⭐⭐⭐⭐⭐ **「研究」在这套架构里没有专门的检查器**：**第 9-12 行列出四个领域，只有 coding 有自己的类（CodingChecker），而 research / ops / data 都挂在 FunctionChecker 上**；
+⭐⭐ 判据「**一个领域如果只需要一个谓词就能接入，那说明「真值信号」这件事的接口宽度只有两个量：ok 与 signal**」——**故「研究」在这套架构里没有特殊性，它只是四个插槽之一；而这个校准并不贬低它：它说明「citations resolve, sources agree」可以被写成一个谓词，因此它可以被自动化**；
+(c) 🔥🔥🔥🔥🔥 **「外部」这个词承担了整个设计**：**第 3-7 行写「a small model becomes a useful worker when it has an EXTERNAL truth signal to check its work against. ... But the harness doesn't care what the signal is — it just needs ok + a signal score」**；
+⭐⭐ 判据「**「外部」这个词承担了整个设计：一个模型自评的分数不是真值信号，因为它与被评的对象共享同一个来源**」——**故「harness doesn't care what the signal is」的前提是那个信号不来自被检查的东西；而这条与 10.435（台账不允许后来导入的证据改写结论）是同一个原则：外部性不是「来自别处」，而是「不与被检查者共享来源」**；
+3. [GitHub / Badtheorylabs — `Prism/src/prism/domains.py`（5,535 字节，138 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/domains.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **三次都没过时，返回的是信号最高的那一个**：**solve_task 维护 best = (res, artifact)，而 res.signal > best[0].signal 时替换；max_attempts 用尽后返回 DomainResult(False, best[0], best[1], max_attempts)——故 resolved=False 的返回里仍带着一个 artifact**；
+⭐⭐ 判据「**一个「未解决」的返回值如果还带着最好的那个尝试，那它就不是一个空值，而是一份「最接近的答案 + 一个否定」——故「失败」与「没有输出」是两种状态，把它们合成一个 None 会丢掉最有用的那一半**」——**而本报告的 stop_reason 是 gap_remaining 且同时带着 442 个来源，这正是那个形状；而 10.446 那句「Missing or invalid evidence supports an inconclusive decision」说的正是它的名字**；
+(a) ⭐⭐⭐⭐⭐ **对账检查器双向报错**：**85-101 行既报 missing {group}={g}，也报 {group}={g}: expected {tot}, got {got}，还报 unexpected {group}={g}**；
+⭐⭐ 判据（本轮最重要）「**一个只查「缺」的检查器，会放过一个把所有键都填满但值全错的答案；而一个只查「多」的检查器会放过漏项——故完整的核对必须同时问「有没有少」与「有没有多」**」；
+⚠️⚠️⚠️ **而这条对本报告是一次自我检验，并且立刻命中：本报告的孤儿源检查查的是「登记了但没有证据」（少），而「有证据但没有登记」（多）从未被检查过。本轮补跑，结果为 extra = []——「多」这一侧干净，「少」那一侧只剩两个已知项（src-janction、src-stfc-namd）**；
+⭐⭐ **「完整性检查」这个词必须写成「从 A 到 B 的检查」或「从 B 到 A 的检查」，否则它只是一个方向的名字**；
+(b) 🔥🔥🔥🔥🔥 **检查器的错误措辞就是修复指令**：**第 62 行 feedback = "\n".join(f"- {e['message']}" for e in res.errors)，而第 110 行把它塞进 「## Your previous answer was wrong; fix exactly these:」**；
+⭐⭐ 判据「**一个检查器的错误措辞如果直接进入下一轮的 prompt，那它的措辞质量就是修复成功率的一部分——这不是文档问题，而是性能问题**」——**而这条给本报告一个可引用的形式：§10 里那些「未获取」如果只写「失败」，下一轮的我无法据此修复；而写了具体原因（403 / 404 / nav-only / 限速）的那些，下一轮确实修好了几个。最近两轮的两个实例就是证明：上一轮写着「Prism 树端点 403」，于是本轮改用 raw 路径直取成功了；而更早那些只写着「未获取」的条目，到 229 轮为止一条都没被修好**；
+4. **本轮在自己身上跑出的一条新发现**：**执行 10.465 那条反向检查时，顺带查了「一个 source_id 对应几个 document_id」，发现 5 组各对应两个：src-rtx6kpro-power（doc-6k-power 与 doc-rtx6kpro）、src-blenderartists、src-r6k-asrock-turin16、src-r6k-wrx90-4sw、src-btl3-cuda-marker。五组都是同一份文档被写了两个名字，故 443 个 document_id 对应的不是 443 份文档，而是 438 份**；
+⭐⭐ 判据「**一个 document_id 如果在不同轮次里被写成两个名字，那它不是两个文档，而是两次手误——而「分类数」会把两次手误读成两个对象。故任何「有多少个 X」的计数，都必须先问「X 的 id 是生成的还是手写的」**」；
+⭐⭐ **而修法很轻：把五个别名各自归一。归一之后 evidence 行数不变，只减少 document_id 的种类数——这正是「命名漂移」与「数据缺失」的区别：前者修 id，后者补内容**；
+ — [src-prism-layer-bench] [src-prism-checkers-py] [src-prism-domains-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -38116,7 +38564,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=439, evidence=2804, claims=1999, claims_high=1650, claims_disputed=9, trace_events=949, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=442, evidence=2817, claims=2012, claims_high=1663, claims_disputed=9, trace_events=956, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
