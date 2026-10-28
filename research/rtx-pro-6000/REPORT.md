@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：386 ｜ **证据数**：2657 ｜ **主张数**：1874（高置信 1526，争议 9）
+> **来源数**：392 ｜ **证据数**：2667 ｜ **主张数**：1880（高置信 1532，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -28491,6 +28491,220 @@ exit 0
 > 为什么 `llama-bench` 要报总时长？
 > 因为它是唯一能把「加载开销」与「推理速率」分开的可检查冗余。**
 
+### 10.331 🔥🔥🔥🔥🔥 同一张卡上的第二个 27B：**预填差 47.5 倍**
+
+[c-btl3-prefill-is-47x-slower-than-bonsai-on-same-card]
+
+> **`prism-ml/Ternary-Bonsai-2-27B-gguf` 的模型卡 179-190 行**：
+> ```
+> tg128 is token-generation throughput over 128 generated tokens
+>   (the memory-bandwidth-bound, interactive metric)
+>
+> | Platform                | PQ2_0 TG128 | PQ2_0 PP512 | PQ2_0 J/tok | PTQ1_0 TG128 | PTQ1_0 PP512 |
+> | RTX 5090 (32 GB)        | 129.9       | 3893        | 1.95        | 120.5        | 1805         |
+> | RTX PRO 6000 Blackwell  | 124.8       | 4020        | 2.49        | 117.9        | 1972         |
+> | H100 SXM (80 GB)        | 113.9       | 2830        | 2.69        | 86.9         | 1237         |
+> | RTX 6000 Ada (48 GB)    | 82.8        | 2431        | 2.51        | 90.4         | 1657         |
+> | RTX 4090 (24 GB)        | 81.2        | 3124        | 2.99        | 91.1         | 1645         |
+> | L40S (48 GB)            | 74.4        | 2868        | 3.24        | 81.8         | 1543         |
+> | A100 SXM (80 GB)        | 73.9        | 1328        | 3.43        | 54.7         | 706          |
+> | L4 (24 GB, 72 W)        | 29.8        | 777         | 2.42        | 32.1         | 467          |
+> ```
+
+> **同一张卡、同一量级的两张 27B 表：**
+>
+> | 模型 | 体积 | TG tok/s | PP tok/s | PP/TG |
+> |---|---:|---:|---:|---:|
+> | **BTL-3 Compact（AVQ2）** | **8.39 GB** | **43.16** | **84.70** | **1.96** |
+> | Bonsai 2 27B `PQ2_0` | 7.21 GB | 124.8 | **4020** | 32.2 |
+> | Bonsai 2 27B `PTQ1_0` | 5.95 GB | 117.9 | 1972 | 16.7 |
+>
+> **🔥 生成差 2.89 倍，而预填差 47.5 倍。**
+> **⚠️ 而 Bonsai 的体积还更小（7.21 GB vs 8.39 GB）——
+> 故「BTL-3 更大所以更慢」这个解释不成立。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **同一张卡、同一量级的两个 27B 模型，
+> 预填差 47.5 倍而生成只差 2.9 倍——
+> 这个不对称只能由内核解释，不能由硬件解释。**
+>
+> **⭐⭐ 判据：**
+> **当两个实现在同一个维度上差一个数量级、
+> 在另一个维度上只差三倍时，
+> 它们差的不是「快慢」，而是「有没有走那条路」。**
+>
+> **⭐⭐ 判据：**
+> **一个比较要能成立，必须先排除「体积」这个混杂变量；
+> 而这里体积方向与速度方向相反，故它是排除的。**
+
+> 📌 **这条同时改写了本报告对 84.70 tok/s 的评价**：
+> **§10.195 记这个数时它只是一个「孤立的数」；
+> 现在它有了一个同卡同量级的参照物，而这个参照物比它快 47 倍。**
+
+### 10.332 🔥🔥🔥🔥🔥 **`PP/TG = 1.96` 说明预填根本没有并行**
+
+[c-pp-tg-ratio-1-96-means-prefill-not-parallel]
+
+> **一个纯算术导出量，但它的解释力最大：**
+> ```
+> BTL-3 Compact:  84.70 / 43.16 =  1.96
+> Bonsai PQ2_0:   4020 / 124.8  = 32.2
+> Bonsai PTQ1_0:  1972 / 117.9  = 16.7
+> ```
+> **⭐ 一个正常的 LLM 推理，PP/TG 应在 10-40 之间：
+> 预填是「一次矩阵乘覆盖 N 个 token」（并行），
+> 生成是「每次一个 token」（串行）。**
+
+> **🔥 而 BTL-3 的 1.96 说明那个矩阵乘退化成了 N 次单 token 乘。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个模型的 PP/TG 比如果接近 1，
+> 说明它的预填路径没有利用 batch 并行；
+> 而这是内核实现问题，不是硬件问题。**
+>
+> **⭐⭐ 判据：**
+> **预填的算术优势来自「一次矩阵乘覆盖 N 个 token」；
+> 如果实测没有这个优势，说明那个矩阵乘退化成了 N 次单 token 乘。**
+>
+> **🔥 而这正好解释了 §10.195 那个「84.70 tok/s 看起来很慢」的疑惑：
+> 不是这张卡慢，是预填没并行。**
+
+### 10.333 🔥🔥🔥🔥🔥 同一个异常在 **CUDA 与 Metal** 上都出现
+
+[c-same-anomaly-on-cuda-and-metal-points-upstream]
+
+> ```
+> RTX PRO 6000 (CUDA):  84.70 / 43.16 = 1.96
+> Apple M2 (Metal):      2.30 /  2.48 = 0.93
+> ```
+> **⭐ 两个后端的 PP/TG 都远低于正常的 10-40。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **同一个比率在两个完全不同的后端上都异常，
+> 说明异常的原因不在后端，而在两者共用的那部分代码。**
+>
+> **⭐⭐ 判据：**
+> **「两个后端都慢」比「一个后端慢」弱，但
+> 「两个后端都以同一种比例慢」比两者都强——
+> 因为它指向一个共同的上游。**
+
+> **🔥 而上游就是 §10.187 那个 `transform_scale = 0.08838834764831845F`
+> 所在的 `mul_mat` 路径**：
+> **那个变换对每个 token 都要做一次，故它在预填阶段被做了 N 次，
+> 而在生成阶段被做了 1 次——这恰好是「预填失去并行优势」的形状。**
+
+> ⚠️ **这仍然是一个推断，不是测量。**
+> **要证实它，需要的是一次 `GGML_CUDA_FORCE_CUBLAS=1` 的 A/B，
+> 或一次 `ggml_custom_4d` 的 profile。**
+> **这条待办从 §10.186 起就在清单里，本轮它第一次有了一个具体的理由。**
+
+### 10.334 🔥🔥🔥🔥🔥 `claim_boundary`：一份**主动否认自己卖点**的清单
+
+[c-manifest-declares-what-it-does-not-support]
+
+> **`papers/behavior-before-perplexity/RESEARCH_MANIFEST.json` 40-54 行**：
+> ```json
+> "claim_boundary": {
+>   "supported": [
+>     "a novel end-to-end compression cookbook for behavior-sensitive agent models",
+>     "failure-driven mixed vector quantization and precision allocation",
+>     "an 8.39 GB native standalone BTL-3 Compact GGUF",
+>     "packed CUDA and Metal execution through the custom backend",
+>     "92.2% conditional tool-behavior retention on the stated private gate"
+>   ],
+>   "unsupported": [
+>     "a novel universal quantization codebook",
+>     "92.2% general intelligence retention",
+>     "lossless compression",
+>     "phone-ready deployment",
+>     "coding-benchmark retention for the compact artifact"
+>   ]
+> }
+> ```
+
+> **🔥 五件「不支持」的事里有两件是主动否认自己的卖点**
+> （`92.2% general intelligence retention` 与 `lossless compression`）。
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份 manifest 如果有一节叫 `claim_boundary`，
+> 那它的可信度不取决于 `supported` 有多长，
+> 而取决于 `unsupported` 有多具体。**
+>
+> **⭐⭐ 而这里最具体的一条是「92.2% general intelligence retention」——
+> 它主动否认了自己的核心数字可以被读成「通用智能保留率」。**
+>
+> **⭐⭐ 判据：**
+> **一个项目愿意在自己的发布清单里写下「这个数字不能那样读」，
+> 比它写十个新数字更能说明它的测量纪律。**
+>
+> **⭐⭐ 而这条与 §10.323 那份「不保证清单」、§10.328 那条 `assertNotIn`
+> 构成同一个姿态的第三次出现**：
+> **文档层面的自我限制、测试层面的自我限制、manifest 层面的自我限制。**
+
+> ⭐ **注意 `supported` 的第五项带了三个限定词**：
+> **`92.2%` + `conditional tool-behavior` + `on the stated private gate`——
+> 三个词各自砍掉一类误读。**
+
+### 10.335 🔥🔥🔥🔥🔥 这条赛道上「格式」与「变换」是**分离**的
+
+[c-format-and-transform-are-separable-in-this-race]
+
+> **Bonsai 模型卡 138-141 行**：
+> 「**It rejects `PQ2_0` and `PTQ1_0` as unknown types,
+> and it loads `Q2_0` without any warning and produces garbage,
+> because it has no Hadamard activation runtime.**」
+>
+> **Bonsai `KNOWN_ISSUES.md` 113 行**：
+> 「**Quantizing your own model to `PQ2_0` or `PTQ1_0` produces garbage.
+> `llama-quantize` offers both types ...**」
+
+> **🔥 通用工具能写出这个格式的头，却不能正确执行它。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个格式可以被通用工具写出、却不能被通用工具正确执行时，
+> 这个格式就不是格式，而是一个私有协议。**
+>
+> **⭐⭐ 判据：**
+> **「静默产垃圾」是最坏的一种失败，
+> 因为它不报错、不退让，只是把正确答案换成噪声。**
+>
+> **⭐⭐ 而 Bonsai 把这一条写进了模型卡，BTL-3 的文档里没有对应的一条**：
+> **BTL-3 说的是「Stock Ollama does not load BTL-3's custom AVQ2 GGUF」
+> （会拒绝，不是静默产垃圾），而 Bonsai 说的是「它会加载并产出垃圾」。**
+> **故两者在同一个失败模式上处于不同档位：一个显式拒绝，一个静默错。**
+
+### 10.336 ⚠️⚠️⚠️ 完整性链条**不覆盖它自己的清单**
+
+[c-integrity-chain-excludes-its-own-manifest]
+
+> **`SHA256SUMS` 的 14 行覆盖**：
+> `README.md`、`CLAIMS.md`、`ARTICLE.md`、`ARTICLE-IMPLEMENTATION-APPENDIX.md`、
+> `PAPER.tex`、`references.bib`、三张 PNG、两个 PDF、三个 `tools/` 脚本。
+>
+> **⚠️ 而 `RESEARCH_MANIFEST.json` 自己不在表里。**
+> **而它第 56 行写着 `"integrity_file": "SHA256SUMS"`。**
+
+> **⚠️ 故这是一个单向引用**：
+> **清单说「我的完整性在那边」，而那边的表里没有清单。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个校验表如果不校验它自己的清单，
+> 那这个清单就可以被改而不被发现。**
+>
+> **⭐⭐ 判据：**
+> **完整性链条的强度等于它最弱的那一环；
+> 而「清单本身不在清单里」是一个结构性的弱环，不是偶然遗漏。**
+>
+> **⭐⭐ 而它与 §10.330 那次复算构成同一类检验**：
+> **一个声称自己完整的包，要先问「它的完整性定义覆盖了哪些文件」。**
+
+> ✅ **顺带一条正面的**：**`headroom_bytes = 207,630,400`
+> 与 `contract_ceiling_bytes - final_file_bytes = 8,600,000,000 - 8,392,369,600`
+> 精确相等，一位不差**——
+> **而 `tensor_payload_bytes` 与 `final_file_bytes` 的差 `11,107,568`
+> 也与 §10.306 记的 ARTICLE.md 45-46 行逐字吻合。**
+> **故这份 manifest 的数字本身是自洽的，缺的只是「谁校验 manifest」这一环。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -33457,6 +33671,72 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**期望值的来源有三个层级，验证强度严格递增：来自被测对象 < 来自字面量 < 来自另一个实现的一次计算**」；
  — [src-btl3-tests-cuda-packaging] [src-btl3-tests-launch-release] [src-btl3-tests-lmstudio-package] [src-btl3-tests-gguf-signs] [src-btl3-tests-qwen35] [src-btl3-tests-safetensor-view]
 
+### papers 包与 Bonsai 2 对账（第一百三十六轮补充）
+
+继续按 r208 那 39 个清单推进。本轮读 `papers/behavior-before-perplexity`
+的六个文件，并因此找到了本报告一直缺的那个同赛道对比对象。
+
+1. [GitHub / Badtheorylabs — `papers/behavior-before-perplexity/RESEARCH_MANIFEST.json`（2,118 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/RESEARCH_MANIFEST.json)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **它有一节叫 `claim_boundary`，主动列出五件「不支持」的事**：
+「**unsupported: [a novel universal quantization codebook, 92.2% general intelligence retention, lossless compression, phone-ready deployment, coding-benchmark retention for the compact artifact]**」——
+**其中第二条主动否认了自己的核心数字可被读成「通用智能保留率」**；
+⭐⭐ 判据（本轮最重要）「**一份 manifest 如果有一节叫 claim_boundary，那它的可信度不取决于 supported 有多长，而取决于 unsupported 有多具体**」；
+⭐⭐ 判据「**一个项目愿意在自己的发布清单里写下「这个数字不能那样读」，比它写十个新数字更能说明它的测量纪律**」；
+⭐⭐ **而这条与 §10.323 那份「不保证清单」、§10.328 那条 assertNotIn 构成同一个姿态的第三次出现**：
+**文档层面、测试层面、manifest 层面的自我限制**；
+(a) ✅ **`headroom_bytes` 与 `ceiling - final` 精确相等**：「**final_file_bytes 8392369600 / contract_ceiling_bytes 8600000000 / headroom_bytes 207630400**」——**相减一位不差**；
+2. [GitHub / Badtheorylabs — `papers/behavior-before-perplexity/SHA256SUMS`（1,298 字节，14 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/SHA256SUMS)
+ —（2026-10 抓取）。
+⚠️⚠️⚠️ **它校验 14 个文件，但不含 `RESEARCH_MANIFEST.json` 自己**：
+**而 manifest 第 56 行写着 `integrity_file: SHA256SUMS`，故这是一个单向引用**；
+⭐⭐ 判据「**一个校验表如果不校验它自己的清单，那这个清单就可以被改而不被发现**」；
+⭐⭐ 判据「**完整性链条的强度等于它最弱的那一环；而「清单本身不在清单里」是一个结构性的弱环，不是偶然遗漏**」；
+3. [GitHub / Badtheorylabs — `papers/behavior-before-perplexity/references.bib`（2,995 字节，84 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/references.bib)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **12 条文献里只有一条是本赛道的产品，其余 11 条都是量化方法论文**：
+「**@techreport{bonsai2026, title={Bonsai 27B: Full 27B-Class Reasoning in Binary and Ternary Transformer Weights}, author={{PrismML}}, year={2026}, url={https://github.com/PrismML-Eng/Bonsai-demo}}**」——
+**而另一条最新的是 `unisvq2026` = `arXiv:2606.10520`，标题 `UniSVQ: 2-bit Unified Scalar-Vector Quantization`**；
+⭐⭐ 故 BTL-3 的 AVQ2 在学术谱系上接的是 UniSVQ，而在产品谱系上对标的是 Bonsai；
+4. [PrismML — `PrismML-Eng/Bonsai-demo` README（24,840 字节，529 行）]
+(https://raw.githubusercontent.com/PrismML-Eng/Bonsai-demo/main/README.md)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐ **Bonsai 的规模比 BTL-3 大两个数量级，且仍在活跃推送**：
+**GitHub 3,457 星 / 394 分支 / 41 MB / 创建 2026-03-25 / 最后推送 2026-10-25**；**Hugging Face 2,114,872 次下载 / 2,848 个赞**；
+**自述「98.2% of FP16 intelligence retained」、「1.75 bits per weight in the PTQ1_0 packing」、「262K-token context」**；
+5. [PrismML — `prism-ml/Ternary-Bonsai-2-27B-gguf` 模型卡（23,200 字节，312 行）]
+(https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/raw/main/README.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **本报告第一次拿到同一张卡上的第二个 27B 低比特模型**：
+「**| RTX PRO 6000 Blackwell | PQ2_0 TG128 124.8 | PQ2_0 PP512 4020 | PTQ1_0 TG128 117.9 | PTQ1_0 PP512 1972 |**」——
+**而 BTL-3 Compact 在同一张卡上是 43.16 / 84.70**；
+🔥 **生成差 2.89 倍，而预填差 47.5 倍**；⚠️ **而 Bonsai 的体积还更小（7.21 GB vs 8.39 GB），故「BTL-3 更大所以更慢」这个解释不成立**；
+⭐⭐ 判据（本轮最重要）「**同一张卡、同一量级的两个 27B 模型，预填差 47.5 倍而生成只差 2.9 倍——这个不对称只能由内核解释，不能由硬件解释**」；
+⭐⭐ 判据「**当两个实现在同一个维度上差一个数量级、在另一个维度上只差三倍时，它们差的不是「快慢」，而是「有没有走那条路」**」；
+(a) 🔥🔥🔥🔥🔥 **一个纯算术导出量，但解释力最大**：**PP/TG 比：BTL-3 84.70/43.16 = 1.96；Bonsai PQ2_0 4020/124.8 = 32.2；PTQ1_0 1972/117.9 = 16.7**——
+**而正常的 LLM 推理 PP/TG 应在 10-40 之间（预填并行、生成串行）**；
+⭐⭐ 判据「**一个模型的 PP/TG 比如果接近 1，说明它的预填路径没有利用 batch 并行；而这是内核实现问题，不是硬件问题**」；
+🔥 **而这正好解释了那个「84.70 tok/s 看起来很慢」的疑惑：不是这张卡慢，是预填没并行**；
+(b) 🔥🔥🔥🔥🔥 **同一个异常在 CUDA 与 Metal 上都出现**：**RTX PRO 6000 1.96、Apple M2 0.93（2.30/2.48）**——
+⭐⭐ 判据「**同一个比率在两个完全不同的后端上都异常，说明异常的原因不在后端，而在两者共用的那部分代码**」；
+⭐⭐ 而那个上游就是 §10.187 那个 `transform_scale = 0.08838834764831845F` 所在的 mul_mat 路径——**它对每个 token 都要做一次，故预填阶段被做了 N 次、生成阶段 1 次**；
+⚠️ **这仍是推断，不是测量；要证实它需要一次 `GGML_CUDA_FORCE_CUBLAS=1` 的 A/B 或一次 `ggml_custom_4d` 的 profile**；
+(c) 🔥🔥🔥🔥🔥 **它明说镜像版 llama.cpp 会「静默产出垃圾」**：「**It rejects PQ2_0 and PTQ1_0 as unknown types, and it loads Q2_0 without any warning and produces garbage, because it has no Hadamard activation runtime**」——
+⭐⭐ 判据「**当一个格式可以被通用工具写出、却不能被通用工具正确执行时，这个格式就不是格式，而是一个私有协议**」；
+⭐⭐ 判据「**「静默产垃圾」是最坏的一种失败，因为它不报错、不退让，只是把正确答案换成噪声**」；
+6. [PrismML — `prism-ml/Ternary-Bonsai-2-27B-gguf` KNOWN_ISSUES.md（17,107 字节，191 行）]
+(https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf/raw/main/KNOWN_ISSUES.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **它承认 `PTQ1_0` 在 CUDA 上解码偏慢，且修法「in review」**：「**PTQ1_0 decode on CUDA. A faster small-batch kernel is in review. Status: fix in review (#218)**」——
+**而卡上 PTQ1_0 在 PRO 6000 上是 117.9 对 PQ2_0 的 124.8，差距只有 5.5%**；
+(a) 🔥🔥🔥🔥🔥 **它独立印证了 §10.196 那条「120-real 要写成 120a-real」**：「**RTX 5090: prebuilt Linux binaries decode erratically. Workaround: build from source with -DCMAKE_CUDA_ARCHITECTURES=120a-real. Status: open (#199)**」+「**CUDA builds from source fail with CUDA_ARCHITECTURES is empty. Workaround: pass -DCMAKE_CUDA_ARCHITECTURES=<your arch> (for example 89 for RTX 40-series)**」——
+⭐⭐ 这是「120a-real 不是 120-real」这条在两个项目上的独立复现；
+(b) ⭐⭐⭐⭐ **自量化会产垃圾，因为工具链不做 Hadamard**：「**Quantizing your own model to PQ2_0 or PTQ1_0 produces garbage. llama-quantize offers both types ...**」——**故这条赛道的「格式」与「变换」是分离的**；
+ — [src-btl3-papers-research-manifest] [src-btl3-papers-sha256sums] [src-btl3-papers-references-bib] [src-bonsai-demo-readme] [src-bonsai-model-card] [src-bonsai-known-issues]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -33596,7 +33876,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=386, evidence=2657, claims=1874, claims_high=1526, claims_disputed=9, trace_events=843, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=392, evidence=2667, claims=1880, claims_high=1532, claims_disputed=9, trace_events=855, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
