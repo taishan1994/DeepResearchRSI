@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：355 ｜ **证据数**：2554 ｜ **主张数**：1834（高置信 1487，争议 9）
+> **来源数**：357 ｜ **证据数**：2567 ｜ **主张数**：1836（高置信 1489，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -26611,10 +26611,10 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **两份构建定义如果只在一个开关上不同，
 > 那个开关就是作者唯一真正想区分的东西；而其余差异都是疏忽。**
 >
-> ⭐⭐ **而这条还带出两处不对称**：
-> **许可证——Linux 包有 `LICENSE.llama.cpp` 与 `LICENSE.NVIDIA-CUDA` 两份，
-> Windows 包只有后者；**
+> ⭐⭐ **而这条带出的不对称只有一条是真的**：
 > **失败方式——shell 是 `exit 2`，PowerShell 是 `throw`。**
+> ⚠️⚠️⚠️ **而另一条我第 198 轮下过、第 199 轮已撤回（见 §10.292）**：
+> **「Windows 包缺 `LICENSE.llama.cpp`」不成立——两条中间产物路径确实不对称，但最终两个包都有这份许可证。**
 >
 > **⭐⭐ 判据：**
 > **一个要求与一个开关的矛盾，比两个要求的矛盾更难发现，
@@ -26671,6 +26671,128 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **⭐⭐ 而这条与本轮 §10.287 是同一个教训的两个实例**：
 > **那个是「校验器没查 URL 唯一」，这个是「审计器没认全字符集」。**
 > **两者都不是逻辑错误，而是「范围写得比现实窄」。**
+
+### 10.290 🔥🔥🔥🔥🔥 模型字节数有**四个副本，一次测量**
+
+[c-model-bytes-has-four-copies-one-measurement]
+
+| 落点 | 产生方式 |
+|---|---|
+| `tools/btl3_gguf/exporter.py` | `output.stat().st_size` —— **唯一一次测量** |
+| `artifacts/release/*.report.json` | 记下它的值 |
+| `docs/rtx-pro-6000-speed-2026-07-19.md` | `File bytes` |
+| `tools/build_cuda_bundle.py` 16 行 | **字面量 `MODEL_BYTES`** |
+
+> **🔥🔥🔥🔥🔥 而最后那个文件全文没有 `open` 模型、没有 `exists`、没有 `verify`。**
+> **两个常量各只被读一次**（第 141、142 行写进 manifest）。
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个数字被写进第 N 个文件时，前 N-1 个文件都不再是它的证据。**
+>
+> **⭐⭐ 判据：**
+> **副本的数量不是证据的强度；只有「产生方式不同」才是独立证据。**
+>
+> ⚠️ **这解释了为什么第 197 轮那次编造能撑两轮**：
+> **我当时以为有多个来源相互印证，实际上我只有一个来源、
+> 外加两份抄本，和一份记忆。**
+>
+> **⭐⭐ 判据：**
+> **当多个来源都指向同一个数字时，先问「它们是不是抄的同一份」。**
+>
+> ⭐⭐ **而这条有直接的实用含义**：
+> **`bundle-manifest.json` 里的 `external_model.bytes` 是硬编码常量，
+> 不是对用户手里那个文件的测量——故它不能用来验证模型完整性。**
+
+> ⭐⭐⭐⭐⭐ **顺带记下 `build_cuda_bundle.py` 真正做了什么**：
+> **它打开每个可执行文件读 machine 字段**（ELF `e_machine` @18 字节 /
+> PE `Machine` @`0x3C` 指向的 `PE\0\0` 之后 4 字节），
+> **三个 target 分别是 62 / 183 / `0x8664`，不匹配即 `ValueError`。**
+> **故「交叉编译到正确架构」这一步是真的有断言的。**
+>
+> ⚠️⚠️⚠️ **但「包里有 CUDA 后端」这一步只看文件名**：
+> **`any(name.startswith('libggml-cuda.so'))`——
+> 它不检查那个 `.so` 里有没有 `sm_120` 的 fatbin，也不检查它能不能加载。**
+>
+> **⭐⭐ 判据：**
+> **同一个脚本里，有的检查到了字节级（machine 字段），
+> 有的只检查到文件名（CUDA 后端）——
+> 而这两者之间的差距，就是「能编译」与「能跑」之间的差距。**
+>
+> ⭐⭐⭐⭐⭐ **而每个 manifest 都带着一句自我限定**：
+> **`status: cross-compiled; NVIDIA runtime conformance pending`**——
+> **故「已交叉编译，运行期一致性待定」是包自己声明的状态，
+> 不是我替它加的限定词。**
+
+### 10.291 ⚠️⚠️⚠️ `choose_context` 是一段**死代码**，而它有两份活着的副本
+
+> `tools/build_cuda_bundle.py` 第 49 行定义 `choose_context`，
+> **全文件调用次数为 0。**
+> 而 `launch/btl3-cuda-server` 第 48-56 行有一份同名、同阈值、同返回值的
+> shell 实现，**那份是真的在用的**（第 75 行 `ctx=${BTL3_CTX_SIZE:-$(choose_context ...)}`）。
+
+> **⭐⭐ 三份买现的阈值逐字相同**：
+> **`>= 96,000 -> 131,072`；`>= 48,000 -> 98,304`；`>= 28,000 -> 65,536`；
+> `>= 20,000 -> 32,768`；否则 `16,384`。**
+> **文档、Python 死代码、shell 实装，三处数值完全一致。**
+>
+> **⭐⭐ 判据：**
+> **一段代码只有一份副本却不被调用时，它是一个意图；
+> 有两份副本而只有一份被调用时，第一份是一份过期的意图。**
+>
+> ⭐⭐ **而这套阈值对 RTX PRO 6000 的意义**：
+> **卡上报 97,887 MiB，落在 `>= 96,000` 这一档，故默认上下文是 131,072。**
+> **⚠️ 而 `BTL3_CTX_SIZE` 一旦被设置，整个选择逻辑被短路。**
+
+> ⭐⭐⭐⭐ **启动器的九个默认值**：
+> **`127.0.0.1` / `8080` / `parallel=1` / alias `BTL-3` /
+> `n-gpu-layers=99` / `max-tokens=2048` /
+> `repeat-penalty=1.10` / `repeat-last-n=512`。**
+>
+> ⭐⭐⭐⭐⭐ **而它显式把 CUDA 后端钉死**：
+> **`export GGML_BACKEND_PATH="$bundle_root/lib/libggml-cuda.so"`**——
+> **这正是本报告 §10.36 那条「wheel 遮蔽」问题的正面解法：
+> 用一个显式环境变量锁死后端路径，而不是靠搜索顺序。**
+>
+> ⚠️ **三个「显式关掉」也值得记**：`--cache-ram 0`（关 prompt cache）、
+> `--no-warmup`、`--no-ui`。
+> **故 §10.271 那个 41.03 秒总时长不含 warmup，但与 `--cache-ram 0` 无关。**
+
+### 10.292 ⚠️⚠️⚠️ 【撤回】「Windows 包缺 `LICENSE.llama.cpp`」——**不成立**
+
+[c-windows-bundle-license-retracted]
+
+> **第 198 轮我读 `build-windows.ps1`，看到它只拷 `EULA.txt` 就下了结论。**
+> **而它拷贝的 `$Stage` 只是中间目录**——第 50-51 行紧接着调用
+> `tools/build_cuda_bundle.py`，那才是真正的打包。
+
+> **🔥🔥🔥🔥🔥 那个脚本第 169-171 行无条件补拷**：
+> **`shutil.copy2(ROOT / "native/llama.cpp/LICENSE", staging / "LICENSE.llama.cpp")`**
+> **——与 target 无关。**
+>
+> ⭐⭐ **而第 117-119 行还显式排除**：
+> **`if path.name != "LICENSE.llama.cpp": shutil.copy2(...)`**
+> **——说明作者想过这件事，并且指定了唯一来源。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个中间产物的缺失，不等于最终产物的缺失；
+> 而「中间产物」这个词本身就提示还有下一步。**
+>
+> **⭐⭐ 判据：**
+> **当我发现一处不对称时，必须走完整条流水线再下结论；
+> 否则我测的是流水线的中段，不是产品。**
+>
+> ⚠️ **而这已是同一类错误的第三次**：
+> **第 195 轮我看速度文档没看报告文件；
+> 第 198 轮我看 Windows 脚本没看它调用的脚本——
+> 共同点是我在「第一个看起来能回答问题的地方」就停了。**
+>
+> **⭐⭐ 判据：**
+> **「第一个能回答问题的文件」通常不是「定义答案的那个文件」，
+> 而是「引用它的那个文件」。**
+>
+> ✅ **保留的观测**：**两条中间产物路径确实不对称**
+> （`Dockerfile` 自己拷，`build-windows.ps1` 不拷），
+> **⚠️ 但它不构成对产品的不对称。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -31214,6 +31336,39 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个自建工具的产出，必须至少用另一种方法复算一次；否则它就是一个有权威感的猜测**」；
 ⭐⭐ 判据「**两个工具给出不同的数，比两个工具给出相同的数更有信息量，因为前者会逼你去读代码**」；
 
+### 打包脚本与启动器（第一百二十四轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `tools/build_cuda_bundle.py`（6,797 字节，193 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/build_cuda_bundle.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它才是真正的打包那一步**：
+「**MODEL_BYTES = 8_392_369_600**」「**MODEL_SHA256 = 2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c**」——
+**而全文没有 `open` 模型文件、没有 `exists`、没有 `verify`**，两个常量各只被读一次（141、142 行写进 manifest）；
+⭐⭐ 判据（本轮最重要）「**一个数字被写进第 N 个文件时，前 N-1 个文件都不再是它的证据**」；
+⭐⭐ 判据「**副本的数量不是证据的强度；只有「产生方式不同」才是独立证据**」；
+(a) ⭐⭐⭐⭐⭐ **它真的读二进制校验 machine 字段**：
+「**data[:4] != b 的 \x7fELF ... return struct.unpack_from(<H, data, 18)[0]**」（ELF e_machine）；
+「**offset = struct.unpack_from(<I, data, 0x3C)[0] ... data[offset:offset+4] != b 的 PE\\0\\0 ...**」（PE Machine）——
+**三个 target 分别是 62 / 183 / 0x8664，不匹配即 ValueError**；
+(b) ⚠️⚠️⚠️ **但「包里有 CUDA 后端」只看文件名**：
+「**any(name.startswith(libggml-cuda.so) for name in seen)**」——**不检查那个 .so 里有没有 sm_120 的 fatbin，也不检查它能不能加载**；
+⭐⭐ 判据「**同一个脚本里，有的检查到了字节级，有的只检查到文件名——而这两者之间的差距，就是「能编译」与「能跑」之间的差距**」；
+(c) ⭐⭐⭐⭐⭐ **manifest 自带一句自我限定**：
+「**status: cross-compiled; NVIDIA runtime conformance pending**」「**external_model: {filename, bytes, sha256}**」——**故「已交叉编译，运行期一致性待定」是包自己声明的状态**；
+(d) 🔥🔥🔥🔥🔥 **`choose_context` 是死代码**：定义在第 49 行，**全文件调用次数为 0**——而 `launch/btl3-cuda-server` 里有一份同名同阈值的 shell 实现，那份在 75 行真的被用；
+⭐⭐ 判据「**一段代码只有一份副本却不被调用时，它是一个意图；有两份副本而只有一份被调用时，第一份是一份过期的意图**」；
+(e) 🔥🔥🔥🔥🔥 **许可证是它补的，不是构建脚本补的**：
+「**for path in sorted(source.glob(LICENSE.*)): if path.name != LICENSE.llama.cpp: shutil.copy2(path, output / path.name)**」（117-119 行，显式排除）；
+「**shutil.copy2(ROOT / native/llama.cpp/LICENSE, staging / LICENSE.llama.cpp)**」（169-171 行，无条件）——**故两个平台的最终包都有这份许可证，第 198 轮那条「Windows 包缺它」是错的**；
+2. [GitHub / Badtheorylabs — BTL-3 `launch/btl3-cuda-server`（3,658 字节，109 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/launch/btl3-cuda-server)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **它显式把 CUDA 后端钉死**：
+「**export LD_LIBRARY_PATH=$bundle_root/lib...**」「**export GGML_BACKEND_PATH=$bundle_root/lib/libggml-cuda.so**」——**这正是本报告 §10.36 那条「wheel 遮蔽」问题的正面解法**；
+(a) ⭐⭐⭐⭐ **九个默认值**：「**BTL3_HOST=127.0.0.1、BTL3_PORT=8080、BTL3_PARALLEL=1、BTL3_MODEL_ALIASES=BTL-3、BTL3_GPU_LAYERS=99、BTL3_MAX_TOKENS=2048、BTL3_REPEAT_PENALTY=1.10、BTL3_REPEAT_LAST_N=512**」，而 **BTL3_CTX_SIZE 默认是 `$(choose_context "$memory_mib")`**；
+(b) ⭐⭐⭐⭐⭐ **模型查找四级回退**：「**BTL3_MODEL -> $bundle_root/model/ -> $bundle_root/../../artifacts/release/ -> $PWD**」——⚠️ **第三级只在「包放在仓库里」时成立**；
+(c) ⭐⭐⭐⭐ **三个显式关掉**：`--cache-ram 0` / `--no-warmup` / `--no-ui`；
+(d) ⚠️⚠️⚠️ **`BTL3_PRINT_COMMAND=1` 时 thinking 靠字符串比较还原**：「**[ $chat_template_kwargs = {\"enable_thinking\":true} ] && printf true || printf false**」——⭐⭐ 判据「**一个由字符串比较还原的布尔量，是两处代码之间的隐式契约**」；
+ — [src-btl3-tools-build-cuda-bundle] [src-btl3-launch-cuda-server]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -31353,7 +31508,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=355, evidence=2554, claims=1834, claims_high=1487, claims_disputed=9, trace_events=781, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=357, evidence=2567, claims=1836, claims_high=1489, claims_disputed=9, trace_events=785, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
