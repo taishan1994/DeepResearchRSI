@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：290 ｜ **证据数**：2248 ｜ **主张数**：1652（高置信 1312，争议 9）
+> **来源数**：292 ｜ **证据数**：2254 ｜ **主张数**：1657（高置信 1316，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -18273,9 +18273,11 @@ static ggml_prec ggml_cuda_mmq_get_prec_env() {
 > 合起来的意思是：一台机器上同时跑着两个后端，
 > 而 `-ngl` 只控制其中一个的层数。**
 
-### 10.101 🔥🔥🔥🔥🔥 第一份 RTX PRO 6000 + `llama.cpp` 的 `llama-bench` 记录
+### 10.101 ⚠️⚠️⚠️ 一份 `llama-bench` 外形、但**不是** `llama.cpp` 的记录（§10.106 更正）
 
-**这是本报告连续 12 轮标注为「最大单一数据缺口」的那一项** [c-first-llamabench-on-rtxpro6000]。
+> ⚠️⚠️⚠️ **本节标题曾写作「第一份 RTX PRO 6000 + `llama.cpp` 的 `llama-bench` 记录」，那是错的。§10.106 证明它来自 BTL-3 的 native runtime，不是 `llama.cpp`。**下面的数字本身没有错，错的是它被安上的那顶帽子。**
+
+**这份记录仍然有信息量——但它回答的是「BTL-3 runtime 解码 AVQ2 有多快」** [c-first-llamabench-on-rtxpro6000] [c-btl3-is-not-llamacpp]。
 
 **硬件与参数**（`evidence/rtx-pro-6000-speed-2026-07-19.md`，2026-07-19 实测）：
 
@@ -18462,6 +18464,169 @@ flash-attn   = on
 > ⚠️ **而必须标注**：**`tensor-split=46,54` 与 `main-gpu=1`
 > 说明他把主卡设成了第二张（Max-Q 300W）——
 > 这是一个反直觉的选择，而作者没解释。**
+
+### 10.106 🔥🔥🔥🔥🔥 **推翻 §10.101 的前提：那不是 `llama.cpp`**
+
+[c-btl3-is-not-llamacpp]
+
+> 「**Stock Ollama and the stock LM Studio GGUF engine do not decode AVQ2 directly.
+> The included integrations start or connect to BTL's native runner
+> while preserving the familiar client interface.**」
+
+> ⚠️ **`Badtheorylabs/BTL-3`（C++，32 MB，pushed 2026-07-24）的顶层是
+> `native/`、`papers/`、`integrations/`——既无 `ggml/` 也无 `src/`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个命令行长得像 `llama-bench`」不等于「它是 `llama-bench`」——**
+> **⚠️ 因为 `-p/-n/-r/-o json` 这套参数已被多个项目模仿，
+> 而 model card 的 `library_name` 字段是上传者填的。**
+>
+> ⭐⭐ **这条推翻了三件事**：
+> 1. **那个数字不能回答「`llama.cpp` 在 RTX PRO 6000 上多快」**；
+> 2. **那个 `pp512/tg128 = 1.96` 的「不合物理」有了完全不同的解释**（§10.107）；
+> 3. **`-ngl 99`、`sm_120a`、`KV FP16` 这些参数名虽来自 `llama.cpp` 词汇表，
+> 但在这个 runtime 里的语义未知。**
+>
+> **⭐⭐ 判据：**
+> **「借用词汇表」是一种极强的误导——
+> 当一个新项目用 `-ngl` 而不是 `--gpu-layers` 时，
+> 它在向你暗示「我和 `llama.cpp` 一样」——**
+> **⚠️ 而它可能只实现了同名参数的一小部分。**
+>
+> ⭐⭐ **这正是 §10.55 那条「一个听起来像引擎的名字，
+> 可能只是一个组合」在命令行层面的版本。**
+
+### 10.107 🔥🔥🔥🔥 「pp ≈ tg」是**这个 runtime 的特性**，不是 RTX PRO 6000 的
+
+[c-pp-anomaly-explained-by-custom-runtime]
+
+**同一张表里，Apple M2 16 GB 的数字是决定性对照**：
+
+| Device | Prompt processing | Generation | 比值 |
+|---|---:|---:|---:|
+| RTX PRO 6000 Blackwell 96 GB | **84.70** | **43.16** | **1.96** |
+| **Apple M2 16 GB** | **2.30** | **2.48** | **0.93** |
+
+> ⚠️ **「pp ≈ tg」这个特征在两个完全不同的平台上都出现——
+> 它是这个 runtime 的特性，不是 RTX PRO 6000 的特性。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「异常数字」在第二个平台上以同样的形态重现时，
+> 它就不再是「那个平台的异常」，而是「这个软件的常态」——**
+> **⚠️ 而「换一个平台验证」是排除「硬件异常」最便宜的方法。**
+>
+> ⭐⭐ **机制解释是自洽的**：
+> **`AVQ2` 是一个 packed decoder（「the packed decoder and rank-32 output
+> correction」）——深度压缩的权重在解码时要做大量位操作，
+> 而这类操作对 batch 大小不敏感（因为它不是矩阵乘，是查表与解包）。**
+>
+> **故「预填充不提速」是这种量化格式的必然结果**——
+> **因为预填充的加速来自「大矩阵乘的算力利用」，
+> 而 packed decoder 把它换成了「逐元素的解包」。**
+>
+> **⭐⭐ 判据：**
+> **当一种量化把「矩阵乘」换成「查表 + 解包」时，
+> 它就同时放弃了「预填充的算力优势」——**
+> **⚠️ 而这一点在「2 比特、4 比特」这些名字里完全看不出来。**
+>
+> ⭐⭐ **这是 §10.87 的又一次兑现**：
+> **「同一个权重格式」这句话在量化生态里几乎总是不完整的——
+> 这里是「同一个比特数」也不完整，
+> 因为「怎么存」比「存几位」更重要。**
+>
+> ⚠️ **本条是 `derivation`：本报告没有读 `native/` 的解码实现，
+> 故「位操作不随 batch 加速」是推断。**
+
+### 10.108 ⚠️⚠️⚠️ 撤回：那个 12 轮的缺口**仍未填上**
+
+[c-real-llamacpp-gap-still-open]
+
+> **§10.101 那份数字来自 BTL-3 native runtime，不是 `llama.cpp`。**
+> **而上一轮我在报告里写了「本报告连续 12 轮标注为『最大单一数据缺口』的那一项，
+> 终于被填上」——这句话是错的。**
+
+> **⚠️ 这是本报告第一次「明确撤回自己上一轮的完成宣告」。**
+> **「pp 异常」是「数字可能不对」；「不是 `llama.cpp`」是「这个数字根本不回答那个问题」。**
+>
+> **⭐⭐ 判据（本轮最重要之一）：**
+> **「我填上了一个缺口」这个宣告，必须附带「我是用哪个来源填的」——**
+> **⚠️ 因为「缺口」是按「问题」定义的，而「来源」是按「文档」定义的，
+> 两者之间的匹配是一个需要单独检查的步骤。**
+>
+> ⭐⭐ **而这条也揭示了本报告的一个结构性问题**：
+> **「12 轮未解」这个标签本身会产生压力，
+> 而压力会让人把「一个看起来像答案的东西」当成答案**——
+> **⚠️ 这正是 §10.101 那条判据的反面：「有一个数字」会让人停止找。**
+>
+> **⭐⭐ 判据：**
+> **当一份报告长期标注某个缺口时，
+> 它应该同时标注「什么样的证据才算填上」——**
+> **⚠️ 否则「一个数字」就会被当成「那个证据」。**
+>
+> ⭐⭐ **但对读者来说这条的含义是正面的**：
+> **§10.103–§10.105 那三条（46 t/s 基线、投机解码、双卡配方）
+> 全部来自真实的 `llama.cpp` 用户，故它们仍然成立**——
+> **本报告的「实测」章节没有被这一轮推翻，
+> 被推翻的只有「第一份 `llama-bench`」这顶帽子。**
+
+### 10.109 ⭐⭐⭐ `AVQ2` 不是「量化权重」，而是「换了一个模型结构」
+
+[c-avq2-changes-the-model-itself]
+
+> 「**Full 64-layer mixed AVQ2/UniSVQ representation with targeted precision**」
+> 「**the packed decoder and rank-32 output correction are unchanged**」
+> 「**Under 2.5 effective bits per parameter**」
+> 「**It does not download, load, or reconstruct the original BF16 checkpoint.**」
+
+> ⚠️ 即 **它不是「把 27B 权重压到 2 比特」，
+> 而是「一个 packed decoder + 一个 rank-32 输出校正」——
+> 其中 rank-32 校正项是原模型没有的。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一种压缩方法的输出「不能被原始 runtime 读取」时，
+> 它就已经不是「压缩」而是「格式迁移」——**
+> **⚠️ 而这两者的区别是：前者可以换回原格式，后者不能。**
+>
+> ⭐⭐ **证据链是完整的三条**：
+> **① 「Stock Ollama … do not decode AVQ2 directly」（读不了）；
+> ② 「does not … reconstruct the original BF16 checkpoint」（不重建）；
+> ③ 「rank-32 output correction」（加了原模型没有的项）。**
+>
+> **⭐⭐ 判据：**
+> **「不重建原始 checkpoint」这一句，
+> 是「这是新模型而不是压缩包」的最强证据——**
+> **⚠️ 因为「压缩」的定义就是「能无损或近似地还原」。**
+>
+> ⭐⭐ **对本报告主题的实际含义**：
+> **任何拿「2 比特 27B」与「FP16 27B」比 tok/s 的报告，
+> 如果两者不是同一个 runtime、同一套权重语义，
+> 那么那个比值里至少有一半不是「量化带来的」。**
+
+### 10.110 ⚠️⚠️ CUDA 侧只有 `arm64` 预览包
+
+[c-no-x86-cuda-package]
+
+| Target | Status | Package |
+|---|---|---|
+| macOS arm64 / Apple Metal | **Verified** | `runtimes/supported/BTL-3-Compact-macos-arm64` |
+| **Linux arm64 / NVIDIA CUDA / DGX Spark** | **Preview** | `runtimes/preview/BTL-3-Compact-linux-arm64-cuda` |
+
+> ⚠️ **RTX PRO 6000 是 `x86_64` 平台——
+> 故那份 `84.70 / 43.16` 的实测平台，在官方包矩阵里没有对应项。**
+>
+> **⭐⭐ 判据：**
+> **当一份性能数字来自「官方未分发的构建」时，
+> 它的可复现性取决于「构建脚本是否公开」——**
+> **⚠️ 而这一份是公开的（`native/` + `tools/`），
+> 故它比「闭源魔改」好，但比「官方包」差。**
+>
+> ⭐⭐ **与 §10.36 记的「wheel 覆盖」形成对照**：
+> **那是一个「官方包有多个版本，用户装错了」的问题；
+> 这是一个「官方包没有这个平台，用户自己编了」的问题——**
+> **后者的自由度更大，但可比性更差。**
+>
+> ⚠️ **本报告没有验证那个实测平台是 `x86_64` 还是 `arm64`——
+> model card 只写了「RTX PRO 6000 Blackwell 96 GB」。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -21870,6 +22035,12 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 2. [HuggingFace / unsloth — DeepSeek-V4-Flash-0731-GGUF 讨论 #18「Best way to run on Dual RTX 6000 Pro Blackwell?」（10 条事件，2026-08-02 至 2026-08-08）](https://huggingface.co/api/models/unsloth/DeepSeek-V4-Flash-0731-GGUF/discussions/18) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **五个独立用户在同一讨论里报告了 RTX PRO 6000 的实测吞吐**，是本报告见到的密度最高的数字聚集地。(a) 🔥🔥🔥 **「约 46 t/s」在至少两台不同配置的双卡机器上复现**——jhgoodwin「**around 46 t/s for normal use not micro benchmarks**」、flipplefozz「**Before using DSpark, I too was getting 46 t/s**」（后者 **600W + Max-Q 300W、PCIe Gen4 x8、Ryzen 9 5950x、128 GB**）；⭐⭐ 判据（本轮最重要）「**『同一数字在多个配置上复现』有两种解释：① 它是硬件的上限；② 它是软件的上限——而区分方法是『换一个软件栈还是一样的数字吗』**」；⭐ 讨论里正好有对照：**hassellof 说 sglang 上双卡报到 110–130，而 `llama.cpp` + ds4 是 46 —— 即 46 是这条栈的上限，不是卡的上限**；⭐⭐ 判据「**『一个数字被多个用户复现』是『它是典型值』的证据，而不是『它是上限』的证据——而这两者在报告里经常被写成同一句话**」。(b) 🔥🔥🔥🔥 **投机解码（DSpark / MTP）：46 → 75–130 t/s**——flipplefozz **46 → 75–85**（但 `ctx` **768000 → 370000**）、g0t4 **~70 → 100–130**（默认 3 draft token，`ctx 524288`，CUDA 13.3、llama-server 10290）；⭐⭐ 判据（本轮最重要之一）「**当一项优化的收益是『倍数』而代价是『能力』时，它们不在同一个量纲上，故不能相减——而『2× 更快』与『上下文减半』在一个报告里必须并列，不能只写前者**」；⭐⭐ 机制：**投机解码不改变单 token 的计算量，它改变的是「每次前向产出几个 token」——故加速比取决于接受率，而接受率取决于任务的可预测性**；⭐⭐ 判据「**一个『取决于输入』的加速比，在『代码生成』与『自由写作』上会差很多——而讨论里没有人分别报这两个场景**」。(c) 🔥🔥🔥🔥🔥 **一份完整、已确认可用的双卡配方**——构建 `-DGGML_CUDA=ON -DGGML_CUDA_GRAPHS=ON -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES="120"`，环境 **`CUDA_SCALE_LAUNCH_QUEUES=4x`、`GGML_CUDA_PDL=1`、`GGML_CUDA_P2P=1`**，preset `n-gpu-layers=99`、`split-mode=layer`、`tensor-split=46,54`、`cache-type-k/v=f16`、`batch-size=8192`、`ubatch-size=4096`；⭐⭐⭐ **它验证了上一轮的两条纯文档推断**：**§10.90 的 `CUDA_SCALE_LAUNCH_QUEUES=4x` 与 §10.92 的 `GGML_CUDA_P2P=1` 都被真实用户在多卡上启用了**；⭐⭐ 判据（本轮最重要）「**『文档警告的风险』与『用户实际启用了它』并不矛盾——因为风险是『可能』（`may`），而『我这次没出事』不是『风险不存在』的证据**」；⭐ **两处细节**：**`-DCMAKE_CUDA_ARCHITECTURES="120"` 不是 `120a`（§10.69 那个「未桥接的缝」的真实样本）**、**`GGML_CUDA_FA_ALL_QUANTS=ON` 正好绕开 §10.93 的白名单**；⭐⭐ 判据「**一份『能跑』的配方里，最有信息量的不是『设了什么』，而是『哪几个设置是在绕开已知的默认陷阱』——而绕开的动作通常不会被写出来**」。(d) 🔥🔥🔥 **neptronix 的诊断建议直指 CPU 溢出**：**RTX PRO 6000 + 5090，IQ3_S 77 tok/s**，并说「**If you are getting much below this speed, you probably have some spillover to CPU / CPU RAM happening**」，具体建议「**Make sure to set parallel context windows to 1, otherwise by default you are probably offloading to CPU**」。(e) 🔥🔥🔥 **hassellof（4 卡）78–87 t/s，双卡 110–130，并给出两个 vLLM DSpark 阻塞项**：**① boot crash class（fixed in flashinfer#4309 / sglang#33407）② depth floor 固定在 checkpoint 默认值 5，而那是唯一被测到「损坏输出」的 draft depth（sglang#33800）**，建议 **`--speculative-dspark-block-size 4`** — [src-hf-unsloth-dsv4-disc18]
 
+### 那不是 llama.cpp，与一个被两个平台同时证实的「pp ≈ tg」（第八十五轮补充）
+
+1. [HuggingFace / badtheorylabs — BTL-3-Compact `README.md`（8,354 字节，2026-07-24 更新）](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/main/README.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **推翻 §10.101 的前提：那不是一个 `llama.cpp` 的数字**。(a) **「Stock Ollama and the stock LM Studio GGUF engine do not decode AVQ2 directly. The included integrations start or connect to BTL's native runner while preserving the familiar client interface.」**——⚠️ 即 **它是一个 `.gguf` 后缀的文件，但张量格式是 `AVQ2`，标准 `llama.cpp`/Ollama/LM Studio 读不了**；⭐⭐ 判据（本轮最重要）「**『一个命令行长得像 `llama-bench`』不等于『它是 `llama-bench`』——因为 `-p/-n/-r/-o json` 这套参数已被多个项目模仿，而 model card 的 `library_name` 字段是上传者填的**」；⭐⭐ 判据「**『借用词汇表』是一种极强的误导——当一个新项目用 `-ngl` 而不是 `--gpu-layers` 时，它在向你暗示『我和 `llama.cpp` 一样』，而它可能只实现了同名参数的一小部分**」；⭐ 这正是 §10.55 那条「一个听起来像引擎的名字，可能只是一个组合」在命令行层面的版本。(b) 🔥🔥🔥🔥 **「pp ≈ tg」是这个 runtime 的特性，不是 RTX PRO 6000 的**——同一张表里 **RTX PRO 6000：84.70 / 43.16（比值 1.96）**，**Apple M2 16 GB：2.30 / 2.48（比值 0.93）**；⭐⭐ 判据（本轮最重要）「**当一个『异常数字』在第二个平台上以同样的形态重现时，它就不再是『那个平台的异常』，而是『这个软件的常态』——而『换一个平台验证』是排除『硬件异常』最便宜的方法**」；⭐⭐ 机制：**`AVQ2` 是一个 packed decoder，深度压缩的权重在解码时要做大量位操作，而这类操作对 batch 大小不敏感（因为它不是矩阵乘，是查表与解包）**——故 **「预填充不提速」是这种量化格式的必然结果**；⭐⭐ 判据「**当一种量化把『矩阵乘』换成『查表 + 解包』时，它就同时放弃了『预填充的算力优势』——而这一点在『2 比特、4 比特』这些名字里完全看不出来**」；⭐ 这是 §10.87 的又一次兑现：**「同一个比特数」也不完整，因为「怎么存」比「存几位」更重要**（⚠️ 本条为 `derivation`，本报告未读 `native/` 的解码实现）。(c) ⚠️⚠️⚠️ **撤回：那个 12 轮的缺口仍未填上**——§10.101 的数字来自 BTL-3 native runtime，**而上一轮报告里写的「本报告连续 12 轮标注为『最大单一数据缺口』的那一项，终于被填上」是错的**；⭐⭐ 判据（本轮最重要之一）「**『我填上了一个缺口』这个宣告，必须附带『我是用哪个来源填的』——因为『缺口』是按『问题』定义的，而『来源』是按『文档』定义的，两者之间的匹配是一个需要单独检查的步骤**」；⭐⭐ 判据「**当一份报告长期标注某个缺口时，它应该同时标注『什么样的证据才算填上』——否则『一个数字』就会被当成『那个证据』**」；⭐ 但对读者是正面的：**§10.103–§10.105 那三条全部来自真实的 `llama.cpp` 用户，仍然成立**——被推翻的只有「第一份 `llama-bench`」这顶帽子。(d) ⭐⭐⭐ **`AVQ2` 不是「量化权重」，而是「换了一个模型结构」**——「**Full 64-layer mixed AVQ2/UniSVQ representation with targeted precision**」「**the packed decoder and rank-32 output correction are unchanged**」「**Under 2.5 effective bits per parameter**」「**It does not download, load, or reconstruct the original BF16 checkpoint.**」；⭐⭐ 判据（本轮最重要）「**当一种压缩方法的输出『不能被原始 runtime 读取』时，它就已经不是『压缩』而是『格式迁移』——而这两者的区别是：前者可以换回原格式，后者不能**」；⭐⭐ 判据「**『不重建原始 checkpoint』这一句，是『这是新模型而不是压缩包』的最强证据——因为『压缩』的定义就是『能无损或近似地还原』**」；⭐ 对本报告主题：**任何拿「2 比特 27B」与「FP16 27B」比 tok/s 的报告，如果两者不是同一个 runtime、同一套权重语义，那么那个比值里至少有一半不是「量化带来的」**。(e) ⚠️⚠️ **CUDA 侧只有 `arm64` 预览包**——支持矩阵里「**Linux arm64 / NVIDIA CUDA / DGX Spark | Preview | `runtimes/preview/BTL-3-Compact-linux-arm64-cuda`**」，**而 RTX PRO 6000 是 `x86_64` 平台**；⭐⭐ 判据「**当一份性能数字来自『官方未分发的构建』时，它的可复现性取决于『构建脚本是否公开』——而这一份是公开的，故它比『闭源魔改』好，但比『官方包』差**」 — [src-hf-btl3-model-card]
+
+2. [GitHub / Badtheorylabs — `BTL-3` 仓库元数据（API）](https://api.github.com/repos/Badtheorylabs/BTL-3) —（2026-10 抓取）。⭐⭐⭐ **它有自己的 C++ native runtime**：**`"language": "C++"`、`"size": 32020`、`pushed_at: 2026-07-24T08:11:31Z`**，描述「**Native runtime, integrations, and reproducible packaging for BTL-3 and BTL-3 Compact**」；顶层目录 `artifacts/`、`docs/`、`integrations/`、`launch/`、**`native/`**、`packaging/`、**`papers/`**、`tests/`、`tools/`——⚠️ **既没有 `ggml/` 也没有 `src/`（`llama.cpp` 的两大标志）**，即它不是 fork 而是一个从零写的运行时 — [src-github-btl3-runtime]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -22009,7 +22180,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=290, evidence=2248, claims=1652, claims_high=1312, claims_disputed=9, trace_events=649, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=292, evidence=2254, claims=1657, claims_high=1316, claims_disputed=9, trace_events=653, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
