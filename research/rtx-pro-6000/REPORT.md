@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：401 ｜ **证据数**：2704 ｜ **主张数**：1907（高置信 1559，争议 9）
+> **来源数**：402 ｜ **证据数**：2710 ｜ **主张数**：1913（高置信 1565，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -29614,6 +29614,184 @@ exit 0
 > **一条是串行链，一条是五层捕获。
 > 而两者都不随卡变快而变小。**
 
+### 10.364 🔥🔥🔥🔥🔥 DSpark **没有任何 CLI 或 server 路径**——它自己写的
+
+[c-dspark-has-no-cli-or-server-path]
+
+> **`tests/test-dspark-real-eval.cpp` 11-20 行**：
+> 「**Why this file exists (there is no pre-existing CLI/server path):
+> — `--spec-type draft-dspark` parses (common/arg.cpp), but neither
+> `examples/speculative-simple/speculative-simple.cpp` nor
+> `tools/server/server-context.cpp` ever calls `llama_set_capture_layers()` on
+> the target context. dspark's `process()` needs the target's multi-layer tap
+> captured via `llama_get_embeddings_capture_ith()`, which returns null unless
+> capture is engaged AND logits/output were requested for every row.**」
+
+> **🔥 故「参数能解析」与「功能能跑」是两件事。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 flag 如果能被解析，它只证明「这个词被认识」；
+> 要证明「这条路径被接通」，必须找到那个把数据送进模型的那一次调用。**
+>
+> **⭐⭐ 判据：**
+> **故「这个功能有没有 CLI」不能读文档，要读「谁调了那个 setter」。**
+>
+> **⭐ 而这条解释了为什么这份评估框架必须存在**：
+> **它不是「一个方便的测试」，而是「唯一能跑这个功能的程序」。**
+>
+> **⭐⭐ 而它也给 §10.346 那张 DSpark 表的「PRO 6000 列是空的」
+> 加了第六个解释：那台机器上的人可能根本没有一条命令行可以跑它。**
+
+### 10.365 🔥🔥🔥🔥🔥 一行 `continue` 让 `target_layers` 永远不可达
+
+[c-llama-model-skips-array-gguf-keys]
+
+> **`tests/test-dspark-real-eval.cpp` 21-28 行**：
+> 「**the drafter's `target_layers` array (the layer-id list to pass to
+> `llama_set_capture_layers`) has no public getter: `llama_model`'s own
+> string-KV cache explicitly SKIPS array-typed GGUF keys (see
+> `llama_model_base::load_hparams` in `src/llama-model.cpp`,
+> `"if (type == GGUF_TYPE_ARRAY) continue;"`), so `llama_model_meta_val_str()`
+> can never see it. This harness instead reads the drafter GGUF's own
+> `"<arch>.dspark.target_layers"` key directly via the low-level `gguf.h` C API
+> (no core-file changes needed).**」
+
+> **🔥 故根因不在 API 层，而在更底下的元数据加载层。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个字段是否可达，有时不由它的重要性决定，
+> 而由「读它的那个循环有没有为它的类型留分支」决定。**
+>
+> **⭐⭐ 判据：**
+> **故「没有 getter」的根因可能不在 API 层，而在更底下的元数据加载层。**
+>
+> **⭐⭐ 而作者对此的处理值得记**：
+> **他没有改核心文件，而是用底层 `gguf.h` C API 直接读那个 key。**
+> **判据：一个绕开公共 API 的做法，如果附带「no core-file changes needed」，
+> 那它就是一次「用分层换不改动」的交易。**
+
+### 10.366 🔥🔥🔥🔥🔥 `tau` 是「每轮平均提交的 token 数」，上限 **8.0**
+
+[c-tau-is-tokens-per-round-with-a-block-size-ceiling]
+
+> **`tests/test-dspark-real-eval.cpp` 548-549 行**：
+> ```cpp
+> const double accept_rate = prompt_drafted > 0 ?
+>     (double) prompt_accepted / (double) prompt_drafted : 0.0;
+> const double tau         = prompt_rounds  > 0 ?
+>     (double) prompt_accepted / (double) prompt_rounds + 1.0 : 0.0;
+> ```
+
+> **🔥 代数推导**：一个 round 提交 `n_accepted + 1` 个 token
+> （全接受时的 bonus token 或拒绝位置的那一个），
+> 故 `rounds` 轮共提交 `accepted_sum + rounds` 个；
+> 除以 `rounds` 得 **`accepted/rounds + 1`**。
+
+> **故 `tau` 就是「每轮平均提交的 token 数」**：
+> ```
+> block_size = 7  =>  tau 的理论上限 = 8.0
+> tau = 1.0       =>  等价于「完全不投机」（每轮只出 1 个 token）
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个指标如果有一个代数恒等式能把它变成「每轮多少 token」，
+> 那它比 `accept_rate` 更接近用户体验——
+> 因为它直接就是加速比的上界。**
+>
+> **⭐⭐ 判据：**
+> **而 `tau` 有一个由 `block_size` 决定的上限：
+> `block_size=7` 时 `tau <= 8.0`；而 `tau=1.0` 等价于「完全不投机」。**
+>
+> **⭐⭐ 故「DSpark 的加速比上限」在它的配置里是 `8.0`，
+> 而不是一个可以靠换卡提高的数。**
+
+> ⚠️ **而这条与本报告 §10.349 那条「并行度上限为 1」是同一个形状的两层**：
+> **一层是「一轮能有几个 token 被接受」（`tau <= 8`），
+> 一层是「这几个 token 要串行多久」（链长 = `block_size`）。**
+
+### 10.367 ⭐⭐⭐⭐⭐ 它报的是**按深度的条件接受率曲线**，不是一个标量
+
+[c-accept-by-depth-beats-a-single-accept-rate]
+
+> **`tests/test-dspark-real-eval.cpp` 332-336 行**：
+> 「**// accept-by-depth: for 1-based draft position i, `depth_reached[i]` counts
+> // rounds where position i was REACHED (prior positions accepted and the draft
+> // was at least i long), `depth_accepted[i]` counts rounds where it was also
+> // accepted. `depth_accepted[i]/depth_reached[i]` is the conditional per-depth
+> // accept rate `d(i)`.**」
+>
+> **而 568 行的打印标题写明了条件**：
+> 「**=== accept-by-depth (conditional: given position i was reached) ===**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个总体接受率是「所有深度的混合」，
+> 故它无法回答「第 5 位还有多少希望」；而条件接受率能。**
+>
+> **⭐⭐ 判据：**
+> **而这两者的差是一个可以直接算的量**：
+> ```
+> accept_rate = Σ_i d(i) · P(reached i) / 7
+> ```
+> **故同一条 `d(i)` 曲线可以产生很不同的 `accept_rate`——
+> 取决于 `d` 衰减得多快。**
+>
+> **⭐⭐ 故「报一个 `accept_rate`」与「报 `d(i)`」的差，
+> 是「一个标量」与「一个可以预测的模型」的差。**
+
+> ⭐ **而这是本报告见过的最好的一个投机解码度量设计，
+> 值得与 §10.346 那张只有单个数的社区表对照**：
+> **那张表的 DSpark 列是一个数，而这里是七个数的曲线。**
+
+### 10.368 🔥🔥🔥🔥🔥 cap 掉 `n_max` **不减少草稿器成本**
+
+[c-nmax-cap-does-not-reduce-drafter-cost]
+
+> **`tests/test-dspark-real-eval.cpp` 48-55 行**：
+> 「**`n_max_override` (1..`block_size`) caps the per-round draft length
+> `dp.n_max`. The dspark impl itself always produces a full `block_size` block
+> (its markov-resample loop is fixed-length and its drafter cache is cropped
+> back to `start` inside `draft()` regardless of acceptance), but the generic
+> `common_speculative_draft()` dispatcher truncates `*dp.result` to `dp.n_max`
+> after the impl returns — so capping here shrinks only the VERIFY batch,
+> leaving the drafter's per-round cost unchanged (**the honest semantics for a
+> block-diffusion drafter**).**」
+
+> **🔥 故「把 `n_max` 调小来省时间」在 DSpark 上不成立。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个参数如果只影响「验证多少」，而不影响「产出多少」，
+> 那它就不是一个性能旋钮，而是一个「正确性—吞吐」的折中旋钮。**
+>
+> **⭐⭐ 判据：**
+> **而作者用了「the honest semantics for a block-diffusion drafter」这个说法——
+> 这等于承认：块扩散草稿器的成本与「用几个」是解耦的，
+> 而这是它与自回归草稿器的一个结构性差别。**
+
+> **⭐⭐ 而这条正是 §10.361「四路径」之后第三个「块扩散不是自回归」的证据**：
+> ① 逐位置串行链（§10.349）；② 五层捕获（§10.363）；③ 固定成本块（本节）。
+
+### 10.369 ⚠️⚠️⚠️ 这份「real-eval」里**一个实测数字都没有**
+
+[c-real-eval-ships-no-numbers]
+
+> **`tests/test-dspark-real-eval.cpp` 全文件 31,867 字节、602 行**，
+> **而 `accept=0.` 与 `tau=0.` 的字面值各出现 `0` 次**（正则实测）。
+>
+> **24 条内置 prompt 分三类**（`code 8 / chat 8 / reasoning 8`），
+> **而输出只有 `printf` 模板**（551-554、563-565、587-590 行）。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「real-eval」框架如果本身不含结果，
+> 那它测出来的数只存在于某个没被提交的终端输出里。**
+>
+> **⭐⭐ 判据：**
+> **故「DSpark 在 RTX PRO 6000 上多少 tok/s」这个问题的答案，
+> 在仓库里是一个「怎么量」而不是一个「量到多少」。**
+>
+> **⭐ 而这条正好回答了我上一轮的猜测**：
+> **我说「`real-eval` 这个文件名暗示它有真实接受率数据」——它没有。**
+> **文件名说的是「这个框架测的是真模型」，不是「这里有真结果」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -34818,6 +34996,40 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个有默认值的字段是「我认为它总该是这个值」，一个没有默认值的字段是「它必须由导出方声明，否则我不猜」；而 markov_rank 走的是后者，于是缺失时它退化成 0，而不是退化成某个猜测值**」；
  — [src-btl3-dspark-scope] [src-btl3-conv-dspark]
 
+### DSpark 的真实目标评估框架（第一百四十二轮补充）
+
+继续按上一轮的待追项推进。上一轮结尾说「读 `tests/test-dspark-real-eval.cpp`——`real-eval` 这个文件名暗示它有真实接受率数据」。
+本轮读完，结论是：**它有真实的度量设计，但没有一个真实数字**。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/tests/test-dspark-real-eval.cpp`（31,867 字节，602 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/tests/test-dspark-real-eval.cpp)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **DSpark 没有任何 CLI 或 server 路径，这是它自己写的**：
+「**Why this file exists (there is no pre-existing CLI/server path): `--spec-type draft-dspark` parses (common/arg.cpp), but neither examples/speculative-simple/speculative-simple.cpp nor tools/server/server-context.cpp ever calls llama_set_capture_layers() on the target context. dspark's process() needs the target's multi-layer tap captured via llama_get_embeddings_capture_ith(), which returns null unless capture is engaged AND logits/output were requested for every row**」——**故「参数能解析」与「功能能跑」是两件事**；
+⭐⭐ 判据（本轮最重要）「**一个 flag 如果能被解析，它只证明「这个词被认识」；要证明「这条路径被接通」，必须找到那个把数据送进模型的那一次调用**」；
+⭐⭐ 判据「**故「这个功能有没有 CLI」不能读文档，要读「谁调了那个 setter」**」——
+**而这也给「PRO 6000 的 DSpark 列是空的」加了第六个解释：那台机器上的人可能根本没有一条命令行可以跑它**；
+(a) 🔥🔥🔥🔥🔥 **一行 `continue` 让 `target_layers` 永远不可达**：
+「**llama_model's own string-KV cache explicitly SKIPS array-typed GGUF keys (see llama_model_base::load_hparams in src/llama-model.cpp, "if (type == GGUF_TYPE_ARRAY) continue;"), so llama_model_meta_val_str() can never see it. This harness instead reads the drafter GGUF's own "<arch>.dspark.target_layers" key directly via the low-level gguf.h C API (no core-file changes needed)**」——
+⭐⭐ 判据「**一个字段是否可达，有时不由它的重要性决定，而由「读它的那个循环有没有为它的类型留分支」决定**」；
+⭐⭐ 判据「**一个绕开公共 API 的做法，如果附带「no core-file changes needed」，那它就是一次「用分层换不改动」的交易**」；
+(b) 🔥🔥🔥🔥🔥 **`tau` 是「每轮平均提交的 token 数」，上限 8.0**：
+「**const double tau = prompt_rounds > 0 ? (double) prompt_accepted / (double) prompt_rounds + 1.0 : 0.0;**」——
+**推导：一个 round 提交 `n_accepted + 1` 个 token，故 rounds 轮共提交 `accepted_sum + rounds` 个，除以 rounds 得 `accepted/rounds + 1`；故 `block_size = 7` 时 `tau <= 8.0`，而 `tau = 1.0` 等价于「完全不投机」**；
+⭐⭐ 判据「**一个指标如果有一个代数恒等式能把它变成「每轮多少 token」，那它比 accept_rate 更接近用户体验——因为它直接就是加速比的上界**」；
+(c) ⭐⭐⭐⭐⭐ **它报的是按深度的条件接受率曲线，不是一个标量**：
+「**// accept-by-depth: for 1-based draft position i, depth_reached[i] counts rounds where position i was REACHED (prior positions accepted and the draft was at least i long), depth_accepted[i] counts rounds where it was also accepted. depth_accepted[i]/depth_reached[i] is the conditional per-depth accept rate d(i).**」——**而打印标题写明「conditional: given position i was reached」**；
+⭐⭐ 判据「**一个总体接受率是「所有深度的混合」，故它无法回答「第 5 位还有多少希望」；而条件接受率能**」——**两者的差是 `accept_rate = sum_i d(i) * P(reached i) / 7`，故同一条 d(i) 曲线可以产生很不同的 accept_rate**；
+(d) 🔥🔥🔥🔥🔥 **cap 掉 `n_max` 不减少草稿器成本**：
+「**n_max_override (1..block_size) caps the per-round draft length dp.n_max. The dspark impl itself always produces a full block_size block (its markov-resample loop is fixed-length and its drafter cache is cropped back to `start` inside draft() regardless of acceptance), but the generic common_speculative_draft() dispatcher truncates *dp.result to dp.n_max after the impl returns -- so capping here shrinks only the VERIFY batch, leaving the drafter's per-round cost unchanged (the honest semantics for a block-diffusion drafter)**」——
+⭐⭐ 判据「**一个参数如果只影响「验证多少」，而不影响「产出多少」，那它就不是一个性能旋钮，而是一个「正确性—吞吐」的折中旋钮**」；
+**而「the honest semantics for a block-diffusion drafter」这句等于承认块扩散草稿器的成本与「用几个」解耦**；
+(e) ⚠️⚠️⚠️ **这份 real-eval 里一个实测数字都没有**：
+**全文件 31,867 字节、602 行，而 `accept=0.` 与 `tau=0.` 的字面值各出现 0 次**；**24 条内置 prompt 分三类（code 8 / chat 8 / reasoning 8），而输出只有 printf 模板**；
+⭐⭐ 判据「**一个「real-eval」框架如果本身不含结果，那它测出来的数只存在于某个没被提交的终端输出里**」——**故「DSpark 在 PRO 6000 上多少 tok/s」在仓库里是一个「怎么量」而不是一个「量到多少」**；
+⭐ **而这条正好回答了我上一轮的猜测：我说「real-eval 这个文件名暗示它有真实接受率数据」——它没有；文件名说的是「这个框架测的是真模型」，不是「这里有真结果」**；
+ — [src-btl3-test-dspark-real-eval]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -34957,7 +35169,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=401, evidence=2704, claims=1907, claims_high=1559, claims_disputed=9, trace_events=873, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=402, evidence=2710, claims=1913, claims_high=1565, claims_disputed=9, trace_events=875, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
