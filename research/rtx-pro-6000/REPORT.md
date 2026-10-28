@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：399 ｜ **证据数**：2698 ｜ **主张数**：1902（高置信 1554，争议 9）
+> **来源数**：401 ｜ **证据数**：2704 ｜ **主张数**：1907（高置信 1559，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -29208,6 +29208,13 @@ exit 0
 > **⭐ 这是一个「一次同步、一次查错」的设计——**
 > **对一个必须串行的链来说是合理的，但它让「哪一个位置出错」不可定位。**
 
+
+> ⚠️⚠️⚠️ **第 216 轮的修正（见 §10.359）**：
+> **`block_size` 是 `7`，不是 `128`。**
+> **故本节那三个数里的前两个要除以 `128 / 7 = 18.29`**：
+> `2 × 7 = 14` 次发射（不是 256）、`h_base` 约 `3.50 MiB`（不是 64 MiB，在 `n_vocab=131072` 下）。
+> **而 `partial:final = 1024:1` 这个网格比不变——它是常量，与 `block_size` 无关。**
+
 ### 10.352 🔥🔥🔥🔥🔥 `block_size` 与 `markov_rank` 是 **GGUF 元数据**，不是代码常量
 
 [c-block-size-and-markov-rank-are-gguf-metadata]
@@ -29433,6 +29440,179 @@ exit 0
 > **⭐⭐ 而这条也解释了为什么 CUDA 路径值得存在**：
 > **它不是「把 CPU 的活搬到 GPU」，
 > 而是「把 `block_size` 次长点积换成 `block_size` 次宽发射」。**
+
+
+> ⚠️⚠️⚠️ **第 216 轮的修正（见 §10.359）**：
+> **`block_size = 7`，故本节那个 `536,870,912 次乘加` 要除以 `18.29`，
+> 真实值约 `29,360,128`（在 `n_vocab=131072`、`rank=32` 下）。
+> 而「逐 token 串行」这个结构不变。**
+
+### 10.359 🔥🔥🔥🔥🔥 `block_size` 是 **7**——上一轮的绝对量全部要除以 18.29
+
+[c-dspark-block-size-is-seven]
+
+> **`native/llama.cpp/docs/dspark-scope.md`「dspark drafter shape」节**：
+> 「**Block diffusion. `block_size = 7`. A block of `block_size` positions is
+> seeded with `mask_token_id` and predicted in parallel (not autoregressively),
+> optionally over a few refinement passes, then truncated at the first
+> low-confidence position.**」
+>
+> **而 `conversion/dspark.py` 第 85 行写着同一个数作为默认值**：
+> 「**block_size = int(hp.get("block_size", 7))**」
+
+> **🔥 两个独立位置给出同一个数（一个文档、一个代码默认值），故它是真的。**
+>
+> **故 §10.351 与 §10.358 的绝对量修正如下**（`n_vocab = 131072`、`rank = 32`）：
+> ```
+>                              上轮用的 n_use=128      真实 block_size=7
+> kernel 发射次数                 256                     14
+> h_base（pinned）                64.00 MiB                3.50 MiB
+> host 标量乘加                   536,870,912              29,360,128
+> partial:final 网格比            1024:1                   1024:1（不变）
+> ```
+> **三个数全部是 `128 / 7 = 18.29` 分之一。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个我以为「大概一百多」的参数如果实际是 7，
+> 那我上一轮所有基于它的绝对开销都高估了 18 倍；
+> 而观测（「每位置发射一对 kernel」）本身没有错。**
+>
+> **⭐⭐ 判据：**
+> **故「以 X 为例」这个限定词不是谨慎，它是必需的——
+> 因为我没有那个值。**
+
+> ⭐ **而这一条也是「§10.352 那次自我降级」的落实**：
+> **上一轮我说「所有绝对量只能写成以 X 为例」，
+> 这一轮拿到了 X，于是把它换成了真值。**
+
+### 10.360 🔥🔥🔥🔥🔥 DSpark 的接受率**还没打赢 MTP**
+
+[c-dspark-does-not-yet-beat-mtp]
+
+> **`docs/dspark-scope.md`「Status」节**：
+> 「**It is not yet proven: at the time of writing the upstream author is around
+> 600 training steps in and the measured accept rate does not yet beat MTP.
+> The runtime work below is gated on that result.**」
+
+> **🔥🔥🔥 这一句改变了 §10.346 那张收益表的读法。**
+>
+> **而 §10.346 那张表里，DSpark 是用来看「相对基线」的：
+> `107.5 -> ~169`、`29.2 -> ~70.0`。
+> 那些基线是「不投机解码」，不是 MTP。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个投机解码器的收益表如果不附带
+> 「它的接受率有没有打赢基线投机解码器」，
+> 那这张表读起来就像「DSpark 是一个好东西」，而它可能不是。**
+>
+> **⭐⭐ 判据：**
+> **故那张表的正确读法是「DSpark 相对【不投机】快 1.57x–2.40x」，
+> 而不是「DSpark 相对【MTP】快」。**
+> **而这两句的差是一整个量级的故事。**
+
+> ⚠️ **而这也给 §10.345 那个「PRO 6000 的 DSpark 列是空的」加了第五个候选解释**：
+> **没人测 / 开关关了 / init 失败回退 / 权重读不出 / 它还不值得测。**
+
+### 10.361 ⚠️⚠️⚠️ 同一份文档说「已完成」又说「还没开始建」
+
+[c-scope-doc-says-done-and-not-built]
+
+> **`docs/dspark-scope.md`「Done in this branch」第 3 条**：
+> 「**The model build path (`src/models/dspark.cpp`) implements the feature-reuse
+> projection and the masked block forward, and the `draft-dspark` speculative
+> impl (`common/speculative.cpp`) runs the block-diffusion propose plus the
+> sequential Markov resample**」
+>
+> **同一份文档的「Gate」节**：
+> 「**Build the block-diffusion `draft()` loop and the dspark forward graph only
+> once dspark beats the MTP accept rate at training convergence on the target
+> model. Until then this branch stops at the multi-layer tap (reusable, low risk)
+> and the arch scaffolding (registration only).**」
+
+> **⚠️ 两节不可能同时为真。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份文档的「已完成」与「准入门槛」互相矛盾时，
+> 信「已完成」——因为代码的存在是一个可验证的事实，
+> 而「Gate」是一个可能过期的意图。**
+>
+> **⭐⭐ 判据：**
+> **而这条也给出一个可检验的推论：
+> 「Done in this branch」是被实现追认的那一半，
+> 而「Gate」是写在同一份文件里但没有被删除的旧计划。**
+>
+> **⭐ 而本报告采信「已完成」是有外部证据的**：
+> **`speculative.cpp` 里确实有 `draft-dspark` 的实现（§10.355–§10.358），
+> `dspark-markov.cu/.h` 也确实存在（§10.347–§10.351）。**
+
+> ⚠️ **而这条对本报告的意义比它对项目本身大**：
+> **它说明「一份文档的时态」不可靠，而「仓库里有没有那个文件」可靠。**
+
+### 10.362 ⚠️⚠️⚠️ `markov_rank` 缺失 ⇒ 静默走「不做 Markov 修正」
+
+[c-missing-markov-rank-opens-the-degrade-path]
+
+> **`conversion/dspark.py` 96-98 行**：
+> ```python
+> markov_rank = hp.get("markov_rank")
+> if markov_rank is not None:
+>     self.gguf_writer.add_dspark_markov_rank(int(markov_rank))
+> ```
+> **`common/speculative.cpp` 931 与 960 行**：
+> ```cpp
+> markov_rank   = meta.markov_rank;
+> has_markov = markov_rank > 0 && llama_model_dspark_get_markov(model_dft, markov_w1, markov_w2);
+> ```
+
+> **⚠️ 故导出时缺这个 hparam，运行时就静默走「只做 base argmax」的分支**，
+> **而它只发一行 `LOG_WRN(... block logits will NOT be markov-corrected)`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个可选元数据字段如果缺失时既不报错也不标记，
+> 那它就变成了一个「因导出工具版本而异」的行为开关。**
+>
+> **⭐⭐ 判据：**
+> **故「同一个模型的两份 GGUF 可能一个做 Markov 修正一个不做」，
+> 而两个文件的 log 里只有一行 WRN。**
+>
+> **⭐⭐ 而这条与 §10.356 那条「三条静默降级」正好接上**：
+> **那里我数出三条路径，这里我找到了其中一条的触发条件。**
+
+> ⭐ **而 `block_size` 与 `markov_rank` 的待遇不同，这一点本身是一个信息**：
+> ```
+> block_size    = int(hp.get("block_size", 7))        <- 有默认值 7
+> markov_rank   = hp.get("markov_rank")               <- 无默认值
+> target_layers = hp.get("target_layer_ids")          <- 无默认值
+> mask_token_id = hp.get("mask_token_id")             <- 无默认值
+> ```
+> **⭐⭐ 判据：一个有默认值的字段是「我认为它总该是这个值」，
+> 一个没有默认值的字段是「它必须由导出方声明，否则我不猜」。**
+> **而 `markov_rank` 走的是后者，于是缺失时它退化成 0，而不是退化成某个猜测值。**
+
+### 10.363 🔥🔥🔥🔥🔥 `n_capture = 5`，来自一张**写死的层表**
+
+[c-dspark-captures-five-target-layers]
+
+> **`docs/dspark-scope.md`「dspark drafter shape」节**：
+> 「**Feature reuse. The drafter consumes the target model's hidden states from a
+> fixed set of layers, `target_layer_ids = (1, 9, 17, 25, 33)`. The five rows are
+> concatenated to width `5 * target_hidden`, projected by `fc` down to
+> `hidden_size`, then normalized by `hidden_norm` (RMSNorm).**」
+
+> **故 `n_capture = 5`，而这是 DSpark 比 MTP 贵的那部分——
+> 不在草稿器本身，而在「目标模型要多吐五个中间层」。**
+
+> **⭐⭐ 判据（本轮重要）：**
+> **一张写死的五层表说明这个 drafter 是对着某一个目标模型训练的**，
+> **而层号 `(1, 9, 17, 25, 33)` 的间隔是 `8, 8, 8, 8`——完全等距。**
+>
+> **⭐⭐ 判据：**
+> **等距采样层号是「我假设层的重要性是均匀的」这个假设的编码；
+> 而它是否成立，取决于目标模型有多少层，而本报告不知道那个数。**
+
+> **⭐⭐ 而这是「并行度上限为 1」（§10.349）之外的第二项 per-step 常量成本**：
+> **一条是串行链，一条是五层捕获。
+> 而两者都不随卡变快而变小。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -34604,6 +34784,40 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个 CPU 上的三重循环如果内层是 rank 长度的点积，那它的性能不由 FLOPs 决定，而由「能不能向量化」决定**」——**故 CUDA 路径不是「把 CPU 的活搬到 GPU」，而是「把 block_size 次长点积换成 block_size 次宽发射」**；
  — [src-btl3-speculative-cpp]
 
+### DSpark 的范围文档与转换器（第一百四十一轮补充）
+
+继续按上一轮的待追项推进。上一轮结尾说「找那个 drafter GGUF 的元数据」，
+本轮先拿到仓库树，发现 `docs/dspark-scope.md` 与 `conversion/dspark.py`
+这两个此前从未登记的来源，而它们直接回答了那两个值。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/docs/dspark-scope.md`（5,956 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/docs/dspark-scope.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **`block_size = 7`，不是 128，也不是 32**：
+「**Block diffusion. `block_size = 7`. A block of `block_size` positions is seeded with `mask_token_id` and predicted in parallel (not autoregressively), optionally over a few refinement passes, then truncated at the first low-confidence position**」——
+**故上一轮用 `n_use=128` 算出的 256 次发射与 64 MiB，全部要除以 128/7 = 18.29**；
+⭐⭐ 判据（本轮最重要）「**一个我以为「大概一百多」的参数如果实际是 7，那我上一轮所有基于它的绝对开销都高估了 18 倍；而观测（每位置发射一对 kernel）本身没有错**」；
+⭐⭐ 判据「**「以 X 为例」这个限定词不是谨慎，它是必需的——因为我没有那个值**」；
+(a) 🔥🔥🔥🔥🔥 **DSpark 的接受率还没打赢 MTP**：
+「**It is not yet proven: at the time of writing the upstream author is around 600 training steps in and the measured accept rate does not yet beat MTP. The runtime work below is gated on that result**」——
+⭐⭐ 判据（本轮最重要）「**一个投机解码器的收益表如果不附带「它的接受率有没有打赢基线投机解码器」，那这张表读起来就像「DSpark 是一个好东西」，而它可能不是**」；
+⭐⭐ **故 §10.346 那 1.57x-2.40x 的正确读法是「DSpark 相对【不投机】快」，而不是「相对【MTP】快」**——**而这两句的差是一整个量级的故事**；
+⚠️ **而这也给「PRO 6000 的 DSpark 列是空的」加了第五个候选解释：没人测 / 开关关了 / init 失败回退 / 权重读不出 / 它还不值得测**；
+(b) ⚠️⚠️⚠️ **同一份文档的两节互相矛盾**：「**## Done in this branch ... 3. dspark forward graph and block-diffusion draft loop. The model build path (`src/models/dspark.cpp`) implements the feature-reuse projection and the masked block forward**」而「**## Gate ... Build the block-diffusion `draft()` loop and the dspark forward graph only once dspark beats the MTP accept rate**」；
+⭐⭐ 判据「**当一份文档的「已完成」与「准入门槛」互相矛盾时，信「已完成」——因为代码的存在是一个可验证的事实，而「Gate」是一个可能过期的意图**」——**而本报告采信「已完成」是有外部证据的：speculative.cpp 里确实有 draft-dspark 的实现**；
+(c) 🔥🔥🔥🔥🔥 **`n_capture = 5`，来自一张写死的层表**：「**target_layer_ids = (1, 9, 17, 25, 33). The five rows are concatenated to width 5 * target_hidden, projected by fc down to hidden_size, then normalized by hidden_norm (RMSNorm)**」——**故 DSpark 每步要读目标模型五个中间层的隐藏态**；
+⭐⭐ 判据「**层号 (1, 9, 17, 25, 33) 的间隔是 8, 8, 8, 8——完全等距；等距采样层号是「我假设层的重要性是均匀的」这个假设的编码**」；
+⭐⭐ **而这是「并行度上限为 1」（§10.349）之外的第二项 per-step 常量成本：一条是串行链，一条是五层捕获；而两者都不随卡变快而变小**；
+2. [GitHub / Badtheorylabs — `native/llama.cpp/conversion/dspark.py`（8,010 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/conversion/dspark.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **转换器里 `block_size` 有字面默认值 7，而其余三个维度没有**：
+「**block_size = int(hp.get("block_size", 7))**」+「**markov_rank = hp.get("markov_rank"); if markov_rank is not None: add_dspark_markov_rank(...)**」+「**target_layers = hp.get("target_layer_ids"); if target_layers is not None: ...**」+「**mask_token_id = hp.get("mask_token_id")**」——
+⚠️⚠️⚠️ **故 `markov_rank` 缺失时元数据里没有这个键，于是整条「不做 Markov 修正」的路径被静默打开**：「**has_markov = markov_rank > 0 && llama_model_dspark_get_markov(...)**」——**而它只发一行 LOG_WRN**；
+⭐⭐ 判据「**一个可选元数据字段如果缺失时既不报错也不标记，那它就变成了一个「因导出工具版本而异」的行为开关**」；
+⭐⭐ 判据「**一个有默认值的字段是「我认为它总该是这个值」，一个没有默认值的字段是「它必须由导出方声明，否则我不猜」；而 markov_rank 走的是后者，于是缺失时它退化成 0，而不是退化成某个猜测值**」；
+ — [src-btl3-dspark-scope] [src-btl3-conv-dspark]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -34743,7 +34957,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=399, evidence=2698, claims=1902, claims_high=1554, claims_disputed=9, trace_events=869, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=401, evidence=2704, claims=1907, claims_high=1559, claims_disputed=9, trace_events=873, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
