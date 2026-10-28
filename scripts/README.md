@@ -40,6 +40,59 @@ python scripts/validate_research.py                         # 默认 research/ �
 
 退出码：全通过为 `0`，任一失败为 `1`。
 
+### `audit_uncited.py` — 已记录但正文未引用
+
+```bash
+python scripts/audit_uncited.py research/rtx-pro-6000
+```
+
+**为什么存在**：校验器只能检查「正文引用的 id 是否存在」，无法检查「已记录的主张是否在正文中被引用」。后者一旦缺失，prose 与 CSV 就会脱节，而所有自动检查仍然通过。
+
+输出：主张总数 / 已引用 / 未引用（含百分比），再按 `confidence` 与 `as_of` 分布，最后列待核实清单。
+
+⚠️ 它给出的是**待核实清单**，不是错误清单——「内容没写」与「写了没打标签」都会被计入，需要人工区分。
+
+### `audit_coverage.py` — 来源覆盖率
+
+```bash
+python scripts/audit_coverage.py research/rtx-pro-6000
+```
+
+统计每个来源被多少条证据覆盖、每条证据被多少条主张引用，用来发现「登记了很多来源但只读了少数」这类偏差。**分母是「已登记的来源数」，不是「存在的资料数」**——这一点必须写在结论里，否则覆盖率会被读成完整度。
+
+### `audit_duplicate_sources.py` — 重复来源（只读）
+
+```bash
+python scripts/audit_duplicate_sources.py research/rtx-pro-6000
+```
+
+按 URL 归一化（去协议、去 `www.`、去尾斜杠、去 fragment）分组，报告同一 URL 被登记为多个 `source_id` 的情况。
+
+**只读，不合并。** 合并需要一条裁决规则（保留哪个 id、证据怎么迁移、主张的 `evidence_ids` 怎么改），而这条规则属于研究决策，不属于工具。
+
+### `audit_id_drift.py` — `document_id` 命名漂移
+
+```bash
+python scripts/audit_id_drift.py research/rtx-pro-6000
+python scripts/audit_id_drift.py research/*
+```
+
+**为什么存在**（第 229 轮）：跑「双向孤儿检查」时发现 5 个 `source_id` 各对应两个 `document_id`。核对后确认每一对都是同一份文档被写了两个名字——不是真的有两份文档。故 `distinct(document_id)` 这个数被高估了。
+
+这个缺陷之所以长期没被发现，是因为既有的检查器只朝两个方向看：`validate.py` 的 C1 从 claim 往 evidence 看，孤儿检查从 source 往 evidence 看。**两个方向都不是「同一来源内的 `document_id` 是否唯一」。**
+
+输出每组漂移的：各 id 的证据条数、正文出现次数、是否等于 `doc-<source stem>`，以及三种候选归一规则各自的结论。
+
+⚠️ **本脚本不自动归一。** 三种规则在本归档里给出不同答案：`doc-6k-power`(10) 与 `doc-rtx6kpro`(10) 打平使多数派失效；`doc-blender`(3) 多数派指向短名但 stem 规则指向长名；而 stem 规则整体只覆盖 349/440 组，故它不是一个可推广的归档惯例。**裁决留给人。**
+
+### `fix_stray_closer.py` — 修复未闭合的字符串
+
+```bash
+python scripts/fix_stray_closer.py scripts/_zzNNa.py
+```
+
+扫一个待运行脚本里「跨行的中文引号"…"没有闭合」这类错误，并就地修好。用于批量生成 CSV 的脚本，避免 `SyntaxError` 在写入中途才暴露。
+
 ## 内部工具（下划线前缀）
 
 以下脚本是**操作性工具**，不保证接口稳定，主要服务于人工/代理批量写归档。

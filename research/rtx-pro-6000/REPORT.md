@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：442 ｜ **证据数**：2817 ｜ **主张数**：2012（高置信 1663，争议 9）
+> **来源数**：445 ｜ **证据数**：2825 ｜ **主张数**：2020（高置信 1671，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -32697,6 +32697,294 @@ exit 0
 > **「多」这一侧干净，「少」那一侧只有两个已知项。
 > 故本报告的来源表与证据表在「引用完整性」上是双向闭合的。**
 
+### 10.469 🔥🔥🔥🔥🔥 同一模型的自评**永远不能否决验收**
+
+[c-self-critique-can-never-gate-acceptance]
+
+> **`Prism/src/prism/verifier.py` 第 3-18 行**：
+> ```
+> REDESIGNED per the frontier-vs-Prism research audit
+> (docs/research/frontier-vs-prism.md):
+>
+>   - The research is unambiguous: reliability comes from EXECUTION (tests,
+>     compile, type-check, diagnostics) and separately-trained verifiers — NOT
+>     from a weak model critiquing itself (which can *degrade* accuracy and
+>     suffers self-preference bias).
+>   - So execution is now the PRIMARY signal. `best_of_n` ranks candidates by the
+>     execution signal, not by self-judgment.
+>   - Same-model self-critique is DEMOTED to an optional hint (`adversarial=True`,
+>     off by default) that only supplies repair suggestions and tie-breaks — it
+>     can never gate acceptance.
+>   - A SEPARATE/stronger verifier model may be supplied (`verifier_client`); the
+>     generator never judges itself.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个系统如果主动把「自己判断自己」降级为不可否决的提示，
+> 那它对「什么算证据」的定义是排他的，而不是加权的。**
+>
+> **⭐⭐ 判据：**
+> **故「`execution` is now the PRIMARY signal」这句话的重点不在 `PRIMARY`，
+> 而在「`self-critique` can never gate acceptance」这个绝对条款。**
+>
+> ⭐⭐ **而这条对本报告是一个直接可用的判据：
+> 本报告里凡是我自己判断自己的段落
+> （例如「这一节是本轮最重要的」），都不应该被当成验收依据。**
+> **⚠️ 而 §10 里有大量这类自评句，它们从未被标记为「不可验收」。**
+> **⭐⭐ 这是一个新的、可执行的自我纪律：
+> 每节的「判据」句应该只被读成「我认为」，而不是「已证」。**
+
+### 10.470 ⭐⭐⭐⭐⭐ 「接受」这个属性**只读一个字段**
+
+[c-accepted-reads-exactly-one-field]
+
+> **`Prism/src/prism/verifier.py` 64-67 行**：
+> ```python
+> @property
+> def accepted(self) -> bool:
+>     """Trusted iff EXECUTION passed. Self-critique cannot accept or reject."""
+>     return self.ok
+> ```
+> **而 `ok` 的注释是（56 行）**：
+> ```python
+> ok: bool  # execution-grounded pass (compiles + tests pass if any exist)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「接受」判定如果只读一个字段，
+> 那它的语义完全由那个字段的定义决定——而这是可审计的前提。**
+>
+> **⭐⭐ 判据：**
+> **故「`accepted == ok`」这种写法比「`accepted = ok and not issues`」更可审计，
+> 因为后者的语义散落在两个地方。**
+>
+> ⭐⭐ **而这条给本报告一个可借用的形式：
+> 每一节的结论应该只依赖一个可命名的字段
+> （`citations` / `contradicted` / `gap_remaining`），
+> 而不是靠句子里的形容词累积。**
+
+### 10.471 🔥🔥🔥🔥🔥 「tiny tie-break」的**负项没有上界**
+
+[c-the-tiny-tiebreak-is-unbounded-on-the-negative-side]
+
+> **`Prism/src/prism/verifier.py` 115-122 行**：
+> ```python
+> def _score(report: ExecReport, crit: Optional[Critique], n_files: int) -> float:
+>     """Ranking score is EXECUTION-DOMINATED. Critique is at most a small tie-break."""
+>     s = report.signal  # [0, 3], the real signal
+>     if n_files == 0:
+>         return -1.0
+>     if crit is not None:  # tie-break only, tiny weight — never flips a pass/fail
+>         s += 0.15 if crit.satisfies else -0.05 * len(crit.issues)
+>     return round(s, 3)
+> ```
+> **而 `report.signal` 的上界是 `3.0`（`execution.py` 45 行），
+> 故当 `len(crit.issues) > 60` 时，负项就超过了整个执行信号的上界。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「只做打破平局」的项，如果它的取值范围可以超过被打破的那个量，
+> 那它就不是打破平局，而是主导排序。**
+>
+> **⭐⭐ 判据：**
+> **故「权重小」这个说法必须伴随一个数值上界，
+> 否则它只是一个形容词。**
+>
+> ⚠️ **而这条对本报告是一个直接的检验：
+> 本报告里凡是我说「这一项影响较小」的地方，有没有给过数值上界？
+> 答案是没有——一次也没有。**
+>
+> **⭐⭐ 而讽刺的是，这处不一致恰好出现在一个
+> 专门为了「不让自评影响判定」而重写的文件里。**
+> **故它说明：一条原则被写进 docstring 不等于它被写进算术。**
+
+### 10.472 🔥🔥🔥🔥🔥 没有 `pytest` 时，`ok` 退化为**只要编译通过**
+
+[c-ok-degrades-to-compile-only-without-pytest]
+
+> **`Prism/src/prism/execution.py` 第 156-164 行**：
+> ```python
+> report = ExecReport(
+>     ok=compiled and (not tests_ran or tests_passed) and (types_ok is not False),
+>     compiled=compiled,
+>     tests_ran=tests_ran,
+>     tests_passed=tests_passed,
+>     types_ok=types_ok,
+>     errors=errors,
+>     detail={"tests": test_detail[-2000:], "types": types_detail},
+> )
+> ```
+> **故 `tests_ran=False` 时 `not tests_ran` 为 `True`，
+> `ok` 只剩 `compiled` 与 `types_ok is not False` 两个条件。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个条件如果写成「没有 X 或者 X 通过」，
+> 那它在 X 缺席时恒真；
+> 故这条写法的安全性完全依赖于「X 的缺席是否会被记录」。**
+>
+> **⭐⭐ 判据：**
+> **故 `tests_ran` 这个字段不是诊断信息，
+> 而是这个判定的前置条件。**
+>
+> ⭐⭐ **而这条给本报告一个可引用的形式：
+> 「未获取」这个状态如果只出现在文字里而不出现在判定里，
+> 那所有依赖它的结论都会在它缺席时自动成立。**
+> **⚠️ 而本报告的 `stop_reason` 是 `gap_remaining`，
+> 这正是「把缺席写进了判定」——故本报告在这一点上做对了。**
+
+### 10.473 🔴🔴🔴 那个「接受门」依赖一个**可选依赖**
+
+[c-the-acceptance-gate-depends-on-an-optional-dependency]
+
+> **`Prism/pyproject.toml`**：
+> ```toml
+> dependencies = []  # core is stdlib-only, on purpose
+>
+> [project.optional-dependencies]
+> mcp = ["mcp>=1.0"]
+> tokens = ["tiktoken>=0.5"]
+> dev = ["pytest>=7"]
+> ```
+> **而 `Prism/README.md` 第 78 行把这件事当成优点宣传**：
+> ```bash
+> # 2. clone — the core is stdlib-only, nothing to pip install to try it
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个系统如果它的「接受门」依赖一个可选依赖，
+> 那它的默认安装态就是「接受门关闭」——
+> 而这不是缺陷，是设计的必然后果。**
+>
+> **⭐⭐ 判据：**
+> **故「标准库优先」与「有测试才算通过」这两条原则在这里直接冲突，
+> 而作者选择了前者。**
+>
+> ⭐⭐ **而这条对本报告是一次校准：
+> 我一直在把「有测试」当成一个仓库的强度指标，
+> 而在一个默认不装 `pytest` 的仓库里，
+> 测试文件的**存在**与测试的**执行**是两件事。**
+> **⚠️ 而本报告此前从未把「测试文件数」与
+> 「测试是否在默认路径上被执行」分开过——
+> §10.443 那句「8 个测试文件 / 33 个测试函数 / 101 个 assert」
+> 就是这种混同的一个实例。**
+
+### 10.474 ⭐⭐⭐⭐⭐ 那个分数是**可复算的**，因为权重写在函数里
+
+[c-signal-is-a-recomputable-weighted-sum]
+
+> **`Prism/src/prism/execution.py` 44-59 行**：
+> ```python
+> @property
+> def signal(self) -> float:
+>     """A single execution-grounded reliability score in [0, 3].
+>
+>     Execution evidence dominates: passing tests > compiles-clean > broken.
+>     This is what best-of-N should rank by (NOT a self-critique score).
+>     """
+>     if not self.compiled:
+>         return 0.0
+>     s = 1.0  # compiles
+>     if self.tests_ran:
+>         s += 1.5 if self.tests_passed else -0.5
+>     if self.types_ok is True:
+>         s += 0.5
+>     elif self.types_ok is False:
+>         s -= 0.25
+>     return round(max(0.0, s), 3)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当权重全部写在一个函数里且带注释时，这个分数就是可复算的——
+> 而「可复算」正是它与「主观评分」的唯一区别。**
+>
+> **⭐⭐ 判据：**
+> **故一个分数的可信度不取决于它是否精确，
+> 而取决于它的构造是否被写下来。**
+>
+> ⭐⭐ **而这条给本报告一个可借用的形式：
+> `confidence` 的 `high` / `medium` / `low` 目前没有写下任何构造规则，
+> 故它不是一个可复算的量——
+> 而 §10.461 已经说过它是序关系，不是概率。**
+> **⭐⭐ 两条合起来是一个更强的结论：
+> 它既是序关系，又没有构造规则——
+> 故它是一个**不可复算的序**。**
+> **⚠️ 而这不是本报告独有的问题：
+> 任何人工标注的置信度都有这个性质。
+> 但差别在于，Prism 把它的权重写下来了，而本报告没有。**
+
+### 10.475 🔥🔥🔥🔥🔥 路径逃逸**作废整个候选**，而不是扣分
+
+[c-an-unsafe-path-voids-the-whole-candidate]
+
+> **`Prism/src/prism/execution.py` 第 101-120 行**：
+> ```python
+> # model paths are untrusted,
+> # so every write is sandboxed via safe_join (no absolute / `..` escapes).
+> written_py: list[str] = []
+> escaped = False
+> for f in files:
+>     dst = safe_join(overlay, f.path)
+>     if dst is None:
+>         escaped = True
+>         errors.append({"file": f.path, "line": None,
+>                        "message": "rejected unsafe path (absolute or traversal)",
+>                        "kind": "unsafe_path"})
+>         continue
+>     ...
+> # 1. compile check (stdlib, always) + light non-python check
+> compiled = not escaped  # an unsafe path fails the candidate outright
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个安全违规如果只被记成一条 `error` 而继续评估，
+> 那它会被后续的高分掩盖；
+> 把它直接接到「编译失败」这个变量上，才是真正的短路。**
+>
+> **⭐⭐ 判据：**
+> **故「作废」与「扣分」是两种不同的处置，
+> 而安全类问题必须用前者。**
+>
+> ⚠️ **而这条对本报告是一个提醒：
+> §10 里凡是我发现「这个数字来自一个不安全的方法」的地方，
+> 有没有把它整条作废？**
+> **答案多数时候是「没有」——我只是加了一条警告，而数字还留着。**
+> **⭐⭐ 而最典型的一例就是 §10.467 那五个 `document_id` 别名：
+> 我给了它一条警告，但 443 这个数仍然被印在每一轮的摘要里。**
+
+### 10.476 ⭐⭐⭐⭐⭐ `failed in (0, None)` ——**未知被读成通过**
+
+[c-tests-passed-accepts-a-none-failure-count]
+
+> **`Prism/src/prism/execution.py` 第 139-148 行**：
+> ```python
+> tests_ran = tests_passed = False
+> test_detail = ""
+> if compiled and run_tests:
+>     tinfo = _run_pytest(overlay, test_target)
+>     tests_ran = tinfo["ran"]
+>     tests_passed = tinfo["ran"] and (tinfo["failed"] in (0, None))
+>     test_detail = tinfo["output"]
+>     if tests_ran and not tests_passed:
+>         errors.append({"file": test_target or ".", "line": None,
+>                        "message": f"{tinfo['failed']} test(s) failed",
+>                        "kind": "test"})
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「通过」判定如果接受 `None`，
+> 那它把一个未知状态读成了一个已知的好状态——
+> 这与「缺证据当成通过」是同一类错误。**
+>
+> **⭐⭐ 判据：**
+> **故「未知」必须在判定里有一个独立的位置，
+> 而不能被归入任何一侧。**
+>
+> ⭐⭐ **而这条与 §10.446 那句
+> 「`Missing or invalid evidence supports an inconclusive decision`」
+> 是同一条原则的两种写法：
+> 前者说 `unknown` 不等于 `pass`，后者说 `missing` 不等于 `success`。**
+> **⭐⭐ 而 `inconclusive` 这个词之所以重要，
+> 正是因为它占了那个独立的位置。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -38425,6 +38713,44 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ **而修法很轻：把五个别名各自归一。归一之后 evidence 行数不变，只减少 document_id 的种类数——这正是「命名漂移」与「数据缺失」的区别：前者修 id，后者补内容**；
  — [src-prism-layer-bench] [src-prism-checkers-py] [src-prism-domains-py]
 
+### 「接受门」依赖一个可选依赖——而那个门是**整座房子的地基**（第一百五十五轮补充）
+
+上一轮定下的第一件事是「修那 5 组 `document_id` 别名」。本轮先做了它，**结果是它不能被修**——因为归一需要一条前置规则，而三种候选规则在 5 组里给出三种不同答案。于是改成 **加一个可执行检查器**（`scripts/audit_id_drift.py`）。然后读 `verifier.py`（10,896 字节 / 270 行）、`execution.py`（8,788 字节 / 216 行）与 `pyproject.toml`。
+
+1. **上一轮那条「把 5 组别名归一」的建议本轮被推翻**：
+**`audit_id_drift.py` 对每组列出三种候选规则的结论，而它们不一致：`src-rtx6kpro-power` 的 10 与 10 打平使多数派失效且 stem 不在候选中；`src-blenderartists` 多数派指向短名（doc-blender，3 条）而 stem 规则指向长名（doc-blenderartists，2 条）；`src-btl3-cuda-marker` 多数派指向 doc-btl3-cuda-avq-marker-h（5 条）而 stem 与正文引用都指向 doc-btl3-cuda-marker（3 条）**；
+⭐⭐ 判据（本轮最重要）「**一个「归一」建议，如果它需要一条前置规则而三条候选规则给出三个不同答案，那它不是一条建议，而是一个未做的决定**」——**故正确的产物不是「改好的数据」，而是「一个把三个答案并排列出来的检查器」。这正是本报告对「工具」与「决策」的分界：工具可以报事实，决策必须由人做**；
+⭐⭐ **而 `doc-<source stem>` 这条看似自然的规则只覆盖 349/440 组，故它在本归档里不是一个惯例，只是一个巧合——一个 79% 的规则看起来像规则，这正是它危险的地方**；
+2. [GitHub / Badtheorylabs — `Prism/src/prism/verifier.py`（10,896 字节，270 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/verifier.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **同一模型的自评永远不能否决验收**：**docstring 写「reliability comes from EXECUTION ... NOT from a weak model critiquing itself (which can degrade accuracy and suffers self-preference bias)」，而同模型自评被 DEMOTED 为可选提示且「can never gate acceptance」**；
+⭐⭐ 判据（本轮最重要）「**一个系统如果主动把「自己判断自己」降级为不可否决的提示，那它对「什么算证据」的定义是排他的，而不是加权的**」——**故重点不在 PRIMARY，而在「self-critique can never gate acceptance」这个绝对条款**；
+⚠️ **而这条对本报告是一个直接可用的判据：本报告里凡是我自己判断自己的段落（例如「这一节是本轮最重要的」），都不应该被当成验收依据——而 §10 里有大量这类自评句，它们从未被标记为「不可验收」。这是一个新的、可执行的自我纪律**；
+(a) ⭐⭐⭐⭐⭐ **「接受」只读一个字段**：**accepted 属性直接 return self.ok，而 docstring 是「Trusted iff EXECUTION passed. Self-critique cannot accept or reject.」**；
+⭐⭐ 判据「**一个「接受」判定如果只读一个字段，那它的语义完全由那个字段的定义决定——而这是可审计的前提**」——**故 accepted == ok 比 accepted = ok and not issues 更可审计；而每一节的结论应该只依赖一个可命名的字段，而不是靠句子里的形容词累积**；
+(b) 🔥🔥🔥🔥🔥 **「tiny tie-break」的负项没有上界**：**_score 的注释写「at most a small tie-break」与 「tiny weight — never flips a pass/fail」，而实现是 s += 0.15 if crit.satisfies else -0.05 * len(crit.issues)——负项无上界，而 report.signal 的上界是 3.0，故 len(crit.issues) > 60 时负项就超过整个执行信号的上界**；
+⭐⭐ 判据（本轮最重要）「**一个「只做打破平局」的项，如果它的取值范围可以超过被打破的那个量，那它就不是打破平局，而是主导排序。故「权重小」这个说法必须伴随一个数值上界，否则它只是一个形容词**」——**⚠️ 而本报告里凡是我说「这一项影响较小」的地方，一次也没有给过数值上界；而讽刺的是，这处不一致恰好出现在一个专门为了「不让自评影响判定」而重写的文件里——它说明一条原则被写进 docstring 不等于它被写进算术**；
+3. [GitHub / Badtheorylabs — `Prism/src/prism/execution.py`（8,788 字节，216 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/execution.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **没有 pytest 时 ok 退化为「只要编译通过」**：**第 157 行写 ok=compiled and (not tests_ran or tests_passed) and (types_ok is not False)——故 tests_ran=False 时 not tests_ran 为 True，ok 只剩 compiled 与 types_ok is not False 两个条件**；
+⭐⭐ 判据（本轮最重要）「**一个条件如果写成「没有 X 或者 X 通过」，那它在 X 缺席时恒真；故这条写法的安全性完全依赖于「X 的缺席是否会被记录」**」——**故 tests_ran 不是诊断信息，而是这个判定的前置条件；而「未获取」如果只出现在文字里而不出现在判定里，那所有依赖它的结论都会在它缺席时自动成立**；
+⭐⭐ **而本报告的 stop_reason 是 gap_remaining，这正是「把缺席写进了判定」——本报告在这一点上做对了**；
+(a) ⭐⭐⭐⭐⭐ **那个分数是可复算的，因为权重写在函数里**：**signal 是 compiles=1.0 起、tests_passed 加 1.5 / failed 减 0.5、types_ok 加 0.5 / False 减 0.25，最后 round(max(0.0, s), 3)**；
+⭐⭐ 判据「**当权重全部写在一个函数里且带注释时，这个分数就是可复算的——而「可复算」正是它与「主观评分」的唯一区别**」——**而本报告的 confidence 没有写下任何构造规则，故它既是一个序关系（10.461）又是一个不可复算的量。这不是本报告独有的问题，但差别在于 Prism 把权重写下来了，而本报告没有**；
+(b) 🔥🔥🔥🔥🔥 **路径逃逸作废整个候选**：**escaped=True 时继续循环，但 compiled = not escaped，注释是「an unsafe path fails the candidate outright」**；
+⭐⭐ 判据「**一个安全违规如果只被记成一条 error 而继续评估，那它会被后续的高分掩盖；把它直接接到「编译失败」这个变量上，才是真正的短路**」——**故「作废」与「扣分」是两种处置，安全类必须用前者；而本报告里凡是我发现「这个数字来自一个不安全的方法」的地方，多数时候只是加了一条警告，数字还留着——最典型的一例就是 10.467 那五个 document_id 别名：我给了它一条警告，但 443 这个数仍然被印在每一轮的摘要里**；
+(c) ⭐⭐⭐⭐⭐ **failed in (0, None) 把未知读成通过**：**tests_passed = tinfo["ran"] and (tinfo["failed"] in (0, None))**；
+⭐⭐ 判据「**一个「通过」判定如果接受 None，那它把一个未知状态读成了一个已知的好状态——这与「缺证据当成通过」是同一类错误。故「未知」必须在判定里有一个独立的位置**」——**而这条与 10.446 那句「Missing or invalid evidence supports an inconclusive decision」是同一条原则的两种写法：inconclusive 这个词之所以重要，正是因为它占了那个独立的位置**；
+4. [GitHub / Badtheorylabs — `Prism/pyproject.toml`（620 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/pyproject.toml)
+ —（2026-10 抓取）。
+🔴🔴🔴 **「接受门」依赖一个可选依赖**：**dependencies = [] 且注释「core is stdlib-only, on purpose」，而 pytest 只在 [project.optional-dependencies].dev 里；同时 README 第 78 行把这件事当优点宣传（「the core is stdlib-only, nothing to pip install to try it」）**；
+⭐⭐ 判据（本轮最重要）「**一个系统如果它的「接受门」依赖一个可选依赖，那它的默认安装态就是「接受门关闭」——而这不是缺陷，是设计的必然后果。故「标准库优先」与「有测试才算通过」这两条原则在这里直接冲突，而作者选择了前者**」；
+⚠️ **而这条对本报告是一次校准：我一直在把「有测试」当成一个仓库的强度指标，而在一个默认不装 pytest 的仓库里，测试文件的存在与测试的执行是两件事。本报告此前从未把「测试文件数」与「测试是否在默认路径上被执行」分开过——10.443 那句「8 个测试文件 / 33 个测试函数 / 101 个 assert」就是这种混同的一个实例**；
+ — [src-prism-verifier-py] [src-prism-execution-py] [src-prism-pyproject]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -38564,7 +38890,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=442, evidence=2817, claims=2012, claims_high=1663, claims_disputed=9, trace_events=956, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=445, evidence=2825, claims=2020, claims_high=1671, claims_disputed=9, trace_events=961, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
