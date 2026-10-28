@@ -20,7 +20,7 @@ research/<slug>/
 
 | slug | 主题 | 规模 |
 |---|---|---|
-| [rtx-pro-6000](./rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **380 来源 / 2646 证据 / 1868 主张（1484 高置信）/ 9 争议** |
+| [rtx-pro-6000](./rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **386 来源 / 2657 证据 / 1874 主张（1484 高置信）/ 9 争议** |
 
 ## 新建任务
 

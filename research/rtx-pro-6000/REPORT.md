@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：380 ｜ **证据数**：2646 ｜ **主张数**：1868（高置信 1520，争议 9）
+> **来源数**：386 ｜ **证据数**：2657 ｜ **主张数**：1874（高置信 1526，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -28219,6 +28219,278 @@ exit 0
 > **一个项目对自己最想要的那个能力（CUDA 支持）用了「候选」这个词，
 > 说明它的自我评价是按实测走的，不是按路线图走的。**
 
+### 10.325 🔥🔥🔥🔥🔥 启动器被**真的执行**过一次——不是被 grep 过
+
+[c-launcher-is-executed-not-grepped]
+
+> **`tests/test_cuda_packaging.py` 134-164 行**：
+> ```python
+> def test_posix_launcher_prints_safe_detected_context(tmp_path: Path) -> None:
+>     bundle = tmp_path / "bundle"
+>     (bundle / "bin").mkdir(parents=True)
+>     (bundle / "libexec").mkdir()
+>     (bundle / "model").mkdir()
+>     server = bundle / "libexec/llama-server"
+>     server.write_text("#!/bin/sh\nexit 0\n")
+>     server.chmod(0o755)
+>     model = bundle / "model/BTL-3-Compact-AVQ2.gguf"
+>     model.write_bytes(b"x")
+>     launcher = bundle / "bin/btl3-server"
+>     launcher.write_bytes((ROOT / "launch/btl3-cuda-server").read_bytes())
+>     launcher.chmod(0o755)
+>
+>     result = subprocess.run(
+>         [str(launcher)], check=True, capture_output=True, text=True,
+>         env={"PATH": "/usr/bin:/bin",
+>              "BTL3_GPU_MEMORY_MIB": "24576",
+>              "BTL3_PRINT_COMMAND": "1"},
+>     )
+>     assert "ctx_size=32768" in result.stdout
+>     assert "gpu_memory_mib=24576" in result.stdout
+>     assert "gpu_layers=99" in result.stdout
+>     assert "max_tokens=2048" in result.stdout
+>     assert "repeat_penalty=1.10" in result.stdout
+>     assert "thinking_enabled=false" in result.stdout
+> ```
+
+> **🔥 这是全仓库唯一一处启动器被真的执行。**
+> **⭐⭐ 故 §10.293 那张「四个启动器、两个 ctx 默认值」从「读出来的」
+> 升级成「跑出来的」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 shell 启动器如果有单元测试，那它一定是用子进程跑的；
+> 而用子进程跑就意味着这个测试同时验证了 shell 语法、参数拼装顺序、
+> 以及 stdout 格式——三样东西。**
+>
+> **⭐⭐ 判据：**
+> **一个脚本语言的程序，只要它被 `subprocess` 跑过一次，
+> 它的语法错误就不可能进到发布包里；
+> 而如果它只被 `grep` 过，它的语法错误只会在用户手里出现。**
+>
+> **⭐⭐ 判据：**
+> **「我读到它写了 32768」与「我运行它，它输出了 `ctx_size=32768`」
+> 是两级证据；后者包含前者，而前者不包含后者。**
+
+> ⭐ **注意那个假的 model 只有一字节（`b"x"`），假的 llama-server 只有
+> `#!/bin/sh` + `exit 0`**——**故这个测试完全不验证数值计算，
+> 只验证「启动器能不能起来并把参数说清楚」。**
+> **⭐⭐ 这恰好是启动器唯一可测的东西。**
+
+### 10.326 ⚠️⚠️⚠️ **边界表从头到尾没测过边界**
+
+[c-boundary-table-never-tests-boundaries]
+
+> **`tests/test_cuda_packaging.py` 64-75 行**：
+> ```python
+> @pytest.mark.parametrize(("memory_mib", "expected"), [
+>     (16_000, 16_384),
+>     (24_000, 32_768),
+>     (32_000, 65_536),
+>     (64_000, 98_304),
+>     (120_000, 131_072),
+> ])
+> def test_context_selection_reserves_memory(memory_mib: int, expected: int) -> None:
+>     assert choose_context(memory_mib) == expected
+> ```
+
+> **⚠️ 而真实边界是 `20,000` / `28,000` / `48,000` / `96,000`。**
+> **五个测试点全部离最近边界 ≥2,000 MiB：**
+>
+> | 测试点 | 落在档 | 距下边界 | 距上边界 |
+> |---:|---|---:|---:|
+> | 16,000 | 1 | -4,000 | 4,000 |
+> | 24,000 | 2 | 4,000 | 4,000 |
+> | 32,000 | 3 | 4,000 | 16,000 |
+> | 64,000 | 4 | 16,000 | 32,000 |
+> | 120,000 | 5 | 24,000 | - |
+>
+> **启动器那一层的测试也只取了 `24,576`（同样不是边界）。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份边界表的测试如果只在档内取点，
+> 它就验证了「映射对」，而没验证「边界对」；
+> 而边界恰恰是唯一会出错的地方。**
+>
+> **⭐⭐ 判据：**
+> **一个五档表，最少的完备测试是九个点：四个边界各两侧，加一个远端点。
+> 而它只用了五个中点。**
+>
+> **⚠️ 而这不是疏忽，是风格**：**24,000 这个点在启动器测试里也只取了一次，
+> 同样不是边界。两次都选中点。**
+>
+> **⭐⭐ 判据：**
+> **一个作者如果两次都选档内中点，
+> 说明他的心智模型是「测试映射」，而不是「测试阈值」。**
+
+### 10.327 🔥🔥🔥🔥🔥 13 个 `assertTrue` 全是**重言式**
+
+[c-lmstudio-test-is-a-tautology]
+
+> **`tests/test_lmstudio_package.py` 15-31 行**：
+> ```python
+> report = validate_package(PLUGIN)
+> self.assertTrue(report["streaming"])
+> self.assertTrue(report["cancellation"])
+> self.assertTrue(report["tool_calls"])
+> self.assertTrue(report["parallel_tool_calls"])
+> self.assertTrue(report["tool_call_fragments_buffered"])
+> self.assertTrue(report["api_errors_propagated"])
+> self.assertTrue(report["auto_start"])
+> self.assertTrue(report["full_gpu_offload"])
+> self.assertTrue(report["safe_context"])
+> self.assertTrue(report["bounded_generation"])
+> self.assertTrue(report["thinking_disabled_by_default"])
+> self.assertTrue(report["repetition_guard"])
+> self.assertTrue(report["explicit_stream_abort"])
+> ```
+
+> **🔥 这 13 个布尔量全部由 `validate_package()` 自己产出，然后测试断言它们为 `True`。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个测试如果断言「被测函数返回的布尔量为真」，
+> 它验证的是「这个函数会返回真」，而不是「这件事是真的」。**
+>
+> **⭐⭐ 判据：**
+> **如果 `validate_package` 里把某个检查删掉、直接把那个键写成 `True`，
+> 这个测试依然全绿；故这个测试对「检查是否存在」零敏感。**
+>
+> **⭐⭐ 而真正的分界不在 `assert` 的数量，而在「期望值的来源」**：
+> **期望值来自被测对象 → 重言式；
+> 期望值来自被测对象之外（字面量、哈希、另一次计算）→ 真测试。**
+>
+> **⭐⭐ 判据：**
+> **一个有 15 个 `assert` 的测试可以比一个有 2 个 `assert` 的测试更弱，
+> 唯一取决于那 15 个期望值是从哪来的。**
+>
+> ⭐ **而这条把 §10.299 那个「16 个 `true` 标志」的成因追到了底**：
+> **它不是被独立验证的，而是被原样断言了一遍。**
+
+### 10.328 🔥🔥🔥🔥🔥 有一条测试是**断言文档没有说过头**
+
+[c-one-test-asserts-docs-do-not-overclaim]
+
+> **`tests/test_lmstudio_package.py` 46-51 行**：
+> ```python
+> def test_unpublished_plugin_is_not_described_as_windows_verified(self) -> None:
+>     readme = (ROOT / "README.md").read_text()
+>     integration = (ROOT / "docs/patched-ollama-and-lmstudio.md").read_text()
+>     self.assertIn("Development preview", readme)
+>     self.assertIn("has not been published", integration)
+>     self.assertNotIn("| LM Studio | **Supported through generator**", readme)
+> ```
+
+> **🔥 两个 `assertIn` 要求「必须承认是开发预览」，
+> 一个 `assertNotIn` 禁止把它写成「已支持」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个测试套件里如果有一条「断言文档没有说过头」，
+> 说明这个项目的维护者知道：
+> 最危险的不是代码错了，而是文案比代码走得远。**
+>
+> **⭐⭐ 判据：**
+> **一条 `assertNotIn` 比十条 `assertIn` 更能防止一次公关事故；
+> 因为吹牛的形式是「多写了一行」，而不是「少写了一个字」。**
+>
+> **⭐⭐ 而这条与 §10.323 那份「不保证清单」是同一个姿态的两种实现**：
+> **一个是文档层面的自我限制，一个是测试层面的自我限制；
+> 而两者都指向同一件事：这个项目在防「说得比做得多」。**
+>
+> ⭐ **这是本报告见过的最特别的测试类型**：
+> **测试的对象不是代码，而是文案。**
+
+### 10.329 ⭐⭐⭐⭐⭐ 最硬的期望值全部来自**被测对象之外**
+
+[c-hardest-expectations-come-from-outside]
+
+> **`tests/test_btl3_gguf_signs.py`**：
+> ```python
+> def test_matches_real_torch_seed_digest(self) -> None:
+>     signs = seeded_signs(17_408, 40_521_442)
+>     packed = np.packbits(signs == 1, bitorder="little")
+>     self.assertEqual(hashlib.sha256(packed.tobytes()).hexdigest(),
+>         "5a80ab3cab9e3b38b1f85108937b49c7d97afb06a19d006e73cce78ac64d5e3a")
+> ```
+> **`tests/test_btl3_safetensor_view.py`**：
+> ```python
+> words = np.array([0x3F80, 0xC000], dtype="<u2")
+> np.testing.assert_array_equal(bfloat16_to_float32(words),
+>                               np.array([1.0, -2.0], dtype=np.float32))
+> ```
+> **`tests/test_launch_release.py`**：
+> ```python
+> assert (output / "model" / release.MODEL_NAME).stat().st_ino == model.stat().st_ino
+> ```
+
+> **🔥 三种「外部期望值」的三种形式：**
+> **一个来自另一个实现的哈希（17,408 元素、种子 40,521,442）、
+> 一个字面量位模式（`0x3F80`→`1.0`）、
+> 一个文件系统 inode 相等性。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **期望值来自一次外部计算（真 torch 跑出的抽样）
+> 比来自本仓库任何地方的期望值都强，
+> 因为它把这个实现与另一个生态钉在了一起。**
+>
+> **⭐⭐ 判据：**
+> **一个哈希常数如果是「我自己算的」，它只能防止回归；
+> 如果它是「另一个实现算的」，它才能证明正确。**
+>
+> **⭐⭐ 「两条例证覆盖同一条结论」比「一条例证覆盖两个结论」强；
+> 因为前者是两条独立路径，后者是一次侥幸。**
+> **而这里的 BF16 位移（§10.194 的「65,536 个位模式全部往返」与
+> 这里的两个位模式）正是两条例证覆盖同一条结论。**
+
+> **⚠️ 而 `tests/test_btl3_qwen35.py` 是这条尺子的反面例证**：
+> ```python
+> grouped = np.arange(2 * 3 * 2).reshape(2 * 3 * 2)
+> actual = reorder_v_heads(grouped, 0, key_heads=2, values_per_key=3, head_dim=2)
+> expected = grouped.reshape(2, 3, 2).transpose(1, 0, 2).reshape(-1)
+> np.testing.assert_array_equal(actual, expected)
+> ```
+> **🔥 它的期望值不是字面量，而是一次 numpy 现算的等价重排。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当期望值是一次同构变换时，这个测试证明的是「两种写法等价」，
+> 而不是「结果正确」；**
+> **若 `reorder_v_heads` 与 `transpose(1, 0, 2)` 都错成同一个样子，
+> 这个测试依然全绿。**
+>
+> **⭐⭐ 故「期望值从哪来」这条尺子有第四档**：
+> **来自被测对象（重言式）< 来自另一次同构变换（只证等价）
+> < 来自字面量（回归保护）< 来自另一个实现的一次计算（正确性证明）。**
+
+### 10.330 🔥🔥🔥🔥🔥 `41.03` 秒能被两个速率**加一个加载常数**解释
+
+[c-4103-seconds-reconciles-with-both-rates]
+
+> **`docs/rtx-pro-6000-speed-2026-07-19.md` 记三组数字**：
+> **`-p 512 -n 128 -r 3`、generation `43.16 tok/s`、prompt `84.70 tok/s`、
+> whole body `41.03 s`。**
+>
+> **一次独立复算：**
+> ```
+> 41.03 / 3                        = 13.68 s   每轮
+> 512 / 84.70 + 128 / 43.16        = 6.045 + 2.966
+>                                  = 9.011 s   纯推理
+> 13.68 - 9.011                    = 4.67 s    加载
+> 推理占比 9.011 / 13.68           = 65.9%
+> ```
+
+> **🔥 三组数字自洽：`13.68` 秒里 `9.01` 秒是推理、`4.67` 秒是模型加载。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个基准的总时长如果能被「prompt 数 / prompt 速率 + gen 数 / gen 速率」
+> 加一个常数解释，那这三组数字就是自洽的；
+> 而这是我能做的最强的内部一致性检验。**
+>
+> **⭐⭐ 判据：**
+> **「自洽」不等于「正确」，但它排除了一整类错误：
+> 记错单位、抄错一列、把两轮混成三轮。**
+>
+> **⭐⭐ 而这条也顺手解释了一个我一直没问的问题：
+> 为什么 `llama-bench` 要报总时长？
+> 因为它是唯一能把「加载开销」与「推理速率」分开的可检查冗余。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -33129,6 +33401,62 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个声明了 `outDir` 却在 `build` 里用 `--noEmit` 的项目，它的 `dist` 是一个从未存在过的目录**」；
  — [src-btl3-docs-launch-compact] [src-btl3-docs-compact-release-readme] [src-btl3-integrations-lmstudio-pkg] [src-btl3-integrations-lmstudio-manifest] [src-btl3-integrations-lmstudio-runlocal]
 
+### 六个测试文件与一次独立复算（第一百三十五轮补充）
+
+继续按 r208 那 39 个清单推进，本轮读完 tests 下剩余六个测试文件，
+并把「M2 生成快于预填」这个新缺口转成一次可算的复算。
+
+1. [GitHub / Badtheorylabs — `tests/test_cuda_packaging.py`（6,289 字节，183 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_cuda_packaging.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **全仓库唯一一处「启动器被真的执行」的测试**：
+「**launcher.write_bytes((ROOT / launch/btl3-cuda-server).read_bytes())；result = subprocess.run([str(launcher)], check=True, capture_output=True, text=True, env={PATH: /usr/bin:/bin, BTL3_GPU_MEMORY_MIB: 24576, BTL3_PRINT_COMMAND: 1})；assert ctx_size=32768 / gpu_memory_mib=24576 / gpu_layers=99 / max_tokens=2048 / repeat_penalty=1.10 / thinking_enabled=false in result.stdout**」——
+⭐⭐ 判据（本轮最重要）「**一个 shell 启动器如果有单元测试，那它一定是用子进程跑的；而用子进程跑就意味着这个测试同时验证了 shell 语法、参数拼装顺序、以及 stdout 格式——三样东西**」；
+⭐⭐ 判据「**一个脚本语言的程序，只要它被 subprocess 跑过一次，它的语法错误就不可能进到发布包里；而如果它只被 grep 过，它的语法错误只会在用户手里出现**」；
+⭐⭐ 故 §10.293 那张「四个启动器、两个 ctx 默认值」从「读出来的」升级成「跑出来的」；
+(a) ⚠️⚠️⚠️ **边界表从头到尾没测过边界**：「**@pytest.mark.parametrize((memory_mib, expected), [(16_000, 16_384), (24_000, 32_768), (32_000, 65_536), (64_000, 98_304), (120_000, 131_072)])**」——**而真实边界是 20,000 / 28,000 / 48,000 / 96,000，五个点全部离最近边界 >=2,000 MiB；启动器那一层也只取了 24,576，同样不是边界**；
+⭐⭐ 判据「**一份边界表的测试如果只在档内取点，它就验证了「映射对」，而没验证「边界对」；而边界恰恰是唯一会出错的地方**」；
+⭐⭐ 判据「**一个五档表，最少的完备测试是九个点：四个边界各两侧，加一个远端点；而它只用了五个中点**」；
+⭐⭐ 判据「**一个作者如果两次都选档内中点，说明他的心智模型是「测试映射」，而不是「测试阈值」**」；
+(b) ⭐⭐⭐⭐⭐ **它真造 ELF 与 PE 头，字段位置与生产代码一致**：「**header[:4] = b"\x7fELF"; header[4] = 2; header[5] = 1; struct.pack_into("<H", header, 18, machine)**」+「**header[:2] = b"MZ"; struct.pack_into("<I", header, 0x3C, 128); header[128:132] = b"PE\0\0"; struct.pack_into("<H", header, 132, machine)**」——**e_machine @18 与 e_lfanew @0x3C 与 §10.288 记的生产代码逐字相同**；
+(c) ⭐⭐⭐⭐ **它不只断言「抛了异常」，还断言「没有留下半截产物」**：「**with pytest.raises(ValueError, match=CUDA backend): package_bundle(...)；assert not output.exists()**」——**故这条测的不只是拒绝，还有拒绝的原子性**；
+2. [GitHub / Badtheorylabs — `tests/test_launch_release.py`（3,680 字节，110 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_launch_release.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **它用 `st_ino` 断言模型是硬链接而不是拷贝**：「**assert (output / model / release.MODEL_NAME).stat().st_ino == model.stat().st_ino；assert output.stat().st_mode & 0o777 == 0o755；assert (output / SHA256SUMS).is_file()**」——**故「模型是外部的」这条声明被一次 inode 比较验证了，而不是靠读文档**；
+⭐⭐⭐⭐⭐ **「preview 不能被标成 supported」有一个专门的测试**：「**with pytest.raises(release.ReleaseError, match=conformance pending): release.build_release(supported_runtimes=[preview], preview_runtimes=[], ...)**」——**而 §10.298 记的 `raise ReleaseError(f"conformance pending runtime cannot be marked supported")` 正是这条测试对应的实现**；
+3. [GitHub / Badtheorylabs — `tests/test_lmstudio_package.py`（2,768 字节，64 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_lmstudio_package.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **13 个 `assertTrue` 断言的是被测函数自己返回的布尔量**：「**report = validate_package(PLUGIN)；self.assertTrue(report[streaming]) / report[cancellation] / report[tool_calls] / report[parallel_tool_calls] / report[tool_call_fragments_buffered] / report[api_errors_propagated] / report[auto_start] / report[full_gpu_offload] / report[safe_context] / report[bounded_generation] / report[thinking_disabled_by_default] / report[repetition_guard] / report[explicit_stream_abort]**」——**加上 report[model] 与 report[default_base_url] 两条 assertEqual，共 15 条，全部来自 validate_package() 的返回值**；
+⭐⭐ 判据（本轮最重要）「**一个测试如果断言「被测函数返回的布尔量为真」，它验证的是「这个函数会返回真」，而不是「这件事是真的」**」；
+⭐⭐ 判据「**如果 validate_package 里把某个检查删掉、直接把那个键写成 True，这个测试依然全绿；故这个测试对「检查是否存在」零敏感**」；
+⭐⭐ 判据「**一个有 15 个 assert 的测试可以比一个有 2 个 assert 的测试更弱，唯一取决于那 15 个期望值是从哪来的**」；
+(a) 🔥🔥🔥🔥🔥 **有一条测试是「断言文档没有说过头」**：「**def test_unpublished_plugin_is_not_described_as_windows_verified(): self.assertIn("Development preview", readme)；self.assertIn("has not been published", integration)；self.assertNotIn("| LM Studio | **Supported through generator**", readme)**」——**两个 assertIn 要求承认是开发预览，一个 assertNotIn 禁止写成已支持**；
+⭐⭐ 判据「**一个测试套件里如果有一条「断言文档没有说过头」，说明这个项目的维护者知道：最危险的不是代码错了，而是文案比代码走得远**」；
+⭐⭐ 判据「**一条 assertNotIn 比十条 assertIn 更能防止一次公关事故；因为吹牛的形式是「多写了一行」，而不是「少写了一个字」**」；
+4. [GitHub / Badtheorylabs — `tests/test_btl3_gguf_signs.py`（737 字节，27 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_btl3_gguf_signs.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **符号生成的期望值是一个 17,408 元素的 SHA-256，且注明来自真 torch 种子**：「**signs = seeded_signs(17_408, 40_521_442)；packed = np.packbits(signs == 1, bitorder=little)；assertEqual(hashlib.sha256(packed.tobytes()).hexdigest(), 5a80ab3cab9e3b38b1f85108937b49c7d97afb06a19d006e73cce78ac64d5e3a)**」——**加上一个 8 元素的字面向量 `[-1,-1,-1,-1,1,-1,-1,1]`，两条一起把「种子算法」与「打包顺序」都钉死了**；
+5. [GitHub / Badtheorylabs — `tests/test_btl3_qwen35.py`（630 字节，26 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_btl3_qwen35.py)
+ —（2026-10 抓取）。
+⭐⭐⭐ **一个测试、零个 assert 语句、一条 `assert_array_equal`**：「**expected = grouped.reshape(2, 3, 2).transpose(1, 0, 2).reshape(-1)**」——**期望值不是字面量，而是用 numpy 现算的一次等价重排**；⭐⭐ 判据「**当期望值是一次同构变换时，这个测试证明的是「两种写法等价」，而不是「结果正确」**」；
+6. [GitHub / Badtheorylabs — `tests/test_btl3_safetensor_view.py`（1,189 字节，38 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_btl3_safetensor_view.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐ **它测的正是 §10.194 那条「BF16->F32 是精确位移」**：「**words = np.array([0x3F80, 0xC000], dtype=<u2)；assert_array_equal(bfloat16_to_float32(words), np.array([1.0, -2.0], dtype=np.float32))**」——**0x3F80 是 1.0 的 BF16 位模式、0xC000 是 -2.0 的；故这条与 §10.194 那次「65,536 个位模式全部往返」是同一条结论的两种验证**；
+7. 🔥🔥🔥🔥🔥 **一次独立复算：41.03 秒能被两个速率加一个加载常数解释**：
+**41.03 / 3 = 13.68 秒每轮；而 512 / 84.70 + 128 / 43.16 = 6.045 + 2.966 = 9.011 秒，差 4.67 秒即模型加载（推理占 65.9%）**；
+⭐⭐ 判据（本轮最重要）「**一个基准的总时长如果能被「prompt 数 / prompt 速率 + gen 数 / gen 速率」加一个常数解释，那这三组数字就是自洽的；而这是我能做的最强的内部一致性检验**」；
+⭐⭐ 判据「**「自洽」不等于「正确」，但它排除了一整类错误：记错单位、抄错一列、把两轮混成三轮**」；
+⭐⭐ 而这条也解释了一个我一直没问的问题：**为什么 llama-bench 要报总时长？因为它是唯一能把「加载开销」与「推理速率」分开的可检查冗余**；
+8. ⭐ **全仓库测试强度总表（八个文件）**：
+**33 个测试函数、101 个 assert、11 次 raises()，平均每测试 3.06 个 assert**；按「断言是否独立于被测对象」重排：**test_cuda_packaging（强，真跑启动器）> test_patched_ollama_package（强，真跑 --help）> test_launch_release（强，真改模型字节 + 真查 inode）> test_consumer_installer（中，真写 8 字节但只测到 size 层）> test_lmstudio_package（弱，13/16 断言是重言式）**；
+⭐⭐ 判据「**期望值的来源有三个层级，验证强度严格递增：来自被测对象 < 来自字面量 < 来自另一个实现的一次计算**」；
+ — [src-btl3-tests-cuda-packaging] [src-btl3-tests-launch-release] [src-btl3-tests-lmstudio-package] [src-btl3-tests-gguf-signs] [src-btl3-tests-qwen35] [src-btl3-tests-safetensor-view]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -33268,7 +33596,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=380, evidence=2646, claims=1868, claims_high=1520, claims_disputed=9, trace_events=831, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=386, evidence=2657, claims=1874, claims_high=1526, claims_disputed=9, trace_events=843, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
