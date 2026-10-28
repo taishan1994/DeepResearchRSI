@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：457 ｜ **证据数**：2876 ｜ **主张数**：2081（高置信 1731，争议 9）
+> **来源数**：459 ｜ **证据数**：2883 ｜ **主张数**：2088（高置信 1738，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -34818,6 +34818,211 @@ exit 0
 > 不是「缺 PRO 6000 的数」，
 > 而是「缺一个同一量化在两个架构上的数」。**
 
+### 10.538 🔥🔥🔥🔥🔥 那个 Hopper 内核在运行时**硬排除 Blackwell**
+
+[c-the-hopper-kernel-hard-blocks-blackwell]
+
+> **`ggml/src/ggml-cuda/mmq-hopper-q1.cu` 第 449-458 行**：
+> ```cpp
+> const int cc = ggml_cuda_info().devices[ctx.device].cc;
+> ...
+> if (cc < 900 || cc >= GGML_CUDA_CC_BLACKWELL ||
+>     // sm_90a wgmma only: not Ada, not Blackwell (no wgmma; needs the tcgen05 path)
+>     // 900 = Hopper; no GGML_CUDA_CC_HOPPER macro in this tree
+>     (!is_q1 && !is_q2) || src1->type != GGML_TYPE_F32 || dst->type != GGML_TYPE_F32 ||
+>     src1->ne[2] * src1->ne[3] != 1 || src0->ne[2] * src0->ne[3] != 1 ||
+>     (M % 128) || (N % 128) || (K % 128) ||
+>     !ggml_is_contiguous(src0) || !ggml_is_contiguous(src1)) {
+>     return false;
+> }
+> ```
+> **而 `common.cuh` 第 59 行是 `#define GGML_CUDA_CC_BLACKWELL 1200`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个内核同时写下界和上界时，
+> 它表达的不是「支持某个区间」，
+> 而是「这个指令只在这个区间里存在」——
+> 而下界与上界之间没有任何余量，
+> 故没有一个「较新的硬件自动更快」的可能。**
+>
+> **⭐⭐ 判据：**
+> **故 `cc >= 900 && cc < 1200` 这个区间恰好等于「Hopper 与 Hopper 之间」，
+> 也就是只有 Hopper 自己。**
+>
+> ⚠️ **而这条把上一轮的 §10.537 从「推断」升级成「原文确认」：
+> 上一轮说「这个路径在 `sm_120a` 上永远不可达」是从选项名推的；
+> 本轮读到的是 `return false`。**
+> **⭐⭐ 故 PRO 6000 的 `Q2_0` 129.9 tok/s 里不含这个优化——
+> 这不是「大概」，而是「运行时第一行就返回」。**
+
+### 10.539 ⚠️⚠️⚠️ 一条注释否认了一个**同目录里存在**的宏
+
+[c-the-comment-denies-a-macro-that-exists-in-the-same-tree]
+
+> **`mmq-hopper-q1.cu` 第 453 行**：
+> ```cpp
+> // 900 = Hopper; no GGML_CUDA_CC_HOPPER macro in this tree
+> ```
+> **而 `common.cuh` 第 55-56 行**：
+> ```c
+> #define GGML_CUDA_CC_ADA_LOVELACE    890
+> #define GGML_CUDA_CC_HOPPER          900
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条注释的理由是「某某不存在」时，
+> 这句话的过期速度比任何一个数字都快——
+> 因为「不存在」只需要一次提交就能被推翻，
+> 而推翻它的人不会回头改注释。**
+>
+> **⭐⭐ 判据：**
+> **故「写死一个字面量」在这个例子里是对的
+> （`900` 与 `GGML_CUDA_CC_HOPPER` 同值，故行为不变），
+> 但它对的原因不是注释说的那个原因。**
+>
+> ⚠️ **而这条与本报告 §10.491 那族（docstring 与行内注释互相矛盾）的关系是：
+> 那一族是「两份表示互相矛盾」，
+> 而这一族是「一份表示否认另一份的存在」——
+> 后者更难发现，因为读的人不会去搜一个被声称不存在的东西。**
+
+### 10.540 🔥🔥🔥🔥🔥 同一个功能有**两道闸**，语义不同
+
+[c-the-hopper-path-has-two-gates-compile-time-and-runtime]
+
+> **编译期**：`ggml/CMakeLists.txt` 第 202 行
+> `option(GGML_CUDA_HOPPER_Q1 ... OFF)`，
+> `ggml-cuda/CMakeLists.txt` 第 147 行
+> `target_compile_definitions(ggml-cuda PRIVATE GGML_USE_HOPPER_Q1)`。
+> **运行期**：`mmq-hopper-q1.cu` 第 2 行
+> `Experimental opt-in path (env GGML_HOPPER_Q1)`，
+> 第 445 行 `static const bool enabled = getenv("GGML_HOPPER_Q1") != nullptr;`。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一个功能需要两道闸时，
+> 第一道决定「这段代码在不在二进制里」，
+> 第二道决定「它在不在执行路径上」——
+> 故「打开了这个功能」这句话必须先问是哪一道。**
+>
+> **⭐⭐ 判据：**
+> **故「`GGML_CUDA_HOPPER_Q1=ON` 就能加速 `Q1_0`」这个理解是错的：
+> 还要 `GGML_HOPPER_Q1` 非空。**
+>
+> ⚠️ **而这条给本报告一个可检验的推论：
+> 即使有人在 PRO 6000 上把两道闸都打开，
+> 第 453 行仍然会 `return false`——
+> 故「刚刚好打开」和「根本打不开」在这里是同一个结果。**
+
+### 10.541 ⚠️⚠️⚠️ 环境变量**只看存不存在**，不看值
+
+[c-the-env-var-only-checks-presence]
+
+> **`mmq-hopper-q1.cu` 第 445 行**：
+> ```cpp
+> static const bool enabled = getenv("GGML_HOPPER_Q1") != nullptr;
+> ```
+> **故 `GGML_HOPPER_Q1=0` 与 `GGML_HOPPER_Q1=false` 一样会打开它。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条「关闭」的写法（`=0`）会被读成「打开」时，
+> 这个开关的默认值就不是「关闭」，
+> 而是「任何设置都等于开启」。**
+>
+> **⭐⭐ 判据：**
+> **故这类开关的正确用法只有两种：不设它，或者设任意值——
+> 而「设成 0 来关掉」是一个会静默起反作用的操作。**
+>
+> ⚠️ **而这条与本报告在 DSpark 里发现的同一现象完全一致：
+> 本报告此前已记录 `speculative.cpp` 第 973-977 行「只按首字符判断」，
+> 故 `=off` 不关闭它——
+> 两处独立的代码，同一个陷阱。**
+> **⭐⭐ 故这不是一个人的疏忽，
+> 而是「用 `getenv` 判存在」这种写法的默认后果。**
+
+### 10.542 ⭐⭐⭐⭐⭐ 三个维度**必须全部是 128 的倍数**
+
+[c-the-hopper-kernel-requires-all-three-dims-divisible-by-128]
+
+> **`mmq-hopper-q1.cu` 第 455 行**：
+> ```cpp
+> (M % 128) || (N % 128) || (K % 128) ||
+> ```
+> **而第 4-5 行**：
+> ```
+> Dispatched only when M,N,K % 128 == 0 and cc >= 900;
+> otherwise the caller falls through to the standard MMQ path.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个优化只对「三个维度全是 128 倍数」的形状生效时，
+> 它优化的不是「这个量化」，
+> 而是「这个量化在一个特定形状下的表现」——
+> 而那个形状恰好是「大 batch prefill」。**
+>
+> **⭐⭐ 判据：**
+> **故「fall through to the standard MMQ path」这句话是判据：
+> 失败不是错误，而是一条更慢的路——
+> 故任何「打开了这个开关所以更快」的判断，
+> 都必须先证明形状落在 128 的格点上。**
+>
+> ⚠️ **而这条给本报告一个新的测量要求：
+> §10 里所有「prefill 更快」的数字，
+> 都应该附带「M、N、K 各是多少，是否 128 的倍数」。**
+
+### 10.543 🔥🔥🔥🔥🔥 激活量化比 `q8_1` 粗四倍，而作者自己标了「待 KLD 验证」
+
+[c-activation-quantization-is-coarser-than-q8-1-and-unvalidated]
+
+> **`mmq-hopper-q1.cu` 第 1-5 行**：
+> ```
+> // Hopper (sm_90a) wgmma MMQ path for Q1_0: dequant-in-SMEM + int8 wgmma
+> // with exact per-block scaling.
+> // Activations are quantized fp32 -> int8 with a per-128-K absmax scale
+> // (coarser than q8_1's per-32; flagged for KLD validation).
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份实现自己写下「flagged for KLD validation」时，
+> 它交付的不是一个优化，而是一个待验证的假设——
+> 故任何引用它速度的人都引用了一个未验证正确性的路径。**
+>
+> **⭐⭐ 判据：**
+> **故「prefill 快了多少」这个数字，
+> 在这个开关打开时，
+> 同时也是一个「质量下降了多少」的未知数。**
+>
+> ⚠️ **而这条给本报告一个直接的可检验项：
+> 如果有人在 Hopper 上打开它，应当同时报告 KLD——
+> 而 corpus 里既没有 Hopper 的速度，也没有 KLD。**
+> **⭐⭐ 故这个功能的状态是「实现了、可编译、可运行、
+> 未经质量验证、且在被测硬件上不可达」。**
+
+### 10.544 🔥🔥🔥🔥🔥 §10.537 从「推断」升级为「原文确认」
+
+[c-the-pro-6000s-fastest-quant-prefill-path-is-now-confirmed-unreachable]
+
+> **上一轮说「那个为 `Q1_0`/`Q2_0` 写的 prefill 优化，
+> 只存在于 `sm_90a`，而不存在于 `sm_120a`」——
+> 那是从 CMake 选项名推的；
+> 本轮在 `mmq-hopper-q1.cu` 第 453 行读到了
+> `cc >= GGML_CUDA_CC_BLACKWELL` 与 `return false`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条推断被原文确认时，
+> 它的价值不在于「结论对了」，
+> 而在于「现在可以引用一句话而不是一段推理」——
+> 故这条把 §10.537 的置信基础从「名字」换成了「代码」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告对 PRO 6000 的 `Q2_0` 129.9 tok/s 的读法应当固定为：
+> 「在通用 MMQ 路径上，
+> 且专门的内核在运行时第一行就排除了这张卡」。**
+>
+> ⚠️ **而这条也说明「选项名足够推断」是一个危险的巧合：
+> 这一次数值对上了（`1200 >= 1200`），
+> 但上一轮同样基于名字的推断（`121-real`）是错的。**
+> **⭐⭐ 故两轮相邻、同一类推理、正确率 1/2——
+> 这就是为什么「读原文」不能省。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -40833,6 +41038,74 @@ shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 480
 `FATAL_ERROR` 在这里是一个关于「谁会打开它」的声明：只有已经拥有 CUTLASS checkout 的人才会。**而这条与本报告反复出现的「静默失败」模式正好相反：§10 里记过十几个「配置错了但什么都没说」的例子，而这一个是「配置错了就立刻停下」——故同一个仓库里两种纪律并存**；
  — [src-btl3-cuda-backend-cmake]
 
+### 读到内核本身：`return false`（第一百六十五轮补充）
+
+上一轮结尾说「查 `GGML_USE_HOPPER_Q1` 这个宏实装在哪些 `.cu` 文件里——那里应该能看到 `Q1_0`/`Q2_0` 的 wgmma kernel 本身」。本轮读到了：`mmq-hopper-q1.cu`（26,385 字节，490 行）。**而它第一件事就是把 RTX PRO 6000 排除掉。**
+
+1. 🔥🔥🔥🔥🔥 **那个 Hopper 内核在运行时硬排除 Blackwell**：
+`mmq-hopper-q1.cu` 第 449-458 行写「**const int cc = ggml_cuda_info().devices[ctx.device].cc; ... if (cc < 900 || cc >= GGML_CUDA_CC_BLACKWELL || // sm_90a wgmma only: not Ada, not Blackwell (no wgmma; needs the tcgen05 path) ... ) { return false; }**」，而 `common.cuh` 第 59 行是 `#define GGML_CUDA_CC_BLACKWELL 1200`；
+
+⭐⭐ 判据（本轮最重要）「**当一个内核同时写下界和上界时，它表达的不是「支持某个区间」，而是「这个指令只在这个区间里存在」——而下界与上界之间没有任何余量，故没有一个「较新的硬件自动更快」的可能。故 cc >= 900 && cc < 1200 这个区间恰好等于「Hopper 与 Hopper 之间」，也就是只有 Hopper 自己**」——**⚠️ 故 PRO 6000 的 Q2_0 129.9 tok/s 里不含这个优化——这不是「大概」，而是「运行时第一行就返回」**；
+2. ⚠️⚠️⚠️ **一条注释否认了一个同目录里存在的宏**：
+`mmq-hopper-q1.cu` 第 453 行注释写「**// 900 = Hopper; no GGML_CUDA_CC_HOPPER macro in this tree**」，而 `common.cuh` 第 55-56 行就写着「**#define GGML_CUDA_CC_ADA_LOVELACE 890 / #define GGML_CUDA_CC_HOPPER 900**」；
+
+⭐⭐ 判据（本轮最重要）「**当一条注释的理由是「某某不存在」时，这句话的过期速度比任何一个数字都快——因为「不存在」只需要一次提交就能被推翻，而推翻它的人不会回头改注释。故「写死一个字面量」在这个例子里是对的，但它对的原因不是注释说的那个原因**」——**⚠️ 而这一族比 §10.491 更难发现：那一族是「两份表示互相矛盾」，而这一族是「一份表示否认另一份的存在」——读的人不会去搜一个被声称不存在的东西**；
+3. 🔥🔥🔥🔥🔥 **同一个功能有两道闸，语义不同**：
+编译期是 `option(GGML_CUDA_HOPPER_Q1 ... OFF)` 加 `target_compile_definitions(ggml-cuda PRIVATE GGML_USE_HOPPER_Q1)`，运行期是 `getenv("GGML_HOPPER_Q1") != nullptr`；
+
+⭐⭐ 判据（本轮最重要）「**当同一个功能需要两道闸时，第一道决定「这段代码在不在二进制里」，第二道决定「它在不在执行路径上」——故「打开了这个功能」这句话必须先问是哪一道**」——⚠️ **故即使把两道闸都打开，第 453 行仍然会 return false：「刚刚好打开」和「根本打不开」在这里是同一个结果**；
+4. ⚠️⚠️⚠️ **环境变量只看存不存在，不看值**：
+`static const bool enabled = getenv("GGML_HOPPER_Q1") != nullptr;` ——故 `=0` 与 `=false` 都会打开它；
+
+⭐⭐ 判据「**当一条「关闭」的写法（=0）会被读成「打开」时，这个开关的默认值就不是「关闭」，而是「任何设置都等于开启」**」——**⚠️ 而这条与本报告在 DSpark 里发现的同一现象完全一致：`speculative.cpp` 第 973-977 行「只按首字符判断」，故 =off 不关闭它。两处独立的代码，同一个陷阱——故这不是一个人的疏忽，而是「用 getenv 判存在」这种写法的默认后果**；
+5. ⭐⭐⭐⭐⭐ **三个维度必须全部是 128 的倍数**：
+`(M % 128) || (N % 128) || (K % 128) ||`，而第 4-5 行写「Dispatched only when M,N,K % 128 == 0 and cc >= 900; otherwise the caller falls through to the standard MMQ path.」；
+
+⭐⭐ 判据「**当一个优化只对「三个维度全是 128 倍数」的形状生效时，它优化的不是「这个量化」，而是「这个量化在一个特定形状下的表现」——而那个形状恰好是「大 batch prefill」。故「fall through to the standard MMQ path」这句话是判据：失败不是错误，而是一条更慢的路**」——**⚠️ 故 §10 里所有「prefill 更快」的数字，都应该附带「M、N、K 各是多少，是否 128 的倍数」**；
+6. 🔥🔥🔥🔥🔥 **激活量化比 `q8_1` 粗四倍，而作者自己标了「待 KLD 验证」**：
+第 1-5 行写「Activations are quantized fp32 -> int8 with a per-128-K absmax scale (coarser than q8_1's per-32; flagged for KLD validation)」；
+
+⭐⭐ 判据「**当一份实现自己写下「flagged for KLD validation」时，它交付的不是一个优化，而是一个待验证的假设——故任何引用它速度的人都引用了一个未验证正确性的路径。故「prefill 快了多少」这个数字，在这个开关打开时，同时也是一个「质量下降了多少」的未知数**」——**⭐⭐ 故这个功能的状态是「实现了、可编译、可运行、未经质量验证、且在被测硬件上不可达」**；
+7. 🔥🔥🔥🔥🔥 **§10.537 从「推断」升级为「原文确认」**：
+上一轮是从 CMake 选项名推的，本轮在 `mmq-hopper-q1.cu` 第 453 行读到了 `return false`；
+
+⭐⭐ 判据「**当一条推断被原文确认时，它的价值不在于「结论对了」，而在于「现在可以引用一句话而不是一段推理」**」——**⚠️ 而这条也说明「选项名足够推断」是一个危险的巧合：这一次数值对上了（1200 >= 1200），但上一轮同样基于名字的推断（121-real）是错的。故两轮相邻、同一类推理、正确率 1/2——这就是为什么「读原文」不能省**；
+ — [src-btl3-mmq-hopper-q1-cu] [src-btl3-common-cuh]
+
+### 读到内核本身：`return false`（第一百六十五轮补充）
+
+上一轮结尾说「查 `GGML_USE_HOPPER_Q1` 这个宏实装在哪些 `.cu` 文件里——那里应该能看到 `Q1_0`/`Q2_0` 的 wgmma kernel 本身」。本轮读到了：`mmq-hopper-q1.cu`（26,385 字节，490 行）。**而它第一件事就是把 RTX PRO 6000 排除掉。**
+
+1. 🔥🔥🔥🔥🔥 **那个 Hopper 内核在运行时硬排除 Blackwell**：
+`mmq-hopper-q1.cu` 第 449-458 行写「**const int cc = ggml_cuda_info().devices[ctx.device].cc; ... if (cc < 900 || cc >= GGML_CUDA_CC_BLACKWELL || // sm_90a wgmma only: not Ada, not Blackwell (no wgmma; needs the tcgen05 path) ... ) { return false; }**」，而 `common.cuh` 第 59 行是 `#define GGML_CUDA_CC_BLACKWELL 1200`；
+
+⭐⭐ 判据（本轮最重要）「**当一个内核同时写下界和上界时，它表达的不是「支持某个区间」，而是「这个指令只在这个区间里存在」——而下界与上界之间没有任何余量，故没有一个「较新的硬件自动更快」的可能。故 cc >= 900 && cc < 1200 这个区间恰好等于「Hopper 与 Hopper 之间」，也就是只有 Hopper 自己**」——**⚠️ 故 PRO 6000 的 Q2_0 129.9 tok/s 里不含这个优化——这不是「大概」，而是「运行时第一行就返回」**；
+2. ⚠️⚠️⚠️ **一条注释否认了一个同目录里存在的宏**：
+`mmq-hopper-q1.cu` 第 453 行注释写「**// 900 = Hopper; no GGML_CUDA_CC_HOPPER macro in this tree**」，而 `common.cuh` 第 55-56 行就写着「**#define GGML_CUDA_CC_ADA_LOVELACE 890 / #define GGML_CUDA_CC_HOPPER 900**」；
+
+⭐⭐ 判据（本轮最重要）「**当一条注释的理由是「某某不存在」时，这句话的过期速度比任何一个数字都快——因为「不存在」只需要一次提交就能被推翻，而推翻它的人不会回头改注释。故「写死一个字面量」在这个例子里是对的，但它对的原因不是注释说的那个原因**」——**⚠️ 而这一族比 §10.491 更难发现：那一族是「两份表示互相矛盾」，而这一族是「一份表示否认另一份的存在」——读的人不会去搜一个被声称不存在的东西**；
+3. 🔥🔥🔥🔥🔥 **同一个功能有两道闸，语义不同**：
+编译期是 `option(GGML_CUDA_HOPPER_Q1 ... OFF)` 加 `target_compile_definitions(ggml-cuda PRIVATE GGML_USE_HOPPER_Q1)`，运行期是 `getenv("GGML_HOPPER_Q1") != nullptr`；
+
+⭐⭐ 判据（本轮最重要）「**当同一个功能需要两道闸时，第一道决定「这段代码在不在二进制里」，第二道决定「它在不在执行路径上」——故「打开了这个功能」这句话必须先问是哪一道**」——⚠️ **故即使把两道闸都打开，第 453 行仍然会 return false：「刚刚好打开」和「根本打不开」在这里是同一个结果**；
+4. ⚠️⚠️⚠️ **环境变量只看存不存在，不看值**：
+`static const bool enabled = getenv("GGML_HOPPER_Q1") != nullptr;` ——故 `=0` 与 `=false` 都会打开它；
+
+⭐⭐ 判据「**当一条「关闭」的写法（=0）会被读成「打开」时，这个开关的默认值就不是「关闭」，而是「任何设置都等于开启」**」——**⚠️ 而这条与本报告在 DSpark 里发现的同一现象完全一致：`speculative.cpp` 第 973-977 行「只按首字符判断」，故 =off 不关闭它。两处独立的代码，同一个陷阱——故这不是一个人的疏忽，而是「用 getenv 判存在」这种写法的默认后果**；
+5. ⭐⭐⭐⭐⭐ **三个维度必须全部是 128 的倍数**：
+`(M % 128) || (N % 128) || (K % 128) ||`，而第 4-5 行写「Dispatched only when M,N,K % 128 == 0 and cc >= 900; otherwise the caller falls through to the standard MMQ path.」；
+
+⭐⭐ 判据「**当一个优化只对「三个维度全是 128 倍数」的形状生效时，它优化的不是「这个量化」，而是「这个量化在一个特定形状下的表现」——而那个形状恰好是「大 batch prefill」。故「fall through to the standard MMQ path」这句话是判据：失败不是错误，而是一条更慢的路**」——**⚠️ 故 §10 里所有「prefill 更快」的数字，都应该附带「M、N、K 各是多少，是否 128 的倍数」**；
+6. 🔥🔥🔥🔥🔥 **激活量化比 `q8_1` 粗四倍，而作者自己标了「待 KLD 验证」**：
+第 1-5 行写「Activations are quantized fp32 -> int8 with a per-128-K absmax scale (coarser than q8_1's per-32; flagged for KLD validation)」；
+
+⭐⭐ 判据「**当一份实现自己写下「flagged for KLD validation」时，它交付的不是一个优化，而是一个待验证的假设——故任何引用它速度的人都引用了一个未验证正确性的路径。故「prefill 快了多少」这个数字，在这个开关打开时，同时也是一个「质量下降了多少」的未知数**」——**⭐⭐ 故这个功能的状态是「实现了、可编译、可运行、未经质量验证、且在被测硬件上不可达」**；
+7. 🔥🔥🔥🔥🔥 **§10.537 从「推断」升级为「原文确认」**：
+上一轮是从 CMake 选项名推的，本轮在 `mmq-hopper-q1.cu` 第 453 行读到了 `return false`；
+
+⭐⭐ 判据「**当一条推断被原文确认时，它的价值不在于「结论对了」，而在于「现在可以引用一句话而不是一段推理」**」——**⚠️ 而这条也说明「选项名足够推断」是一个危险的巧合：这一次数值对上了（1200 >= 1200），但上一轮同样基于名字的推断（121-real）是错的。故两轮相邻、同一类推理、正确率 1/2——这就是为什么「读原文」不能省**；
+ — [src-btl3-mmq-hopper-q1-cu] [src-btl3-common-cuh]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -40972,7 +41245,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=457, evidence=2876, claims=2081, claims_high=1731, claims_disputed=9, trace_events=985, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=459, evidence=2883, claims=2088, claims_high=1738, claims_disputed=9, trace_events=989, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
