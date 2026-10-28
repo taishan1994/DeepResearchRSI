@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：398 ｜ **证据数**：2690 ｜ **主张数**：1895（高置信 1547，争议 9）
+> **来源数**：399 ｜ **证据数**：2698 ｜ **主张数**：1902（高置信 1554，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -28650,6 +28650,12 @@ exit 0
 > **`92.2%` + `conditional tool-behavior` + `on the stated private gate`——
 > 三个词各自砍掉一类误读。**
 
+
+> ⚠️⚠️⚠️ **第 215 轮的限定（见 §10.353）**：
+> **这条推理的适用范围必须缩到「在同一后端内、且该量未被作者声明为顺序相关」时才成立。**
+> **因为 `common/speculative.cpp` 的 DSpark 重采样有四条路径（CUDA / Metal / host BLAS / host 标量），而 `dspark-markov.h` 明说四者的累加顺序不同、结果非逐位相同——「同一份数学在多后端不等价」在这里是被明确允许的。**
+> **⭐⭐ 判据：不一致如果是「允许的」，那它就不能被当作「共同上游代码」的证据。**
+
 ### 10.335 🔥🔥🔥🔥🔥 这条赛道上「格式」与「变换」是**分离**的
 
 [c-format-and-transform-are-separable-in-this-race]
@@ -29201,6 +29207,232 @@ exit 0
 > **它捕获的是「有没有发射失败」，而不是「第几个 kernel 算错了」。**
 > **⭐ 这是一个「一次同步、一次查错」的设计——**
 > **对一个必须串行的链来说是合理的，但它让「哪一个位置出错」不可定位。**
+
+### 10.352 🔥🔥🔥🔥🔥 `block_size` 与 `markov_rank` 是 **GGUF 元数据**，不是代码常量
+
+[c-block-size-and-markov-rank-are-gguf-metadata]
+
+> **`common/speculative.cpp` 920-931 行**：
+> ```cpp
+> llama_dspark_meta meta;
+> if (!llama_model_dspark_get_meta(model_dft, &meta)) { throw ... }
+> n_embd        = meta.n_embd;
+> n_vocab       = meta.n_vocab;
+> n_capture     = meta.n_capture;
+> n_embd_cap    = meta.n_embd_cap;
+> block_size    = meta.block_size;
+> mask_token_id = meta.mask_token_id;
+> markov_rank   = meta.markov_rank;
+> ```
+
+> **🔥 故 §10.351 那三个定量全部要加限定词**：
+> `2 * n_use`、`n_use * n_vocab * 4`、`1024:1` ——
+> **前两个的 `n_use`、第三个的 `rank`，都因模型而异。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「我以为它是代码常量」的数如果其实来自元数据，
+> 那我此前所有基于它的绝对量都只能写成「以 X 为例」。**
+>
+> **⭐⭐ 判据：**
+> **而这条也说明：判一个实现「快不快」之前，
+> 要先知道它的两个关键维度是从哪读的。**
+
+> ⚠️ **而 `block_size` 是「候选块长度」，它同时决定了：
+> 一轮最多产几个 token、要发射几次 kernel、要搬多少字节日志
+> ——一个元数据字段同时管三件事。**
+
+### 10.353 🔥🔥🔥🔥🔥 同一份数学**四条路径**：CUDA → Metal → host BLAS → host 标量
+
+[c-dspark-ships-four-resample-paths]
+
+> **`common/speculative.cpp` 1262-1390 行的四级回退**：
+> ```cpp
+> // 1. CUDA
+> if (markov_use_cuda && has_markov) {
+>     if (dspark_markov_cuda_resample(markov_cuda, logits_base, dp.id_last,
+>                                     block_size, (int32_t *) result.data())) { did_cuda = true; }
+> }
+> // 2. Metal
+> if (!did_cuda && has_markov) {
+>     if (llama_dspark_markov_resample(ctx_dft, block_size, dp.id_last, result.data())) { did_metal = true; }
+> }
+> // 3/4. host
+> if (!did_cuda && !did_metal)
+> for (int32_t k = 0; k < block_size; ++k) {
+> #ifdef LLAMA_DSPARK_MARKOV_BLAS
+>     cblas_sgemv(CblasRowMajor, CblasNoTrans, (int) n_vocab, (int) markov_rank, ...);
+> #else
+>     for (int64_t v = 0; v < n_vocab; ++v) { ... for (int64_t r = 0; r < markov_rank; ++r) ... }
+> #endif
+> }
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个算法如果为四个后端各写一遍，
+> 那「这四个后端的结果是否一致」就成了一个必须回答的问题；
+> 而 `dspark-markov.h` 已经替作者回答了：不一致，且只影响接受率。**
+
+> ⚠️⚠️⚠️ **而这条与本报告 §10.334 那条方法论发现直接冲突，必须标出来**：
+> **§10.334 说「CUDA 与 Metal 上出现同一个异常 ⇒ 指向共同的上游代码」；
+> 而这里「同一份数学在四条路径上不等价」是被明确允许的。**
+> **⭐⭐ 判据：**
+> **不一致如果是「允许的」，那它就不能被当作「共同上游代码」的证据。**
+> **故 §10.334 那条推理的适用范围要缩到：
+> 「在同一后端内、且该量未被作者声明为顺序相关」时才成立。**
+
+### 10.354 ⚠️⚠️⚠️ `LLAMA_DSPARK_MARKOV_CUDA` **只看第一个字符**
+
+[c-cuda-off-switch-reads-only-first-char]
+
+> **`common/speculative.cpp` 973-977 行**：
+> ```cpp
+> bool want_cuda_markov = has_markov;
+> if (const char * e = getenv("LLAMA_DSPARK_MARKOV_CUDA")) {
+>     const char c     = e[0];
+>     want_cuda_markov = want_cuda_markov && !(c == '0' || c == 'n' || c == 'N' || c == 'f' || c == 'F');
+> }
+> ```
+
+> **故关掉它的拼写集合是**：
+> ```
+> =0     关    =no      关    =false   关
+> =0000  关    =FALSE   关    =n       关
+> =off   开  <-- 首字符是 'o'，不在集合里
+> =disable 开
+> ```
+
+> **⚠️⚠️⚠️ 而 `=off` 是英语里最自然的「关」，它被静默解释成「开」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「关掉某个功能」的环境变量如果只看首字符，
+> 那它接受的拼写集合就比它看起来的大，
+> 而它拒绝的集合也比它看起来的大。**
+>
+> **⭐⭐ 故 §10.347 那条「有一个开关可以解释为什么没有数」，
+> 现在要加一个脚注：这个开关对拼写敏感。**
+
+### 10.355 🔥🔥🔥🔥🔥 这个 bug **已经在 MLX/Swift 端口上发生过一次**
+
+[c-the-batched-dspark-bug-already-happened]
+
+> **`common/speculative.cpp` 1237-1243 行**：
+> 「**This must never be batched over `mask_token_id` for all block positions at
+> once — that exact bug class already hit the on-device (MLX/Swift) port.
+> The assert below makes the sequential dependency structural rather than
+> just a comment: it is unsatisfiable if this loop is ever refactored to
+> precompute `prev_token_ids` up front from `draft_input_ids` instead of
+> chaining the sampled result forward.**」
+
+> **🔥 而第 1322-1389 行的实现把这句话落成了代码**：
+> ```cpp
+> llama_token prev_token = dp.id_last;
+> if (!did_cuda && !did_metal)
+> for (int32_t k = 0; k < block_size; ++k) {
+>     ...
+>     result.push_back(best_id);
+>     prev_token = best_id; // chain the SAMPLED token, never mask_token_id
+> }
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一段注释如果写着「that exact bug class already hit the X port」，
+> 那它就不是一个设计说明，而是一份事故记录。**
+>
+> **⭐⭐ 判据：**
+> **而它的护栏形式很值得记：一个「如果被重构就会不满足」的 assert，
+> 比一句「不要这么做」强得多。**
+>
+> **⭐⭐ 判据：**
+> **故「结构性不可满足」是比「注释警告」高一级的防护，
+> 因为它把违反从「不礼貌」变成了「编译或运行失败」。**
+
+> ⭐ **而这条与本报告 §10.203 那个 `RepetitionGuard` 形成对照**：
+> **那里守卫是活的但在 `push()` 里抛错，这里守卫是一个 assert 加一行赋值顺序；
+> 两者都是「把约束写进结构而不是写进文档」。**
+
+### 10.356 ⚠️⚠️⚠️ 三条**静默降级**，而它们只出现在日志里
+
+[c-three-silent-dspark-fallbacks]
+
+> **`common/speculative.cpp` 的三种「继续跑但结果不同」**：
+>
+> | # | 触发 | 代码 | 结果 |
+> |---|---|---|---|
+> | ① | CUDA init 失败 | `LOG_INF("... FAILED TO INIT (falling back to host path)")` | 走 Metal 或 host |
+> | ② | `markov_rank > 0` 但权重读不出 | `LOG_WRN("... block logits will NOT be markov-corrected")` | 只做 base argmax |
+> | ③ | 运行时 CUDA 失败 | `LOG_WRN("cuda markov resample failed ... falling back")` + `markov_use_cuda = false` | 降级且**永久** |
+
+> **⚠️ 注意 ③ 会把 `markov_use_cuda` 置 false，故它不是这一轮的降级，
+> 而是整个会话的降级。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个系统如果有三条「继续跑但结果不同」的路径，
+> 那它的性能数字必须附带「当时走的是哪一条」。**
+>
+> **⭐⭐ 判据：**
+> **而这三条都不会让 tok/s 变成 0——它们只会让它变小，
+> 或者让接受率变小。**
+>
+> **⭐⭐ 故 §10.345 那个「PRO 6000 的 DSpark 列是空的」的候选解释从 2 个变成 4 个**：
+> **没人测 / 开关关了 / init 失败回退 / 权重读不出。**
+
+### 10.357 ⭐⭐⭐⭐⭐ 候选块短于 `n_min` 时**整轮被静默放弃**
+
+[c-short-draft-is-silently-dropped]
+
+> **`common/speculative.cpp` 1392-1394 行**：
+> ```cpp
+> if (result.size() < (size_t) params.n_min) {
+>     continue; // dp.result stays empty: treated as a failed draft this round
+> }
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「这一轮没有草稿」与一个「这一轮草稿被拒」如果在下游同形，
+> 那么接受率这个指标就无法区分「抽不出」与「抽错了」。**
+>
+> **⭐⭐ 判据：**
+> **而这条正是 §10.346 那张收益表读法的关键：
+> DSpark 的加速比里混着「块太短被放弃」的轮次，
+> 而那个比例没有出现在任何一张表里。**
+
+### 10.358 🔥🔥🔥🔥🔥 host 标量路径是 `block_size × n_vocab × rank` 次乘加，且**逐 token 串行**
+
+[c-host-scalar-path-is-block-size-times-vocab-times-rank]
+
+> **`common/speculative.cpp` 1365-1390 行**：
+> ```cpp
+> for (int64_t v = 0; v < n_vocab; ++v) {
+>     const float * w2row = markov_w2.data() + (size_t) v * (size_t) markov_rank;
+>     float bias = 0.0f;
+>     for (int64_t r = 0; r < markov_rank; ++r) {
+>         bias += emb[r] * w2row[r];
+>     }
+>     const float logit = base_logits[v] + bias;
+>     if (logit > best_v) { best_v = logit; best_id = (llama_token) v; }
+> }
+> ```
+
+> **它在 `for (int32_t k = 0; k < block_size; ++k)` 之内，故总量是**：
+> ```
+> block_size × n_vocab × rank
+> block_size=128, n_vocab=131072, rank=32  ->  536,870,912 次乘加
+> ```
+> **而同一份活的 CUDA 版本是 `2 × block_size` 次 kernel 发射、
+> 每次 262,144 线程。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 CPU 上的三重循环如果内层是 `rank` 长度的点积，
+> 那它的性能不由 FLOPs 决定，而由「能不能向量化」决定。**
+>
+> **⭐⭐ 判据：**
+> **故 `cblas_sgemv` 与标量分支的差，
+> 是这次实现里唯一一个「同一个算法、同一个后端、两种写法」的对照，
+> 而作者把 BLAS 放在一个 `#ifdef` 后面，说明它不是默认。**
+>
+> **⭐⭐ 而这条也解释了为什么 CUDA 路径值得存在**：
+> **它不是「把 CPU 的活搬到 GPU」，
+> 而是「把 `block_size` 次长点积换成 `block_size` 次宽发射」。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -34342,6 +34574,36 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 (b) ⚠️ **`cudaGetLastError()` 只在 2 * n_use 个发射全部入队之后被调一次**：**它捕获的是「有没有发射失败」，而不是「第几个 kernel 算错了」**；
  — [src-btl3-dspark-markov-h] [src-btl3-dspark-markov-cu]
 
+### DSpark 的 host 侧实现（第一百四十轮补充）
+
+继续按上一轮的待追项推进。本轮读 `common/speculative.cpp`
+（97,104 字节，2,442 行），这是 DSpark 的 host 侧实现。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/common/speculative.cpp`（97,104 字节，2,442 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/common/speculative.cpp)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **`block_size` 与 `markov_rank` 都不是代码常量，而是 GGUF 元数据**：
+「**block_size = meta.block_size; mask_token_id = meta.mask_token_id; markov_rank = meta.markov_rank;**」——**故 §10.351 那三个定量（`2 * n_use`、`n_use * n_vocab * 4`、网格比）全部要加限定词**；
+⭐⭐ 判据（本轮最重要）「**一个「我以为它是代码常量」的数如果其实来自元数据，那我此前所有基于它的绝对量都只能写成「以 X 为例」**」；
+(a) 🔥🔥🔥🔥🔥 **同一份数学有四条路径**：「**CUDA（dspark_markov_cuda_resample）-> Metal（llama_dspark_markov_resample）-> host BLAS（cblas_sgemv）-> host 标量（三重循环）**」——
+**而 dspark-markov.h 已声明四者累加顺序不同、结果非逐位相同**；
+⚠️⚠️⚠️ **而这条与本报告 §10.334「CUDA 与 Metal 上出现同一个异常 ⇒ 指向共同上游代码」直接冲突**——**不一致如果是「允许的」，那它就不能被当作「共同上游代码」的证据**；
+**故 §10.334 那条推理的适用范围要缩到「同一后端内、且该量未被声明为顺序相关」**；
+(b) ⚠️⚠️⚠️ **`LLAMA_DSPARK_MARKOV_CUDA` 只看第一个字符**：「**const char c = e[0]; want_cuda_markov = want_cuda_markov && !(c == '0' || c == 'n' || c == 'N' || c == 'f' || c == 'F');**」——**故 `=0`、`=no`、`=false`、`=0000`、`=FALSE` 都会关掉，而 `=off` 不会（首字符是 o）**；
+⭐⭐ 判据「**一个「关掉某个功能」的环境变量如果只看首字符，那它接受的拼写集合就比它看起来的大，而它拒绝的集合也比它看起来的大**」；
+(c) 🔥🔥🔥🔥🔥 **这个 bug 已经在 MLX/Swift 端口上发生过一次**：「**This must never be batched over mask_token_id for all block positions at once -- that exact bug class already hit the on-device (MLX/Swift) port. The assert below makes the sequential dependency structural rather than just a comment: it is unsatisfiable if this loop is ever refactored to precompute prev_token_ids up front**」；
+⭐⭐ 判据「**一段注释如果写着「that exact bug class already hit the X port」，那它就不是一个设计说明，而是一份事故记录**」；
+⭐⭐ 判据「**「结构性不可满足」是比「注释警告」高一级的防护，因为它把违反从「不礼貌」变成了「编译或运行失败」**」；
+(d) 🔥🔥🔥🔥🔥 **DSpark 的注意力在块内完全非因果**：「**dspark attention is fully non-causal within a call: the draft block attends over the WHOLE persistent cache plus itself, with no position-based masking (attention_mask=None, is_causal=False in the reference)**」——**实现是 `llama_set_causal_attn(ctx_dft, false)`**；
+(e) ⚠️⚠️⚠️ **三条静默降级，只出现在日志里**：**① CUDA init 失败（LOG_INF）② markov_rank>0 但权重读不出（LOG_WRN，只因 only vanilla is supported）③ 运行时 CUDA 失败（LOG_WRN，并把 markov_use_cuda 置 false——是整会话的降级而不是这一轮的）**；
+⭐⭐ 判据「**一个系统如果有三条「继续跑但结果不同」的路径，那它的性能数字必须附带「当时走的是哪一条」**」——**而这三条都不会让 tok/s 变成 0，只会让它变小**；
+**故 §10.345 那个「PRO 6000 的 DSpark 列是空的」的候选解释从 2 个变成 4 个：没人测 / 开关关了 / init 失败回退 / 权重读不出**；
+(f) ⭐⭐⭐⭐⭐ **候选块短于 n_min 时整轮被静默放弃**：「**if (result.size() < (size_t) params.n_min) { continue; // dp.result stays empty: treated as a failed draft this round }**」——**故「这一轮没抽出草稿」与「这一轮草稿被拒」在下游同形**；
+⭐⭐ 判据「**接受率这个指标无法区分「抽不出」与「抽错了」**」；
+(g) 🔥🔥🔥🔥🔥 **host 标量路径是 `block_size * n_vocab * rank` 次乘加，且逐 token 串行**：**`block_size=128`、`n_vocab=131072`、`rank=32` 时是 536,870,912 次乘加；而同一份活的 CUDA 版本是 2 * block_size 次 kernel 发射、每次 262,144 线程**；
+⭐⭐ 判据「**一个 CPU 上的三重循环如果内层是 rank 长度的点积，那它的性能不由 FLOPs 决定，而由「能不能向量化」决定**」——**故 CUDA 路径不是「把 CPU 的活搬到 GPU」，而是「把 block_size 次长点积换成 block_size 次宽发射」**；
+ — [src-btl3-speculative-cpp]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -34481,7 +34743,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=398, evidence=2690, claims=1895, claims_high=1547, claims_disputed=9, trace_events=867, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=399, evidence=2698, claims=1902, claims_high=1554, claims_disputed=9, trace_events=869, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
