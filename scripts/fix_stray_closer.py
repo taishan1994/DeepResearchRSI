@@ -50,7 +50,7 @@ def fix(path: Path) -> int:
 def main() -> int:
     targets = sys.argv[1:]
     if not targets:
-        print('用法: python scripts/_fix_stray_closer.py <file.py> [...]')
+        print('用法: python scripts/fix_stray_closer.py <file.py> [...]')
         return 2
     rc = 0
     for t in targets:
