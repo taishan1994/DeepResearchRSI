@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：285 ｜ **证据数**：2223 ｜ **主张数**：1632（高置信 1294，争议 9）
+> **来源数**：286 ｜ **证据数**：2228 ｜ **主张数**：1637（高置信 1298，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -17821,6 +17821,162 @@ static ggml_prec ggml_cuda_mmq_get_prec_env() {
 > 它的数字的可比性是无法评估的——**
 > **⚠️ 而这与 §10.53 记的「同机器同权重同提示同一天 ≠ 受控比较」是同一条判据。**
 
+### 10.86 🔥🔥🔥 更正 §10.85：`GGML_CUDA_MMQ_PREC` **是有文档的**
+
+**`docs/build.md`（46,343 字节 / 907 行）第 309 行附近有完整一节** [c-mmq-prec-is-documented]：
+
+> 「**Override the activation precision that the model requests
+> for NVFP4 and MXFP4 matrix multiplications.
+> Currently supported values: `auto`, `q8`, `q4`.**」
+
+> ⚠️ **上一轮记的「285 个来源里只出现在源码中」是错的**——
+> **而错的原因很具体：我在读源码之前没有先读 `docs/`。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「我没找到」与「不存在」之间，
+> 还有一个中间态你没写出来：
+> 「我没有在我可能会找的地方找」——**
+> **⚠️ 而后者是一个可以立刻消除的不确定性。**
+>
+> ⭐⭐ **而更尖锐的是**：
+> **我上一轮已经写下了「去 `docs/` 里搜这个变量名
+> 是唯一能把『我没找到』变成『它不在那里』的动作」——
+> 然后我没有做，而是直接开了新的一轮。**
+>
+> **⭐⭐ 判据（这条是对我自己的）：**
+> **当你在报告里写下「下一步应该做 X」时，
+> 如果 X 只要一次抓取就能做，
+> 那么「没做 X 就写结论」是一种自我欺骗——**
+> **⚠️ 因为那句话本身证明了你知道怎么做。**
+>
+> ⭐⭐ **这与 §10.48 那条「引用链会成为『我读过了』的错觉来源」是同一族错误**：
+> **「我写下了要做」会成为「我做过了」的错觉来源。**
+
+### 10.87 🔥🔥🔥🔥🔥 一个此前完全不知道的机制：**层标记决定走 W4A4 还是 W4A8**
+
+[c-w4a16-layer-requests-8bit]
+
+> 文档原文：
+> 「**NVFP4 and MXFP4 layers marked as `W4A16` request 8-bit activations,
+> so on Blackwell those layers run through the `W4A8` path
+> instead of the native `W4A4` path.**」
+
+> ⚠️ 即 **同一个权重格式，可以因为「层被标记为 `W4A16`」而在 Blackwell 上走 `W4A8`**——
+> **这不是硬件限制，是模型侧的元数据。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「能力」有四个开关，而其中一个是「模型自己说自己要什么」时，
+> 「换一张更快的卡」就不再是提升性能的主要手段——**
+> **⚠️ 因为瓶颈可能在「模型请求了什么」。**
+
+**于是 §10.85 那张表从三个条件变成四个**：
+
+| # | 条件 | 性质 |
+|---|---|---|
+| ① | 权重格式 `NVFP4`/`MXFP4` | **文件属性** |
+| ② | 二进制能力（`>= 1200`） | **安装属性** |
+| ③ | 环境变量（`q8`） | **运行属性** |
+| ④ | **层标记（`W4A16` vs `W4A4`）** | ⚠️ **模型元数据** |
+
+> ⭐⭐ **这解释了本报告记录过但没解释的现象**：
+> **§10.47 的「NVFP4 在 SM12x 上崩」与 §10.30 的「dense 不受影响、MoE 崩」——
+> 两种报告的「NVFP4」可能对应不同的层标记。**
+>
+> **⭐⭐ 判据：**
+> **「同一份权重」这句话，在量化生态里几乎总是不完整的——**
+> **⚠️ 因为「权重」之外还有「每层的精度元数据」，
+> 而后者不在权重文件的主张量里。**
+>
+> ⭐ **可操作的检查**：
+> **如果你的 NVFP4 模型在 Blackwell 上没跑到预期，
+> 先查它的层标记是 `W4A16` 还是 `W4A4`——⚠️ 而不是先怀疑硬件。**
+
+### 10.88 ⭐⭐⭐ `q4` 的收益只在**预填充**，代价是**精度**
+
+[c-q4-benefit-is-prefill-only]
+
+> 「**Set `q4` to keep the native `W4A4` path for faster prompt processing
+> at the cost of accuracy, or `q8` to use the `W4A8` path for every layer**」
+
+> ⚠️ 即 **收益在 `prompt processing`，代价是 `accuracy`——文档没有说 decode 会变快。**
+
+> **⭐⭐ 判据：**
+> **「预填充受益」与「解码受益」是两个完全不同的产品结论——**
+> **预填充决定「TTFT」，解码决定「tok/s」**——
+> **⚠️ 而多数「这卡快不快」的讨论默认在说解码。**
+>
+> ⭐⭐ **对 RTX PRO 6000 的读者有直接含义**：
+> **如果工作是「长上下文、短输出」（文档问答），`W4A4` 的价值很高；
+> 如果是「短输入、长输出」（代码生成），`W4A4` 的价值可能很小。**
+>
+> **⭐⭐ 判据：**
+> **一个「加速项」如果不说明它加速的是哪个阶段，
+> 它的收益数字就无法被应用到任何具体场景——**
+> **⚠️ 而这正是 §10.54 记的「TensorFold 解码快、预填充慢」那个矛盾的根源。**
+>
+> ⚠️ **边界：「文档没提 decode」不等于「decode 没受益」——它可能只是没写。**
+
+### 10.89 ⭐⭐ `auto` 是**逐张量**的，不是全局的
+
+[c-auto-is-per-tensor-not-global]
+
+> 「**`auto` uses per-tensor prec metadata
+> (this is the same behavior as when the environment variable is not set)**」
+
+> ⚠️ 即 **默认不是「全局 Q8」，而是「每个张量自己说自己要几位」**——
+> **故一个模型里可以同时有 `W4A4` 层与 `W4A8` 层。**
+
+> **⭐⭐ 判据：**
+> **当一份文档说「默认是 X」时，要追问「X 是全局的，还是逐项的默认值」——**
+> **⚠️ 因为后者意味着「同一个进程里可以同时存在两种行为」，
+> 而这会让「平均性能」变成一个没有意义的数。**
+>
+> ⭐⭐ **对实测的影响是直接的**：
+> **如果模型的一半层是 `W4A4`、一半是 `W4A8`，
+> 那么一个 tok/s 数字既不代表 W4A4 也不代表 W4A8——它代表一个混合物。**
+>
+> **⭐⭐ 判据：**
+> **一个「混合配置下的平均性能」数字，只有在混合比例固定时才可比——**
+> **⚠️ 而混合比例是模型属性，不是硬件属性。**
+>
+> ⭐⭐ **这解释了 §10.53 记的「2.1–2.3× 是跨精度比较」为什么难以纠正**：
+> **因为「精度」本身就不是一个单值，而是一个分布。**
+
+### 10.90 ⭐⭐ `CUDA_SCALE_LAUNCH_QUEUES`：一个本报告**从没试过的维度**
+
+[c-cuda-scale-launch-queues-for-multigpu]
+
+> 「**Consider setting `CUDA_SCALE_LAUNCH_QUEUES=4x`,
+> which increases the CUDA command buffer to 4 times its default size.
+> This optimization is particularly beneficial for
+> Multi-GPU setups with pipeline parallelism, where it significantly
+> improves prompt processing throughput by allowing more operations
+> to be enqueued across GPUs.**」
+
+> ⚠️ 而 §10.40–§10.41 记录的 **NCCL 卡死**与 §10.44 记的 **TTFT 慢**
+> 都发生在多卡场景。
+
+> **⭐⭐ 判据（这条是本轮最需要自我约束的一条）：**
+> **「一个参数出现在相关场景的文档里」不等于「它能解决那个场景的问题」——**
+> **⚠️ 而把前者写成后者，是 §10.50「归因一致 ≠ 结论一致」的又一次风险。**
+>
+> ⭐⭐ **故本条的准确写法只能是**：
+> **「文档推荐在多卡流水并行下设 `CUDA_SCALE_LAUNCH_QUEUES=4x`，
+> 理由是提升预填充吞吐；本报告的多卡卡死问题是否与命令缓冲区深度有关，未验证。」**
+>
+> ⭐⭐ **而它的价值在于它是一个「可以试的下一步」**：
+> **§10.41 那张 7 行控制矩阵里，
+> 没有一行是「改命令缓冲区大小」——
+> 而这是一个本报告此前不知道存在的维度。**
+>
+> **⭐⭐ 判据：**
+> **一份好的控制矩阵，最缺的往往不是「更多数据点」，
+> 而是「一个没人想到的维度」——**
+> **⚠️ 而新维度通常藏在你没读的文档里，不在你读过的 issue 里。**
+>
+> ⭐ **它与 §10.40 记的「NCCL 2.30.4 消除卡死」是不同的层**：
+> **一个是通信库版本，一个是命令缓冲区深度。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -21210,6 +21366,10 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 1. [ggml-org/llama.cpp — `ggml/src/ggml-cuda/mmq.cu` 的 `ggml_cuda_mmq_get_prec_env()` 与 `ggml_cuda_mmq_get_prec_src1()`（第 104-127 行）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/ggml/src/ggml-cuda/mmq.cu) —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **一个读者可以直接用的开关：`GGML_CUDA_MMQ_PREC`**，合法值 **`q4` / `q8` / `auto`**（大小写不敏感）；注释「**overrides the src1 precision requested by the graph, "auto" keeps the requested one**」；⚠️ 被 **`static const ggml_prec prec_env = ...`** 缓存——**整个进程只读一次，改了必须重启**；⚠️ 非法值（拼错、带空格）**只产生一条 `GGML_LOG_WARN`，然后静默退回 `auto`**；⭐⭐ 判据「**当一个系统存在『静默降级』时，最有价值的不是『加一条日志』，而是『加一个能强制覆盖的开关』——因为前者需要重新编译，后者不需要**」；⭐ 三条实操：**① `=q8` 一键强制保守路径（设了速度不变说明本来就走 Q8）② `=q4` 一键强制 W4A4（设了崩了说明二进制没编 `120a` 或硬件不对）③ 拼错值不会报错**；⭐⭐ 判据「**一个用来『排除静默降级』的开关，如果它自己也会静默失效，那它就不能用来排除静默降级**」。(b) ⭐⭐⭐⭐ **`=q4` 绕过了硬件检查**——`prec = prec_env;` 之后 `can_use_q4` 只在 `prec == GGML_PREC_UNDEFINED` 的路径上被用，⚠️ **环境变量给了非 `UNDEFINED` 值时 `can_use_q4` 根本不被求值**，而断言只检查值合法、不检查硬件支持；⭐⭐ 判据「**『一个检查只覆盖默认路径』是一个常见的设计，而它的风险不在『检查不够严』，而在『覆盖路径与默认路径的行为差异没有文档』——因为前者是取舍，后者是陷阱**」；⭐ 但**第二道防线存在**：`ggml_cuda_mmq_get_config` 会按 `cc` 选表，故非 Blackwell 上强制 `q4` 大概率仍回退；⭐⭐ 判据「**『有两道防线』与『只有一道』在文档上看起来一样，在故障时完全不同——而读代码能告诉你『有几道』，读文档只能告诉你『有』**」。(c) ⭐⭐ **默认激活是 `Q8_1`，不是 `Q8_0`**——注释「**src1 is quantized to `Q8_1` unless the FP4 types can use 4-bit activations, in which case they default to the native `W4A4` instructions on Blackwell**」；⭐⭐ 判据「**当一个名词有两个变体（`Q8_0` 与 `Q8_1`）时，『用 Q8』这种说法在讨论性能时是无信息的**」+「**『FP4 模型快不快』这个问题，有一半的答案不在权重里，而在『激活走了几位』——而后者是一个运行时决定，不是一个文件属性**」。(d) ⭐⭐⭐ **「走 W4A4」需要三个条件同时成立**：**① 权重类型是 `NVFP4`/`MXFP4`（用户可控）② `blackwell_mma_available(cc)` 为真（安装包决定）③ 没把 `GGML_CUDA_MMQ_PREC` 设成 `q8`（用户可控）**；⚠️ 而**设成 `q4` 会绕过条件 ②**——这是唯一一条「可以关闭某个条件」的路径；⭐⭐ 判据「**当『能不能用某个快路径』取决于三个条件、而只有一个条件是『买什么硬件』时，『升级硬件』就不再是主要答案——而市面上所有选购指南都假设它是**」；⭐⭐ 对读者的四步诊断：**① 模型是不是 `NVFP4`/`MXFP4` ② 二进制有没有编 `120a` ③ 有没有设 `GGML_CUDA_MMQ_PREC=q8` ④ 用 `q4` 强制一次看是不是崩**（⚠️ 四步全部基于读代码，本报告没有在 RTX PRO 6000 上执行过其中任何一步）；⚠️ **而 `GGML_CUDA_MMQ_PREC` 这个变量名在本报告的 285 个来源里只出现在源码中**，而它控制的是一次可能接近 **2×** 的性能差异——⚠️ 但必须写成「我的 285 个来源里没有」，而不是「它没有文档」；⭐⭐ 判据「**当一份实测报告没有说『它的环境变量』时，它的数字的可比性是无法评估的——而这与 §10.53 记的『同机器同权重同提示同一天 ≠ 受控比较』是同一条判据**」 — [src-llamacpp-mmq-prec-env]
 
+### 它其实有文档，而文档揭示了一个「层标记决定走 W4A4 还是 W4A8」的机制（第八十一轮补充）
+
+1. [ggml-org/llama.cpp — `docs/build.md`（master 原始文档，46,343 字节 / 907 行）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/docs/build.md) —（2026-10 抓取）。(a) 🔥🔥🔥 **更正 §10.85：`GGML_CUDA_MMQ_PREC` 是有文档的**——`docs/build.md` 第 309 行附近有完整一节：「**Override the activation precision that the model requests for NVFP4 and MXFP4 matrix multiplications. Currently supported values: `auto`, `q8`, `q4`.**」；⚠️ **上一轮记的「285 个来源里只出现在源码中」是错的**——**而错的原因很具体：我在读源码之前没有先读 `docs/`**；⭐⭐ 判据（本轮最重要）「**『我没找到』与『不存在』之间，还有一个中间态你没写出来：『我没有在我可能会找的地方找』——而后者是一个可以立刻消除的不确定性**」；⭐⭐ **更尖锐的是：我上一轮已经写下了「去 `docs/` 里搜这个变量名是唯一能把『我没找到』变成『它不在那里』的动作」——然后我没有做**；⭐⭐ 判据（这条是对我自己的）「**当你在报告里写下『下一步应该做 X』时，如果 X 只要一次抓取就能做，那么『没做 X 就写结论』是一种自我欺骗——因为那句话本身证明了你知道怎么做**」；⭐ 这与 §10.48「引用链会成为『我读过了』的错觉来源」是同一族错误：**「我写下了要做」会成为「我做过了」的错觉来源**。(b) 🔥🔥🔥🔥🔥 **一个此前完全不知道的机制：层标记决定走 W4A4 还是 W4A8**——「**NVFP4 and MXFP4 layers marked as `W4A16` request 8-bit activations, so on Blackwell those layers run through the `W4A8` path instead of the native `W4A4` path.**」；⚠️ 即 **同一个权重格式，可以因为「层被标记为 `W4A16`」而在 Blackwell 上走 `W4A8`——这不是硬件限制，是模型侧的元数据**；⭐⭐ 判据（本轮最重要）「**当一个『能力』有四个开关，而其中一个是『模型自己说自己要什么』时，『换一张更快的卡』就不再是提升性能的主要手段——因为瓶颈可能在『模型请求了什么』**」；ⓘ 于是 §10.85 那张表从三个条件变成四个：**① 权重格式（文件属性）② 二进制能力（安装属性）③ 环境变量（运行属性）④ 层标记 `W4A16` vs `W4A4`（模型元数据）**；⭐ 这解释了 §10.47「NVFP4 在 SM12x 上崩」与 §10.30「dense 不受影响、MoE 崩」为何难以归类：**两种报告的「NVFP4」可能对应不同的层标记**；⭐⭐ 判据「**『同一份权重』这句话，在量化生态里几乎总是不完整的——因为『权重』之外还有『每层的精度元数据』，而后者不在权重文件的主张量里**」。(c) ⭐⭐⭐ **`q4` 的收益只在预填充，代价是精度**——「**Set `q4` to keep the native `W4A4` path for faster prompt processing at the cost of accuracy, or `q8` to use the `W4A8` path for every layer**」；⚠️ 即 **收益在 `prompt processing`，代价是 `accuracy`——文档没有说 decode 会变快**；⭐⭐ 判据「**『预填充受益』与『解码受益』是两个完全不同的产品结论——预填充决定『TTFT』，解码决定『tok/s』——而多数『这卡快不快』的讨论默认在说解码**」+「**一个『加速项』如果不说明它加速的是哪个阶段，它的收益数字就无法被应用到任何具体场景——而这正是 §10.54 记的『TensorFold 解码快、预填充慢』那个矛盾的根源**」；⭐ 对 RTX PRO 6000：**长上下文短输出（文档问答）时 `W4A4` 价值高；短输入长输出（代码生成）时价值可能很小**；⚠️ 边界：**「文档没提 decode」不等于「decode 没受益」**。(d) ⭐⭐ **`auto` 是逐张量的，不是全局的**——「**`auto` uses per-tensor prec metadata (this is the same behavior as when the environment variable is not set)**」，⚠️ 即 **默认不是「全局 Q8」，而是「每个张量自己说自己要几位」，故一个模型里可以同时有 `W4A4` 层与 `W4A8` 层**；⭐⭐ 判据「**当一份文档说『默认是 X』时，要追问『X 是全局的，还是逐项的默认值』——因为后者意味着『同一个进程里可以同时存在两种行为』，而这会让『平均性能』变成一个没有意义的数**」+「**一个『混合配置下的平均性能』数字，只有在混合比例固定时才可比——而混合比例是模型属性，不是硬件属性**」；⭐⭐ 这解释了 §10.53 记的「2.1–2.3× 是跨精度比较」为何难以纠正：**因为「精度」本身就不是一个单值，而是一个分布**。(e) ⭐⭐ **`CUDA_SCALE_LAUNCH_QUEUES`：一个本报告从没试过的维度**——「**Consider setting `CUDA_SCALE_LAUNCH_QUEUES=4x`, which increases the CUDA command buffer to 4 times its default size. This optimization is particularly beneficial for Multi-GPU setups with pipeline parallelism, where it significantly improves prompt processing throughput by allowing more operations to be enqueued across GPUs.**」（同一份文档还列了 `GGML_CUDA_CUBLAS_COMPUTE_TYPE`，合法值 `auto`/`f16`/`fp16`/`bf16`/`f32`/`fp32`）；⭐⭐ 判据（本轮最需自我约束的一条）「**『一个参数出现在相关场景的文档里』不等于『它能解决那个场景的问题』——而把前者写成后者，是 §10.50『归因一致 ≠ 结论一致』的又一次风险**」；⭐ 故准确写法只能是：**文档推荐多卡流水并行下设 `4x` 以提升预填充吞吐；本报告的多卡卡死是否与命令缓冲区深度有关，未验证**——**而 §10.41 那张 7 行控制矩阵里没有一行是「改命令缓冲区大小」，这是一个此前不知道存在的维度**；⭐⭐ 判据「**一份好的控制矩阵，最缺的往往不是『更多数据点』，而是『一个没人想到的维度』——而新维度通常藏在你没读的文档里，不在你读过的 issue 里**」 — [src-llamacpp-docs-build-md]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -21349,7 +21509,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=285, evidence=2223, claims=1632, claims_high=1294, claims_disputed=9, trace_events=639, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=286, evidence=2228, claims=1637, claims_high=1298, claims_disputed=9, trace_events=641, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
