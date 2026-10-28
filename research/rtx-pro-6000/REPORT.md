@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：304 ｜ **证据数**：2289 ｜ **主张数**：1686（高置信 1343，争议 9）
+> **来源数**：305 ｜ **证据数**：2295 ｜ **主张数**：1691（高置信 1347，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -19744,6 +19744,200 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > `docs/rtx-pro-6000-speed-2026-07-19.md`，
 > 一份专门讲这张卡速度的文档。**
 
+### 10.140 🔥🔥🔥🔥🔥 决定性的一句：**GGUF 里没有新的张量类型，只有自定义的张量名**
+
+[c-gguf-uses-standard-tensor-types]
+
+> 「**The GGUF stores BTL's packed representation in ordinary I8/F32/BF16
+> tensors with custom names, so no new GGUF tensor-type enum is required.**」
+>
+> —— `docs/patched-ollama-and-lmstudio.md`
+
+> **⚠️ 即这个 GGUF 文件本身是合法的——
+> 它没有新增张量类型，只是用「自定义的张量名字」装「打包过的数据」。**
+>
+> **⭐⭐⭐⭐⭐ 这是 §10.106–§10.111 那场「格式不兼容」争论的最终答案，
+> 而它的形态与本报告前四轮的假设都不同**：
+> **第 159 轮：我以为它是标准 GGUF（对）；
+> 第 160 轮：我因为它"不兼容 stock Ollama"而说"它不是标准 GGUF"（错）；
+> 第 161 轮：我确认它是 `llama.cpp` 的 fork（对）；
+> 第 167 轮："它是标准 GGUF 张量类型，但张量名是自定义的"（完整答案）。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「兼容性」这个判断被拆成了两层，而我一直在把它们混为一谈**：
+> **第一层：文件格式（GGUF 容器 + 张量类型枚举）——它是标准的；
+> 第二层：语义（哪个张量名对应哪个权重、怎么解释那些字节）——它是私有的——**
+> **⚠️ 即「stock Ollama 读不了」不是因为「文件格式不对」，
+> 而是因为「它不知道叫这个名字的张量该怎么算」。**
+>
+> ⭐⭐ **与 §10.116「magic 是假指针」是同一个设计的两面**：
+> **magic 用「假指针」传递类型标签（不改枚举），
+> 张量名用「自定义字符串」传递语义（不改枚举）——**
+> **⚠️ 即这个项目的整个扩展策略是「不改标准，只改内容」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「在不改标准的前提下扩展」有两种做法：
+> ① 塞进未使用的字段（这里是 `userdata`）；
+> ② 用标准类型 + 私有命名（这里是自定义张量名）——**
+> **⚠️ 两种做法的共同代价是「标准工具能打开文件，但读不懂内容」。**
+>
+> ⭐⭐ **对读者的实际后果**：
+> **「这个 GGUF 能不能被别的工具检查」——能，但只能检查到「容器层」；
+> ⚠️ 即元数据、张量尺寸、名字都能读，
+> 而「那些字节是什么」只有 BTL-3 自己的 runner 知道。**
+>
+> **⭐⭐ 判据：**
+> **「格式合规」与「语义可读」是两个独立的性质，
+> 而「合规但不语义可读」是最难诊断的一种状态——**
+> **⚠️ 因为它会通过所有「格式检查」，然后在第一次前向时给出垃圾。**
+
+### 10.141 ⭐⭐⭐ 三张表面，三个不同的成熟度
+
+[c-three-surfaces-three-statuses]
+
+| 表面 | 怎么执行 | 当前状态 |
+|---|---|---|
+| Stock Ollama | Stock runner | **不执行 AVQ2** |
+| **BTL-3 Patched Ollama** | Ollama 直接 spawn BTL 的 `llama-server` | **脚手架完成；目标包待打** |
+| LM Studio | 官方 generator 插件调本地端点 | **开发预览；插件未发布，Windows 验证待做** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个产品有几种用法」的最佳答案形式是一张表，
+> 而表里必须有一列叫「当前状态」——**
+> **⚠️ 因为「支持 X」这句话在没有状态列时，
+> 会被读成「X 已经完全可用」。**
+>
+> ⭐⭐ **三个档位恰好都不是「完成」**：
+> **「不执行」（不打算做）／「脚手架完成，目标包待打」（做了架子）／
+> 「开发预览，插件未发布」（做了但未发布）。**
+>
+> **⭐⭐ 判据：**
+> **「一个集成」的成熟度至少有四档：
+> 不可用 / 脚手架 / 预览 / 发布——**
+> **⚠️ 而把它们区分开的唯一方法，是作者主动写出「我在第几档」。**
+>
+> ⚠️ **RTX PRO 6000 在这张表里完全没有出现**——
+> **而「没出现」与「不支持」是两件事。**
+
+### 10.142 ⭐⭐⭐ Ollama 本身就是一个**壳**
+
+[c-ollama-is-a-shell]
+
+> 「**`llm.NewLlamaServer` delegates every GGUF model to a `llama-server`
+> subprocess. Ollama locates that executable under `lib/ollama`,
+> starts it on an ephemeral loopback port, and speaks its native
+> `/health`, `/completion`, `/v1/chat/completions`, tokenization,
+> and embedding endpoints.**」
+> 「**The patched distribution replaces Ollama's runtime payload,
+> not its public API, scheduler, CLI, model store, or UI.**」
+> —— pinned commit `573386c35eac76124ffce571f4b0fefa0a7fe13c`
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个中间层能不能被替换」取决于「它有没有把自己做成一个协议边界」——**
+> **⚠️ 而 Ollama 做对了这件事：它和 runner 之间是 HTTP，不是链接。**
+>
+> ⭐⭐ **与 §10.115 那套「白名单 + 静默回退」形成鲜明对比**：
+> **`llama.cpp` 的扩展点是「未使用的字段」，需要改代码才能用；
+> Ollama 的扩展点是「一个可执行文件的位置」，不需要改代码——**
+> **⚠️ 即「换一个二进制」比「加一个算子」的侵入性低一个数量级。**
+>
+> **⭐⭐ 判据：**
+> **「一个系统的可扩展性」不取决于「它有没有插件机制」，
+> 而取决于「它的边界是不是进程边界」——**
+> **⚠️ 因为进程边界只需要「协议兼容」，而代码边界需要「重新编译」。**
+>
+> ⭐⭐ **对读者的实际用处**：
+> **如果想在自己的机器上跑这个模型，
+> 最省事的路径不是「打补丁」，而是
+> 「让 `lib/ollama/llama-server` 指向 BTL 的那个二进制」——
+> ⚠️ 而作者也确实是这么做的。**
+>
+> **⭐⭐ 判据：**
+> **「一个补丁的规模」可以用「它替换了几个文件」来估计——
+> ⚠️ 这里是 `llama-server` + 三个 `.so`，共四个文件。**
+
+### 10.143 ⭐⭐⭐ 「没有 HTTP 翻译层」在进程维度对、在协议维度错
+
+[c-no-http-bridge-in-ollama-path]
+
+> 「**No HTTP translation bridge sits between patched Ollama and the runner.**」
+>
+> 而 LM Studio 插件是「**calls the native runner's OpenAI-compatible endpoint;
+> it does not ask LM Studio's stock engine to interpret AVQ2**」。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「有没有中间层」这个问题，答案取决于「中间层的定义」——**
+> **⚠️ 如果「HTTP」就算中间层，那 Ollama 路径也有
+> （它是 HTTP 到 loopback 端口）；
+> 而作者说的「no translation bridge」指的是「没有协议转换」，
+> 不是「没有 HTTP」。**
+>
+> ⭐⭐ **与 §10.152 那条「两个配置项的参数相同 ≠ 它们执行同一条指令」同类**：
+> **「没有中间层」这个说法在「进程」维度是对的，在「协议」维度是错的——**
+> **⚠️ 即「直连」这个词同时被用来描述两件不同的事。**
+>
+> **⭐⭐ 判据：**
+> **当作者说「没有 X」时，要问的是「X 是按什么粒度定义的」——**
+> **⚠️ 因为「进程」「协议」「数据格式」三个粒度下，
+> 同一个句子会给出不同答案。**
+>
+> ⭐⭐ **实际含义**：
+> **Ollama 路径的「直连」意味着「token 流没有被解释两次」，
+> 而 LM Studio 路径的「插件」意味着「token 流被转发了一次」——**
+> **⚠️ 后者会引入额外延迟与取消语义的复杂度
+> （文档确实花了很多篇幅讲取消与工具调用）。**
+>
+> ⚠️ **本条置信度 `medium`**：**「没有翻译层」只覆盖 Ollama 路径，
+> 而文档没有说 Ollama 与 runner 之间的 HTTP 是否原样。**
+
+### 10.144 ⭐⭐⭐ `native` 架构：在 CI 里是坑，在本机构建里是正解
+
+[c-build-requires-target-machine]
+
+> 「**Build on the target machine so CMake selects the target GPU**」
+>
+> ```bash
+> cmake -S native/llama.cpp -B ... \
+>   -DCMAKE_CUDA_ARCHITECTURES=native \
+>   -DGGML_BACKEND_DL=ON -DGGML_CUDA=ON -DLLAMA_CURL=OFF
+> ```
+>
+> 硬件目标表：**RTX 4090 ｜ RTX 5090 ｜ Windows 4090-5090 ｜ DGX Spark**
+> —— **RTX PRO 6000 既不在「支持」里，也不在「不支持」里。**
+
+> **⭐⭐ 与 §10.94 形成对照**：
+> **§10.94 说「`GGML_NATIVE=OFF` 是官方的 arch 覆盖方式，
+> 因为 `-arch=native` 在找不到 GPU 时会警告并回退」；
+> 本条说「这份文档主动要求用 `native`，并明确在目标机器上构建」——**
+> **⚠️ 即同一个选项，在「发行二进制」场景下是坑，
+> 在「本机构建」场景下是正解。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个选项是好是坏」取决于「谁在什么机器上跑它」——**
+> **⚠️ `native` 在 CI 里是灾难（没有 GPU），
+> 在用户机器上是精确（有 GPU）。**
+>
+> ⭐⭐ **后果很尖锐**：
+> **如果构建者的机器是 RTX 4090，
+> 那产出的二进制就只有 `sm_89`——**
+> **⚠️ 即「同一个源码，在不同机器上构建，
+> 会得到不同架构的二进制」。**
+>
+> **⭐⭐ 判据：**
+> **「一个 `native` 构建的产物」是不可分发的——
+> ⚠️ 而 §10.149 记的「`120a` 是默认 arch 列表里的一项」
+> 说的是「发行版二进制」，与「本机构建」是两条完全不同的路径。**
+>
+> ⭐⭐ **硬件目标表里没有 RTX PRO 6000 有两种解释**：
+> **① 作者没测过这张卡；② 作者测过但这张卡不需要单独的构建目标——
+> ⚠️ 而 §10.135 已确认：那份速度文档就是在
+> 「RTX PRO 6000 Blackwell Server Edition」上跑的。**
+>
+> **⭐⭐ 判据：**
+> **「一份硬件目标表」缺一项，比「一份不支持列表」缺一项更难解释——**
+> **⚠️ 因为前者暗示「我们没考虑它」，
+> 后者暗示「我们考虑过并排除了它」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -23188,6 +23382,9 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 2. [GitHub / Badtheorylabs — BTL-3 `artifacts/btl3-compact-gguf-dry-run.json`（910 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/artifacts/btl3-compact-gguf-dry-run.json) —（2026-10 抓取）。⚠️⚠️⚠️ **`source_weight_bytes: 8551772952` 是一个口径陷阱**：「**source_weight_bytes: 8551772952 | source_checksums_verified: 158 | tensor_count: 2416 | projected_tensor_bytes: 8381262032 | exporter_unsupported: [] | native_runtime_gaps: []**」；⚠️ **若它是 BF16 的 27B 权重，则参数量 = 4.28 B——故据此算出的「压缩比 1.019×」是错的**；⭐⭐ 判据（本轮最重要）「**当一个字段的名字里出现『source』时，要问的不是『它是什么』，而是『它是哪一步的 source』**」；⭐⭐ 正确口径：**27B 在 BF16 下约 54 GB，最终 8.39 GB，压缩比约 6.4×，等效 2.48 bpw**——与「Under 2.5 effective bits per parameter」一致；⭐⭐ 判据「**当一个『官方数字』算出来与『官方宣称』矛盾时，先怀疑那个数字的口径，而不是先怀疑那个宣称**」；⚠️ 分项与 `PAPER.tex` 的 `tab:bytes` 完全一致 — [src-btl3-artifact-dry-run]
 
 3. [GitHub API / Badtheorylabs BTL-3 完整文件树](https://api.github.com/repos/Badtheorylabs/BTL-3/git/trees/main?recursive=1) —（2026-10 抓取）。⚠️⚠️⚠️ **本报告列了十几轮的三组目录根本不存在**：`git/trees/main?recursive=1` 返回 **3,439 条目（`truncated=false`）**，顶层只有 **`native/` 2,990、`tools/` 17、`papers/` 16、`integrations/` 12、`tests/` 9、`docs/` 7、`artifacts/` 6、`launch/` 4、`packaging/` 3**；⚠️ **没有 `vendor/`、没有 `pocs/`、没有 `benches/`**；⭐⭐⭐⭐ 判据（本轮最重要）「**『未获取项』清单里最危险的一项，不是『我知道它存在但读不到』，而是『我以为它存在』——因为前者会随着时间变成『已放弃』，而后者会永久占据清单，并且让清单看起来比实际更长**」；⭐⭐ 判据「**一个『未获取项』只有在能被指认时才是诚实的——而『能被指认』的最低标准是『我在某份清单里见过它』，不是『我推断它应该有』**」；⭐⭐ 判据「**当一个清单里的项目长期无法推进时，第一个要问的不是『怎么读到它』，而是『它到底在不在』**」；⭐ **本轮实际结果：清单里 3 项被删除，同时新增 1 项真正的发现** — [src-btl3-repo-tree]
+### GGUF 里没有新张量类型、三张表面、与 `native` 构建的两面（第九十二轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `docs/patched-ollama-and-lmstudio.md`（10,347 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/patched-ollama-and-lmstudio.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它是 §10.106 那场「stock engine 不兼容」误读的物理对象的说明书**，开篇即「**separates three products that must not be conflated**」。(a) 🔥🔥🔥🔥🔥 **决定性的一句**：「**The GGUF stores BTL's packed representation in ordinary I8/F32/BF16 tensors with custom names, so no new GGUF tensor-type enum is required.**」——⚠️ **即这个 GGUF 文件本身是合法的，只是张量名字是自定义的**；⭐⭐ 判据（本轮最重要）「**『兼容性』这个判断被拆成了两层：第一层『文件格式（GGUF 容器 + 张量类型枚举）』是标准的；第二层『语义（哪个张量名对应哪个权重）』是私有的——即『stock Ollama 读不了』不是因为『文件格式不对』，而是因为『它不知道叫这个名字的张量该怎么算』**」；⭐⭐ 与 §10.116 是同一设计的两面：**magic 用「假指针」传递类型标签，张量名用「自定义字符串」传递语义，两者都不改枚举**；⭐⭐ 判据（本轮最重要）「**在不改标准的前提下扩展有两种做法：① 塞进未使用的字段；② 用标准类型 + 私有命名——两种做法的共同代价是『标准工具能打开文件，但读不懂内容』**」；⭐⭐ 判据「**『格式合规』与『语义可读』是两个独立的性质，而『合规但不语义可读』是最难诊断的一种状态**」；(b) ⭐⭐⭐ **开篇一张「三个产品不可混淆」的表**：「**Stock Ollama | Stock runner | Does not execute AVQ2；BTL-3 Patched Ollama | Ollama directly spawns BTL's native `llama-server` | Packaging scaffold complete; target packages pending；LM Studio | Official generator plugin calls BTL's native local endpoint | Development preview; plugin unpublished and Windows validation pending**」；⭐⭐ 判据（本轮最重要）「**『一个产品有几种用法』的最佳答案形式是一张表，而表里必须有一列叫『当前状态』——因为『支持 X』这句话在没有状态列时，会被读成『X 已经完全可用』**」；⚠️ **RTX PRO 6000 在这张表里完全没有出现**；(c) ⭐⭐⭐ **Ollama 本身就是一个「壳」**：「**At official Ollama commit `573386c35eac76124ffce571f4b0fefa0a7fe13c`, `llm.NewLlamaServer` delegates every GGUF model to a `llama-server` subprocess. Ollama locates that executable under `lib/ollama`, starts it on an ephemeral loopback port, and speaks its native `/health`, `/completion`, `/v1/chat/completions`, tokenization, and embedding endpoints.**」、「**The patched distribution replaces Ollama's runtime payload, not its public API, scheduler, CLI, model store, or UI.**」；⭐⭐ 判据（本轮最重要）「**『一个中间层能不能被替换』取决于『它有没有把自己做成一个协议边界』——而 Ollama 做对了这件事：它和 runner 之间是 HTTP，不是链接**」；⭐⭐ 判据「**『一个系统的可扩展性』不取决于『它有没有插件机制』，而取决于『它的边界是不是进程边界』**」；(d) ⭐⭐⭐ **「没有 HTTP 翻译层」在进程维度对、在协议维度错**：「**No HTTP translation bridge sits between patched Ollama and the runner.**」，而 LM Studio 插件「**calls the native runner's OpenAI-compatible endpoint**」；⭐⭐ 判据「**当作者说『没有 X』时，要问的是『X 是按什么粒度定义的』——因为『进程』『协议』『数据格式』三个粒度下，同一个句子会给出不同答案**」；⚠️ 本条置信度 `medium`；(e) ⭐⭐⭐ **构建用 `-DCMAKE_CUDA_ARCHITECTURES=native`，且必须在本机**：「**Build on the target machine so CMake selects the target GPU**」，命令含 **`-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CUDA=ON -DLLAMA_CURL=OFF`**；⚠️ 硬件目标表只有 **RTX 4090 / RTX 5090 / Windows 4090-5090 / DGX Spark**（「**Current DGX Spark software is ARM64 and ships CUDA 13; do not reuse an x86_64 payload**」），**没有 RTX PRO 6000**；⭐⭐ 与 §10.94 对照：**同一个 `native` 选项，在「发行二进制」场景下是坑，在「本机构建」场景下是正解**；⭐⭐ 判据（本轮最重要）「**『一个选项是好是坏』取决于『谁在什么机器上跑它』**」；(f) ⭐⭐⭐ **六条 release gate，且明说「这是打包候选，不是兼容发布」**：「**Until those checks pass on a real CUDA executable, the output is a packaging candidate - not an Ollama-compatible release.**」，适用对象只有「**each 4090, 5090, and DGX Spark artifact**」，含 SHA-256 `2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c` — [src-btl3-doc-patched-integrations]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -23327,7 +23524,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=304, evidence=2289, claims=1686, claims_high=1343, claims_disputed=9, trace_events=677, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=305, evidence=2295, claims=1691, claims_high=1347, claims_disputed=9, trace_events=679, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
