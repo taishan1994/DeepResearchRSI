@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：392 ｜ **证据数**：2667 ｜ **主张数**：1880（高置信 1532，争议 9）
+> **来源数**：393 ｜ **证据数**：2675 ｜ **主张数**：1885（高置信 1537，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -28598,6 +28598,11 @@ exit 0
 > 或一次 `ggml_custom_4d` 的 profile。**
 > **这条待办从 §10.186 起就在清单里，本轮它第一次有了一个具体的理由。**
 
+> **⚠️⚠️⚠️ 而下一轮（§10.337）就找到了一个直接反例**：
+> **Bonsai 用同一族的 blockwise Hadamard 变换（block 1024），
+> 而它明说「Prompt processing is less sensitive to this overhead」。
+> 故这个推断已被削弱，剩下的解释必须另找。**
+
 ### 10.334 🔥🔥🔥🔥🔥 `claim_boundary`：一份**主动否认自己卖点**的清单
 
 [c-manifest-declares-what-it-does-not-support]
@@ -28704,6 +28709,187 @@ exit 0
 > **而 `tensor_payload_bytes` 与 `final_file_bytes` 的差 `11,107,568`
 > 也与 §10.306 记的 ARTICLE.md 45-46 行逐字吻合。**
 > **故这份 manifest 的数字本身是自洽的，缺的只是「谁校验 manifest」这一环。**
+
+### 10.337 🔥🔥🔥🔥🔥 **同类 Hadamard 变换不会让预填失去并行**——一个直接反例
+
+[c-same-hadamard-transform-does-not-slow-prefill]
+
+> **Bonsai 白皮书 §A.2（9 页）**：
+> 「**Prompt processing is less sensitive to this overhead because the
+> transform is amortized across many input tokens and the matrix
+> multiplication itself is more compute-bound.**」
+>
+> **而它的权重基（3 页 Table 1）是**：
+> 「**Blockwise Hadamard rotation (block 1024, fixed ±1 signs)**」
+
+> **🔥 这与 §10.187 那个 `transform_scale = 0.08838834764831845F`
+> （即 `1/sqrt(128)` 的 float32 位模式）属于同一族变换。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「变换让预填失去并行」的假设，
+> 如果被一个用同类变换的实现直接否认，那这个假设就被削弱了；
+> 而削弱的方式不是「它没测」，而是「它测了且反向」。**
+>
+> **⭐⭐ 判据：**
+> **当你想用「某个通用机制」解释一个异常时，
+> 先去找一个用同一机制但没这个异常的实现；
+> 如果找到了，那个机制就不是原因。**
+>
+> **⭐⭐ 故 §10.333 那个推断从「候选」降为「已有一个反例」。**
+>
+> **⚠️ 但要注意量级**：**Bonsai 的预填 `4520` 对 BTL-3 的 `84.70` 差 `53` 倍，
+> 故两者的实现差异远不止「有没有把变换并行」。**
+> **⭐⭐ 判据：**
+> **一个反例只能否掉一个机制，不能解释剩下的 53 倍；
+> 故这里需要的不是「另一个候选」，而是「一次 profile」。**
+
+### 10.338 ⚠️⚠️⚠️ 同一个项目**两份文档两套吞吐**
+
+[c-same-project-two-different-throughput-tables]
+
+> | 来源 | PQ2_0 TG128 | PQ2_0 PP512 | PTQ1_0 TG128 | PTQ1_0 PP512 |
+> |---|---:|---:|---:|---:|
+> | **白皮书 Table 5** | **140.6** | **4520** | **136.8** | **2290** |
+> | **模型卡 179-190 行** | **124.8** | **4020** | **117.9** | **1972** |
+> | 差 | −12.7% | −12.4% | −16.0% | −16.1% |
+>
+> **⭐ 而两套的 PP/TG 比一致：白皮书 `4520/140.6 = 32.1`、
+> 模型卡 `4020/124.8 = 32.2`。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **同一个项目若在两个文档里给出两套吞吐数字，
+> 那这两套数字里至少有一套不是「当前发布物」的测量；
+> 而判据不是哪个更大，而是哪一套标注了测量日期。**
+>
+> **⭐⭐ 白皮书说「All rows use the same release artifact and backend build
+> measured on 2026-09-16」——它有日期；而模型卡没有日期。**
+>
+> **⭐⭐ 判据：**
+> **一份性能表如果没有测量日期，它就不能被用来裁决两个版本；
+> 而它仍然可以被用来裁决「量级」。**
+>
+> **⭐⭐ 而 PP/TG 比一致这一点很重要**：
+> **它说明两套数字测的是同一个「形状」，
+> 故 12-16% 的差是绝对水平差，不是配置差。**
+
+### 10.339 🔥🔥🔥🔥🔥 **预填每 token 的能耗是解码的 1/37.5**
+
+[c-prefill-is-37x-cheaper-per-token-than-decode]
+
+> **Bonsai 白皮书 §D（13 页）**：
+> 「**Prefill is far cheaper than decode per token everywhere
+> (0.012-0.060 mWh/token, e.g. 0.017 on the RTX PRO 6000), because prompt
+> processing is compute-bound and amortizes weight traffic across many tokens.**」
+> **而解码是 `0.637 mWh/tok`。**
+> ```
+> 0.637 / 0.017 = 37.5
+> ```
+> **⭐ 而 `37.5` 与 `PP/TG = 32.1` 是同一个量级的两个不同量——
+> 一个按能耗算、一个按速率算，而它们互不矛盾。**
+
+> **⭐⭐ 能耗公式与三条方法论声明**：
+> 「**Energy per token is then E = P/(3.6 r) in mWh,
+> for measured power P (W) and rate r (tok/s).**」
+> +「**On NVIDIA, nvidia-smi reports board power including HBM/GDDR;
+> the mWh/token column of Table 5 is that figure, total,
+> with no idle subtraction.**」
+> +「**On Apple, powermetrics reports CPU, GPU and ANE and has no DRAM rail,
+> so no comparable per-token figure exists and none is quoted.**」
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个能耗数字的可比性取决于三件事：
+> 测的是哪条电源轨、有没有减空载、以及速率是否同一口径；
+> 而白皮书把这三件都写了出来。**
+>
+> **⭐⭐ 判据：**
+> **Bonsai 拒绝给出 Apple 的 `mWh/token`，理由是
+> 「powermetrics has no DRAM rail」——
+> 而拒绝给数比给一个不可比的数更诚实。**
+>
+> **⭐⭐ 而这条给 §10 补上了一个整轴缺口的第一块**：
+> **本报告此前零能耗数据，现在有了 PRO 6000 的 `0.637`（解码）
+> 与 `0.017`（预填）两个数。**
+>
+> ⚠️ **而 `0.637 mWh/tok` 换算成「每瓦 tok/s」是 `1 / (0.637e-3 * 3600) = 0.436 tok/J`；
+> 按 600 W 板功耗算，`0.637 mWh/tok` 对应 `600 mW / ... `——
+> 这个换算仍需一次独立核对，故本轮不写成结论。**
+
+### 10.340 ⭐⭐⭐⭐⭐ **`1.72 bits/weight` 是一个可复算的公式值**
+
+[c-bpw-is-log2-3-plus-scale-overhead]
+
+> **Bonsai 白皮书 §2.1（3 页）**：
+> 「**A ternary value carries log2 3 = 1.585 bits of information, so with one
+> FP16 scale per 128 weights the effective storage cost is
+> b_eff = log2 3 + 16/128 = 1.71 bits/weight**」
+
+> **一次独立复算：**
+> ```
+> log2(3)   = 1.58496
+> 16 / 128  = 0.125
+> 和        = 1.70996  ->  1.71
+> ```
+> **✅ 与白皮书写的 `1.71` 一致。**
+
+> **而 `Table 3` 的 `True Ternary` 行写 `1.72`——多出的 `0.01` 从哪来？**
+> **白皮书 §2.2 自己回答了**：
+> 「**The additional cost of this choice is 26.2 M parameters,
+> which constitutes only 0.0976% of the language model, or 52 MB at bf16.
+> It moves the ternary model from 1.71 to 1.72 bits per weight.**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个比特/权重如果能被「信息量 + 开销」两项加出来，
+> 它就不是一个标称值，而是一个可复算的物理量。**
+>
+> **⭐⭐ 判据：**
+> **而 `1.72` 与 `1.71` 的差 `0.01` 恰好对应那 `26.2M` 个全精度参数——
+> 故这个项目的「保留哪些高精度」是一次显式选择，不是遗漏。**
+>
+> **⭐⭐ 而它与 §10.307 那六项字节分解是同一类自证**：
+> **两项给出的和必须等于一个已知量。**
+
+> ⭐ **而 `Table 2` 把每一组高精度张量的形状、层数、参数量、占比都列了出来**：
+> `in_proj_a.weight 5120x48 x 48`、`in_proj_b.weight 5120x48 x 48`、
+> `conv1d.weight 10240x4 x 48`、`A_log/dt_bias/norm.weight`、
+> `input_/post_attention_layernorm, final`、`q_norm, k_norm`，
+> **合计 `26,238,464`（`0.0976%`）。**
+> **⭐⭐ 这是一份可以被逐行验算的高精度白名单。**
+
+### 10.341 🔥🔥🔥🔥🔥 跑分前先做**带宽健康检查**，而实得只有 **76–91%**
+
+[c-benchmark-preflight-bw-check-is-76-to-91-percent]
+
+> **Bonsai 白皮书 §D（12 页）**：
+> 「**Before measurement, each NVIDIA host passed a memory-bandwidth health
+> check, reaching 76-91% of its rated bandwidth. Prefill is the noisier
+> measurement, with run-to-run variation of up to approximately 11% on the
+> fastest devices.**」
+> **+「All throughput measurements use depth 0, batch size 1, and exclude the
+> vision tower. Each configuration is measured three times after a warm-up
+> pass.」**
+
+> **🔥 「76–91% of rated bandwidth」是一个很大的区间，而它被写成了前置门槛。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个基准如果先测「这台机器的带宽是不是它标称的」，
+> 那它的数字就不是「某台机器上的一次运行」，
+> 而是「一台已知状态的机器上的一次运行」。**
+>
+> **⭐⭐ 判据：**
+> **而这个检查的存在本身说明作者遇到过「跑分低是因为机器不对」；
+> 而本报告 §10.226 那个 PEX890xx 静默降速、§10.36 那个 wheel 遮蔽，
+> 都是同一类「机器看起来对、实际不对」的问题。**
+>
+> **⭐⭐ 判据：**
+> **一个跑分表里最该有、而通常最缺的一行，是「被测机器的自检结果」。**
+
+> ⚠️ **而「11% 的 run-to-run 变化」给出了一个不可忽视的量级**：
+> **§10.338 那 12.4% 的两表差，与单机重复测量的 11% 波动是同一个量级——
+> 故不能用「一定有一份错了」来解释那 12%，只能说它们测的不是同一次构建。**
+>
+> **⭐⭐ 判据：**
+> **当两个数字的差与测量噪声同量级时，
+> 你既不能说它们矛盾，也不能说它们一致——只能说它们不可分辨。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -33737,6 +33923,39 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 (b) ⭐⭐⭐⭐ **自量化会产垃圾，因为工具链不做 Hadamard**：「**Quantizing your own model to PQ2_0 or PTQ1_0 produces garbage. llama-quantize offers both types ...**」——**故这条赛道的「格式」与「变换」是分离的**；
  — [src-btl3-papers-research-manifest] [src-btl3-papers-sha256sums] [src-btl3-papers-references-bib] [src-bonsai-demo-readme] [src-bonsai-model-card] [src-bonsai-known-issues]
 
+### Bonsai 白皮书与能耗维度（第一百三十七轮补充）
+
+继续按上一轮的待追项推进。本轮读 Bonsai 2 27B 白皮书（14 页），
+它是这条赛道上除 BTL-3 论文外的第二份技术报告；
+并因此给 §10 补上了第一块能耗数据。
+
+1. [PrismML — `bonsai-2-27b-whitepaper.pdf`（14 页，366,237 字节，2026-09）]
+(https://raw.githubusercontent.com/PrismML-Eng/Bonsai-demo/main/bonsai-2-27b-whitepaper.pdf)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **同类 Hadamard 变换不会让预填失去并行——一个直接反例**：
+「**Prompt processing is less sensitive to this overhead because the transform is amortized across many input tokens and the matrix multiplication itself is more compute-bound.**」——
+**而它的权重基是「Blockwise Hadamard rotation (block 1024, fixed ±1 signs)」，与 §10.187 那个 transform_scale = 0.08838834764831845F 属同一族**；
+⭐⭐ 判据（本轮最重要）「**一个「变换让预填失去并行」的假设，如果被一个用同类变换的实现直接否认，那这个假设就被削弱了；而削弱的方式不是「它没测」，而是「它测了且反向**」；
+⭐⭐ 判据「**当你想用「某个通用机制」解释一个异常时，先去找一个用同一机制但没这个异常的实现；如果找到了，那个机制就不是原因**」；
+⚠️ **故 §10.333 那个推断从「候选」降为「已有一个反例」**；**而 Bonsai 预填 4520 对 BTL-3 的 84.70 差 53 倍，两者差异远不止「有没有把变换并行」**；
+(a) ⚠️⚠️⚠️ **同一个项目两份文档两套吞吐**：**白皮书 Table 5 是 PQ2_0 TG128 140.6 / PP512 4520、PTQ1_0 136.8 / 2290；模型卡是 124.8 / 4020 与 117.9 / 1972；差 12.4%-16.1%**——
+**而两套的 PP/TG 比一致（32.1 与 32.2）**；
+⭐⭐ 判据「**同一个项目若在两个文档里给出两套吞吐数字，那这两套数字里至少有一套不是「当前发布物」的测量；而判据不是哪个更大，而是哪一套标注了测量日期**」——**白皮书标注「measured on 2026-09-16」，模型卡没有日期**；
+⭐⭐ 判据「**当两个数字的差与测量噪声同量级时，你既不能说它们矛盾，也不能说它们一致——只能说它们不可分辨**」——**因为白皮书自述单机重复测量有 11% 波动**；
+(b) 🔥🔥🔥🔥🔥 **预填每 token 的能耗是解码的 1/37.5**：「**Prefill is far cheaper than decode per token everywhere (0.012-0.060 mWh/token, e.g. 0.017 on the RTX PRO 6000), because prompt processing is compute-bound and amortizes weight traffic across many tokens**」——**而解码是 0.637 mWh/tok，故 0.637/0.017 = 37.5**；
+🔥 **这是本报告第一条能耗证据**；
+⭐⭐ 判据「**一个能耗数字的可比性取决于三件事：测的是哪条电源轨、有没有减空载、以及速率是否同一口径；而白皮书把这三件都写了出来**」——「**Energy per token is then E = P/(3.6 r) in mWh**」+「**nvidia-smi reports board power including HBM/GDDR; the mWh/token column is that figure, total, with no idle subtraction**」+「**on Apple, powermetrics has no DRAM rail, so no comparable per-token figure exists and none is quoted**」；
+⭐⭐ 判据「**拒绝给数比给一个不可比的数更诚实**」；
+(c) ⭐⭐⭐⭐⭐ **1.72 bits/weight 是一个可复算的公式值**：「**A ternary value carries log2 3 = 1.585 bits of information, so with one FP16 scale per 128 weights the effective storage cost is b_eff = log2 3 + 16/128 = 1.71 bits/weight**」——**log2(3)=1.58496、16/128=0.125、和=1.70996**；
+**而表值 1.72 多出的 0.01 恰好对应 26,238,464 个全精度参数（0.0976%、52 MB at bf16）**；
+⭐⭐ 判据「**一个比特/权重如果能被「信息量 + 开销」两项加出来，它就不是一个标称值，而是一个可复算的物理量**」；
+⭐ **Table 2 把每一组高精度张量的形状、层数、参数量、占比都列了出来**：**in_proj_a/in_proj_b 各 11,796,480、conv1d 1,966,080、A_log/dt_bias/norm 10,752、layernorm 660,480、q_norm/k_norm 8,192**——**合计 26,238,464，可逐行验算**；
+(d) 🔥🔥🔥🔥🔥 **跑分前先做带宽健康检查，而实得只有 76-91%**：「**Before measurement, each NVIDIA host passed a memory-bandwidth health check, reaching 76-91% of its rated bandwidth. Prefill is the noisier measurement, with run-to-run variation of up to approximately 11% on the fastest devices**」——
+⭐⭐ 判据「**一个基准如果先测「这台机器的带宽是不是它标称的」，那它的数字就不是「某台机器上的一次运行」，而是「一台已知状态的机器上的一次运行**」；
+⭐⭐ 判据「**一个跑分表里最该有、而通常最缺的一行，是被测机器的自检结果**」——**而 §10.226 那个 PEX890xx 静默降速、§10.36 那个 wheel 遮蔽，都是同一类「机器看起来对、实际不对」的问题**；
+(e) ⭐⭐⭐⭐⭐ **两个 packing 的胜负随架构反转，且给出了机理**：「**PTQ1_0 moves 18% less weight data per step than PQ2_0, but its dense trit representation requires additional arithmetic during unpacking. ... PTQ1_0 is faster on the Ada-generation parts and on the L4, while PQ2_0 is faster on several larger accelerators**」——**「This reflects a shift in the limiting resource」**；
+ — [src-bonsai-whitepaper]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -33876,7 +34095,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=392, evidence=2667, claims=1880, claims_high=1532, claims_disputed=9, trace_events=855, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=393, evidence=2675, claims=1885, claims_high=1537, claims_disputed=9, trace_events=857, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
