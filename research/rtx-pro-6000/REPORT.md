@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：300 ｜ **证据数**：2277 ｜ **主张数**：1676（高置信 1333，争议 9）
+> **来源数**：301 ｜ **证据数**：2283 ｜ **主张数**：1681（高置信 1338，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -19358,6 +19358,190 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 >
 > ⚠️ **边界**：**本报告没有这两个开销的实测分解，故上面是推断。**
 
+### 10.130 🔥🔥🔥🔥🔥 作者的「honest launch sentence」里，**完全没有提到速度**
+
+[c-launch-sentence-has-no-speed]
+
+> 「**BTL-3 Compact is a complete 8.39 GB text-only native GGUF for a
+> 27B-class agentic model. On a fresh 100-turn private tool-contract gate,
+> it retained 83 of 90 teacher-correct turns (92.2% conditional retention),
+> with perfect measured retention on single, parallel, sequential, and
+> abstention cases, but only 30% on parallel-multiple.
+> Its custom packed backend executes on CUDA and Metal without loading
+> the BF16 source checkpoint.**」
+>
+> —— 附录 §19「The honest launch sentence」
+
+> **⚠️ 即「能执行」是它敢写进「诚实的一句话」里的全部性能主张。**
+>
+> **⭐⭐⭐⭐ 一个人写「诚实的一句话」时，会把「自己最不确定的东西」全部剔除——
+> 而速度被剔除了。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一句话总结」是检验「作者自己认为什么最重要」的最好工具——**
+> **⚠️ 因为总结必然要丢东西，而「丢掉哪些」比「留下哪些」更能说明问题。**
+>
+> ⭐⭐ **与 §10.120 形成链条**：
+> **§10.120 说「作者把速度列为需要更多证据的主张」；
+> 本条说「作者在总结里连提都不提」——**
+> **⚠️ 即不只是「没证实」，而是「连候选都算不上」。**
+>
+> **⭐⭐ 判据：**
+> **「未证实」与「不值得一提」是两个不同的信号：
+> 前者意味着「方向对但证据不足」，
+> 后者意味着「这个方向本身不重要」——**
+> **⚠️ 而区分它们的唯一方法是看「总结里有没有它」。**
+>
+> ⭐⭐ **对读者的后果**：
+> **不应该问「RTX PRO 6000 上这个模型多快」，因为作者自己都不认为那是卖点——
+> 应该问「这张卡能不能跑这个 packed backend」，而答案是「能」（§10.117）。**
+
+### 10.131 🔥🔥🔥🔥🔥 作者用的动词是 **`adds`**，不是 `fork`
+
+[c-adds-operators-to-llamacpp]
+
+> 「**The release backend adds native packed CUDA and Metal operators
+> to llama.cpp, an OpenAI-compatible server, and launch bridges.**」
+
+> **⭐⭐⭐⭐ 这条给 §10.111 那场「是不是 llama.cpp」的三轮更正画上了句号，
+> 而画句号的方式值得记录**：
+> **第 160 轮我说「它不是 `llama.cpp`」（因为根目录没有 `ggml/`）；
+> 第 161 轮我说「`native/llama.cpp/` 是一整套 `llama.cpp`」（对）；
+> 第 165 轮作者说「我们给 `llama.cpp` 加了算子」（`adds`）。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「`adds operators to X`」这个措辞本身就把答案说完了——
+> 它不是「重写」，不是「替代」，而是「在 X 上加」——**
+> **⚠️ 而我用了两轮去推断这件事，答案在一个动词里。**
+>
+> **⭐⭐ 判据：**
+> **当一句话里有一个精确的动词（`adds` / `replaces` / `wraps` / `embeds`）时，
+> 它对「这是什么关系」的判定力，强于整段架构描述——**
+> **⚠️ 因为动词是作者对「关系」的抽象，
+> 而架构描述是「实现」的细节。**
+>
+> ⭐⭐ **与 §10.116 形成互补**：
+> **`adds operators` 是「接口层面」的说法，
+> `ggml_custom_4d` + `userdata` 是「实现层面」的说法——
+> ⚠️ 两者说的是同一件事：它确实是在 `llama.cpp` 的扩展点上加了东西，
+> 而不是自己做了一个引擎。**
+>
+> **⭐⭐ 判据：**
+> **当「接口说法」与「实现说法」互相印证时，
+> 那个结论的强度会跳一级——⚠️ 而这正是本报告在前四轮一直缺的那一步。**
+
+### 10.132 🔥🔥🔥🔥 最初的目标是 **3.9 GB**，8.39 GB 是失败后的退让
+
+[c-original-target-was-3p9gb]
+
+> 「**Stop pure one-bit work sooner.
+> A rigid 3.9 GB target forced the project into the representation regime
+> most hostile to tool behavior.**」
+>
+> —— 附录 §17 第 6 条「What we would do differently」
+
+> **⚠️ 即 8.39 GB 不是「一开始就定的目标」，
+> 而是「1 比特路线走不通之后的退让」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个数字是目标还是结果」决定了它能不能被当作「最优」来引用——**
+> **⚠️ 3.9 GB 是目标（未达成），8.39 GB 是结果（已达成），
+> 而「8.39 GB 接近最优」这个说法需要「有人试过更小的并失败」，
+> 不是「作者想要 8.39」。**
+>
+> ⭐⭐ **对本报告主题的具体含义**：
+> **如果 3.9 GB 的目标失败了，
+> 那么「2 比特 / 1 比特的 27B 模型在 RTX PRO 6000 上能不能用于 agent」
+> 这个问题，就已经有一个否定答案了——**
+> **⚠️ 而这个答案不是「硬件不行」，
+> 是「表示本身在最敌对的区间」。**
+>
+> **⭐⭐ 判据：**
+> **「一个失败的目标」是一份比「一个成功的结果」更有信息量的材料——**
+> **⚠️ 因为前者告诉你「边界在哪」，后者只告诉你「边界内有什么」。**
+>
+> ⭐⭐ **与 §10.78 呼应**：
+> **「`can_use_q4` 是一个 `&&`」——硬件的 FP4 路径是「有或没有」；
+> 而这里说的是「即使有，1 比特这个表示区间对 agent 行为也是敌对的」——**
+> **⚠️ 即「硬件支持」与「表示可用」是两件事，而后者常被前者掩盖。**
+
+### 10.133 ⭐⭐⭐⭐ 「总体通过、分项失败」被写成**两条并列的结论**
+
+[c-overall-pass-category-fail]
+
+| 类别 | teacher 正确 | retained | 条件保留率 |
+|---|---:|---:|---:|
+| Single | 20 | 20 | **100%** |
+| Parallel | 20 | 20 | **100%** |
+| Sequential | 20 | 20 | **100%** |
+| **Parallel-multiple** | **10** | **3** | **30%** |
+| Abstention | 20 | 20 | **100%** |
+| **Overall** | **90** | **83** | **92.2%** |
+
+> 「**The package passes the overall 90% rule and fails the per-category
+> 90% rule. Both statements belong in the release.**」
+
+> **⭐⭐⭐⭐ 这是本报告「聚合掩盖分布」那条判据的最强外部印证**：
+> **92.2% 与 30% 是同一个模型在同一次评测里的两个数字——
+> 而它们能同时成立，是因为「分母不同」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「92.2%」的分母是 90，「30%」的分母是 10——
+> ⚠️ 即两个百分比的分母相差 9 倍，而它们被并列写在同一个表里。**
+>
+> ⭐⭐ **与 §10.105 记的「短生成基准掩盖长流式退化」是同一类缺陷**：
+> **一个聚合分数可以掩盖「某一个类别完全死掉」——
+> ⚠️ 而「死掉」在这里是字面的：parallel-multiple 只 retained 3/10。**
+>
+> **⭐⭐ 判据：**
+> **「一个聚合分数是否可信」取决于「它的分母里最小的那一格有多大」——**
+> **⚠️ 因为一个 10 个样本的类别，即使全错，
+> 对 100 个样本的总分也只影响 10 个百分点。**
+>
+> ⭐⭐ **作者的第 7 条教训正是这个**：
+> **「Report category denominators. An aggregate can hide a completely dead
+> action family or reward a model that always abstains.」——**
+> **⚠️「奖励一个总是弃权的模型」是本报告见过对「聚合指标」最尖锐的批评。**
+>
+> **⭐⭐ 对本报告主题**：
+> **当读者看到一个「RTX PRO 6000 上 XX tok/s」的数字时，
+> 应该问的第一个问题不是「什么模型」，而是「什么形状」——
+> ⚠️ 因为 tok/s 的分母是「token 数」，
+> 而「token 数」在不同形状下的含义完全不同。**
+
+### 10.134 ⭐⭐⭐ 「干跑投影」：**算不平就根本不开始打包**
+
+[c-dry-run-refuses-expensive-pack]
+
+> 「**The package builder has a dry-run projection.
+> It refuses to begin the expensive pack unless the projected candidate,
+> required reserve, and selected demotions fit under the declared limit.**」
+>
+> **投影 8,551,634,944 逻辑权重字节；预留 25,000,000 字节；
+> 最终 8,381,262,032。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个昂贵的操作」应该有一个「便宜的预检」，
+> 而预检的输出必须是「可行 / 不可行」，不是「大概行」——**
+> **⚠️ 因为「大概行」会让昂贵的操作继续，
+> 而它的失败代价远高于预检的精度。**
+>
+> ⭐⭐ **与 §10.128 是同一件事的两面**：
+> **§10.128 说「精确预算 → 可审计账本」；
+> 本条说「精确预算 → 可拒绝的预检」——**
+> **⚠️ 即「精确」这个性质同时产出了「记录」与「闸门」。**
+>
+> **⭐⭐ 判据：**
+> **「一个可执行的预算」不是「一个数字」，
+> 而是「一个能在花钱之前回答是/否的函数」——**
+> **⚠️ 而大多数工程的「预算」只是一个数字，
+> 故它只能在花完钱之后回答。**
+>
+> ⭐⭐ **对本报告主题**：
+> **这也是「为什么 RTX PRO 6000 上的选型应该先算再买」的那个论证——
+> ⚠️ 显存、带宽、精度三者的账，可以在下单前算平；
+> 而「先买一张试试」是最贵的预检。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -22792,6 +22976,9 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 ### 字节账本、BF16 岛的位置、与运行时的 rank-8 LoRA（第八十九轮补充）
 
 1. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/PAPER.tex`（23,347 字节，338 行）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/PAPER.tex) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **「the canonical research-paper source」，含「the executed recipe, rejected stages, exact settings, artifact ledger, and claim limits」**。(a) 🔥🔥🔥🔥🔥 **完整字节账本（`tab:bytes`）**：「**AVQ2 & 1,615 & 5,498,130,320 | Affine INT4 & 189 & 875,438,080 | BF16 islands & 12 & 1,205,862,400 | INT4 demotions & 6 & 43,909,120 | Vocabulary/head & 13 & 667,713,856 | Behavior LoRA & 132 & 32,440,320 | Compact state & 449 & 57,767,936 | Tensor total & 2,416 & 8,381,262,032**」，加「**GGUF metadata and alignment: 11,107,568 bytes**」，最终 **8,392,369,600 bytes**；⭐⭐⭐ 判据（本轮最重要）「**『2.5 比特』这个标题让所有人以为『这个模型几乎全是 2 比特权重』，而实际是『65.6% 的字节是 2 比特，14.4% 是 16 比特，10.5% 是 4 比特』——而『字节占比』与『计算量占比』又不是一回事**」；⭐⭐ 判据「**『一个分量占多少』这个问题有两个完全不同的答案，取决于你数的是『参数』还是『字节』——而性能关心的是第三个量：『访存字节 × 调用次数』**」；⚠️ 百分比为本报告自算（字节数 / tensor total），非论文给出。(b) 🔥🔥🔥🔥 **12 个 BF16 岛集中在第 10-16 层**：「**The BF16 islands were concentrated in layers 10 through 16, with later islands at layers 33 and 36. They covered selected linear-attention input/output projections, attention output/value projections, MLP gates, and MLP down projections. This pattern is a record of observed cliffs, not a general claim about Qwen sensitivity.**」；⭐⭐ 判据（本轮最重要）「**『一个不均匀的分布』有两种解释：① 那些位置真的更敏感；② 那些位置是我第一个测到的——而作者明确选了 ②**」；⭐⭐ 判据「**『混合精度』在单卡上是『平均比特数』问题，在流水线并行上是『最慢阶段』问题——而后者与前者的比值，取决于『岛』的分布，不是『岛』的总量**」；(c) ⭐⭐⭐ **336 个 AVQ2 矩阵 / 64 个 INT4 矩阵 / 14 个 behavior-proven BF16 岛**：「**The complete source decoder contained 336 AVQ2 vector matrices, 64 group-128 affine INT4 matrices on full-attention paths, one measured AVQ2-to-INT4 island, and 14 behavior-proven BF16 islands.**」——⚠️ **64 个 INT4 矩阵正好「每层一个」**；⭐⭐⭐ 判据（本轮最重要）「**『混合精度』的粒度有三个层次：按层、按模块、按张量——而每一个层次对『访存模式』的影响不同**」；⭐⭐ 判据「**『一个模型的量化方案』不只是『多少个比特』，还包括『几种格式』与『每种格式的张量数』——而后面两个数字决定『调度开销』，第一个只决定『访存开销』**」；(d) ⭐⭐⭐ **两次字节交换只回收 123.86 MB（1.48%）**：「**L13 in-proj QKV: 104.86 MB -> 27.44 MB；L33 in-proj Z: 62.91 MB -> 16.47 MB；Recovered 123.86 MB**」；⭐⭐ 判据（本轮最重要）「**『一个精确的字节预算』会强迫出一套『可审计的取舍记录』——因为每一字节都要有出处，而『大概降一点』这种做法在账本上留不下痕迹**」；⭐⭐ 判据「**『量化』这个动作的『可审计性』，取决于『它是选一个类型还是排一张表』——而只有后者能回答『为什么这个张量是 16 比特』**」；(e) ⭐⭐⭐ **行为适配器是「运行时组合」的 rank-8 LoRA，不合并进低位码**：「**rank-8 LoRA with alpha 16, no dropout, AdamW betas (0.9,0.95), zero weight decay, gradient norm 1.0, sequence length 1,024, and 100 optimizer steps in the saved state**」、「**restricted to layers 40 through 63 and to four module families: `linear_attn.in_proj_z`, `linear_attn.out_proj`, `self_attn.o_proj`, and `mlp.down_proj`**」、「**The adapter is not merged into the low-bit codes; the packed matmul and low-rank path are composed at runtime. Its counted payload is 32,440,320 bytes.**」；⭐⭐ 判据（本轮最重要）「**『把校正项合并进权重』与『运行时加一个低秩路径』是两种完全不同的产品决策：前者零开销但不可逆，后者可逆但每 token 都要付钱**」；⭐⭐ 判据「**『低秩校正』在精度上几乎免费，在速度上不免费**」；⭐ 与 §10.112 叠加：**AVQ2 的 matvec 没有 batch 维度，LoRA 的瘦矩阵乘也没有——两个「低利用率」的开销叠在一起，可能才是 `43.16 tok/s` 的真正来源**（⚠️ 无实测分解，为推断）；(f) 🔥🔥🔥🔥 **论文对那三个数字的措辞比 ARTICLE.md 更精确**：「**Three full-offload `llama-bench` runs on an RTX PRO 6000 Blackwell measured 84.70±0.37 prompt tokens/s and 43.16±0.29 generated tokens/s for a 512-token prompt and 128-token generation. An Apple M2 16 GB compatibility smoke measured 2.30 prompt tokens/s and 2.48 generated tokens/s. These are measurements of two systems, not a general performance model.**」 — [src-btl3-paper-tex]
+### 「诚实的一句话」里没有速度、`adds` 这个动词、与 3.9 GB 的失败目标（第九十轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/ARTICLE-IMPLEMENTATION-APPENDIX.md`（7,918 字节，节 13-19）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/ARTICLE-IMPLEMENTATION-APPENDIX.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **§19「The honest launch sentence」全文里没有速度**：「**BTL-3 Compact is a complete 8.39 GB text-only native GGUF for a 27B-class agentic model. On a fresh 100-turn private tool-contract gate, it retained 83 of 90 teacher-correct turns (92.2% conditional retention), with perfect measured retention on single, parallel, sequential, and abstention cases, but only 30% on parallel-multiple. Its custom packed backend executes on CUDA and Metal without loading the BF16 source checkpoint.**」；⭐⭐⭐⭐ 判据（本轮最重要）「**一个人写『诚实的一句话』时，会把『自己最不确定的东西』全部剔除——而速度被剔除了**」；⭐⭐ 判据「**『一句话总结』是检验『作者自己认为什么最重要』的最好工具——因为总结必然要丢东西，而『丢掉哪些』比『留下哪些』更能说明问题**」；⭐⭐ 判据「**『未证实』与『不值得一提』是两个不同的信号——而区分它们的唯一方法是看『总结里有没有它』**」；(b) 🔥🔥🔥🔥🔥 **作者用的动词是 `adds`**：「**The release backend adds native packed CUDA and Metal operators to llama.cpp, an OpenAI-compatible server, and launch bridges.**」——⭐⭐⭐⭐ 这给 §10.111 那场「是不是 llama.cpp」的三轮更正画上了句号；⭐⭐ 判据（本轮最重要）「**`adds operators to X` 这个措辞本身就把答案说完了——它不是『重写』，不是『替代』，而是『在 X 上加』——而我用了两轮去推断这件事，答案在一个动词里**」；⭐⭐ 判据「**当一句话里有一个精确的动词（`adds` / `replaces` / `wraps` / `embeds`）时，它对『这是什么关系』的判定力，强于整段架构描述**」；(c) 🔥🔥🔥🔥 **最初的目标是 3.9 GB**：「**Stop pure one-bit work sooner. A rigid 3.9 GB target forced the project into the representation regime most hostile to tool behavior.**」；⭐⭐ 判据（本轮最重要）「**『一个数字是目标还是结果』决定了它能不能被当作『最优』来引用**」；⭐⭐ 判据「**『一个失败的目标』是一份比『一个成功的结果』更有信息量的材料——因为前者告诉你『边界在哪』，后者只告诉你『边界内有什么』**」；(d) ⭐⭐⭐⭐ **「总体通过、分项失败」被写成两条并列结论**：「**The package passes the overall 90% rule and fails the per-category 90% rule. Both statements belong in the release.**」，分项表 **Single 20/20、Parallel 20/20、Sequential 20/20、Parallel-multiple 10/3 (30%)、Abstention 20/20、Overall 90/83 (92.2%)**；⭐⭐ 判据（本轮最重要）「**『一个聚合分数是否可信』取决于『它的分母里最小的那一格有多大』**」；⭐⭐ 作者第 7 条教训：「**Report category denominators. An aggregate can hide a completely dead action family or reward a model that always abstains.**」；(e) ⭐⭐⭐ **「干跑投影」：算不平就不开始打包**：「**The package builder has a dry-run projection. It refuses to begin the expensive pack unless the projected candidate, required reserve, and selected demotions fit under the declared limit.**」，投影 8,551,634,944 逻辑权重字节，预留 25,000,000 字节；⭐⭐ 判据（本轮最重要）「**预检的输出必须是『可行 / 不可行』，不是『大概行』**」；⭐⭐ 判据「**『一个可执行的预算』不是『一个数字』，而是『一个能在花钱之前回答是/否的函数』**」；(f) ⭐⭐⭐ **七条「What we would do differently」，每条都是一次失败**：「**1. Design the behavior gate before the first quantizer. 2. Use balanced tool structures from the start. 3. Budget the vocabulary on day one. 4. Separate the development and release gates earlier. 5. Build the native runtime earlier. 6. Stop pure one-bit work sooner. 7. Report category denominators.**」，其中第 4 条附注「**Once a gate guides a repair, it is no longer untouched.**」 — [src-btl3-impl-appendix]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -22931,7 +23118,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=300, evidence=2277, claims=1676, claims_high=1333, claims_disputed=9, trace_events=669, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=301, evidence=2283, claims=1681, claims_high=1338, claims_disputed=9, trace_events=671, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
