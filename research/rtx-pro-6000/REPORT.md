@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：343 ｜ **证据数**：2479 ｜ **主张数**：1808（高置信 1461，争议 9）
+> **来源数**：345 ｜ **证据数**：2494 ｜ **主张数**：1813（高置信 1466，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -25648,6 +25648,205 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **⚠️ 否则「查过了」反而比「没查」更危险，
 > 因为它会产出一个带证据编号的错误结论。**
 
+### 10.264 🔥🔥🔥🔥🔥 `verified_payload_count` 是一个**恒等式**，不是一次测量
+
+[c-payload-count-is-an-identity]
+
+> 四份报告的三个计数字段永远相等：
+> layer13 `28/28/28`、layer40 `44/44/44`、layer47 `35/35/35`、release `2416/2416/2416`。
+> 而源码里写的是 `"verified_payload_count": len(actual)`——**两者同源**。
+
+> **⭐⭐⭐⭐⭐ 这条把一个我读了很多轮的字段降了一级**：
+> **我一直把 `verified_payload_count` 读成「已独立核验的字节数」，
+> ⚠️ 而它其实是「张量个数」的同义反复。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个名字里带 verified 的字段」不一定是一次测量——**
+> **⚠️ 它也可能是一个循环跑完的标志。**
+>
+> ⭐⭐ **而这条不能推出「导出器没做校验」**：
+> **恰恰相反，`verify_gguf` 对每一项都重算了整个 payload 的 SHA-256——
+> ⚠️ 故准确的表述是「逐项比对很严，而汇总计数很虚」。**
+>
+> **⭐⭐ 判据：**
+> **「一个校验的强度」要分两层看：
+> ① 单项怎么比；② 汇总怎么报——**
+> **⚠️ 而这两层可以一强一弱，且弱者会污染读者对强者的印象。**
+>
+> ⭐⭐ **而这条给「读一份自动生成的报告」一个通用提醒**：
+> **报告里的聚合字段往往是代码路径的副产品，而不是被测量的量——
+> ⚠️ 判据是「它有没有一个独立的累加器」。**
+>
+> **⭐⭐ 判据：**
+> **「一个数」有两种来源：被数出来的，和被算出来的——
+> ⚠️ 而两者在 JSON 里长得一模一样。**
+>
+> ⭐⭐ **而这条的实际用途是排除一个误读**：
+> **若有人用「2,416 个 payload 已校验」来论证这个模型「已被完整性验证」，
+> ⚠️ 那句论证是空的——
+> 因为它没有提供任何超出「张量数」的信息。**
+>
+> **⭐⭐ 判据：**
+> **「一个字段的信息量」等于「它与其它字段的独立程度」——**
+> **⚠️ 而这里三个计数字段完全相等，故信息量只有一份。**
+
+### 10.265 ⭐⭐⭐⭐⭐ 导出器只能处理**一份输入**
+
+[c-exporter-is-single-use-by-design]
+
+> `EXPECTED_MANIFEST = "a2b763323eed76d8f78fe5cbdf5a2349323b2c3d87dddc037714569946961116"`
+> 而 `validate_source` 在它不匹配时直接 `raise ValueError`。
+> 故这不是一个通用 GGUF 导出器，而是一个**只对 BTL-3 Compact 有效的单次工具**。
+
+> **⭐⭐⭐⭐⭐ 这条解释了一个此前困惑我的现象**：
+> **为什么三份 conformance 报告的 `source_manifest_sha256` 完全相同——
+> ⚠️ 因为我原以为它们分别校验了三份不同的输入，
+> 而实际上是同一份输入被跑了三次，且那个字段是从常量抄来的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个报告里的来源标识」可能是常量回显，而不是实测值——**
+> **⚠️ 而区分它们的办法是看那行代码写的是变量名还是字段名。**
+>
+> ⭐⭐ **而这条给「这个项目的复现性」一个准确描述**：
+> **它是可复现的（同一输入必得同一输出），
+> ⚠️ 而它不可复用（换一份输入就直接抛错）——
+> 故「可复现」与「可复用」是两件事。**
+>
+> **⭐⭐ 判据：**
+> **「一个工具的可复现性」靠的是输入哈希；
+> 「一个工具的复用性」靠的是输入无关——**
+> **⚠️ 而硬编码哈希恰好是「最大化前者、最小化后者」的极端配置。**
+>
+> ⭐⭐ **而这条还有一个正面含义**：
+> **硬编码哈希意味着这个导出器不可能被用来伪造别人的模型——
+> ⚠️ 因为它只认一份输入，故它的产物与那份输入是一一对应的。**
+>
+> **⭐⭐ 判据：**
+> **「一个工具的能力上限」有时是它的安全边界——**
+> **⚠️ 而判据是「它能不能被用来处理攻击者提供的输入」。**
+>
+> ⭐⭐ **而这条也把 `range(64)` 与 `0 <= layer < 64` 两处硬编码归到同一类**：
+> **整个导出器是按这一个模型的形状写的，不是按形状参数写的——
+> ⚠️ 故它更像一份可执行的证明，而不是一个产品。**
+
+### 10.266 ⚠️⚠️⚠️ `native_runtime_gaps: []` 是一个**子串检查**的结果
+
+[c-native-runtime-gaps-is-a-substring-check]
+
+> `runtime_gaps` 只在 `src/btl3-*.cpp` 的拼接文本里找
+> `ggml_tensor * <name>(`。注释、声明、甚至字符串字面量都能满足它。
+> 故它**不证明任何东西能链接**。
+
+> **⚠️⚠️⚠️ 这条把一个「空数组」的语义讲清楚了**：
+> **`native_runtime_gaps: []` 读起来像「原生运行时没有缺口」，
+> ⚠️ 而它的真实含义是「这两个函数的签名文本在源码里出现过」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个检查返回空」的信息量，等于那个检查能检出什么——**
+> **⚠️ 而一个子串检查只能检出「文本不在」，
+> 不能检出「实现在但不工作」。**
+>
+> ⭐⭐ **而这条与 §10.258 那条「CUDA 从未被编译」形成合流**：
+> **那份文档说「机器上没有 NVCC」，
+> ⚠️ 而这里的检查说「签名文本在」——
+> 故两者合起来恰好是「有源码、没编译」这个状态。**
+>
+> **⭐⭐ 判据：**
+> **「两个弱证据合起来」有时能得到一个强结论——**
+> **⚠️ 而条件是它们各自否掉的是不同的可能性。**
+>
+> ⭐⭐ **而这条也给「我该怎么引用一个自动生成的字段」一个规矩**：
+> **引用它时必须带上它是怎么算出来的——
+> ⚠️ 否则读者会按字面理解，而那通常比字面更宽。**
+>
+> **⭐⭐ 判据：**
+> **「一个字段的可信度」不取决于它的名字，而取决于它的产生方式——**
+> **⚠️ 而后者只写在代码里，不写在 JSON 里。**
+>
+> ⭐⭐ **而这条还暴露了一个设计上的选择**：
+> **作者只查了两个函数，而没有查其余十几个——
+> ⚠️ 故这个检查的覆盖面本身也是手写的、不完整的。**
+
+### 10.267 ⭐⭐⭐⭐⭐ `small-state` 的 449 个张量**混着 BF16 与 F32**
+
+[c-small-state-mixes-bf16-and-f32]
+
+> `force_f32` 覆盖 `norm.weight`、`.A_log`、`.dt_bias` 与所有 `conv1d`，其余保持 BF16。
+> 故「449 个张量占 57,767,936 字节」不能反推出平均张量大小。
+
+> **⭐⭐⭐⭐⭐ 这条给「组件表」这个我引用了好几轮的东西一个必要的限定**：
+> **`small-state` 不是一种格式，而是一组被特殊对待的杂项——
+> ⚠️ 而它内部至少有两档精度。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个组件的字节数」只有在它内部格式统一时才能当格式指标用——**
+> **⚠️ 而 `small-state` 恰好不统一。**
+>
+> ⭐⭐ **而这条解释了作者为什么强制这四类升到 F32**：
+> **`norm.weight` 是归一化权重、`.A_log` 与 `.dt_bias` 是 SSM 的连续参数、
+> `conv1d` 是短卷积——
+> ⚠️ 它们的共同点是「值域窄但动态范围要求高」，
+> 故用低精度会直接改变模型行为，而它们又都很小。**
+>
+> **⭐⭐ 判据：**
+> **「一个张量该用什么精度」取决于它的作用，而不是它的大小——**
+> **⚠️ 而这条与 §10.262 那条「bf16 孤岛」是同一个原则的两个粒度。**
+>
+> ⭐⭐ **而这条也修正 §10.262 里那句「bf16 是 16 比特」**：
+> **更准确的说法是「bf16 与 f32 两种，按张量作用分配」——
+> ⚠️ 故「这个模型的平均比特率」连分层都做不到，
+> 因为最小的一层内部还是混的。**
+>
+> **⭐⭐ 判据：**
+> **「平均」这个词要求同质——**
+> **⚠️ 而一个混着两种精度的组件，
+> 其平均值既不是任何一种精度，也不是它们的算术平均。**
+
+### 10.268 ⭐⭐⭐⭐⭐ 导出器是一份**可执行的证明**，不是一个工具
+
+[c-exporter-is-a-proof-not-a-product]
+
+> 四处硬编码：**输入哈希**（27 行）、**64 层**（259 行）、
+> **r=8 / alpha=16**（306 行）、**两个待查函数**（370 行）。
+> 每一处都指向「这一个模型」，而不是「这一类模型」。
+
+> **⭐⭐⭐⭐⭐ 这条是读完整份 495 行之后的整体判断，而不是单点发现**：
+> **四处硬编码各自都能解释成「为了严格」，
+> ⚠️ 而四处放在一起就只有一种解释：
+> 这个脚本只服务于一份已经冻结的制品。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个硬编码」可以是个例，「四个硬编码」就是设计——**
+> **⚠️ 而判据是「它们守的是同一个东西吗」：
+> 这里是同一个，即那份 `package.json` 的哈希。**
+>
+> ⭐⭐ **而这条给「这个项目在做什么」一个不同于我此前理解的答案**：
+> **我此前把它读成「一个推理运行时 + 一个量化格式」，
+> ⚠️ 而现在看到它还有第三件东西：一份可重放的制品生成过程。**
+>
+> **⭐⭐ 判据：**
+> **「一个项目的产物」不只有代码与权重，还有生成权重的那条路——**
+> **⚠️ 而第三条往往是最能说明作者意图的，因为它不面向用户。**
+>
+> ⭐⭐ **而这条也解释了为什么这份代码写得比运行时更严格**：
+> **运行时面向「任意输入」，故它必须防御；
+> ⚠️ 而导出器面向「唯一输入」，故它可以假设——
+> 而假设一旦写进代码，就变成了硬编码。**
+>
+> **⭐⭐ 判据：**
+> **「一段代码有多严」取决于它允许多少种输入——**
+> **⚠️ 而判据不是「它写了多少检查」，
+> 而是「它的检查里有多少是正确的废话」。**
+>
+> ⭐⭐ **而这条对报告读者的实际含义是**：
+> **你不能用这份导出器去导别的模型，
+> ⚠️ 也不能把它当作「BTL-3 支持任意模型」的证据——
+> 它只证明「这一个模型能被精确重建」。**
+>
+> **⭐⭐ 判据：**
+> **「一个工具能做什么」应该用它的输入集合来描述，而不是用它的输出——**
+> **⚠️ 而这里输入集合的大小是 1。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -29891,6 +30090,76 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (a) ⚠️⚠️⚠️ **本轮撤回清单**：删 5 条重复证据（`e-btl3-val-cuda-never-compiled-or-run`、`e-btl3-val-contract-says-zero-rows`、`e-btl3-signs-reimplements-mt19937`、`e-btl3-signs-tempering-is-inline`、`e-btl3-signs-only-parity-is-the-point`）；删 2 条重复主张（`c-cuda-backend-never-executed`、`c-signs-must-be-bit-reproducible`）；删 2 个小节（原 §10.258、原 §10.261）；**并在 §10.156 与 §10.153 各加一句「本条曾被重复提出，已撤回」**；
  — [src-btl3-doc-cuda-validation]
 
+### AVQ2 编码器与 gguf-py（第一百一十八轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/exporter.py`（18,357 字节，495 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/exporter.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **只能导出那一份输入，因为哈希是硬编码的**：
+「**EXPECTED_MANIFEST = "a2b763323eed76d8f78fe5cbdf5a2349323b2c3d87dddc037714569946961116"**」「**if sha256(manifest_path) != EXPECTED_MANIFEST: raise ValueError("source package manifest does not match frozen BTL-3 Compact")**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个报告里的来源标识」可能是**常量回显**，而不是**实测值**——⚠️ 而区分它们的办法是看那行代码写的是**变量名**还是**字段名****」；
+⭐⭐ 判据「**「一个工具的可复现性」靠的是**输入哈希**；「一个工具的复用性」靠的是**输入无关**——⚠️ 而硬编码哈希恰好是「**最大化前者、最小化后者**」的极端配置**」；
+⭐⭐ 判据「**「一个工具的能力上限」有时是它的**安全边界**——⚠️ 而判据是「它能不能被用来处理**攻击者提供的输入**」**」；
+(a) 🔥🔥🔥🔥🔥 **`verified_payload_count` 是恒等式，不是测量**：
+「**return {"output_bytes": output.stat().st_size, "output_sha256": sha256(output), "verified_tensor_count": len(actual), "verified_payload_count": len(actual)}**」——**两者都是 `len(actual)`**；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个名字里带 verified 的字段」不一定是**一次测量**——⚠️ 它也可能是一个**循环跑完的标志****」；
+⭐⭐ 判据「**「一个校验的强度」要分两层看：① 单项怎么比；② 汇总怎么报——⚠️ 而这两层可以**一强一弱**，且弱者会污染读者对强者的印象**」；
+⭐⭐ 但其实逐项比对很严：「**expected_digest = sha256(memoryview(np.ascontiguousarray(spec.load())).cast("B")).digest()**」「**if expected_value.nbytes != tensor.data.nbytes or expected_digest != actual_digest: raise ValueError(f"GGUF payload mismatch: {name}")**」；
+(b) ⚠️⚠️⚠️ **`native_runtime_gaps: []` 是子串检查的结果**：
+「**for function in ("build_vocab_get_rows", "build_vocab_head"): if f"ggml_tensor * {function}(" not in implementation: gaps.append(...)**」——**注释、声明、字符串字面量都能满足它**；
+⭐⭐ 判据「**「一个检查返回空」的信息量，等于**那个检查能检出什么**——⚠️ 而一个子串检查只能检出「文本不在」，不能检出「实现在但不工作」**」；
+⭐⭐ 判据「**「一个字段的可信度」不取决于它的名字，而取决于**它的产生方式**——⚠️ 而后者只写在代码里，不写在 JSON 里**」；
+(c) ⭐⭐⭐⭐⭐ **`small-state` 混着 BF16 与 F32**：
+「**force_f32 = (name.endswith("norm.weight") or name.endswith(".A_log") or name.endswith(".dt_bias") or is_conv)**」——**故 449 个张量里至少两档精度**；
+⭐⭐ 判据「**「一个组件的字节数」只有在**它内部格式统一**时才能当格式指标用**」；
+⭐⭐ 判据「**「一个张量该用什么精度」取决于**它的作用**，而不是**它的大小**——⚠️ 而这条与 §10.262 那条「bf16 孤岛」是同一个原则的两个粒度**」；
+(d) ⭐⭐⭐⭐ **层数 64 与 LoRA 的 r=8 也是硬编码**：
+「**layers = [layer] if layer is not None else range(64)**」「**if int(config["r"]) != 8 or float(config["lora_alpha"]) / int(config["r"]) != 2.0: raise ValueError("native LoRA contract requires rank 8 and scale 2.0")**」；
+(e) ⭐⭐⭐⭐ **`dtype_map` 只映射 BF16，其余走 numpy 推断**：
+「**dtype_map = {"BF16": gguf.GGMLQuantizationType.BF16}**」——**而 `I8` 出现 5 次、`F32` 4 次、`BF16` 1 次**；
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/gguf-py/gguf/gguf_writer.py`（60,100 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/gguf-py/gguf/gguf_writer.py)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **`raw_dtype=None` 时 gguf-py 按 numpy dtype 推断，且这条推断是完备的**：
+「**if raw_dtype is None: if tensor_dtype == np.float16: dtype = GGMLQuantizationType.F16 elif tensor_dtype == np.float32: ... elif tensor_dtype == np.int8: dtype = GGMLQuantizationType.I8 ... else: raise ValueError(...)**」——**故我最初怀疑「F32/I8 会被写错类型」是错的**；
+3. [GitHub / Badtheorylabs — BTL-3 `ggml/src/ggml-cuda/btl3-avq.cuh`（156 字节）与 `btl3-int4.cuh`（164 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cuh)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **两个 `.cuh` 是纯声明**：「**#pragma once #include "common.cuh" #include "btl3-avq-marker.h" void ggml_cuda_op_btl3_avq2(ggml_backend_cuda_context & ctx, ggml_tensor * dst);**」——**故「CUDA 的形状校验在哪里」的答案是「只在 `btl3-avq-marker.h` 里」**；
+ — [src-btl3-tools-exporter-py] [src-btl3-gguf-writer-py] [src-btl3-cuda-avq-cuh] [src-btl3-cuda-int4-cuh]
+
+### AVQ2 编码器与 gguf-py（第一百一十八轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/exporter.py`（18,357 字节，495 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/exporter.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **只能导出那一份输入，因为哈希是硬编码的**：
+「**EXPECTED_MANIFEST = "a2b763323eed76d8f78fe5cbdf5a2349323b2c3d87dddc037714569946961116"**」「**if sha256(manifest_path) != EXPECTED_MANIFEST: raise ValueError("source package manifest does not match frozen BTL-3 Compact")**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个报告里的来源标识」可能是**常量回显**，而不是**实测值**——⚠️ 而区分它们的办法是看那行代码写的是**变量名**还是**字段名****」；
+⭐⭐ 判据「**「一个工具的可复现性」靠的是**输入哈希**；「一个工具的复用性」靠的是**输入无关**——⚠️ 而硬编码哈希恰好是「**最大化前者、最小化后者**」的极端配置**」；
+⭐⭐ 判据「**「一个工具的能力上限」有时是它的**安全边界**——⚠️ 而判据是「它能不能被用来处理**攻击者提供的输入**」**」；
+(a) 🔥🔥🔥🔥🔥 **`verified_payload_count` 是恒等式，不是测量**：
+「**return {"output_bytes": output.stat().st_size, "output_sha256": sha256(output), "verified_tensor_count": len(actual), "verified_payload_count": len(actual)}**」——**两者都是 `len(actual)`**；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个名字里带 verified 的字段」不一定是**一次测量**——⚠️ 它也可能是一个**循环跑完的标志****」；
+⭐⭐ 判据「**「一个校验的强度」要分两层看：① 单项怎么比；② 汇总怎么报——⚠️ 而这两层可以**一强一弱**，且弱者会污染读者对强者的印象**」；
+⭐⭐ 但其实逐项比对很严：「**expected_digest = sha256(memoryview(np.ascontiguousarray(spec.load())).cast("B")).digest()**」「**if expected_value.nbytes != tensor.data.nbytes or expected_digest != actual_digest: raise ValueError(f"GGUF payload mismatch: {name}")**」；
+(b) ⚠️⚠️⚠️ **`native_runtime_gaps: []` 是子串检查的结果**：
+「**for function in ("build_vocab_get_rows", "build_vocab_head"): if f"ggml_tensor * {function}(" not in implementation: gaps.append(...)**」——**注释、声明、字符串字面量都能满足它**；
+⭐⭐ 判据「**「一个检查返回空」的信息量，等于**那个检查能检出什么**——⚠️ 而一个子串检查只能检出「文本不在」，不能检出「实现在但不工作」**」；
+⭐⭐ 判据「**「一个字段的可信度」不取决于它的名字，而取决于**它的产生方式**——⚠️ 而后者只写在代码里，不写在 JSON 里**」；
+(c) ⭐⭐⭐⭐⭐ **`small-state` 混着 BF16 与 F32**：
+「**force_f32 = (name.endswith("norm.weight") or name.endswith(".A_log") or name.endswith(".dt_bias") or is_conv)**」——**故 449 个张量里至少两档精度**；
+⭐⭐ 判据「**「一个组件的字节数」只有在**它内部格式统一**时才能当格式指标用**」；
+⭐⭐ 判据「**「一个张量该用什么精度」取决于**它的作用**，而不是**它的大小**——⚠️ 而这条与 §10.262 那条「bf16 孤岛」是同一个原则的两个粒度**」；
+(d) ⭐⭐⭐⭐ **层数 64 与 LoRA 的 r=8 也是硬编码**：
+「**layers = [layer] if layer is not None else range(64)**」「**if int(config["r"]) != 8 or float(config["lora_alpha"]) / int(config["r"]) != 2.0: raise ValueError("native LoRA contract requires rank 8 and scale 2.0")**」；
+(e) ⭐⭐⭐⭐ **`dtype_map` 只映射 BF16，其余走 numpy 推断**：
+「**dtype_map = {"BF16": gguf.GGMLQuantizationType.BF16}**」——**而 `I8` 出现 5 次、`F32` 4 次、`BF16` 1 次**；
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/gguf-py/gguf/gguf_writer.py`（60,100 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/gguf-py/gguf/gguf_writer.py)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **`raw_dtype=None` 时 gguf-py 按 numpy dtype 推断，且这条推断是完备的**：
+「**if raw_dtype is None: if tensor_dtype == np.float16: dtype = GGMLQuantizationType.F16 elif tensor_dtype == np.float32: ... elif tensor_dtype == np.int8: dtype = GGMLQuantizationType.I8 ... else: raise ValueError(...)**」——**故我最初怀疑「F32/I8 会被写错类型」是错的**；
+3. [GitHub / Badtheorylabs — BTL-3 `ggml/src/ggml-cuda/btl3-avq.cuh`（156 字节）与 `btl3-int4.cuh`（164 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cuh)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **两个 `.cuh` 是纯声明**：「**#pragma once #include "common.cuh" #include "btl3-avq-marker.h" void ggml_cuda_op_btl3_avq2(ggml_backend_cuda_context & ctx, ggml_tensor * dst);**」——**故「CUDA 的形状校验在哪里」的答案是「只在 `btl3-avq-marker.h` 里」**；
+ — [src-btl3-tools-exporter-py] [src-btl3-gguf-writer-py] [src-btl3-cuda-avq-cuh] [src-btl3-cuda-int4-cuh]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -30030,7 +30299,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=343, evidence=2479, claims=1808, claims_high=1461, claims_disputed=9, trace_events=753, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=345, evidence=2494, claims=1813, claims_high=1466, claims_disputed=9, trace_events=759, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
