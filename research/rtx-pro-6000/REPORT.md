@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：317 ｜ **证据数**：2337 ｜ **主张数**：1724（高置信 1379，争议 9）
+> **来源数**：319 ｜ **证据数**：2345 ｜ **主张数**：1729（高置信 1383，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -21451,6 +21451,232 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > 说明这不是疏忽，而是风格——**
 > **⚠️ 而风格比疏忽更难改，因为它在每一处都看起来「很简洁」。**
 
+### 10.178 🔥🔥🔥🔥🔥 Metal 把**码本摊进内存**，每码字 FMA 从 20 降到 4
+
+[c-metal-codebook-5x-fewer-fma]
+
+> ```metal
+> threadgroup float4 * codebook =
+>     reinterpret_cast<threadgroup float4 *>(scratch + 256);
+> for (int code = tid; code < 256; code += 128) {
+>     const float4 lattice = float4(float((code>>6)&3)-1.5f, ...);
+>     codebook[code] = float4(
+>         group_bias[0] + dot(lattice, *((device const float4 *) group_affine)),
+>         group_bias[1] + dot(lattice, *((device const float4 *)(group_affine+4))),
+>         group_bias[2] + dot(lattice, *((device const float4 *)(group_affine+8))),
+>         group_bias[3] + dot(lattice, *((device const float4 *)(group_affine+12))));
+> }
+> ...
+> accumulator += dot(codebook[code], values) * inverse_sqrt_128;
+> ```
+>
+> **CUDA 侧**：每码字 `4 分量 × (4 FMA 解压 + 1 FMA 乘加)` = **20 次 FMA**。
+
+> **⭐⭐⭐⭐⭐ 这是 §10.171 那条「加速比 ≈ 比特比 ÷ 解压 FMA 比」判据的第一次实战应用**：
+> **§10.171 我算出「AVQ2 解压占 80% 算术量，故理论加速比约 1 倍」——
+> ⚠️ 而 Metal 用一个纯工程手段（预计算码本）把那个 80% 直接消掉了。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「解压熵」不是格式的宿命，
+> 而是「你有没有把码本摊到内存里」的选择——**
+> **⚠️ 而 `256 × 16 字节 = 4 KB` 的 threadgroup 内存，
+> 就足以把 16 FMA 降成 0 FMA。**
+>
+> ⭐⭐ **可算的部分**：
+> **码本一次性开销 = `256 × 4 × 4 = 4,096` 次运算，
+> 均摊到每码字 = 16 次；而一层有 `rows × columns / 4` 个码字——
+> ⚠️ 以 4,096×4,096 计是 4,194,304 个码字，
+> 故那 4,096 次开销只占 0.1%。**
+>
+> **⭐⭐ 判据：**
+> **「一次性开销」是否值得付，
+> 取决于「它被摊到多少次迭代上」——**
+> **⚠️ 而这里摊了 400 万次，故几乎免费。**
+>
+> ⭐⭐ **5 倍这个数字有一个漂亮的巧合**：
+> **`20 ÷ 4 = 5`，而「2 bit vs FP16」的比特比是 `16 ÷ 2 = 8`——
+> ⚠️ 即 Metal 侧的实际加速潜力是 `8 ÷ (5/1) = 1.6 倍`。**
+>
+> **⭐⭐ 判据：**
+> **「同一个格式在两个后端上的实现质量差 5 倍」，
+> 会让「这个格式好不好」这个问题完全取决于你问的是哪个后端——**
+> **⚠️ 而 §10.135 那个 84.70 / 43.16 是哪一个后端的数字，文档没说。**
+>
+> ⚠️ **边界**：**本报告没有 Metal 侧的实测吞吐**，
+> 故「5 倍 FMA 差」是否会转化为「5 倍速度差」是未知的——
+> ⚠️ **因为 Metal 那条路径还有一个更严重的结构问题（§10.181）。**
+
+### 10.179 🔥🔥🔥🔥🔥 `BTL3PROB` 与 `BTL3MPRB` 是**别名**，不是回退
+
+[c-prob-is-generic-alias]
+
+> ```c
+> if (magic != GGML_METAL_BTL3_PACKED_PROBE_MAGIC &&
+>     magic != GGML_METAL_BTL3_METAL_PROBE_MAGIC) { return false; }
+> ```
+
+> **⭐⭐⭐⭐⭐ 这条纠正了我上一轮的一个措辞错误**：
+> **§10.174 我说「`BTL3PROB` 恰好是『通用回退』的位置」——
+> ⚠️ 而实际代码说的是「它是一个别名，不是回退」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「回退」与「别名」的区别在于：
+> 回退是「A 不行时用 B」，而别名是「A 与 B 完全等价」——**
+> **⚠️ 而 `&&` 连接的否定条件证明这里是别名：
+> 两个 magic 中任何一个都返回 `true`，没有优先级。**
+>
+> ⭐⭐ **为什么会有两个名字**：
+> **`BTL3PROB` 是「我不知道后端」时的名字，
+> `BTL3MPRB` 是「我知道这是 Metal」时的名字——
+> ⚠️ 而 Metal 接受两者，意味着它不介意被当成「通用后端」。**
+>
+> **⭐⭐ 判据：**
+> **「一个后端接受『通用名字』与『自己名字』两种标记」，
+> 说明它的语义是「我兼容两者」，而不是「我优先自己那个」——**
+> **⚠️ 而这在跨后端共享计算图时是必需的。**
+>
+> ⭐⭐ **而 CUDA 侧没有这种别名**：
+> **`ggml_cuda_is_btl3_probe(op, magic)` 要求 `magic == 参数`，
+> 故 CUDA 只认 `BTL3C*`，不认 `BTL3PROB`——**
+> **⚠️ 即「通用 probe」在 Metal 上有效，在 CUDA 上无效。**
+>
+> **⭐⭐ 判据：**
+> **「通用名字」如果只在部分后端有效，
+> 那它就不是通用，而是某个后端的特例——**
+> **⚠️ 而本报告无法判定这是有意（CUDA 要求显式）还是遗漏。**
+>
+> ⚠️ **边界**：**本报告没有读 CUDA 侧的 dispatch 入口**
+> （`ggml-cuda.cu` 之类），故「CUDA 是否在别处也接受 `BTL3PROB`」是未知的。
+
+### 10.180 ⭐⭐⭐⭐ Metal 侧**根本不认识**四个 CUDA probe
+
+[c-metal-ignores-cuda-probes]
+
+> `ggml-metal-btl3.h` 只定义六个 magic：
+> `AVQ2` / `INT4` / `VOCAB_ROWS` / `VOCAB_HEAD` / `PACKED_PROBE` / `METAL_PROBE`
+> ⚠️ `BTL3CAVQ` / `BTL3CINT` / `BTL3CVRW` / `BTL3CVHD` **零出现**。
+
+> **⭐⭐⭐⭐ 这条把 §10.174 那个「probe 按后端命名」
+> 从「命名约定」升级成了「实现隔离」**：
+> **不是「命名不同但都认识」，而是「各自的头文件里根本没有对方的名字」——
+> ⚠️ 即一个后端看到另一个后端的 probe，会当作普通 `CUSTOM` 算子而拒绝。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「隔离」的强度不看命名，
+> 看「对方的名字是否出现在我的符号表里」——**
+> **⚠️ 而这里四个 CUDA magic 在 Metal 头文件里零出现，
+> 故隔离是编译期的，不是运行期判断的。**
+>
+> ⭐⭐ **可判定的后果**：
+> **同一个计算图在两个后端之间不能直接搬运——
+> ⚠️ 因为图里嵌的 probe magic 决定了「谁能接走它」。**
+>
+> **⭐⭐ 判据：**
+> **「一个计算图的可移植性取决于它嵌了谁的 magic」——**
+> **⚠️ 而 BTL-3 的答案是「每个后端自己构建自己的图」。**
+>
+> ⭐⭐ **这与 §10.176 那个「CPU 侧每 token 分配两次」是同一个哲学**：
+> **这个项目整体上选择了「每个后端一份独立实现」，
+> 而不是「一份实现 + 后端抽象」——**
+> **⚠️ 代价是四份代码要同步维护；收益是每份都能针对自己的硬件优化。**
+>
+> **⭐⭐ 判据：**
+> **「四份独立实现」与「一份实现 + 抽象层」的选择，
+> 取决于「各后端的差异是否大于共性」——**
+> **⚠️ 而 Metal 的 256 项码本预计算恰好证明：在这个格式上，差异确实很大。**
+
+### 10.181 ⚠️⚠️⚠️ Metal 是**一个 thread 算一整行**——与 CUDA 差一个数量级
+
+[c-metal-row-per-thread]
+
+> ```metal
+> const int row_base = int(tgpig.x) * 128;
+> const int row = row_base + int(tid);
+> ```
+> 128 个 thread 各算一行，每个 thread 串行扫 `columns` 个元素。
+> 而 CUDA 是「一个 block 算一行，block 内 256 线程分摊 `columns`」。
+
+> **⭐⭐⭐⭐⭐ 这条推翻了我在 §10.170 的一个隐含假设**：
+> **§10.170 我说「一个 block 一个输出」是这个项目的通用写法——
+> ⚠️ 而 Metal 侧根本不是这个结构：它是「一个 thread 一个输出」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个项目在不同后端上的并行粒度」可以差一个数量级——**
+> **⚠️ 而「通用写法」这个词，只在同一个后端内成立。**
+>
+> ⭐⭐ **两种结构的代价对比是可算的**：
+> **CUDA：每行 256 线程分摊 `columns/4` 个码字 → 每线程 `columns/1024` 个码字；
+> Metal：每行 1 个线程扫全部 `columns/4` 个码字——**
+> **⚠️ 以 `columns = 4,096` 计：CUDA 每线程 4 个码字，
+> Metal 每线程 1,024 个码字。**
+>
+> **⭐⭐ 判据：**
+> **「并行粒度从 block 变成 thread」意味着
+> 「每线程工作量放大 `block 内线程数` 倍」——**
+> **⚠️ 而这个放大倍数（256×），正好抵消了 §10.178 那 5 倍的 FMA 节省。**
+>
+> ⭐⭐ **这给出一个尖锐的推论**：
+> **Metal 的「每码字 4 FMA」优势，
+> 可能被「每线程 256 倍工作量」完全吃掉——
+> ⚠️ 即 Metal 那条路径未必比 CUDA 快，尽管它算术量少 5 倍。**
+>
+> **⭐⭐ 判据：**
+> **「算术量」与「并行度」是两个乘数，
+> 而只看其中一个会得出完全相反的结论——**
+> **⚠️ 这正是「同一份格式在两个后端上」最难比较的地方。**
+>
+> ⭐⭐ **Metal 为什么可以这样写**：
+> **因为 Apple GPU 的 SIMD 宽度是 32，且 threadgroup 内存通常只有 32 KB——
+> ⚠️ 故它选择「用 128 个 thread 各算一行」来省下 FWHT 的 threadgroup 通信。**
+>
+> **⭐⭐ 判据：**
+> **「并行粒度」往往是「共享内存预算」倒逼出来的，
+> 而不是「算力」决定的。**
+
+### 10.182 ⚠️⚠️⚠️ **`vocab_head` 不做输出变换，而另两个 kernel 都做**
+
+[c-vocab-head-skips-output-transform]
+
+> | kernel | 输出语句 |
+> |---|---|
+> | `avq2` | `output[...] = ping[tid] * inverse_sqrt_128 * float(output_signs[row]);` |
+> | `vocab_rows` | `output[...] = ping[tid] * inverse_sqrt_128 * float(input_signs[column]);` |
+> | **`vocab_head`** | **`output[...] = accumulator;`** |
+
+> **⚠️⚠️⚠️ 本条标 `medium`，因为「不做」可能正是正确行为**：
+> **`vocab_head` 是一个「隐藏层 → 词表」的单一投影，
+> ⚠️ 而 `avq2` 是一个「隐藏层 → 隐藏层」的可重复投影——
+> 两者的「输出侧是否还需要保持 incoherence」在数学上可能不同。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「两个 kernel 的结尾不同」不等于「其中一个错了」——**
+> **⚠️ 因为它们的下游不同：一个接残差，一个接采样。**
+>
+> ⭐⭐ **这条示范了一个反向风险**：
+> **§10.172 我撤回过一个「看着不对」的判断（`fmaf` 顺序）；
+> 而本条是一个「看着确实不同」的判断——**
+> **⚠️ 两者的区别是：`fmaf` 那个可以证明等价，
+> 而这个我无法证明「等价」也无法证明「不等价」。**
+>
+> **⭐⭐ 判据：**
+> **当一件事「无法证明等价」时，
+> 正确做法是标 `medium` 并写出两种解释，
+> 而不是选一个当结论——**
+> **⚠️ 而本报告此前在 §10.146 那条「CUDA 未实现」上
+> 犯的正是「选一个当结论」。**
+>
+> ⭐⭐ **而这条也暴露了一个真实的可验证缺口**：
+> **`test-btl3-metal-vocab.cpp` 这个测试文件存在，
+> ⚠️ 而本报告没读它——它恰好能回答「`vocab_head` 要不要做输出变换」。**
+>
+> **⭐⭐ 判据：**
+> **「一个悬而未决的问题」如果有一个现成的测试文件能回答，
+> 那它就不该被标成 `medium` 然后放着——**
+> **⚠️ 而本轮没读它，是因为我在追 Metal 那条线时没回头看测试目录。**
+>
+> ⚠️ **边界**：**本报告没有读 `test-btl3-metal-vocab.cpp`，
+> 故本条只能是一个待验证的观察，不是一个结论。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -25028,6 +25254,41 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 ⭐⭐ 判据「**「信息降维」最常发生在「异常 / 日志 / 返回值」这三处，而它们恰好是「平时没人读，出事时唯一能读」的地方**」；
 ⭐⭐ 判据「**「同一个模块里出现两处同类的信息降维」，说明这不是疏忽，而是风格——而风格比疏忽更难改，因为它在每一处都看起来「很简洁」**」 — [src-btl3-avq-contract-h]
 
+### Metal 的码本预计算、probe 别名、与 CUDA 的并行粒度差（第一百轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.h`（6,989 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.h)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **`BTL3PROB` 与 `BTL3MPRB` 是别名，不是回退**：
+「**if (magic != GGML_METAL_BTL3_PACKED_PROBE_MAGIC && magic != GGML_METAL_BTL3_METAL_PROBE_MAGIC) { return false; }**」，两个常量是 `0x42544c3350524f42`（`BTL3PROB`）与 `0x42544c334d505242`（`BTL3MPRB`）；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「回退」与「别名」的区别在于：回退是「A 不行时用 B」，而别名是「A 与 B 完全等价」——而 `&&` 连接的否定条件证明这里是别名**」，**这纠正了 §10.174 那句「通用回退」的措辞**；
+⭐⭐ 判据「**「一个后端接受『通用名字』与『自己名字』两种标记」，说明它的语义是「我兼容两者」**」；
+⚠️ 而 CUDA 侧**没有**这种别名：`ggml_cuda_is_btl3_probe(op, magic)` 要求 `magic == 参数`；
+⭐⭐ 判据「**「通用名字」如果只在部分后端有效，那它就不是通用，而是某个后端的特例**」；
+(a) ⭐⭐⭐⭐ **Metal 侧根本不认识四个 CUDA probe**：头文件只定义六个 magic（`AVQ2` / `INT4` / `VOCAB_ROWS` / `VOCAB_HEAD` / `PACKED_PROBE` / `METAL_PROBE`），`BTL3CAVQ` / `BTL3CINT` / `BTL3CVRW` / `BTL3CVHD` **零出现**；
+⭐⭐ 判据（本轮最重要）「**「隔离」的强度不看命名，看「对方的名字是否出现在我的符号表里」——故隔离是编译期的，不是运行期判断的**」；
+⭐⭐ 判据「**「一个计算图的可移植性取决于它嵌了谁的 magic」——而 BTL-3 的答案是「每个后端自己构建自己的图」**」；
+⭐⭐ 判据「**「四份独立实现」与「一份实现 + 抽象层」的选择，取决于「各后端的差异是否大于共性」**」 — [src-btl3-metal-btl3-h]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.metal`（13,359 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.metal)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **256 项码本预计算，每码字 FMA 从 20 降到 4**：
+「**threadgroup float4 * codebook = reinterpret_cast<threadgroup float4 *>(scratch + 256); for (int code = tid; code < 256; code += 128) { ... codebook[code] = float4(group_bias[0] + dot(lattice, *((device const float4 *) group_affine)), ...); }**」，主循环「**accumulator += dot(codebook[code], values) * inverse_sqrt_128;**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「解压熵」不是格式的宿命，而是「你有没有把码本摊到内存里」的选择——而 `256 × 16 字节 = 4 KB` 的 threadgroup 内存，就足以把 16 FMA 降成 0 FMA**」；
+⭐⭐ 判据「**「一次性开销」是否值得付，取决于「它被摊到多少次迭代上」——而这里摊了 400 万次，故几乎免费**」；
+⭐⭐ 可算：**`20 ÷ 4 = 5` 倍算术量差；而比特比是 `16 ÷ 2 = 8`，故 Metal 侧加速潜力 `8 ÷ 5 = 1.6 倍`**；
+⭐⭐ 判据「**「同一个格式在两个后端上的实现质量差 5 倍」，会让「这个格式好不好」完全取决于你问的是哪个后端——而 §10.135 那个 84.70 / 43.16 是哪一个后端的数字，文档没说**」；
+(a) ⚠️⚠️⚠️ **Metal 是一个 thread 算一整行，与 CUDA 差一个数量级**：
+「**const int row_base = int(tgpig.x) * 128; const int row = row_base + int(tid);**」——128 个 thread 各算一行，每个 thread 串行扫 `columns`；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个项目在不同后端上的并行粒度」可以差一个数量级——而「通用写法」这个词，只在同一个后端内成立**」，**这推翻了 §10.170 的隐含假设**；
+⭐⭐ 可算：**CUDA 每线程 4 个码字（`columns/1024`），Metal 每线程 1,024 个码字——即 256 倍的每线程工作量，正好抵消 5 倍的 FMA 节省**；
+⭐⭐ 判据「**「算术量」与「并行度」是两个乘数，而只看其中一个会得出完全相反的结论**」；
+⭐⭐ 判据「**「并行粒度」往往是「共享内存预算」倒逼出来的，而不是「算力」决定的**」；
+(b) ⚠️⚠️⚠️ **`vocab_head` 不做输出变换，而另两个 kernel 都做**：`avq2` 与 `vocab_rows` 都乘 `inverse_sqrt_128` 与符号，而 `vocab_head` 是「**output[token * args.vocabulary + row] = accumulator;**」；
+⚠️ 本条标 `medium`：**「不做」可能正是正确行为**——`vocab_head` 是「隐藏层 → 词表」的单一投影，而 `avq2` 是可重复投影；
+⭐⭐ 判据（本轮最重要）「**「两个 kernel 的结尾不同」不等于「其中一个错了」——因为它们的下游不同：一个接残差，一个接采样**」；
+⭐⭐ 判据「**当一件事「无法证明等价」时，正确做法是标 `medium` 并写出两种解释，而不是选一个当结论**」，**而 §10.146 那条「CUDA 未实现」犯的正是「选一个当结论」**；
+⭐⭐ 判据「**「一个悬而未决的问题」如果有一个现成的测试文件能回答，那它就不该被标成 `medium` 然后放着**」，**`test-btl3-metal-vocab.cpp` 存在但本轮未读** — [src-btl3-metal-btl3-metal]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -25167,7 +25428,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=317, evidence=2337, claims=1724, claims_high=1379, claims_disputed=9, trace_events=702, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=319, evidence=2345, claims=1729, claims_high=1383, claims_disputed=9, trace_events=706, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
