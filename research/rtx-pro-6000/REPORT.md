@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：283 ｜ **证据数**：2212 ｜ **主张数**：1622（高置信 1285，争议 9）
+> **来源数**：284 ｜ **证据数**：2218 ｜ **主张数**：1627（高置信 1290，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -17557,6 +17557,139 @@ VOLTA_MMA_AVAILABLE   TURING_MMA_AVAILABLE   AMD_WMMA_AVAILABLE   AMD_MFMA_AVAIL
 > ⚠️ 置信度 **medium**：**「两条管线」是从代码调用关系推出的，
 > 而我并没有读 `mmq.cu` 的调度代码来确认它不调用 `mmf`。**
 
+### 10.78 🔥🔥🔥🔥🔥 FP4 的开关是**两行代码里的一个 `&&`**
+
+**前五轮的所有抽象讨论，在这里收束成一行** [c-fp4-needs-weight-type-and-blackwell-macro]：
+
+```c
+// src1 at Q4 uses the native FP4 instructions, which are Blackwell-only
+// default to the native W4A4 instructions on Blackwell
+// Q4 only for the FP4 types on Blackwell
+const bool can_use_q4 = (src0->type == GGML_TYPE_NVFP4 || src0->type == GGML_TYPE_MXFP4)
+                        && blackwell_mma_available(cc);
+if (prec == GGML_PREC_Q8 || !can_use_q4) { return GGML_PREC_Q8; }
+return GGML_PREC_Q4;
+```
+
+> ⚠️ 即 **必须同时满足**：
+> **① 权重类型是 `NVFP4` 或 `MXFP4`**；
+> **② `blackwell_mma_available(cc)` 为真**（§10.66：要求 `highest_compiled_arch >= 1200`）。
+> ⭐ **缺任一条就退回 `GGML_PREC_Q8`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个能力被写成 `A && B` 时，
+> 它的「不支持」有两种完全不同的含义，
+> 而用户无法从现象上区分它们——**
+> **⚠️ 因为退回的那一档（`Q8`）仍然能跑，只是慢。**
+>
+> ⭐⭐ **这条最实用的推论**：
+> **「我在 RTX PRO 6000 上跑了 NVFP4 模型，但速度不对」
+> 这种报告，最常见的原因不是「卡不支持」，
+> 而是「这个二进制没编 >= 12.0」——**
+> **⚠️ 而两者在 `nvidia-smi` 里看不出区别。**
+>
+> **⭐⭐ 判据：**
+> **一个「静默降级」的设计，
+> 会让「不支持」与「配置错」在现象上完全一样——**
+> **⚠️ 而这类设计在性能软件里是常态，
+> 因为「报错退出」对用户体验的伤害更大。**
+>
+> ⭐⭐ **§10.45 那条判据在这里需要再加一层**：
+> **「验证配置生效了」≠「验证结果是对的」≠「验证走的是快路径」。**
+
+### 10.79 ⭐⭐ `W4A4` 才是准确的术语
+
+[c-w4a4-is-the-term]
+
+> 作者三处注释全部直说 **Blackwell-only**，而其中一处用了 **`W4A4`**：
+> **`W4A4` = 权重 4 比特 + 激活 4 比特。**
+
+> **⭐⭐ 判据：**
+> **一个模型「是 NVFP4」这句话，只说明了权重的格式，
+> 而没有说明激活的格式——**
+> **⚠️ 而两者的组合才是决定「用哪条指令」的东西。**
+>
+> ⭐⭐ **这解释了 §10.30 / §10.47 记的那些「NVFP4 在 SM12x 上崩」
+> 的报告为什么难以归类**：
+> **「NVFP4」这个词在不同项目里指不同的东西**——
+> **在 `llama.cpp` 里它指 `W4A4` 的权重侧，
+> 而在 vLLM / FlashInfer 里它可能指 `W4A16` 或 `W4A8`。**
+>
+> **⭐⭐ 判据（对读者的实际含义）：**
+> **看到「支持 FP4」时，必须追问「权重 4 比特，那激活是几位」——**
+> **⚠️ 而这个问题的答案决定了「哪条指令被发射」，
+> 进而决定了「哪个 bug 会发生」。**
+
+### 10.80 ⭐⭐⭐ 「两条管线」从**推断**升级为**确认**
+
+[c-two-pipelines-confirmed-not-inferred]
+
+> **`mmq.cu`（22,671 字节）全文无任何 `mmf` 调用**；
+> 而它的类型分派是 `switch (args.type_x)` 与 `switch (type)` 两处，
+> **列出的全是量化类型**（`Q1_0`…`Q8_0`、`Q2_K`…`Q6_K`、`IQ1_S`…`IQ4_NL`、`MXFP4`、`NVFP4`）。
+
+> **⭐⭐⭐ 这是本报告第一次明确记录「推断 → 观测」的升级路径**——
+> §10.77 那条被标为 `medium`，**本轮升为 `high`**。
+>
+> **⭐⭐ 判据：**
+> **一份报告如果把「推断」和「观测」混在一起写，
+> 它就失去了「知道自己哪里不确定」的能力——**
+> **⚠️ 而分开记录的代价只是「多写一句 medium」。**
+>
+> ⭐⭐ **内容含义**：
+> **「支持某架构」在 `llama.cpp` 里被组织成两条平行的管线，
+> 而不是一棵按架构分叉的树**——
+> **这意味着「加一个新架构」不需要动调度代码，
+> 只需要动「数据类型 → 指令」的映射。**
+>
+> **⭐⭐ 判据：**
+> **一个系统的「可扩展性」不在于它有多少分支，
+> 而在于「加一个新维度时需要改几处」——**
+> **⚠️ 而「按数据类型分派」比「按架构分派」少改一处。**
+
+### 10.81 ⭐⭐ `J` 是**搜出来的**，而 `GGML_TYPE_COUNT` 是白名单的哨兵
+
+[c-j-is-searched-not-tabled] [c-config-type-count-is-sentinel]
+
+```c
+// Tile width in ne11 (dense) / ne12 (MoE) direction with the fewest
+// tiles that fits into shared memory, 0 if there is none.
+for (int J = 8; J <= 128 && ntiles_J_best > 1; J += 8) {
+    const ggml_cuda_mmq_config config =
+        ggml_cuda_mmq_get_config(type, J, fallback, cc, prec_src1);
+    if (config.type == GGML_TYPE_COUNT) { continue; }   // ← 哨兵
+    ...
+}
+```
+
+> ⚠️ 即 **`J` 从 8 到 128 以 8 为步长枚举，选「tile 数最少且能装进 SMEM」的那个**；
+> **而循环条件是 `ntiles_J_best > 1`——一旦降到 1 就停**。
+
+> **⭐⭐ 判据：**
+> **「一张表」在两个不同的架构里可以是完全不同的东西：
+> 它可以是「答案」，也可以是「候选」——**
+> **⚠️ 而区分方法是看「谁在遍历它」。**
+>
+> ⭐⭐ **这修正了本报告对 §10.62 那份 `CASE` 表的一个误读**：
+> **我以为它是「查表得到配置」，而实际上它是「搜索过程中的候选集」。**
+>
+> **⭐⭐ 判据：**
+> **一个「够用就停」的搜索，与一个「找最优」的搜索，
+> 在多数输入上给出相同结果，而在边界输入上差很多——**
+> **⚠️ 而基准测试通常落在「多数输入」上。**
+>
+> ⭐⭐ **而 `GGML_TYPE_COUNT` 作为哨兵，解释了 §10.64 那个「表只有 1/10 大」**：
+> **那张表小，不是因为它「漏了」，而是因为它的语义允许它小**——
+> **漏掉的部分由哨兵承接，再回退到 Ampere 配置。**
+>
+> **⭐⭐ 判据：**
+> **「小」在一个白名单结构里是设计，在一个全集结构里是欠账——**
+> **⚠️ 而看代码的人如果不知道这是白名单，就会把它当成欠账。**
+>
+> ⭐ **这正是 §10.64 那条判据的兑现**：
+> **「在能看到『它显式回退了什么』时是一个设计决定」——
+> 本轮就是那个「显式回退」被找到的地方。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -20938,6 +21071,10 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 1. [ggml-org/llama.cpp — `ggml/src/ggml-cuda/mmf.cuh`（master 原始源码，45,665 字节 / 926 行）+ `mmf.cu`（7,883 字节）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/ggml/src/ggml-cuda/mmf.cuh) —（2026-10 抓取）。(a) ⚠️ **五项清单的最后一行：`mmf` 连 Ampere 都没单独分**——`mmf.cuh`（926 行）的全部条件编译宏逐行扫完只有四种：**`VOLTA_MMA_AVAILABLE`、`TURING_MMA_AVAILABLE`、`AMD_WMMA_AVAILABLE`、`AMD_MFMA_AVAILABLE`**，**完全不出现 `AMPERE_MMA_AVAILABLE`**，更不出现 `CC_BLACKWELL`/`DGX_SPARK`/`120a`/`121a`/`FP4`；`mmf.cu` 同样 0 命中；⭐⭐ 判据（本轮最重要）「**一个『通用兜底分支』的存在，会让『后来者没有专用分支』这件事在代码里完全不可见——因为没有人需要写一行『Blackwell』，它自动被 `>= 750` 收进去了**」+「**『零命中』能证明『没有专用代码』，但它证明不了『没有为此优化』——因为优化可能发生在『一个对所有架构都生效的写法』里**」。(b) ⭐⭐ **钥匙：`TURING_MMA_AVAILABLE` 的定义是 `>= 750`**——`#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA) && __CUDA_ARCH__ >= GGML_CUDA_CC_TURING`，⚠️ 即 **Ampere 800、Hopper 900、Blackwell 1200 全部落进这个分支**，而 `AMPERE_MMA_AVAILABLE`（`>= 800`）存在但 `mmf.cuh` 没用它；⭐⭐ 判据「**当一个宏以『首次引入它的那一代』命名时，它的名字会随时间的推移而越来越不准确——而代码继续正确运行，因为条件是个下界**」+「**『向下兼容』在代码里的实现方式，通常不是『加一个 `if`』，而是『一开始就写成一个下界』——而这两种写法在『新架构发布时』的表现完全不同**」；⭐ 这解释了「为什么 `llama.cpp` 能在 SM12x 上开箱就跑」；⭐ 对读者的实用含义：**看到「某项目没有 Blackwell 分支」时，先去看它的宏定义是「等号」还是「大于等于」——前者意味着「不支持」，后者意味着「已经支持了」**。(c) ⭐⭐ **FP4 与浮点矩阵乘是两条不相交的管线**——**FP4 的 PTX 全在 `mma.cuh` 里由 `mmq`（量化矩阵乘）使用**，而 `mmf.cuh` 服务的是浮点类型（`half2`、`nv_bfloat162` 一系），**不含任何 4 比特路径**；⭐⭐ 判据「**当一个系统的『支持矩阵』看起来是二维（层 x 架构）时，它实际上可能是一维的（管线 x 数据类型）——而把前者当成后者，会导致『为什么这一格没有』这类无法回答的问题**」+「**一个架构的新能力如果只对某类数据有效，那么『为新架构优化』与『为新数据类型优化』是同一件事——而这时『按架构分派』就是错的组织方式**」；⭐ 对 RTX PRO 6000：**在 `llama.cpp` 上，Blackwell 的收益只在「用 4 比特量化」时才出现——用 FP16/BF16 跑，它和第 750 代之后的所有卡走同一条路径**。(d) ⚠️ **「零命中」有两个不同的原因，不能合并成一个结论**：`fattn-mma-f16.cuh`/`fattn-tile.cuh` 零命中是因为**通用 MMA 够用**（Ampere 的 `m16n8k16` 在 Blackwell 上仍可用）；`mmf.cuh` 零命中是因为**它从来只按 Volta/Turing 两级分**（连 Ampere 都没单独分）；⭐⭐ 判据（本轮最重要之一）「**『两个样本给出同一个观察』不等于『它们有同一个原因』——而这正是 §10.50 那条『归因一致 ≠ 结论一致』在源码分析里的版本**」+「**『零命中』是一个关于『文本』的结论，而『没优化』是一个关于『意图』的结论——前者可以全文检索，后者不能**」；⭐⭐ 判据「**在同一份报告里，『可复现的检索』与『不可复现的解读』必须分开归档——否则读者无法知道哪一句可以自己重跑**」。(e) ⭐⭐⭐ **五项清单的最终形态不是五个层次，而是两条管线**：**量化管线（`mmq` 32 条 `CASE` + `mma.cuh` 两条 FP4 PTX）有 Blackwell 专用；浮点管线（`mmf`）无任何架构专用；注意力无 Blackwell 专用**；⚠️ **把管线画成层次会导致一个具体错误：把「`mma.cuh` 有 FP4」与「`mmf` 没有」当成矛盾——而它们根本不是同一层的两格**；⭐⭐ 判据（本轮最重要）「**当一张『能力表』出现『同一层有的有有的没有』时，先怀疑的不是『哪一格漏了』，而是『这张表的行是不是其实不是同一类东西』——而这类错误的特征，是它会产生『矛盾』而不是『空格』**」+「**一份好的清单应该同时说清『有哪几项』与『哪几项是一类』**」（置信度 medium：「两条管线」是从代码调用关系推出的，并未读 `mmq.cu` 的调度代码确认它不调用 `mmf`） — [src-llamacpp-mmf-cuh]
 
+### FP4 的开关是两行代码里的一个 `&&`，与两条管线从推断升级为确认（第七十九轮补充）
+
+1. [ggml-org/llama.cpp — `ggml/src/ggml-cuda/mmq.cu`（master 原始源码，22,671 字节）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/ggml/src/ggml-cuda/mmq.cu) —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **FP4 生效的完整条件是两行代码里的一个 `&&`**：**`const bool can_use_q4 = (src0->type == GGML_TYPE_NVFP4 || src0->type == GGML_TYPE_MXFP4) && blackwell_mma_available(cc);`**，**`if (prec == GGML_PREC_Q8 || !can_use_q4) { return GGML_PREC_Q8; } return GGML_PREC_Q4;`**——⚠️ 即 **必须同时满足「权重类型是 NVFP4/MXFP4」与「`blackwell_mma_available(cc)` 为真」**，**缺任一条就退回 `GGML_PREC_Q8`**；⭐⭐ 判据（本轮最重要）「**当一个能力被写成 `A && B` 时，它的『不支持』有两种完全不同的含义，而用户无法从现象上区分它们——因为退回的那一档（`Q8`）仍然能跑，只是慢**」+「**一个『静默降级』的设计，会让『不支持』与『配置错』在现象上完全一样——而这类设计在性能软件里是常态，因为『报错退出』对用户体验的伤害更大**」；⭐ 最实用的推论：**「我在 RTX PRO 6000 上跑了 NVFP4 模型，但速度不对」这种报告，最常见的原因不是「卡不支持」，而是「这个二进制没编 >= 12.0」——而两者在 `nvidia-smi` 里看不出区别**；⭐⭐ §10.45 那条判据需再加一层：**「验证配置生效了」≠「验证结果是对的」≠「验证走的是快路径」**。(b) ⭐⭐ **`W4A4` 才是准确的术语**——作者三处注释全部直说 Blackwell-only，其中一处用 **`W4A4`（权重 4 比特 + 激活 4 比特）**；⭐⭐ 判据「**一个模型『是 NVFP4』这句话，只说明了权重的格式，而没有说明激活的格式——而两者的组合才是决定『用哪条指令』的东西**」；⭐⭐ 这解释了 §10.30/§10.47 那些「NVFP4 在 SM12x 上崩」的报告为何难以归类：**「NVFP4」在不同项目里指不同的东西——在 `llama.cpp` 里它指 `W4A4` 的权重侧，而在 vLLM/FlashInfer 里它可能指 `W4A16` 或 `W4A8`**；⭐⭐ 判据「**看到『支持 FP4』时，必须追问『权重 4 比特，那激活是几位』——而这个答案决定了『哪条指令被发射』，进而决定了『哪个 bug 会发生』**」。(c) ⭐⭐⭐ **「两条管线」从推断升级为确认**——**`mmq.cu`（22,671 字节）全文无任何 `mmf` 调用**，类型分派是 `switch (args.type_x)` 与 `switch (type)` 两处、列出的全是量化类型（`Q1_0`…`Q8_0`、`Q2_K`…`Q6_K`、`IQ1_S`…`IQ4_NL`、`MXFP4`、`NVFP4`）；**§10.77 那条被标为 `medium`，本轮升为 `high`**——这是本报告第一次明确记录「推断 → 观测」的升级路径；⭐⭐ 判据「**一份报告如果把『推断』和『观测』混在一起写，它就失去了『知道自己哪里不确定』的能力——而分开记录的代价只是『多写一句 medium』**」+「**一个系统的『可扩展性』不在于它有多少分支，而在于『加一个新维度时需要改几处』——而『按数据类型分派』比『按架构分派』少改一处**」。(d) ⭐⭐ **`J` 是搜出来的，而 `GGML_TYPE_COUNT` 是白名单的哨兵**——`for (int J = 8; J <= 128 && ntiles_J_best > 1; J += 8) { config = ggml_cuda_mmq_get_config(type, J, fallback, cc, prec_src1); if (config.type == GGML_TYPE_COUNT) { continue; } }`，函数注释是「**Tile width in ne11 (dense) / ne12 (MoE) direction with the fewest tiles that fits into shared memory, 0 if there is none**」；⭐⭐ 判据「**『一张表』在两个不同的架构里可以是完全不同的东西：它可以是『答案』，也可以是『候选』——而区分方法是看『谁在遍历它』**」+「**一个『够用就停』的搜索，与一个『找最优』的搜索，在多数输入上给出相同结果，而在边界输入上差很多——而基准测试通常落在『多数输入』上**」；⭐⭐ **`GGML_TYPE_COUNT` 作为哨兵，解释了 §10.64 那个「表只有 1/10 大」：那张表小，不是因为它「漏了」，而是因为它的语义允许它小**——漏掉的部分由哨兵承接，再回退到 Ampere 配置；⭐⭐ 判据「**『小』在一个白名单结构里是设计，在一个全集结构里是欠账——而看代码的人如果不知道这是白名单，就会把它当成欠账**」（这正是 §10.64 那条判据「在能看到『它显式回退了什么』时是一个设计决定」的兑现：本轮就是那个「显式回退」被找到的地方） — [src-llamacpp-mmq-cu]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -21077,7 +21214,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=283, evidence=2212, claims=1622, claims_high=1285, claims_disputed=9, trace_events=635, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=284, evidence=2218, claims=1627, claims_high=1290, claims_disputed=9, trace_events=637, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
