@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：447 ｜ **证据数**：2840 ｜ **主张数**：2034（高置信 1685，争议 9）
+> **来源数**：449 ｜ **证据数**：2846 ｜ **主张数**：2040（高置信 1691，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -33441,6 +33441,204 @@ exit 0
 > **⭐⭐ 故 Prism 在这里给出的不是结论，而是一个可以借用的实验形状：
 > 让对手拿到更多，然后看自己还能不能赢。**
 
+### 10.491 🔥🔥🔥🔥🔥 同一个文件里，docstring 宣传的正是第 282 行放弃的
+
+[c-the-docstring-advertises-what-line-282-abandoned]
+
+> **`Prism/src/prism/tools.py` 第 9-12 行（docstring）**：
+> ```
+> - a lenient parser that extracts a tool call from messy small-model output
+>   (JSON, fenced JSON, or function-call syntax),
+> - schema validation with type coercion and fuzzy tool-name repair,
+> - a ReAct loop that feeds structured observations back and lets the model
+>   self-correct instead of derailing.
+> ```
+> **而第 282-284 行（同一文件，代码旁注释）**：
+> ```
+> # Constrained-decoding schema for a tool call. Per the research pivot, trained
+> # tool-use + structured/constrained decoding is preferred over lenient parsing +
+> # fuzzy repair; we enforce this JSON shape and keep parse_tool_call as fallback.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份 docstring 与同一文件里的行内注释冲突时，行内注释更可信——
+> 因为它写在被解释的那段代码旁边，
+> 而 docstring 写在「这个模块打算成为什么」旁边。**
+>
+> **⭐⭐ 判据：**
+> **故「文档说它支持 X」这句话，
+> 在同一个文件里就有一个更强的反证时，
+> 它连「意图」都不算——它是一段没跟上重构的散文。**
+>
+> ⚠️ **而这条对本报告是一个直接的对照：
+> 本报告的 §10 正文也有大量「设计意图」句，
+> 而代码是唯一能反驳它们的东西。**
+> **⭐⭐ 故本报告引用的每一个「作者说」，
+> 都应该先问「同一文件里有没有相反的注释」。**
+
+### 10.492 ⚠️⚠️⚠️ 布尔参数把**任何未知字符串**读成 `False`
+
+[c-coerce-reads-any-unknown-string-as-false]
+
+> **`Prism/src/prism/tools.py` 第 61-75 行**：
+> ```python
+> def _coerce(param: Param, value: object) -> object:
+>     if value is None:
+>         return param.default
+>     try:
+>         if param.type == "integer":
+>             return int(value)
+>         if param.type == "number":
+>             return float(value)
+>         if param.type == "boolean":
+>             if isinstance(value, bool):
+>                 return value
+>             return str(value).strip().lower() in ("1", "true", "yes", "on")
+>         return str(value)
+>     except (TypeError, ValueError) as e:
+>         raise ToolError(f"arg '{param.name}' expected {param.type}, got {value!r}") from e
+> ```
+> **故 `"maybe"`、`"unknown"`、`"perhaps"` 全部变成 `False`，
+> 且不会走到第 74-75 行的 `except`——因为这条路径不抛异常。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个类型转换函数如果它的兜底是「返回 `False`」而不是「报错」，
+> 那它不是在做类型转换，而是在做默认值填充——
+> 而默认值填充会静默地把「我不确定」读成「不要」。**
+>
+> **⭐⭐ 判据：**
+> **故第 74-75 行那个 `except` 是半段死代码：
+> 它对 `integer` / `number` 有效，对 `boolean` 永远不会被触发。**
+>
+> ⚠️ **而这条与 §10.476（`failed in (0, None)`）是同一类错误，
+> 但方向相反：
+> 那一条把「未知」读成「通过」，这一条把「未知」读成「否」。**
+> **⭐⭐ 共同点是「未知没有自己的位置」。**
+
+### 10.493 🔥🔥🔥🔥🔥 「模糊修复」不留痕，而它直接解释了 §10.488
+
+[c-fuzzy-name-repair-leaves-no-trace]
+
+> **`Prism/src/prism/tools.py` 第 91-95 行**：
+> ```python
+> def resolve_name(self, name: str) -> str | None:
+>     if name in self._tools:
+>         return name
+>     match = difflib.get_close_matches(name, self._tools, n=1, cutoff=0.6)
+>     return match[0] if match else None
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「模糊修复」如果不在 trace 里留下「原本写的是什么」，
+> 那它对测量来说是隐形的——
+> 而一个隐形的修复会让「模型用对了工具」这个结论不可验证。**
+>
+> **⭐⭐ 判据：**
+> **故「修复」与「记录修复」是两个独立的义务，而这条代码只做了前一个。**
+>
+> ⚠️ **而这条直接解释了 §10.488 那个 `any(...)` 判据为什么更松：
+> `called = [s.tool for s in trace.steps]` 拿到的是修复后的名字，
+> 故它一定在 `allowed_tools` 里——
+> 只要模型写的名字与某个允许工具相似度超过 0.6。**
+> **⭐⭐ 故 `bench_tools` 的命中率有两个隐藏加成：
+> `any(...)` 加上「名字被修复成合法名」。**
+
+### 10.494 🔥🔥🔥🔥🔥 解析失败被包装成一个**合法的单步计划**
+
+[c-plan-parse-failure-looks-like-a-one-step-plan]
+
+> **`Prism/src/prism/planner.py` 第 103-118 行**：
+> ```python
+> def _parse_plan(raw: str, task: str) -> list[Step]:
+>     steps: list[Step] = []
+>     for i, it in enumerate(_plan_items(raw), start=1):
+>         steps.append(...)
+>     if not steps:  # fallback: one step = the whole task
+>         steps = [Step(index=1, title=task[:120], detail=task, kind="edit")]
+>     return steps
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当失败被包装成一个合法形状时，所有读这个形状的下游都无法分辨——
+> 而下游唯一能看到的证据是 `len(steps) == 1`。**
+>
+> **⭐⭐ 判据：**
+> **故「一个兜底值如果与一个合法值同形，那这个兜底就是一次伪装的失败」。**
+>
+> ⚠️ **而这条直接命中 §10.485–§10.487：
+> `bench_reasoning` 的 `note` 写的是 `steps=len(plan.steps)`，
+> 故一条解析失败的记录会显示 `steps=1`，
+> 与「模型认为整件事就是一步」完全一样。**
+> **⭐⭐ 而兜底 `Step` 的 `target` 是空字符串——
+> 故 `_plan_file_hits` 对它返回空集、`score` 为 0；
+> 也就是说这条兜底在 reasoning 一档里表现为「失败」，
+> 但 `note` 里看不出原因。**
+
+### 10.495 ⭐⭐⭐⭐⭐ 规划看**结构**，执行看**源码**
+
+[c-planning-gets-structure-and-execution-gets-source]
+
+> **`Prism/src/prism/planner.py` 第 154-158 行（规划）**：
+> ```python
+> # Model-refined plan, grounded by the dossier STRUCTURE (cheap, no full source).
+> # Planning is REASONING -> request thinking mode on hybrid models by default.
+> dossier = render_markdown(payload, include_source=False)
+> ```
+> **而第 191-194 行（执行）**：
+> ```python
+> payload = get_context(repo_root, focus, token_budget=token_budget)
+> step.context_tokens = payload.get("fits_in", 0)
+> dossier = render_markdown(payload, include_source=True)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个系统对同一件事分两个阶段给两种不同的上下文时，
+> 它实际上在说：「决定做什么」与「怎么做」需要的信息量不同。**
+>
+> **⭐⭐ 判据：**
+> **故 `include_source` 这个布尔值不是性能开关，
+> 而是一个关于「哪个阶段需要多少信息」的假设——
+> 而这个假设从未被单独测过。**
+>
+> ⚠️ **而这条给 §10.490 一个更准确的解释：
+> `bench_reasoning` 的对照组拿的是 `_visible_source(root)`（全源码），
+> 而实验组（`make_plan`）拿的是 `include_source=False` 的结构——
+> 故那个对比不只是「预算内 vs 预算外」，而是「结构 vs 全文」。**
+> **⭐⭐ 故 §10.490 的判据需要收窄一格：
+> 实验组输了，可能是预算不够，也可能是结构不够。**
+
+### 10.496 ⭐⭐⭐⭐⭐ 「proof that planning is infrastructure」的兑现方式
+
+[c-planning-is-infrastructure-claim]
+
+> **`Prism/src/prism/planner.py` 第 10-11 行（docstring）**：
+> ```
+> - graph-derived (no model): derive steps from the code graph + Context. Fully
+>   deterministic, runs offline — proof that "planning is infrastructure."
+> ```
+> **而第 133-152 行的实现只做了一件事**：
+> ```python
+> for i, f in enumerate(edit_files[:max_steps], start=1):
+>     steps.append(Step(index=i, title=f"Update {f}",
+>                       detail=f"Apply '{task}' within {f}. ...",
+>                       kind="edit", target=f))
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「无模型」的路径只是把上游的输出换个形状，
+> 那它证明的不是「规划是基础设施」，而是「排序是基础设施」——
+> 因为真正的规划动作发生在 `get_context` 里。**
+>
+> **⭐⭐ 判据：**
+> **故「确定性」这个词在这里是真的，但「规划」这个词是借来的。**
+>
+> ⚠️ **而这条对本报告是一个可借用的检验：
+> 本报告的「自动化」也有同样的问题——
+> `scripts/` 里十个脚本都是「换个形状」，
+> 而真正的判断仍然是手写的。**
+> **⭐⭐ 故「本报告有工具链」这句话应该被读成
+> 「本报告有可复现的检查」，而不是「本报告能自动研究」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -39268,6 +39466,36 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**当一个对照组的输入严格多于实验组时，实验组赢了才说明「预算内的选择」优于「预算外的堆料」——而实验组输了则不说明 Prism 有害，只说明「信息量差距压过了选择质量」。故这个设计是反对自己的：它让 Prism 更难赢，而赢了更可信**」——**⚠️ 而这条也是本报告最缺的那种设计：三源对账里「谁的输入更多」这个变量从未被控制过。故 Prism 在这里给出的不是结论，而是一个可以借用的实验形状：让对手拿到更多，然后看自己还能不能赢**；
  — [src-prism-layer-bench] [src-prism-verifier-py]
 
+### docstring 宣传的正是 270 行后放弃的（第一百五十八轮补充）
+
+上一轮预告要读 `planner.py` 与 `tools.py`——它们是 `layer_bench` 直接 `import` 的上游。本轮读完（8,998 字节 / 238 行 与 13,612 字节 / 369 行），而最重要的发现是**同一个文件里前后矛盾**。
+
+1. 🔥🔥🔥🔥🔥 **同一文件里，docstring 宣传的正是第 282 行放弃的**：
+`Prism/src/prism/tools.py` 第 9-12 行写「**a lenient parser that extracts a tool call from messy small-model output ... schema validation with type coercion and fuzzy tool-name repair**」，而第 282-284 行写「**Per the research pivot, trained tool-use + structured/constrained decoding is preferred over lenient parsing + fuzzy repair; we enforce this JSON shape and keep parse_tool_call as fallback**」；
+⭐⭐ 判据（本轮最重要）「**当一份 docstring 与同一文件里的行内注释冲突时，行内注释更可信——因为它写在被解释的那段代码旁边，而 docstring 写在「这个模块打算成为什么」旁边。故「文档说它支持 X」这句话，在同一个文件里就有一个更强的反证时，它连「意图」都不算——它是一段没跟上重构的散文**」；
+⚠️ **而这条对本报告是一个直接的对照：本报告 §10 正文也有大量「设计意图」句，而代码是唯一能反驳它们的东西。故本报告引用的每一个「作者说」，都应该先问「同一文件里有没有相反的注释」**；
+2. ⚠️⚠️⚠️ **布尔参数把任何未知字符串读成 `False`**：
+`tools.py` 第 61-75 行 `_coerce` 里写「**return str(value).strip().lower() in ("1", "true", "yes", "on")**」，故 `"maybe"` / `"unknown"` / `"perhaps"` 全部变成 `False`，且不会走到第 74-75 行的 `except`——因为这条路径不抛异常；
+⭐⭐ 判据（本轮最重要）「**一个类型转换函数如果它的兜底是「返回 `False`」而不是「报错」，那它不是在做类型转换，而是在做默认值填充——而默认值填充会静默地把「我不确定」读成「不要」**」——**故第 74-75 行那个 `except` 是半段死代码：它对 `integer` / `number` 有效，对 `boolean` 永远不会被触发；而这条与 10.476（`failed in (0, None)`）是同一类错误但方向相反：那一条把「未知」读成「通过」，这一条把「未知」读成「否」——共同点是「未知没有自己的位置」**；
+3. 🔥🔥🔥🔥🔥 **「模糊修复」不留痕，而它直接解释了 10.488**：
+`tools.py` 第 91-95 行 `resolve_name` 用`difflib.get_close_matches(name, self._tools, n=1, cutoff=0.6)`，而 `ToolStep.tool` 记的是修复后的名字；
+⭐⭐ 判据（本轮最重要）「**一个「模糊修复」如果不在 trace 里留下「原本写的是什么」，那它对测量来说是隐形的——而一个隐形的修复会让「模型用对了工具」这个结论不可验证。故「修复」与「记录修复」是两个独立的义务，而这条代码只做了前一个**」——**⚠️ 而这条直接解释了 10.488 那个 `any(...)` 判据为什么更松：`called = [s.tool for s in trace.steps]` 拿到的是修复后的名字，故它一定在 `allowed_tools` 里——只要模型写的名字与某个允许工具相似度超过 0.6。故 `bench_tools` 的命中率有两个隐藏加成：`any(...)` 加上「名字被修复成合法名」**；
+4. [GitHub / Badtheorylabs — `Prism/src/prism/planner.py`（8,998 字节，238 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/planner.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **解析失败被包装成一个合法的单步计划**：**第 116-118 行写 `if not steps:  # fallback: one step = the whole task` 然后返回 `[Step(index=1, title=task[:120], detail=task, kind="edit")]`**；
+⭐⭐ 判据（本轮最重要）「**当失败被包装成一个合法形状时，所有读这个形状的下游都无法分辨——而下游唯一能看到的证据是 `len(steps) == 1`。故「一个兜底值如果与一个合法值同形，那这个兜底就是一次伪装的失败**」——**⚠️ 而这条直接命中 10.485-10.487：`bench_reasoning` 的 note 写的是 `steps=len(plan.steps)`，故一条解析失败的记录会显示 `steps=1`，与「模型认为整件事就是一步」完全一样；而兜底 Step 的 `target` 是空字符串——故 `_plan_file_hits` 对它返回空集、score 为 0，也就是说这条兜底在 reasoning 一档里表现为「失败」，但 note 里看不出原因**；
+(a) ⭐⭐⭐⭐⭐ **规划看结构，执行看源码**：**第 158 行规划用 `render_markdown(payload, include_source=False)`（注释写「grounded by the dossier STRUCTURE (cheap, no full source)」），而第 194 行执行用 `include_source=True`**；
+⭐⭐ 判据「**当一个系统对同一件事分两个阶段给两种不同的上下文时，它实际上在说：「决定做什么」与「怎么做」需要的信息量不同。故 `include_source` 这个布尔值不是性能开关，而是一个关于「哪个阶段需要多少信息」的假设——而这个假设从未被单独测过**」——**⚠️ 而这条给 10.490 一个更准确的解释：`bench_reasoning` 的对照组拿的是 `_visible_source(root)`（全源码），而实验组拿的是 `include_source=False` 的结构——故那个对比不只是「预算内 vs 预算外」，而是「结构 vs 全文」；故 10.490 的判据需要收窄一格：实验组输了，可能是预算不够，也可能是结构不够**；
+(b) ⭐⭐⭐⭐⭐ **「proof that planning is infrastructure」的兑现方式**：**docstring 第 10-11 行写「graph-derived (no model) ... Fully deterministic, runs offline — proof that "planning is infrastructure"」，而第 133-152 行的实现只是把 `get_context` 排好的 `edit_files` 改写成 `Step(index=i, title=f"Update {f}")`**；
+⭐⭐ 判据（本轮最重要）「**当一个「无模型」的路径只是把上游的输出换个形状，那它证明的不是「规划是基础设施」，而是「排序是基础设施」——因为真正的规划动作发生在 `get_context` 里。故「确定性」这个词在这里是真的，但「规划」这个词是借来的**」——**⚠️ 而这条对本报告是一个可借用的检验：本报告的「自动化」也有同样的问题——`scripts/` 里十一个脚本都是「换个形状」，而真正的判断仍然是手写的。故「本报告有工具链」这句话应该被读成「本报告有可复现的检查」，而不是「本报告能自动研究」**；
+5. [GitHub / Badtheorylabs — `Prism/src/prism/tools.py`（13,612 字节，369 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/tools.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **`_chat` 的四级降级链，而它把「约束解码」与「结构化」混在一个布尔里**：`tools.py` 第 295-313 行按顺序尝试 `dict(format=TOOL_CALL_FORMAT, think=False)`、`dict(format=TOOL_CALL_FORMAT)`、`dict(think=False)`、`{}`，每一级只在 `TypeError` 时降级；
+⭐⭐ 判据「**一个「四级降级」如果只捕获一种异常，那它降级的是「这个客户端不支持这个参数」，而不是「这个模型生成了不合法的 JSON」——而后者才是 `TOOL_CALL_FORMAT` 想解决的问题。故「structured=True」这个开关的真实含义是「试一试，不行就算了」，而不是「强制」**」——**⚠️ 而这条让 10.488 的 `structured` vs `loose` 对比又多了一层不确定性：两组的差别不只是有没有约束解码，还包括「约束解码有没有被这个客户端接受」。而 trace 里不记录降级发生在第几级**；
+ — [src-prism-planner-py] [src-prism-tools-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -39407,7 +39635,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=447, evidence=2840, claims=2034, claims_high=1685, claims_disputed=9, trace_events=965, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=449, evidence=2846, claims=2040, claims_high=1691, claims_disputed=9, trace_events=969, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
