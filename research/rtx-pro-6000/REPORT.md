@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：445 ｜ **证据数**：2825 ｜ **主张数**：2020（高置信 1671，争议 9）
+> **来源数**：447 ｜ **证据数**：2834 ｜ **主张数**：2028（高置信 1679，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -32985,6 +32985,258 @@ exit 0
 > **⭐⭐ 而 `inconclusive` 这个词之所以重要，
 > 正是因为它占了那个独立的位置。**
 
+### 10.477 🔥🔥🔥🔥🔥 「**Trust it**」是一句祈使句
+
+[c-the-prompt-orders-the-model-to-trust-the-dossier]
+
+> **`Prism/src/prism/agent.py` 第 31-41 行的 `SYSTEM_PROMPT`**：
+> ```
+> You are a precise coding agent working on a codebase. You are given a
+> budget-sized context dossier (not the whole repo) produced by a code graph.
+> Trust it: the dependency edges and periphery show what your change affects.
+> Make the smallest change that satisfies the task and keeps the code valid.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当检索质量本身是被评估的对象时，「`Trust it`」这句指令会让评估失效——
+> 因为模型被要求不要质疑那个正在被评估的东西。**
+>
+> **⭐⭐ 判据：**
+> **故这条与 §10.463（真值信号必须是 `EXTERNAL` 的）构成一对张力：
+> 前者要求信号来自外部，后者要求执行者不质疑内部产物。**
+>
+> ⭐⭐ **而这条对本报告是一个直接的对照：
+> 本报告的「检索结果」是 `sources.csv`，
+> 而我在 §10 里多次质疑过它（22 组重复源、5 组 `document_id` 漂移）——
+> 那正是「不 trust it」的做法。**
+> **⚠️ 而在一个把 dossier 当唯一视野的系统里，
+> 「质疑」这个动作没有入口——因为模型看不到 dossier 之外的东西。**
+
+### 10.478 ⚠️⚠️⚠️ 验证目录把路径**压成 basename**
+
+[c-verify-squashes-paths-to-basenames]
+
+> **`Prism/src/prism/agent.py` 第 88-103 行**：
+> ```python
+> with tempfile.TemporaryDirectory() as shadow:
+>     written: list[str] = []
+>     for pf in py_files:
+>         dst = os.path.join(shadow, os.path.basename(pf.path))
+>         with open(dst, "w", encoding="utf-8") as fh:
+>             fh.write(pf.code)
+>         written.append(dst)
+>     if written:
+>         result = verify(written)
+>         by_index = {os.path.join(shadow, os.path.basename(pf.path)): pf.path
+>                     for pf in py_files}
+> ```
+> **故 `a/util.py` 与 `b/util.py` 会写到同一个 `shadow/util.py`，
+> 后写的覆盖先写的，而 `by_index` 也只保留后者的映射。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「把所有路径压成 `basename`」的临时目录，
+> 会把「同名文件」这个在真实仓库里合法的结构读成一次覆盖。**
+>
+> **⭐⭐ 判据：**
+> **故「验证环境的结构必须与生产环境同构」不是洁癖，
+> 而是这类错误唯一的防线。**
+>
+> ⚠️ **而关键在于：这条路径（`agent.py`）只做 compile 检查，
+> 所以覆盖的后果是「少检查了一个文件」，而不是「检查错了」——
+> 它静默。**
+> **⭐⭐ 而这条对本报告是一个可借用的检验：
+> 我在引用证据时是否也做过「压成 `basename`」式的归并？
+> 答案是有：§10.467 那 5 组 `document_id` 别名
+> 就是同一个压缩动作的手写版。**
+
+### 10.479 🔴🔴🔴 同一仓库里**两条验收路径强度不同**
+
+[c-the-agent-path-checks-compile-only]
+
+> **`Prism/src/prism/agent.py` 第 78-84 行 docstring**：
+> ```
+> Write proposed files to a shadow dir and verify them.
+>
+> Python files are compile-checked with the stdlib. Other languages can't be
+> compiled without their toolchains, so we only sanity-check that the code is
+> non-empty and balanced-ish; a real per-language linter can plug in here.
+> ```
+> **而 `_verify_files` 的返回值就是 `{"ok": not errors, "errors": errors}`（111 行），
+> 整个函数里没有出现 `pytest`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个仓库里有两条验收路径时，
+> 「这个仓库的验收强度」不是一个值，而是两个——
+> 而文档通常只描述较强的那一条。**
+>
+> **⭐⭐ 判据：**
+> **故引用一个仓库的「严谨性」之前，必须先问「引用的是哪一条路径」。**
+>
+> ⭐⭐ **而这条把 §10.472 与 §10.473 连成一句话：
+> `verifier` 那条路径在缺 `pytest` 时退化为 `compile`，
+> 而 `agent` 这条路径从一开始就只做 `compile`——
+> 故「缺 `pytest`」在 `agent` 路径上不改变任何东西。**
+> **⚠️ 而本报告 §10.443 那句「8 个测试文件 / 33 个测试函数 / 101 个 `assert`」
+> 正是在描述「测试存在」，而不是「哪条路径会跑它们」。**
+
+### 10.480 🔥🔥🔥🔥🔥 一个叫 `_needs_reindex` 的函数只判断**格式版本**
+
+[c-reindex-only-compares-the-version-constant]
+
+> **`Prism/src/prism/context.py` 第 36-42 行**：
+> ```python
+> def _needs_reindex(db_path: str) -> bool:
+>     if not os.path.exists(db_path):
+>         return True
+>     graph = CodeGraph(db_path)
+>     version = graph.get_meta("index_version")
+>     graph.close()
+>     return version != INDEX_VERSION
+> ```
+> **而 `INDEX_VERSION = "6"`（15 行）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个名字里带「needs」的谓词，如果它的判据只覆盖一种失效原因，
+> 那它对其他失效原因是静默的——
+> 而「静默」比「报错」危险，因为它返回的是一个看起来正常的旧值。**
+>
+> **⭐⭐ 判据：**
+> **故「缓存失效」这件事必须被拆成至少两类：
+> 格式失效（版本常量）与内容失效（源变了）。
+> 这条实现只做了第一类。**
+>
+> ⚠️ **而这条对本报告是一个直接的对照：
+> 本报告的「缓存」是 §10 的正文，而它没有任何自动失效机制——
+> 每一轮我手动检查「这个数还成立吗」。**
+> **⭐⭐ 故本报告在这一项上比 Prism 更弱：
+> 它至少有版本常量，我连常量都没有。**
+
+### 10.481 ⚠️⚠️⚠️ `repo_root` 被存、被读，**但不参与判断**
+
+[c-repo-root-is-stored-but-never-compared]
+
+> **`Prism/src/prism/context.py` 第 30-31 行（写）**：
+> ```python
+> graph.set_meta("repo_root", repo_root)
+> graph.set_meta("index_version", INDEX_VERSION)
+> ```
+> **而 36-42 行的 `_needs_reindex` 只读 `index_version`；
+> `repo_root` 在 73 行才被读出**：
+> ```python
+> stored_root = graph.get_meta("repo_root") or repo_root
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个被写入元数据、又被读取、但不参与任何判断的字段，
+> 它的作用是「追溯」而不是「正确性」——
+> 而这两件事在代码里看起来完全一样。**
+>
+> **⭐⭐ 判据：**
+> **故「这个字段存在」不能证明「这个字段被用来保证正确」。**
+>
+> ⚠️ **而这条与本报告 §10.449（一个 `required=True` 的参数从未被计算）
+> 是同一类：两者都是「存在即被当成生效」。**
+> **⭐⭐ 而这一条比那一条更隐蔽，因为 `repo_root` 确实被读了——
+> 只是读它的地方在判断之后。**
+>
+> **⭐⭐ 故一个 db 被搬到另一台机器或另一个目录时，
+> 它不会被重建，只会被当成新目录的索引使用。**
+
+### 10.482 ⭐⭐⭐⭐⭐ 「hard ceiling」不是形容词，而是一个**可证伪的断言**
+
+[c-the-crown-jewel-tool-claims-a-hard-ceiling]
+
+> **`Prism/src/prism/context.py` 第 52-66 行**：
+> ```
+> """Return an optimally-packed context dossier for `task` within `token_budget`.
+>
+> This is the crown-jewel tool. Agents call it with a task string and their
+> model's token budget; they get back exactly the slice that fits.
+> ...
+>     token_budget: hard ceiling on returned context size (in tokens).
+> """
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个写着「`hard`」的上限，如果它没有被任何测试断言过，
+> 那它就是一个意图，而不是一个保证。**
+>
+> **⭐⭐ 判据：**
+> **故「`hard`」这个词的使用成本，应该与「有没有对应测试」成正比。**
+>
+> ⚠️ **而这条对本报告是一个自我检验：
+> 本报告 §10 里用了大量「必须」「必然」「无例外」，
+> 而对应的测试是零——
+> 因为本报告没有测试，只有 `validate_research.py` 那几条不变量。**
+> **⭐⭐ 故本报告里所有「必须」都应该被读成「我据此推理」，
+> 而不是「已被断言」。**
+
+### 10.483 🔥🔥🔥🔥🔥 `confidence` 不是证据表任何一列的函数
+
+[c-confidence-is-not-a-function-of-the-evidence-table]
+
+> **本轮 `scripts/audit_confidence.py` 在 2,020 条主张上的实测（2026-10-28）**：
+> ```
+> confidence 分布: {high: 1671, medium: 329, low: 11, disputed: 9}
+>
+> 候选规则的解释力（分母 = 2020）:
+>   A 全部 primary => high              1831 / 2020  (90.6%)
+>   B 全部 primary 且 >=2 条证据 => high 1025 / 2020  (50.7%)
+>   C 全 primary 且非 interpretation    1686 / 2020  (83.5%)
+>
+> 反例（全部证据都是 primary 但不是 high）: 169
+>   其 confidence: {medium: 157, low: 6, disputed: 6}
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **没有任何一条候选规则的解释力接近 100%，
+> 故 `confidence` 不是证据表任何一列的函数——
+> 它额外吸收了标注者对「结论强度」的判断。**
+>
+> **⭐⭐ 判据：**
+> **故一个不可复算的序，与一个「还没写下规则的序」，
+> 在数据上完全一样——区别只在于作者有没有写下规则。**
+> **而 §10.474 已经给出对照：Prism 把权重写在一个函数里，
+> 那它就是可复算的；本报告没有写，故它只是「尚未写下」。**
+>
+> ⭐⭐ **而本脚本的裁决不是「算出一个分数」，而是「证明没有一条规则够用」：
+> 一个工具能做的最后一件事，是把它自己做不到的那件事变成可复现的输出。**
+
+### 10.484 🔥🔥🔥🔥🔥 C1 校验器的语义比我以为的**窄一档**
+
+[c-the-c1-check-means-at-least-one-primary-not-all]
+
+> **本轮 `scripts/audit_confidence.py` 输出的两条**：
+> ```
+> S2 违规（access != open 却标 high/medium）: 0
+> C1 违规（high 但含非 primary 证据）: 20
+>   c-cuda-cores-same / c-nvdec / c-gdep-passive /
+>   c-syn-speos-conflict / c-syn-conflict-resolution / c-ecc-verify-trap / ...
+> ```
+> **而 `validate_research.py` 每一轮报的都是 `c1_violations=0`。**
+> **两者不矛盾：校验器的 C1 检查的是「至少有一条 `primary` 证据」，
+> 而本脚本检查的是「全部证据都是 `primary`」。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个不变量如果只被实现成「至少一条」，
+> 那它就允许「一条 primary 加九条 tertiary」通过——
+> 而在人读起来，那九条仍然是证据。**
+>
+> **⭐⭐ 判据：**
+> **故「合规」与「站得住」之间的差距，
+> 恰好等于「至少一条」与「全部」之间的差距。**
+> **而这个差距在本报告里是 20 条主张、约 1.0%。**
+>
+> ⚠️ **而这 20 条不是笔误，它们是混合证据的真实情形：
+> 一个数值有官方页（`primary`）也有第三方商城页（`secondary`），
+> 两条都写进 `evidence_ids` 是对的——
+> 错的是把整条主张标成 `high` 时没有说明「依据的是哪一条」。**
+>
+> **⭐⭐ 而这就是本轮真正的修复方向：
+> 不是把 20 条降级，而是承认 `confidence` 描述的是「最强的那个证据」，
+> 而 `evidence_ids` 里混着「补充证据」。**
+> **故两者需要一个字段来区分，而本报告目前没有。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -38751,6 +39003,39 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⚠️ **而这条对本报告是一次校准：我一直在把「有测试」当成一个仓库的强度指标，而在一个默认不装 pytest 的仓库里，测试文件的存在与测试的执行是两件事。本报告此前从未把「测试文件数」与「测试是否在默认路径上被执行」分开过——10.443 那句「8 个测试文件 / 33 个测试函数 / 101 个 assert」就是这种混同的一个实例**；
  — [src-prism-verifier-py] [src-prism-execution-py] [src-prism-pyproject]
 
+### 没有一条规则够用——而这就是规则（第一百五十六轮补充）
+
+上一轮结尾定的第一件事是「给 `confidence` 写下一条构造规则」，照着 `Prism` 的 `signal` 权重写法。本轮做了它，**结果是写不出那条规则**——因为三条候选规则的解释力分别是 90.6% / 50.7% / 83.5%，没有一条接近 100%。于是产物变成一个可执行脚本 `scripts/audit_confidence.py`，而它的裁决是「没有一条够用」。
+
+1. ⚠️⚠️⚠️ **`confidence` 不是证据表任何一列的函数**：
+**本轮 `scripts/audit_confidence.py` 在 2,020 条主张上实测：`high` 1671 / `medium` 329 / `low` 11 / `disputed` 9；规则 A（全部 primary ⇒ high）命中 1831 / 2020 = 90.6%；规则 B（全部 primary 且 ≥2 条证据）命中 1025 / 2020 = 50.7%；规则 C（全 primary 且非 interpretation）命中 1686 / 2020 = 83.5%；而「全部证据都是 primary 却不是 high」的反例有 169 条（157 medium / 6 low / 6 disputed）**；
+⭐⭐ 判据（本轮最重要）「**没有任何一条候选规则的解释力接近 100%，故 confidence 不是证据表任何一列的函数——它额外吸收了标注者对「结论强度」的判断**」——**故一个不可复算的序，与一个「还没写下规则的序」，在数据上完全一样——区别只在于作者有没有写下规则。而 §10.474 已经给出对照：Prism 把权重写在一个函数里，那它就是可复算的；本报告没有写，故它只是「尚未写下」**；
+⭐⭐ **而本脚本的裁决不是「算出一个分数」，而是「证明没有一条规则够用」：一个工具能做的最后一件事，是把它自己做不到的那件事变成可复现的输出**；
+2. 🔥🔥🔥🔥🔥 **C1 校验器的语义比我以为的窄一档，而它的注释里写明了这是有意的**：
+`packages/schemas/python/deepresearchrsi/validate.py` 第 319-320 行写「**# 不变量 C1：confidence=high 需要至少一条 trust_tier=primary 的 supports 证据。# 强制阻断。若无一手证据，正确做法是补证据或降为 medium，而不是放宽规则。**」，而 332-344 行的实现只检查「存在一条 primary」。故 `validate_research.py` 报 `c1_violations=0`，而本轮 `audit_confidence.py` 报「high 但含非 primary 证据 20 条」——**两者都对，因为它们量的是两个不同的东西：前者量「够不够」，后者量「干不干净」**；
+⭐⭐ 判据（本轮最重要）「**一个不变量如果只被实现成「至少一条」，那它就允许「一条 primary 加九条 tertiary」通过——而在人读起来，那九条仍然是证据。故「合规」与「站得住」之间的差距，恰好等于「至少一条」与「全部」之间的差距**」——**而这个差距在本报告里是 20 条主张、约 1.0%**；
+⚠️ **而这 20 条不是笔误，它们是混合证据的真实情形：一个数值有官方页（primary）也有第三方商城页（secondary），两条都写进 evidence_ids 是对的——错的是把整条主张标成 high 时没有说明「依据的是哪一条」。故真正的修复方向不是把 20 条降级，而是承认 confidence 描述的是「最强的那个证据」，而 evidence_ids 里混着「补充证据」——两者需要一个字段来区分，而本报告目前没有**；
+3. [GitHub / Badtheorylabs — `Prism/src/prism/agent.py`（8,171 字节，226 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/agent.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「Trust it」是一句祈使句，而不是描述句**：**`SYSTEM_PROMPT` 写「Trust it: the dependency edges and periphery show what your change affects」，而它前一句是「budget-sized context dossier (not the whole repo)」**；
+⭐⭐ 判据（本轮最重要）「**当检索质量本身是被评估的对象时，「Trust it」这句指令会让评估失效——因为模型被要求不要质疑那个正在被评估的东西**」——**故这条与 10.463（真值信号必须是 EXTERNAL 的）构成一对张力：前者要求信号来自外部，后者要求执行者不质疑内部产物**；
+⚠️ **而在一个把 dossier 当唯一视野的系统里，「质疑」这个动作没有入口——因为模型看不到 dossier 之外的东西；而本报告的「检索结果」是 sources.csv，我在 §10 里多次质疑过它（22 组重复源、5 组 document_id 漂移），那正是「不 trust it」的做法**；
+(a) ⚠️⚠️⚠️ **验证目录把路径压成 basename**：**`os.path.join(shadow, os.path.basename(pf.path))` 使 a/util.py 与 b/util.py 写到同一个 shadow/util.py，后写的覆盖先写的，而 by_index 也只保留后者的映射**；
+⭐⭐ 判据「**一个「把所有路径压成 basename」的临时目录，会把「同名文件」这个在真实仓库里合法的结构读成一次覆盖。故「验证环境的结构必须与生产环境同构」不是洁癖，而是这类错误唯一的防线**」——**而这条路径只做 compile 检查，所以覆盖的后果是「少检查了一个文件」，而不是「检查错了」——它静默；而本报告里 §10.467 那 5 组 document_id 别名就是同一个压缩动作的手写版**；
+(b) 🔴🔴🔴 **同一仓库里两条验收路径强度不同**：**agent.py 的 docstring 写「Python files are compile-checked with the stdlib ... we only sanity-check that the code is non-empty and balanced-ish」，而 `_verify_files` 的返回值就是 `{"ok": not errors, "errors": errors}`，整个函数里没有 pytest**；
+⭐⭐ 判据「**当一个仓库里有两条验收路径时，「这个仓库的验收强度」不是一个值，而是两个——而文档通常只描述较强的那一条**」——**故引用一个仓库的「严谨性」之前，必须先问「引用的是哪一条路径」；而这条把 10.472 与 10.473 连成一句话：verifier 那条路径在缺 pytest 时退化为 compile，而 agent 这条路径从一开始就只做 compile——故「缺 pytest」在 agent 路径上不改变任何东西**；
+4. [GitHub / Badtheorylabs — `Prism/src/prism/context.py`（7,496 字节，235 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/context.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **一个叫 `_needs_reindex` 的函数只判断「格式版本变了没」**：**它只在 db 不存在或 `index_version != INDEX_VERSION`（`"6"`）时返回 True，不比较仓库内容**；
+⭐⭐ 判据（本轮最重要）「**一个名字里带「needs」的谓词，如果它的判据只覆盖一种失效原因，那它对其他失效原因是静默的——而「静默」比「报错」危险，因为它返回的是一个看起来正常的旧值**」——**故「缓存失效」必须被拆成至少两类：格式失效（版本常量）与内容失效（源变了），而这条实现只做了第一类；本报告的「缓存」是 §10 正文，它连版本常量都没有——故本报告在这一项上比 Prism 更弱**；
+(a) ⚠️⚠️⚠️ **`repo_root` 被存、被读，但不参与判断**：**30-31 行 `graph.set_meta("repo_root", repo_root)` 写入，73 行 `stored_root = graph.get_meta("repo_root") or repo_root` 读出，而 36-42 行的 `_needs_reindex` 只读 `index_version`——故一个 db 被搬到另一个目录时不会被重建，只会被当成新目录的索引使用**；
+⭐⭐ 判据「**一个被写入元数据、又被读取、但不参与任何判断的字段，它的作用是「追溯」而不是「正确性」——而这两件事在代码里看起来完全一样。故「这个字段存在」不能证明「这个字段被用来保证正确」**」——**而这条与 10.449（一个 required=True 的参数从未被计算）是同一类；而它比那一条更隐蔽，因为 repo_root 确实被读了——只是读它的地方在判断之后**；
+(b) ⭐⭐⭐⭐⭐ **「hard ceiling」不是形容词，而是一个可证伪的断言**：**docstring 写「token_budget: hard ceiling on returned context size (in tokens)」与「they get back exactly the slice that fits」**；
+⭐⭐ 判据「**一个写着「hard」的上限，如果它没有被任何测试断言过，那它就是一个意图，而不是一个保证。故「hard」这个词的使用成本，应该与「有没有对应测试」成正比**」——**⚠️ 而本报告 §10 里用了大量「必须」「必然」「无例外」，而对应的测试是零——因为本报告没有测试，只有 validate_research.py 那几条不变量。故本报告里所有「必须」都应该被读成「我据此推理」，而不是「已被断言」**；
+ — [src-prism-agent-py] [src-prism-context-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -38890,7 +39175,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=445, evidence=2825, claims=2020, claims_high=1671, claims_disputed=9, trace_events=961, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=447, evidence=2834, claims=2028, claims_high=1679, claims_disputed=9, trace_events=965, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
