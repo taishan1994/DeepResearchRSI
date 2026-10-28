@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：429 ｜ **证据数**：2776 ｜ **主张数**：1975（高置信 1626，争议 9）
+> **来源数**：432 ｜ **证据数**：2784 ｜ **主张数**：1983（高置信 1634，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -31559,6 +31559,252 @@ exit 0
 > **这正是 §10.429 那条「名字级支持」在方向上的反面：**
 > **一个约束如果被写在一个具体 lane 里，它就只能被用在那一个 lane 上。**
 
+### 10.432 ⭐⭐⭐⭐⭐ 上一轮那个推论，被一行 `importlib` 证实了
+
+[c-the-resources-table-is-the-one-code-loads]
+
+> **`btl_lab/bootstrap.py` 23-25 行**：
+> ```python
+> resources = files("btl_lab").joinpath("resources")
+> names = ("recipes.json", "backends.json", "projects.json", "baseline.json",
+>          "candidate.json", "study.json")
+> content = {name: resources.joinpath(name).read_text() for name in names}
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个推论如果能在下一轮用一个 `import` 语句证实或推翻，
+> 那它就是一个好推论——而它的价值在于「当时没验证」被明确标注了。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.425 那句「这是一个可检验的推论」现在可以改成「已检验，成立」。**
+>
+> ⭐ **而这条给本报告一个可复用的模板：
+> 凡是我写出「若如此，则 X 应当被 Y 读取」时，下一轮就该去读 Y。**
+> **本报告有若干处这样的悬置推论，它们不是缺口，而是下一轮的地图。**
+
+### 10.433 🔥🔥🔥🔥🔥 一个魔数同时决定了「这是配置」与「这是示例」
+
+[c-an-index-comparison-sorts-config-from-example]
+
+> **`btl_lab/bootstrap.py` 33-35 行**：
+> ```python
+> for index, name in enumerate(names):
+>     folder = ".btl" if index < 3 else "examples"
+>     (stage / folder / name).write_text(content[name], encoding="utf-8")
+> ```
+> **按 `names` 元组的顺序**：
+> ```
+> index 0  recipes.json    -> .btl/
+> index 1  backends.json   -> .btl/
+> index 2  projects.json   -> .btl/
+> index 3  baseline.json   -> examples/
+> index 4  candidate.json  -> examples/
+> index 5  study.json      -> examples/
+> ```
+> **而 `layout` 里 `registry` 是 `.btl/projects.json`、`groups` 是 `["examples"]`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个魔数如果同时决定「这是配置」与「这是示例」两件事，
+> 那它不是序号，而是一个未命名的分类器。**
+>
+> **⭐⭐ 判据：**
+> **当 `index < N` 被用来分派语义时，那个 `N` 应该有一个名字。**
+> **⚠️ 而这里它没有——`names` 元组的顺序是唯一的事实来源。**
+>
+> ⭐ **这条对本报告是一个可直接套用的检查**：
+> **§10 里有若干处用的是「前三个」「前五个」这样的说法，
+> 而它们同样依赖一个未被命名的顺序。**
+> **§10.426 那个「五条 = 十条例的一个查询」正是这样一个顺序。**
+
+### 10.434 ⭐⭐⭐⭐⭐ 拒绝覆盖，而且**先建在临时目录里再整体替换**
+
+[c-the-workspace-init-stages-then-replaces]
+
+> **`btl_lab/bootstrap.py` 21-22 行**：
+> ```python
+> if root.exists() and (not root.is_dir() or any(root.iterdir())):
+>     raise ValueError("Initialize a new or empty directory; existing files will not be overwritten")
+> ```
+> **29-39 行**：
+> ```python
+> with tempfile.TemporaryDirectory(prefix=".btl-init-", dir=root.parent) as temporary:
+>     stage = Path(temporary) / "workspace"
+>     (stage / ".btl").mkdir(parents=True)
+>     (stage / "examples").mkdir()
+>     ...
+>     os.replace(stage, root)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个初始化器如果先检查「目录非空就拒绝」再在临时目录里建好再整体替换，
+> 那它同时防住了两件事：覆盖已有文件，与留下半成品。**
+>
+> **⭐⭐ 判据：**
+> **而这两件事的失败模式完全不同：前者毁数据，后者毁信任。**
+>
+> ⭐ **故这条与 §10.190（那个 `cap_masked` 断言）是同一族**：
+> **都是「在动手之前把不可能的状态排除掉」**——
+> **一个在入口拦，一个在断言里拦。**
+
+### 10.435 ⭐⭐⭐⭐⭐ `scope` 的第三个用途：**区分「示例」与「测量」**
+
+[c-the-bootstrap-scope-distinguishes-example-from-measurement]
+
+> **`btl_lab/bootstrap.py` 45 行**：
+> ```python
+> "scope": "Workspace metadata and illustrative examples; no model execution"
+> ```
+> **而同一个返回值的 `next_commands` 第三条是**：
+> ```python
+> f'btl --workspace "{root}" measure compare examples/baseline.json examples/candidate.json'
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **`scope` 说「Workspace metadata and illustrative examples」，
+> 而 `next_commands` 立刻让人去 `compare` 那两个示例文件——
+> 这两句话合起来的意思是：你可以跑它，
+> 但它跑出来的不是一个关于模型的结论。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.423 那个 `scope` 建议补了第三个用例：
+> `scope` 不只标「我没测量」，还标「我给的输入是示例」。**
+>
+> ⭐⭐ **而本报告的 `brief.yaml` 与 `research/` 目录恰好是同构的：
+> 示例与实测必须分开标注。**
+> **§10 里那几个「以 X 为例」的数字，按这条标准都应该升格为带 `scope` 的条目。**
+
+### 10.436 🔥🔥🔥🔥🔥 跨仓库 `import` 坐实了 `btl-kernels` 的那句话
+
+[c-the-kernel-audit-is-imported-across-repositories]
+
+> **`btl_lab/checks.py` 第 6 行**：
+> ```python
+> from .workspace import Workspace, inside, sha256
+> from btl_kernels.manifest import audit_manifest
+> ```
+> **而 `btl-kernels/README.md` 说**：
+> ```
+> BTL Lab exposes the checker through its recipe/run interface.
+> Integration tests currently live in the sibling Lab repository.
+> ```
+> **唯一消费点是第 23-24 行**：
+> ```python
+> def manifest_audit(workspace: Workspace, relative: str) -> dict:
+>     return audit_manifest(workspace.root, relative)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 README 说「集成测试在兄弟仓库里」，
+> 而那个兄弟仓库里有一行 `import` 指向它——
+> 这两句话合起来才构成「这个包被用了」的完整证据。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.416 那个「预留位」的判断需要修正一格：
+> 它不是一个空位，而是一个已被 `import` 的最小包。**
+> **⚠️ 而它被 `import` 的仍然只是那个哈希校验器——
+> 故「没有内核」这个结论不变。**
+>
+> ⭐ **这是本轮唯一一处「上一轮的判断被修正」**：
+> **§10.416 说「那个位置是空的」，
+> 而准确的说法是「那个位置有一个 2 KB 的包，且它只提供一个哈希校验器，
+> 并被兄弟仓库真实调用」。**
+
+### 10.437 ⚠️⚠️⚠️ 空列表在一条路径上通过，在另一条上不通过
+
+[c-an-empty-list-passes-one-audit-and-fails-another]
+
+> **`btl_lab/checks.py`，两个函数，相隔 31 行**：
+> ```python
+> # registry_audit, 19-20 行
+> return {"passed": all(c["passed"] for c in checks), "projects": len(projects),
+>         "checks": checks,
+>         "scope": "Registry paths only; no project readiness or model evaluation"}
+>
+> # verify_artifacts, 50-51 行
+> return {"passed": bool(checks) and all(c["passed"] for c in checks),
+>         "checks": checks,
+>         "scope": "Recorded artifact integrity, not independent verification of reported claims"}
+> ```
+> **故 `checks` 为空时：前者 `passed` 是 `True`，后者是 `False`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **`all([])` 是 `True`，`bool([])` 是 `False`——
+> 而这两个事实在同一个文件里被用来回答同一个问题
+> （「这次审计过了吗」）。**
+>
+> **⭐⭐ 判据：**
+> **故这不是 bug，而是一次无声的选择：
+> `registry_audit` 允许「没有项目」，`verify_artifacts` 不允许「没有产物」。**
+>
+> **⭐⭐ 而这两个选择各自都有道理：
+> 一个空项目列表确实可以算通过，
+> 而一个没有任何产物的 run 不该算通过。**
+> **⚠️ 但没有任何注释说明这一点，故它只能被读者自己推出来。**
+>
+> ⭐ **这条对本报告是一个可直接套用的自查**：
+> **我自己的 `validate_research.py` 里有没有同样的不对称？**
+> **§10.437 记录它，而不声称它是一个缺陷——因为两个选择都能被辩护。**
+
+### 10.438 ⭐⭐⭐⭐⭐ 两个 `scope` 限制的是两个不同维度：**深度**与**独立性**
+
+[c-two-scopes-limit-depth-and-independence-separately]
+
+> **`btl_lab/checks.py`**：
+> ```
+> registry_audit   "Registry paths only; no project readiness or model evaluation"
+> verify_artifacts "Recorded artifact integrity, not independent verification of reported claims"
+> ```
+> **前者的范围词是 `only`（限深度），后者的否定词是 `not independent`（限独立性）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「`Registry paths only`」说的是「我只看了路径」；
+> 「`not independent verification`」说的是「我不是第三方」。**
+>
+> **⭐⭐ 判据：**
+> **这两件事经常被合成一句「我没验证」，
+> 而分开写才能让读者知道该去补哪一样：
+> 前者要补一次内容检查，后者要补一个外部复核。**
+>
+> ⭐⭐ **故这条是 §10.423 那个 `scope` 建议最强的一个细化：
+> `scope` 应该说明它限制的是深度还是独立性。**
+> **而本报告 §10 里的「未获取」「实验缺口」「不可检验」三个词，
+> 恰好也在这两个维度上分布——
+> 「未获取」限深度，「实验缺口」限独立性，「不可检验」限两者。**
+
+### 10.439 ⭐⭐⭐⭐⭐ 「导入的证据永远不改变已经记录的结论」
+
+[c-imported-evidence-never-changes-a-recorded-outcome]
+
+> **`btl_lab/store.py` 第 15 行**：
+> ```python
+> class Store:
+>     """Small transactional ledger. Imported evidence never changes run outcome."""
+> ```
+> **而它用 4 张表与 `PRAGMA foreign_keys = ON` 实现**：
+> ```
+> runs              一次运行的完整计划与结果
+> events            运行过程中的状态序列
+> project_overrides 项目级字段覆盖
+> decisions         人工裁决（带 run_id 外键，且必须是同一项目）
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个台账如果允许「后来导入的证据」改写「已经记录的结论」，
+> 那它就不是台账，而是一个可被追溯修改的草稿。**
+>
+> **⭐⭐ 判据：**
+> **故这条给本报告一个直接的检验：
+> §10 里有若干节是在后来的轮次里被修正的——
+> 而那些修正是「新增一节说明旧节错了」，不是「改写旧节」。**
+>
+> **⭐⭐ 这两种做法正好对应 `store.py` 的两条路：前者是 append，后者是 update。**
+> **而本报告一直走的是 append——
+> 故它满足「imported evidence never changes run outcome」这条纪律。**
+>
+> ⭐ **而这条也给本报告一个可以写进结论的自评**：
+> **§10.386 与 §10.334 的两次修正（第 225 轮）都是新增条目 + 在原条目里加一行指针，
+> 而不是把原条目改写掉。这正是这条纪律在文档层的形态。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -37098,6 +37344,41 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ **而这条恰好演示了「同一句话的适用范围」：一个单卡约束在训练 lane 上成立，在推理 lane 上未被验证**；
  — [src-btl-lab-backends-json] [src-btl-lab-resources-backends-json] [src-btl-foundation-review] [src-btl-lab-runtime-probe]
 
+### 上一轮那个推论被证实了，而证实它用了一行 importlib（第一百五十一轮补充）
+
+上一轮结尾写下一个可检验的推论：「若 `resources/backends.json` 是被代码加载的最小集，那它应当被某个 Python 模块读取」。本轮读了 `bootstrap.py`，**推论成立**——而同一个文件还带出三件新事。
+
+1. [GitHub / Badtheorylabs — `btl_lab/bootstrap.py`（2,288 字节，46 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/btl_lab/bootstrap.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **上一轮那个推论被一行 importlib 证实了**：**bootstrap.py 23-25 行用 resources = files("btl_lab").joinpath("resources") 与 names = ("recipes.json", "backends.json", "projects.json", "baseline.json", "candidate.json", "study.json") 取那六个文件**——**故 resources/ 那份五条 lane 表确实是被代码加载的那一份，而根目录那份 4,456 字节的十条例表不是**；
+⭐⭐ 判据「**一个推论如果能在下一轮用一个 import 语句证实或推翻，那它就是一个好推论——而它的价值在于「当时没验证」被明确标注了**」——**凡是我写出「若如此，则 X 应当被 Y 读取」时，下一轮就该去读 Y**；
+(a) 🔥🔥🔥🔥🔥 **一个魔数同时决定了「这是配置」与「这是示例」**：**33-35 行写 folder = ".btl" if index < 3 else "examples"——按 names 元组顺序，recipes / backends / projects 进 .btl/，baseline / candidate / study 进 examples/**；
+⭐⭐ 判据（本轮最重要）「**一个魔数如果同时决定「这是配置」与「这是示例」两件事，那它不是序号，而是一个未命名的分类器**」——**当 index < N 被用来分派语义时，那个 N 应该有一个名字；而这里它没有——names 元组的顺序是唯一的事实来源**；
+(b) ⭐⭐⭐⭐⭐ **拒绝覆盖，而且先建在临时目录里再整体替换**：**21-22 行「Initialize a new or empty directory; existing files will not be overwritten」，29-39 行用 tempfile.TemporaryDirectory(prefix=".btl-init-", dir=root.parent) 建 stage 再 os.replace(stage, root)**；
+⭐⭐ 判据「**它同时防住了两件事：覆盖已有文件，与留下半成品——而这两件事的失败模式完全不同：前者毁数据，后者毁信任**」——**故这条与「那个 cap_masked 断言」是同一族：都是「在动手之前把不可能的状态排除掉」**；
+(c) ⭐⭐⭐⭐⭐ **scope 的第三个用途：区分「示例」与「测量」**：**45 行返回 "scope": "Workspace metadata and illustrative examples; no model execution"，而同一个返回值的 next_commands 第三条让人去 measure compare examples/baseline.json examples/candidate.json**；
+⭐⭐ 判据「**这两句话合起来的意思是：你可以跑它，但它跑出来的不是一个关于模型的结论**」——**故 scope 不只标「我没测量」，还标「我给的输入是示例」**；
+⭐⭐ **而本报告的 brief.yaml 与 research/ 目录恰好是同构的：示例与实测必须分开标注**；
+2. [GitHub / Badtheorylabs — `btl_lab/checks.py`（2,290 字节，52 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/btl_lab/checks.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **跨仓库 import 坐实了 btl-kernels 的那句话**：**checks.py 第 6 行是 from btl_kernels.manifest import audit_manifest，而 btl-kernels/README.md 说「Integration tests currently live in the sibling Lab repository」——唯一消费点是 23-24 行的 manifest_audit**；
+⭐⭐ 判据（本轮最重要）「**一个 README 说「集成测试在兄弟仓库里」，而那个兄弟仓库里有一行 import 指向它——这两句话合起来才构成「这个包被用了」的完整证据**」——
+⭐⭐ **故 10.416 那个「预留位」的判断需要修正一格：它不是一个空位，而是一个已被 import 的最小包；而它被 import 的仍然只是那个哈希校验器——故「没有内核」这个结论不变**；
+(a) ⚠️⚠️⚠️ **空列表在一条路径上通过，在另一条上不通过**：**registry_audit（19-20 行）是 all(c["passed"] for c in checks)，verify_artifacts（50-51 行）是 bool(checks) and all(...)——故 checks 为空时前者 passed 是 True，后者是 False**；
+⭐⭐ 判据（本轮最重要）「**all([]) 是 True，bool([]) 是 False——而这两个事实在同一个文件里被用来回答同一个问题（「这次审计过了吗」）**」——**故这不是 bug，而是一次无声的选择：registry_audit 允许「没有项目」，verify_artifacts 不允许「没有产物」——而两个选择各自都有道理，只是没有任何注释说明这一点**；
+(b) ⭐⭐⭐⭐⭐ **两个 scope 限制的是两个不同维度：深度与独立性**：**前者写「Registry paths only」（限深度），后者写「not independent verification」（限独立性）**；
+⭐⭐ 判据「**这两件事经常被合成一句「我没验证」，而分开写才能让读者知道该去补哪一样：前者要补一次内容检查，后者要补一个外部复核**」——**故 scope 应该说明它限制的是深度还是独立性**；
+⭐⭐ **而本报告 §10 里的「未获取」「实验缺口」「不可检验」三个词，恰好也在这两个维度上分布——「未获取」限深度，「实验缺口」限独立性，「不可检验」限两者**；
+3. [GitHub / Badtheorylabs — `btl_lab/store.py`（6,048 字节，132 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/btl_lab/store.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **「导入的证据永远不改变已经记录的结论」**：**store.py 第 15 行的类 docstring 是「Small transactional ledger. Imported evidence never changes run outcome.」，而它用 4 张表（runs / events / project_overrides / decisions）与 PRAGMA foreign_keys = ON 实现**；
+⭐⭐ 判据（本轮最重要）「**一个台账如果允许「后来导入的证据」改写「已经记录的结论」，那它就不是台账，而是一个可被追溯修改的草稿**」——**而这两种做法正好对应 store.py 的两条路：前者是 append，后者是 update；本报告一直走的是 append，故它满足这条纪律**；
+⭐ **§10.386 与 §10.334 的两次修正（第 225 轮）都是新增条目 + 在原条目里加一行指针，而不是把原条目改写掉——这正是这条纪律在文档层的形态**；
+ — [src-btl-lab-bootstrap-py] [src-btl-lab-checks-py] [src-btl-lab-store-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -37237,7 +37518,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=429, evidence=2776, claims=1975, claims_high=1626, claims_disputed=9, trace_events=929, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=432, evidence=2784, claims=1983, claims_high=1634, claims_disputed=9, trace_events=935, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
