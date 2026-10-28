@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：349 ｜ **证据数**：2516 ｜ **主张数**：1823（高置信 1476，争议 9）
+> **来源数**：352 ｜ **证据数**：2537 ｜ **主张数**：1828（高置信 1481，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -26264,6 +26264,176 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > across output-row blocks」——**
 > **故预填低不是因为卡不行，而是因为内核在重复劳动。**
 
+### 10.279 🔥🔥🔥🔥🔥 `projected_tensor_bytes` 被写成了 `output_bytes`
+
+[c-projected-tensor-bytes-is-output-bytes]
+
+> 真正的计划值是 **8,381,262,032**（七个组件之和，与 exporter 文档逐字一致），
+> 而 release 报告写 **8,391,269,600**——差 **10,007,568**，
+> 恰等于 `output_bytes − 组件合计`。
+
+> **🔥🔥🔥🔥🔥 这条用一个等式锁死了一个一直含糊的字段**：
+> **exporter 文档写 `8,381,262,032 tensor bytes`；
+> 本轮把七个组件相加，得 `8,381,262,032`，一字不差。**
+>
+> **⭐⭐ 而 release 报告的 `projected_tensor_bytes` 比它多 10,007,568，
+> 恰等于 `output_bytes − 组件合计`。**
+> **故那个字段被写成了 `output_bytes` 的值。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **两个字段是否同源，可以用一次减法判定：**
+> **若 `A − B` 恰好等于 `C − B`，则 `A` 就是 `C`。**
+> **这对 `projected` 与 `output` 成立，故它们同源。**
+>
+> ⭐⭐ **而这条也解释了我 r193 那个困惑**：
+> **我当时算 `output − projected` 得 0，以为证明了两者相等，
+> 其实证明的是它们本来就是同一个变量。**
+>
+> **⭐⭐ 判据：**
+> **差为零不是证据，而是症状；**
+> **真正的证据是差等于另一个可独立算出的量。**
+>
+> ⭐⭐ **而这条给三份 conformance 报告的解读一个修正**：
+> **那三份报告的 `projected_tensor_bytes` 也是同一路径产出的，
+> 故它们同样等于各自的 `output_bytes`，同样不是计划值。**
+
+### 10.280 🔥🔥🔥🔥🔥 真值是 **8,392,369,600**，且带哈希
+
+[c-eight-three-nine-two-three-six-nine-six-hundred-wins]
+
+> launch 文档与 speed 文档都写这个数，并给出同一个
+> `2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c`。
+> release 报告的 8,391,269,600 是另一个口径。
+
+> **🔥🔥🔥🔥🔥 这条裁决了 §10.275 那个三数字矛盾**：
+> **launch 文档同时给出 `bytes: 8,392,369,600` 与同一个 SHA-256，
+> 而 speed 文档的 `File bytes` 也是 8,392,369,600。**
+>
+> **⭐⭐ 判据（承接 r195）：**
+> **三个数字争一个事实时，带哈希的那个赢；**
+> **而这里有两个独立文档带同一个哈希，故它赢两次。**
+>
+> ⭐⭐ **而这条还给出一层：launch 文档的 manifest 字段名是 `bytes`，
+> 不是 `output_bytes`**——
+> **故它记录的是分发包里的模型长度。**
+>
+> **⭐⭐ 判据：**
+> **同一个字节数在不同文件里换了字段名，往往意味着它换了测量方式。**
+>
+> ⭐⭐ **而这条的实际含义是**：
+> **§10.262 那些百分比应当标注分母为 release 报告口径；
+> 若改用 8,392,369,600，每个百分比变 0.0131%，结论不变。**
+
+### 10.281 🔥🔥🔥🔥🔥 `120a` **不向前兼容**，这是作者明示的
+
+[c-120a-is-not-forward-compatible]
+
+> 「120-real becomes 120a-real and 121-real becomes 121a-real.
+> This enables Blackwell-specific instructions and is not forward-compatible
+> with later architectures.」
+
+> **🔥🔥🔥🔥🔥 这条把 r193 观察到的一条规则升级为作者的明示**：
+> **三个构建目标是 `89-real;120-real`（Linux/Windows x86_64）与
+> `121-real`（DGX Spark），CUDA Toolkit 钉 13.0.2——**
+> **而 RTX PRO 6000 不在这三个目标里。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **前向兼容与架构专用指令是互斥的，**
+> **而作者选择了后者，并把这个选择写进了文档。**
+>
+> ⭐⭐ **这解释了 §10.26 那条曾被撤回的观察**：
+> **`mxf4nvf4` 能在 `120a` 与 `120f` 上编译，
+> 但 `120a` 的二进制不能跑在 `121` 上。**
+>
+> **⭐⭐ 判据：**
+> **能编译的目标集合与能运行的目标集合是两个不同的集合；**
+> **前者靠编译器，后者靠加载器。**
+>
+> ⭐⭐ **而这条还给出一个具体风险**：
+> **PRO 6000 必须靠 `120a` 这条路径跑，
+> 而那正是实测 43.16 tok/s 用的架构。**
+>
+> **⭐⭐ 判据：**
+> **一个目标不在构建表里，不等于它不能跑，
+> 而等于它没有专门的构建产物。**
+>
+> ⭐⭐ **而这条最后给一个否定式，值得整段引用**：
+> **「No throughput or compatibility number should be inferred from
+> a successful cross-compile.」**
+
+### 10.282 🔥🔥🔥🔥🔥 不需要新张量类型，因为格式信息全在**名字**里
+
+[c-no-new-tensor-type-by-design]
+
+> 「The GGUF stores BTL packed representation in ordinary I8/F32/BF16 tensors
+> with custom names, so no new GGUF tensor-type enum is required.」
+
+> **🔥🔥🔥🔥🔥 这条回答了本报告追问过多次的一个问题**：
+> **为什么 `dtype_map` 只映射 BF16、其余走 numpy 推断，却仍能工作？**
+> **因为类型枚举根本不需要承载格式信息。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **区分两类对象有两种方式：靠类型，或靠命名；**
+> **而靠命名的代价是加载器必须懂命名。**
+>
+> ⭐⭐ **而这条与 §10.288 那条十 magic 系统接上**：
+> **magic 就是命名的强形式，
+> 故命名检查能被做成编译期常量。**
+>
+> **⭐⭐ 判据：**
+> **靠命名区分的系统若要健壮，必须把名字放进签名；**
+> **而 magic 正是那个做法。**
+>
+> ⭐⭐ **而这条最后给一个可验证的推论**：
+> **既然没有新类型，任何只认标准类型的工具都能打开这个 GGUF，
+> 而它会把打包码当成普通 I8 显示出来。**
+>
+> **⭐⭐ 判据：**
+> **兼容但不语义可读，是最难诊断的状态。**
+
+### 10.283 ⭐⭐⭐⭐⭐ 这是本报告见过的**最窄**的支持边界声明
+
+[c-support-boundary-is-the-narrowest-seen]
+
+> 只在 **one Linux x86_64 RTX PRO 6000 (sm_120a)** 上通过；
+> 4090 / 5090 / Windows / DGX Spark 全部未验证；
+> patched Ollama 是 `scaffold complete`，LM Studio 是 `development preview`。
+
+> **⭐⭐⭐⭐⭐ 这条是本报告见过的最严的一次支持边界声明**：
+> **launch 文档说「does not automatically validate a separately built
+> archive, RTX 4090, RTX 5090, Windows, or DGX Spark」，**
+> **并直接写「Do not advertise unmeasured targets as supported」。**
+>
+> **⭐⭐ ollama 文档说 patched Ollama 是「Packaging scaffold complete;
+> target packages pending」，LM Studio 是「Development preview;
+> plugin unpublished and Windows validation pending」，**
+> **且「must not be described as one-click consumer support」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份文档的诚实度，可以按它写出多少个「未验证」来量；**
+> **而这一份在同一页里写了四个未验证目标。**
+>
+> ⭐⭐ **而这条与本报告自身形成对照**：
+> **我此前多次写「支持」或「可用」，而没有同时写清验证范围。**
+>
+> **⭐⭐ 判据：**
+> **一个数字的适用范围，等于它的**验证台数量**；**
+> **而验证台为一的时候，它只能论证那一台。**
+>
+> ⭐⭐ **而这条还给一个可执行的检查**：
+> **launch 文档列出六道门，每道都可判定**——
+> **① 三个平台从干净环境构建；② 三个测试在 4090/5090/Spark 上跑；
+> ③ 记录四个算子族的 parity 与 placement；④ 载入精确 GGUF 并跑 prefill+decode；
+> ⑤ 跑传输/推理/工具调用/取消/行为门；⑥ 记录吞吐、峰值内存、驱动、
+> CUDA runtime 与产物哈希。**
+>
+> **⭐⭐ 判据：**
+> **一个待办的质量，取决于它有没有一个能在花钱之前回答是/否的函数。**
+>
+> ⭐⭐ **而六道门里第 6 条与 §10.274 正好互补**：
+> **speed 文档给了吞吐与显存，而驱动版本、CUDA runtime 版本与产物哈希
+> 只在 launch 文档里给了哈希**——故第 6 条仍未过全。
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -30675,6 +30845,63 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 「**AVQ2 4096 x 4096 x 4: 2.49 ms, 42.8x over the scalar CPU reference**」「**full 248,320 x 5,120 vocabulary head: 22.15 ms**」「**weighted representative AVQ2 decoder suite: about 735.6 ms**」「**weighted representative INT4 decoder suite: about 70.4 ms**」——**AVQ2 suite 是 INT4 的 10.45 倍，而字节只差 6.3 倍**；
  — [src-btl3-doc-rtx-pro-speed] [src-btl3-doc-metal-runtime]
 
+### 三份 docs 与一条字段级裁决（第一百二十一轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-gguf-exporter.md`（2,464 字节，69 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-gguf-exporter.md)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它给出的计划字节数精确等于组件合计**：
+「**The full dry-run plans 2,416 tensors and 8,381,262,032 tensor bytes.**」——**而七个组件相加恰好得 8,381,262,032**；
+⭐⭐ 判据（本轮最重要）「**两个字段是否同源，可以用一次**减法**判定：若 `A - B` 恰好等于 `C - B`，则 `A` 就是 `C`**」；
+⭐⭐ 判据「**差为零不是证据，而是**症状**；真正的证据是差等于**另一个可独立算出的量****」——**这修正了我 r193 那次「output - projected = 0」的读法**；
+(a) ⭐⭐⭐⭐⭐ **缩减量也精确对上，且理由写明了**：
+「**The 170,510,920-byte reduction from the source package is expected: the package retains two superseded BF16 island files for provenance, while the export emits only their final INT4 demotions.**」——**而实测 `8,551,772,952 - 8,381,262,032 = 170,510,920`**；
+(b) ⭐⭐⭐⭐⭐ **158 个源文件逐个查大小与 SHA-256**：
+「**Every one of the 158 source files is size- and SHA-256-checked against the frozen package manifest before planning or writing.**」；
+(c) ⭐⭐⭐⭐⭐ **三个 conformance 层的表**：
+「**Layer 13 | AVQ2, BF16 island, final INT4 demotion | 28 | 322,295,104 | 28/28**」「**Layer 40 | AVQ2, small state, behavior LoRA | 44 | 98,427,808 | 44/44**」「**Layer 47 | AVQ2, standard affine INT4, behavior LoRA | 35 | 122,932,064 | 35/35**」；
+(d) ⭐⭐⭐⭐ **层 40 有独立 SHA-256，且明说它不可运行**：
+「**The layer-40 artifact SHA-256 is e621b4cdb1e3f25cdde514427b14cd6d27bacbe72ad5850468311c693d4d79f7**」「**This one-layer artifact is not a runnable model. A full export was deliberately not started at this gate.**」；
+(e) ⭐⭐⭐⭐⭐ **五条一致性门槛**：
+「**canonical-name equality; source-shape equality; exact GGUF storage-type equality; exact raw payload-byte equality after required Qwen transformations; exact regeneration of seeded signs.**」——**注意第四条：比的是「变换后」的字节**；
+2. [GitHub / Badtheorylabs — BTL-3 `docs/launch-btl3-cuda.md`（5,814 字节，161 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/launch-btl3-cuda.md)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **同时给了字节数与 SHA-256，裁决了 §10.275 的三数字矛盾**：
+「**filename: BTL-3-Compact-AVQ2.gguf | bytes: 8,392,369,600 | SHA-256: 2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c**」；
+⭐⭐ 判据「**三个数字争一个事实时，带**哈希**的那个赢；而这里有两个独立文档带同一个哈希，故它赢两次**」；
+⭐⭐ 判据「**同一个字节数在不同文件里换了字段名，往往意味着它换了**测量方式****」；
+(a) 🔥🔥🔥🔥🔥 **`120-real` 被重写成 `120a-real`，且不向前兼容**：
+「**The current llama.cpp fork deliberately rewrites requested plain Blackwell architectures to architecture-specific code: 120-real becomes 120a-real and 121-real becomes 121a-real. This enables Blackwell-specific instructions and is not forward-compatible with later architectures.**」；
+⭐⭐ 判据「**能编译的目标集合与能运行的目标集合是两个不同的集合；前者靠**编译器**，后者靠**加载器****」；
+(b) ⭐⭐⭐⭐⭐ **三个构建目标，没有 RTX PRO 6000**：
+「**linux-x86_64 | RTX 4090 and RTX 5090 | 89-real;120-real**」「**windows-x86_64 | RTX 4090 and RTX 5090 | 89-real;120-real**」「**linux-arm64 | NVIDIA DGX Spark | 121-real**」——**且 pin CUDA Toolkit 13.0.2**；
+(c) 🔥🔥🔥🔥🔥 **支持边界写得极窄**：
+「**Native AVQ2, affine INT4, vocabulary projection, and embedding kernels have passed exact-GGUF full-model execution on one Linux x86_64 RTX PRO 6000 Blackwell Server Edition (sm_120a).**」「**That measurement validates the implementation on that device. It does not automatically validate a separately built archive, RTX 4090, RTX 5090, Windows, or DGX Spark.**」「**Do not advertise unmeasured targets as supported.**」；
+(d) ⭐⭐⭐⭐⭐ **按显存自动选上下文的五档表**：
+「**below 20,000 MiB | 16,384**」「**20,000-27,999 MiB | 32,768**」「**28,000-47,999 MiB | 65,536**」「**48,000-95,999 MiB | 98,304**」「**at least 96,000 MiB | 131,072**」——**PRO 6000 报 97,887 MiB，落在最后一档**；
+(e) ⭐⭐⭐⭐⭐ **DGX Spark 走统一内存**：
+「**DGX Spark falls back to system memory because CPU and GPU share its 128 GB unified pool.**」「**On DGX Spark, the launcher enables GGML_CUDA_ENABLE_UNIFIED_MEMORY=1**」；
+(f) ⭐⭐⭐⭐ **Docker 用 manifest-list digest 钉住**：
+「**The Dockerfile pins manifest-list digest sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6 so the tag cannot silently change the toolchain.**」；
+(g) ⭐⭐⭐⭐⭐ **六道 conformance 门 + 一句否定式**：
+「**1. Build both Linux architectures and Windows x64 from clean environments. 2. Run test-btl3-avq-cuda, test-btl3-int4-cuda, and test-btl3-vocab-cuda on RTX 4090, RTX 5090, and DGX Spark. 3. Record numerical parity and packed-probe placement for all four custom operation families. 4. Load the exact external GGUF and execute prompt plus decode. 5. Run transport, reasoning, tool-call, cancellation, and behavior gates. 6. Record throughput, peak memory, driver, CUDA runtime, and artifact hashes.**」「**No throughput or compatibility number should be inferred from a successful cross-compile.**」；
+3. [GitHub / Badtheorylabs — BTL-3 `docs/patched-ollama-and-lmstudio.md`（10,347 字节，244 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/patched-ollama-and-lmstudio.md)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **三个产品被显式分开，各带真实状态**：
+「**Stock Ollama | Does not execute AVQ2**」「**BTL-3 Patched Ollama | Packaging scaffold complete; target packages pending**」「**LM Studio | Development preview; plugin unpublished and Windows validation pending**」——**且「No HTTP translation bridge sits between patched Ollama and the runner.」**；
+(a) ⭐⭐⭐⭐⭐ **替换面小的原因**：
+「**At official Ollama commit 573386c35eac76124ffce571f4b0fefa0a7fe13c, llm.NewLlamaServer delegates every GGUF model to a llama-server subprocess.**」——**故「打补丁」实际是换运行时载荷**；
+(b) 🔥🔥🔥🔥🔥 **不需要新张量类型，因为格式信息在名字里**：
+「**The GGUF stores BTL packed representation in ordinary I8/F32/BF16 tensors with custom names, so no new GGUF tensor-type enum is required.**」——**这解释了为什么 `dtype_map` 只映射 BF16 也能工作**；
+⭐⭐ 判据「**区分两类对象有两种方式：靠**类型**，或靠**命名**；而靠命名的代价是**加载器必须懂命名****」；
+⭐⭐ 判据「**兼容但不语义可读，是最难诊断的状态**」；
+(c) ⭐⭐⭐⭐ **打包前强制六个 CLI 参数**：
+「**Do not package until --help exposes --model, --host, --port, --no-webui, --offline, and -np. The packager enforces that contract.**」；
+(d) ⭐⭐⭐⭐⭐ **并行工具调用被改成流结束后逐个发**：
+「**LM Studio generator event lifecycle represents one active tool call at a time and its argument-fragment callback does not include a call ID. To preserve BTL-3 parallel calls correctly, the plugin buffers tool fragments by upstream call index and emits each complete lifecycle sequentially when the server stream ends. It does not misattribute interleaved arguments merely to make the tool UI look live.**」——**为了正确性牺牲实时性**；
+(e) ⭐⭐⭐⭐⭐ **`model.yaml` 被声明不是能力声明**：
+「**The included model.yaml is catalog metadata, not a claim that the stock LM Studio GGUF engine supports AVQ2. It uses the explicit compatibility label btl3-avq2-native.**」；
+ — [src-btl3-doc-gguf-exporter-md] [src-btl3-doc-launch-cuda] [src-btl3-doc-patched-ollama]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -30814,7 +31041,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=349, evidence=2516, claims=1823, claims_high=1476, claims_disputed=9, trace_events=767, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=352, evidence=2537, claims=1828, claims_high=1481, claims_disputed=9, trace_events=773, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
