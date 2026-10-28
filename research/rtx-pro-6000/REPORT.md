@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：360 ｜ **证据数**：2576 ｜ **主张数**：1838（高置信 1491，争议 9）
+> **来源数**：363 ｜ **证据数**：2584 ｜ **主张数**：1840（高置信 1493，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -26882,6 +26882,113 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **故 §10.290 那条「一个数字被写进第 N 个文件时，
 > 前 N-1 个文件都不再是它的证据」在这里又 +1。**
 
+### 10.295 🔥🔥🔥🔥🔥 `--gguf-sha256` 是**必填参数，却从不被计算**
+
+[c-ollama-bridge-sha256-is-echo-not-check]
+
+> **`tools/ollama_bridge.py` 第 469 行**：
+> **`parser.add_argument("--gguf-sha256", required=True)`**
+>
+> **而全文件 `hashlib` 出现 0 次、`sha256(` 出现 0 次、`hexdigest` 出现 0 次。**
+> **该值唯一的去向是第 433 行**：
+> **`"digest": config.gguf_sha256`**——**原样转发。**
+
+> **🔥🔥🔥🔥🔥 而同一个 dict 里，两个邻居是真测量**：
+> ```
+> "modified_at": datetime.fromtimestamp(config.gguf_path.stat().st_mtime, ...),
+> "size":        config.gguf_path.stat().st_size,
+> "digest":      config.gguf_sha256,
+> ```
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **同一个结构里的两个字段，如果一个来自测量、一个来自声明，
+> 那这个结构整体看起来像一次测量。**
+>
+> **⭐⭐ 判据：**
+> **一个 `required=True` 的参数会被当成「系统依赖它」的信号，
+> 而它可能只是「系统要把它转发出去」。**
+
+> ⚠️⚠️⚠️ **而它只校验「文件存在」**：
+> **`if not config.gguf_path.is_file(): parser.error("GGUF does not exist: ...")`**
+>
+> **故任意一个同名 GGUF 都能通过，而 Ollama 客户端会显示那个正确的 digest。**
+>
+> **⭐⭐ 判据：**
+> **一个只在显示层出现的校验值，比没有校验值更危险；
+> 因为它会把「未校验」伪装成「已校验」。**
+>
+> ⭐⭐ **而这条与 §10.290 是同一条链的延伸**：
+> **那个数字被抄进第五个文件，这个数字被抄进了一个协议响应字段。**
+>
+> **⭐⭐ 判据：**
+> **一个常量一旦进入协议层，它就从「文档」升级成「契约」，
+> 而契约会被下游当真。**
+
+> ⭐⭐⭐⭐⭐ **而测试侧的证据同样清楚**：
+> **`tests/test_ollama_bridge.py` 用的是 4 字节的假模型
+> （`model.write_bytes(b"gguf")`）与 `gguf_sha256="abcd" * 16`。**
+> **五个测试、20 处断言，没有一个测 digest 的真伪。**
+>
+> **⭐⭐ 判据：**
+> **当一个测试的期望值是一个明显假的字符串时，
+> 它测的不是正确性，而是管道连通性。**
+>
+> **⭐⭐ 而这不是缺陷——`abcd`*16 恰恰是它诚实的证据**：
+> **作者知道这里只需要一个能透传的字符串，所以他没有假装它是真哈希。**
+> **⚠️ 真正的问题不在测试，而在「生产路径上也只需要一个能透传的字符串」。**
+
+### 10.296 ⭐⭐⭐⭐⭐ Ollama 桥接**只随 macOS 包分发**
+
+[c-ollama-bridge-only-ships-with-macos]
+
+| 打包脚本 | 创建的目录 | 启动器 | `share/btl3/` |
+|---|---|---|---|
+| `build_cuda_bundle.py` | `bin / lib / libexec / model` | `btl3-server`（由 `-cuda` 改名） | **否** |
+| `build_macos_arm64_bundle.py` | `bin / lib / libexec / model / share/btl3` | `btl3-server` + **`btl3-ollama-bridge`** | **是** |
+| `build-linux.sh` + `Dockerfile` | （只是 buildx export） | `llama-server` + `llama-cli` | 否 |
+| `build-windows.ps1` | （只是 `$Stage`） | `llama-server.exe` + `llama-cli.exe` | 否 |
+
+> **🔥🔥🔥🔥🔥 只有 macOS 那个脚本建 `share/btl3/`**：
+> **`(output / "share/btl3").mkdir(parents=True)`**
+> **`shutil.copy2(ROOT / "tools/ollama_bridge.py",
+>                 output / "share/btl3/ollama_bridge.py")`**
+>
+> **而 `launch/btl3-ollama-bridge` 是 sh，它第 16 行要求
+> `$bundle_root/share/btl3/ollama_bridge.py` 存在。**
+>
+> ⚠️ **故若不改就直接把它放进 CUDA 包，它会立刻失败。**
+> ⚠️⚠️ **但这是「尚未发生」，不是「已坏」**：
+> **`build_cuda_bundle.py` 的 launcher 表里根本没有 `btl3-ollama-bridge`。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个缺口如果不是被「跳过」而是被「没走到」，
+> 那它在缺陷清单里的等级要降一级——
+> 因为它是将来的问题，不是现在的问题。**
+>
+> **⭐⭐ 判据：**
+> **判断一个缺口是否已经发生，
+> 要看那条路径上有没有人走过，
+> 而不是看那条路径是否通畅。**
+
+> ⭐⭐ **而这顺带解释了为什么 Ollama 桥接只随 macOS 分发**：
+> **它的依赖被写进了 macOS 打包脚本，而不是被抽成一个共享步骤。**
+>
+> **⭐⭐ 判据：**
+> **当一个能力只在一个平台的打包脚本里被装配时，
+> 它就不是一个产品特性，而是那个平台的一个副产品。**
+
+> ⚠️⚠️⚠️ **附带一条真缺陷**：
+> **`build_cuda_bundle.py` 把启动器改名**
+> **`launcher_target = staging / "bin" / launcher_name.replace("-cuda", "")`**——
+> **故 `btl3-cuda-server` 装进包里叫 `btl3-server`。**
+> **而仓库里 `launch/btl3-server` 是 macOS 专用脚本——
+> 两个不同文件在包里可能同名。**
+>
+> **⚠️ 这一条我标为「可能」而不是「是」**：
+> **因为两个包不会同时被解到同一个目录；
+> 只有「把 macOS 包和 CUDA 包叠在一起」时才会撞名。**
+> **⚠️ 而那种叠法没有文档推荐，故它是一条「结构上存在、实际未触发」的隐患。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -31487,6 +31594,39 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**「完全一致」这个断言必须带一个范围；而范围之外的差异不会被这个断言排除**」；
  — [src-btl3-launch-cuda-server-ps1] [src-btl3-launch-server-macos] [src-btl3-launch-ollama-bridge]
 
+### Ollama 桥接与四份打包脚本（第一百二十六轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `tools/ollama_bridge.py`（18,873 字节，501 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/ollama_bridge.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **`--gguf-sha256` 是必填项却从不被计算**：
+「**parser.add_argument(--gguf-sha256, required=True)**」——
+**而全文件 `hashlib` 出现 0 次、`sha256(` 出现 0 次、`hexdigest` 出现 0 次**；
+(a) 🔥🔥🔥🔥🔥 **它唯一的去向是原样转发**：「**digest: config.gguf_sha256**」（433 行）——**而同一 dict 的 `size` 与 `modified_at` 来自真实 `stat()`**；
+⭐⭐ 判据（本轮最重要）「**同一个结构里的两个字段，如果一个来自测量、一个来自声明，那这个结构整体看起来像一次测量**」；
+⭐⭐ 判据「**一个 `required=True` 的参数会被当成「系统依赖它」的信号，而它可能只是「系统要把它转发出去」**」；
+(b) ⚠️⚠️⚠️ **它只校验文件存在**：「**if not config.gguf_path.is_file(): parser.error(GGUF does not exist: ...)**」——**故任意一个同名 GGUF 都能通过，而 Ollama 客户端会显示那个正确的 digest**；
+⭐⭐ 判据「**一个只在显示层出现的校验值，比没有校验值更危险；因为它会把「未校验」伪装成「已校验」**」；
+⭐⭐ 判据「**一个常量一旦进入协议层，它就从「文档」升级成「契约」，而契约会被下游当真**」；
+2. [GitHub / Badtheorylabs — BTL-3 `tests/test_ollama_bridge.py`（9,337 字节，253 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_ollama_bridge.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **测试用的是 4 字节假模型与假哈希**：
+「**model.write_bytes(b(gguf))**」「**gguf_sha256=abcd * 16**」——
+**五个测试（test_discovery_endpoints、test_non_streaming_chat_preserves_reasoning_and_tools、test_streaming_chat_is_ollama_ndjson、test_generate_maps_to_chat、test_stock_ollama_cli_discovers_bridge_model），20 处断言，没有一个测 digest 的真伪**；
+⭐⭐ 判据「**当一个测试的期望值是一个明显假的字符串时，它测的不是正确性，而是管道连通性**」；
+⭐⭐ **而 `abcd` 重复 16 次恰恰是它诚实的证据**：**作者知道这里只需要一个能透传的字符串，所以他没有假装它是真哈希**；
+3. [GitHub / Badtheorylabs — BTL-3 `tools/build_macos_arm64_bundle.py`（6,597 字节，190 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/build_macos_arm64_bundle.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它是唯一创建 `share/btl3/` 的打包脚本**：
+「**(output / share/btl3).mkdir(parents=True)**」「**shutil.copy2(ROOT / tools/ollama_bridge.py, output / share/btl3/ollama_bridge.py)**」（166、177-180 行）——
+⚠️ **而 CUDA 的 `build_cuda_bundle.py` 只建 `bin / lib / libexec / model` 四个目录，没有 share**；
+(a) ⭐⭐⭐⭐⭐ **macOS 包放两个启动器，CUDA 包只放一个**：「**copy2(ROOT / launch/btl3-server, output / bin/btl3-server)**」「**copy2(ROOT / launch/btl3-ollama-bridge, output / bin/btl3-ollama-bridge)**」——**故 Ollama 桥接目前只随 macOS 包分发**；
+⭐⭐ 判据「**一个缺口如果不是被「跳过」而是被「没走到」，那它在缺陷清单里的等级要降一级**」；
+⭐⭐ 判据「**判断一个缺口是否已经发生，要看那条路径上有没有人走过，而不是看那条路径是否通畅**」；
+⭐⭐ 判据「**当一个能力只在一个平台的打包脚本里被装配时，它就不是一个产品特性，而是那个平台的一个副产品**」；
+(b) ⚠️⚠️⚠️ **附带一条真缺陷**：「**launcher_target = staging / bin / launcher_name.replace(-cuda, )**」——**故 `btl3-cuda-server` 装进包里叫 `btl3-server`，而仓库里 `launch/btl3-server` 是 macOS 专用脚本**；
+⚠️ **这一条标为「可能」而不是「是」**：**两个包不会同时解到同一目录，只有叠放时才撞名**；
+ — [src-btl3-tools-ollama-bridge] [src-btl3-test-ollama-bridge] [src-btl3-tools-build-macos-arm64]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -31626,7 +31766,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=360, evidence=2576, claims=1838, claims_high=1491, claims_disputed=9, trace_events=790, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=363, evidence=2584, claims=1840, claims_high=1493, claims_disputed=9, trace_events=796, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
