@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：467 ｜ **证据数**：2919 ｜ **主张数**：2127（高置信 1777，争议 9）
+> **来源数**：468 ｜ **证据数**：2925 ｜ **主张数**：2134（高置信 1784，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -36108,6 +36108,198 @@ exit 0
 > 唯一会编到 Blackwell 的自动化是手动触发的 Windows 作业，
 > 而 Windows 上并没有人测 RTX PRO 6000。**
 
+### 10.584 🔥🔥🔥🔥🔥 上游那个 PR：标题只写了 **SYCL 与 CANN**
+
+[c-pr-23705-disabled-sycl-and-cann-only]
+
+> **PR #23705**
+> `ci : reduce (disable SYCL and CANN builds/releases)`
+> —— 2026-05-26 由 `ggerganov` 合并，**9 个文件 +513 / −502**。
+>
+> **正文给的理由**：
+> > The `SYCL` builds alone consume more than 1/3 of the total 10GB cache that we have.
+> > I don't think it's reasonable, so disabling them for now.
+> > In order to re-enable, we have to provision dedicated runners.
+> >
+> > The `openEuler` builds are not consuming cache which is good.
+> > However, they allocate slots from the GH hosted runners.
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个 PR 的标题把两个名字写进去了时，
+> 它同时也在声明「不在这两个名字里的东西我没动」——
+> 而那个声明比标题本身更有用。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.580 那条「被注释掉的是 sycl 与 cann」
+> 现在有了上游的一手依据，
+> 而不是只靠 BTL-3 那份 `release.yml` 的注释。**
+>
+> ⚠️ **而这条给本报告一个关于「注释证据」的等级：
+> 注释说「省资源」是二手的，
+> PR 说「SYCL 占了 10 GB 缓存的三分之一」是一手的。**
+
+### 10.585 🔥🔥🔥🔥🔥 九处改动，**没有一处是 CUDA 构建文件**
+
+[c-pr-23705-did-not-touch-any-cuda-file]
+
+> **`/pulls/23705/files` 返回的九个文件**：
+> ```
+> build-cache.yml        8      build-sycl.yml      246
+> build-cann.yml       134      build-vulkan.yml      2
+> build-cross.yml        2      build-webgpu.yml      2
+> build-hip.yml          2      release.yml         617
+> build-openvino.yml     2
+> ```
+> **没有 `build-cuda-ubuntu.yml`，也没有 `build-cuda-windows.yml`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份改动清单里连目标文件都没出现时，
+> 「它可能顺手改了」这个疑虑就被排除了——
+> 而排除它只需要读文件名，不必读 diff。**
+>
+> **⭐⭐ 判据：**
+> **故「PR 23705 删掉了 linux-cuda」这个假设，
+> 在文件名这一层就已经死了。**
+>
+> ⚠️ **而这条是本报告第一次用「改动的文件清单」而不是「改动的内文」
+> 来否证一个假设：
+> 因为内文可能漏读，文件清单不会。**
+
+### 10.586 🔥🔥🔥🔥🔥 那 617 行改动里，`cuda` 出现 **零次**
+
+[c-the-release-patch-has-zero-cuda-lines]
+
+> **对 `release.yml` 的 `patch`（30,456 字符、684 行）做两遍筛选**：
+> ① 取所有以 `+`/`-` 开头且非 `+++`/`---` 的行 → **617 行**；
+> ② 在其中筛 `cuda`（忽略大小写）→ **0 行**。
+>
+> **而被删的顶层 job 只有两条**：
+> ```
+> -  windows-sycl:
+> -  ubuntu-24-sycl:
+> ```
+> **新增 0 条。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个 617 行的改动里目标词出现零次时，
+> 这不是「改得少」，
+> 而是「这件事没有被碰过」——
+> 而「零次」比「一次」更有信息量，因为它排除了偶然。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.576 那个「没有 linux-cuda」现在有两条独立的否证：
+> 当前文件里没有（§10.576），
+> 而最近一次大改也没碰过（本条）。**
+>
+> ⚠️ **而这条也定位了那个假设的出生地：
+> 是我从「一段被注释的 YAML」推出来的，
+> 而那段 YAML 里根本没有 `cuda` 这个词。**
+
+### 10.587 ⭐⭐⭐⭐⭐ 「linux-cuda」上游**从未存在过**——两条独立证据
+
+[c-the-linux-cuda-job-never-existed-in-upstream]
+
+> | 证据 | 内容 |
+> |---|---|
+> | 当前枚举 | 15 个顶层作业里只有 `windows-cuda`（§10.576） |
+> | 最近大改 | PR #23705 的 617 行实质改动里 `cuda` **0 行**，被删 job 只有两个 SYCL |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「从未存在」可以由「当前没有」与「最近一次大改没碰」
+> 两条独立证据共同支撑时，
+> 它就从「我没找到」升级成了「它不是那样」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后不再把「linux-cuda 被删除」当作待查项——
+> 它是一个已被否证的假设，
+> 而不是一个未闭合的缺口。**
+>
+> ⚠️ **而这条的元价值是：
+> 「一个缺口」与「一个错误假设」在待追列表里长得一模一样，
+> 而它们的关闭方式相反：
+> 前者要补证据，后者要写否证。**
+
+### 10.588 ⭐⭐⭐⭐⭐ 「省资源」的具体内容是**缓存**，不是算力
+
+[c-a-third-of-the-10gb-cache-was-the-real-reason]
+
+> **PR 正文的两条原句**：
+> - SYCL：「**consume more than 1/3 of the total 10GB cache**」
+> - openEuler：「**not consuming cache which is good. However,
+>   they allocate slots from the GH hosted runners**」
+>
+> **故两个被禁的作业，一个吃缓存，一个吃 runner 槽位。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「省资源」被拆成「缓存」与「runner 槽位」两种时，
+> 它不是一句含糊的理由，
+> 而是两条可以分别优化的约束——
+> 而 CUDA 两边都不吃。**
+>
+> **⭐⭐ 判据：**
+> **故「为什么 linux-cuda 没有」，
+> 不能从「资源紧张」推出来——
+> 因为资源紧张挑中的是另外两个。**
+>
+> ⚠️ **而这条说明 §10.580 那个「省资源」的注释
+> 是一个正确的理由，
+> 只是它解释的对象不是我以为的那个。**
+
+### 10.589 ⚠️⚠️⚠️ PR 的 TODO 留了 ROCm/HIP，**连 CUDA 都没提**
+
+[c-the-rocm-hip-build-was-left-open-but-cuda-was-not-mentioned]
+
+> **正文「### TODO」段**：
+> > - [ ] I am still considering what to do with the ROCm/HIP builds.
+> >   These are probably important, but also feels like we should already have
+> >   some dedicated runners for them.
+> > - [x] https://github.com/ggml-org/llama.cpp/pull/16452/changes#r3302314304
+>
+> **整段没有 `cuda` 这个词。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份 TODO 列出了一个后端却没列出另一个时，
+> 这不是遗漏，
+> 而是「另一个不在预算压力下」的信号。**
+>
+> **⭐⭐ 判据：**
+> **故 CUDA 作业在这条流水线里的地位是「不参与瘦身讨论」——
+> 它不占那份 10 GB 缓存，也不占用被争抢的 runner 槽位。**
+>
+> ⚠️ **而这条给本报告一个反向确认：
+> 「没有被提到」在资源分配的语境里，
+> 往往是「不构成问题」而不是「不重要」。**
+
+### 10.590 ⭐⭐⭐⭐⭐ 这一轮把「缺口」改判成了「错误假设」
+
+[c-this-round-reclassifies-a-gap-into-a-false-hypothesis]
+
+> **上一轮 §10.576 把「没有 `linux-cuda`」写成了一个缺口，
+> 并据此把「查 PR #23705」列进待追项。
+> 本轮的结论是：那个待追项不该存在——
+> 因为被问的那件事从来没有发生过。**
+>
+> **而这个过程留下了一个可复用的判据**：
+> 一个「没找到 X」的结论，有两种可能：
+> ① X 存在于某处但我没读到 → **缺口**，要继续找；
+> ② X 从未存在 → **错误假设**，要写否证。
+> **而区分它们的那个问题不是「X 在哪」，
+> 而是「谁会创建 X」——如果那个「谁」的改动清单里没有 X，
+> 第二种就成立了。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个否证比一条证据更省工时，
+> 说明我上一个假设的胆子比证据大。**
+>
+> **⭐⭐ 判据：**
+> **故本报告的待追项清单里，
+> 每一条都应当带一个「它的创建者是谁」——
+> 没有创建者的那一条，本质上是空转。**
+>
+> ⚠️ **而这条对 RTX PRO 6000 这个主题的直接价值是：
+> 它删掉了一个会一直留在「未获取项」里的假缺口，
+> 而那个假缺口本来会让后续每一轮都去重读一次 `release.yml`。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -39777,7 +39969,7 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 ⭐⭐ 判据「**「两个实现一致」与「两个实现都对」是两个不同的断言——而「差分测试」这个词只保证前者**」；
 ⭐⭐ 判据「**「一个测试能不能定位故障」取决于「它的期望值是否独立于所有被测实现」——而「独立」的唯一硬标准是「没有共享代码路径」，不是「写在不同文件里」**」；
 (a) 🔥🔥🔥 **测试数据非对称，能检出 nibble 顺序写反**：「**codes[index] = static_cast<int8_t>((index * 29 + 7) & 0xFFU);**」——实测 16,384 个字节里只有 1,024 个（6.2%）两个 nibble 相同，且 16 个码字各出现 2,048 次；
-⭐⭐���⭐⭐ 判据（本轮最重要）「**「一个测试用的是对称数据还是非对称数据」决定了它能不能检出「顺序类错误」——而这两类数据的区别不在「随机不随机」，而在「交换两个位置后结果是否变化」**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个测试用的是对称数据还是非对称数据」决定了它能不能检出「顺序类错误」——而这两类数据的区别不在「随机不随机」，而在「交换两个位置后结果是否变化」**」；
 ⭐⭐ 判据「**「测试数据的分布」应该与「你想检出的错误类型」对齐——均分数据查值域错误，非对称数据查顺序错误，而随机数据两者都查但都不彻底**」；
 ⭐⭐ 可算：**`29` 是奇数且在 mod 16 下等于 13，故 `index*29` 同时遍历高低 nibble——即这个乘数是被挑过的**；
 ⭐⭐ 判据「**「一个测试数据生成式里的乘数」往往比数据本身更能说明作者的意图**」，**当看到 `(i * k + c) & 0xFF` 时先算 `k mod 16`** ；
@@ -42377,6 +42569,40 @@ shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 480
 ⭐⭐ 判据（本轮最重要）「**当一条链上的每一环都只保证「我这一环没报错」时，整条链不保证任何端到端的事——而「Blackwell 能跑」恰好是一件端到端的事。故本报告里所有 PRO 6000 的正面结果，都是「第四环成功」的单点证据，而不是「前三环都为它准备过」**」——**⚠️ 而这条也解释了 §10.568 那个反直觉结论：唯一会编到 Blackwell 的自动化是手动触发的 Windows 作业，而 Windows 上并没有人测 RTX PRO 6000**；
  — [src-btl3-ci-release]
 
+### 那个缺口其实是一个错误假设（第一百七十一轮补充）
+
+上一轮结尾说「读上游 llama.cpp PR #23705 全文，看它删掉的到底是不是曾经存在的 linux-cuda」。本轮读了：**它删的是两个 SYCL 作业， девять 个改动文件里没有一个含 cuda，而 617 行 release.yml 改动里 `cuda` 出现零次**。**故「linux-cuda 被删除」是一个错误假设，不是缺口。**
+
+1. 🔥🔥🔥🔥🔥 **PR #23705 的标题与正文都只讲 SYCL 与 CANN**：
+标题是「**ci : reduce (disable SYCL and CANN builds/releases)**」，2026-05-26 由 ggerganov 合并（9 个文件 +513/−502）；正文理由是「**SYCL builds alone consume more than 1/3 of the total 10GB cache**」与「**openEuler builds 占 GH runner 槽位**」；
+
+⭐⭐ 判据（本轮最重要）「**当一个 PR 的标题把两个名字写进去了时，它同时也在声明「不在这两个名字里的东西我没动」——而那个声明比标题本身更有用**」——**⚠️ 而这条给本报告一个关于「注释证据」的等级：注释说「省资源」是二手的，PR 说「SYCL 占了 10 GB 缓存的三分之一」是一手的**；
+2. 🔥🔥🔥🔥🔥 **九处改动，没有一处是 CUDA 构建文件**：
+`/pulls/23705/files` 返回九个文件「**build-cache(8) / build-cann(134) / build-cross(2) / build-hip(2) / build-openvino(2) / build-sycl(246) / build-vulkan(2) / build-webgpu(2) / release(617)**」，**没有 build-cuda-ubuntu.yml，也没有 build-cuda-windows.yml**；
+
+⭐⭐ 判据（本轮最重要）「**当一份改动清单里连目标文件都没出现时，「它可能顺手改了」这个疑虑就被排除了——而排除它只需要读文件名，不必读 diff。故「PR 23705 删掉了 linux-cuda」这个假设，在文件名这一层就已经死了**」——**⚠️ 这是本报告第一次用「改动的文件清单」而不是「改动的内文」来否证一个假设：因为内文可能漏读，文件清单不会**；
+3. 🔥🔥🔥🔥🔥 **那 617 行改动里 `cuda` 出现零次**：
+对 `release.yml` 的 patch（30,456 字符、684 行）做两遍筛选：先取以 `+`/`-` 开头且非 `+++`/`---` 的行得 617 行，再筛 `cuda`（忽略大小写）得 **0 行**；而被删的顶层 job 只有「**windows-sycl**」与「**ubuntu-24-sycl**」两条，新增 0 条；
+
+⭐⭐ 判据（本轮最重要）「**当一个 617 行的改动里目标词出现零次时，这不是「改得少」，而是「这件事没有被碰过」——而「零次」比「一次」更有信息量，因为它排除了偶然。故 §10.576 那个「没有 linux-cuda」现在有两条独立的否证**」——**⚠️ 而这条也定位了那个假设的出生地：是我从「一段被注释的 YAML」推出来的，而那段 YAML 里根本没有 cuda 这个词**；
+4. ⭐⭐⭐⭐⭐ **「linux-cuda」上游从未存在过——两条独立证据**：
+① 当前 15 个顶层作业里只有 `windows-cuda`（§10.576）；② PR #23705 的 617 行实质改动里 `cuda` 零行，被删 job 只有两个 SYCL；
+
+⭐⭐ 判据（本轮最重要）「**当一个「从未存在」可以由「当前没有」与「最近一次大改没碰」两条独立证据共同支撑时，它就从「我没找到」升级成了「它不是那样」。故本报告此后不再把「linux-cuda 被删除」当作待查项——它是一个已被否证的假设，而不是一个未闭合的缺口**」——**⚠️ 而这条的元价值是：「一个缺口」与「一个错误假设」在待追列表里长得一模一样，而它们的关闭方式相反：前者要补证据，后者要写否证**；
+5. ⭐⭐⭐⭐⭐ **「省资源」的具体内容是缓存，不是算力**：
+PR 正文两条原句：SYCL「**consume more than 1/3 of the total 10GB cache**」，openEuler「**not consuming cache which is good. However, they allocate slots from the GH hosted runners**」——**一个吃缓存，一个吃 runner 槽位**；
+
+⭐⭐ 判据（本轮最重要）「**当「省资源」被拆成「缓存」与「runner 槽位」两种时，它不是一句含糊的理由，而是两条可以分别优化的约束——而 CUDA 两边都不吃。故「为什么 linux-cuda 没有」，不能从「资源紧张」推出来——因为资源紧张挑中的是另外两个**」——**⚠️ 说明那个「省资源」的注释是一个正确的理由，只是它解释的对象不是我以为的那个**；
+6. ⚠️⚠️⚠️ **PR 的 TODO 留了 ROCm/HIP，连 CUDA 都没提**：
+正文「### TODO」是「**- [ ] I am still considering what to do with the ROCm/HIP builds. These are probably important**」，**整段没有 cuda 这个词**；
+
+⭐⭐ 判据（本轮最重要）「**当一份 TODO 列出了一个后端却没列出另一个时，这不是遗漏，而是「另一个不在预算压力下」的信号。故 CUDA 作业在这条流水线里的地位是「不参与瘦身讨论」**」——**⚠️ 而这条给本报告一个反向确认：「没有被提到」在资源分配的语境里，往往是「不构成问题」而不是「不重要」**；
+7. ⭐⭐⭐⭐⭐ **这一轮把「缺口」改判成了「错误假设」**：
+上一轮把「没有 linux-cuda」写成缺口并列进待追项，本轮的结论是那个待追项不该存在——**因为被问的那件事从来没有发生过**；
+
+⭐⭐ 判据（本轮最重要）「**一个「没找到 X」的结论，有两种可能：① X 存在于某处但我没读到 → 缺口，要继续找；② X 从未存在 → 错误假设，要写否证。而区分它们的那个问题不是「X 在哪」，而是「谁会创建 X」——如果那个「谁」的改动清单里没有 X，第二种就成立了**」——**⚠️ 故本报告的待追项清单里，每一条都应当带一个「它的创建者是谁」——没有创建者的那一条，本质上是空转**；
+ — [src-llamacpp-pr-23705]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -42516,7 +42742,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=467, evidence=2919, claims=2127, claims_high=1777, claims_disputed=9, trace_events=1005, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=468, evidence=2925, claims=2134, claims_high=1784, claims_disputed=9, trace_events=1007, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
