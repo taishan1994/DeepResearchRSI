@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：466 ｜ **证据数**：2913 ｜ **主张数**：2119（高置信 1769，争议 9）
+> **来源数**：467 ｜ **证据数**：2919 ｜ **主张数**：2127（高置信 1777，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -35894,6 +35894,220 @@ exit 0
 > 「支持」这个词在这份仓库里有六层，
 > 而每一层的数字都不一样。**
 
+### 10.576 🔥🔥🔥🔥🔥 发布流水线里**没有 `linux-cuda` 这个作业**
+
+[c-the-release-pipeline-has-no-linux-cuda-job]
+
+> **按 2 空格缩进逐一枚举 `release.yml` 的 15 个顶层作业**：
+> ```
+> check-release(41)      macos-cpu(62)        ubuntu-cpu(143)
+> ubuntu-vulkan(229)     android-arm64(314)   ubuntu-24-openvino(406)
+> windows-cpu(503)       windows(571)         windows-cuda(670)
+> ubuntu-22-rocm(962)    windows-hip(1082)    ios-xcode(1205)
+> ui(1355)               release(1360)        ui-publish(1531)
+> ```
+> **15 个名字里，带 `cuda` 的只有 `windows-cuda` 一个。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个发布流水线有 15 个作业、
+> 而 Linux 与 CUDA 这两件事从未在同一行出现时，
+> 这不是「漏了」，
+> 而是「那两件事被分配给两个平台」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告凡引用「上游发布的 CUDA 二进制」，都必须限定为 Windows。**
+>
+> ⚠️ **而这条对 RTX PRO 6000 的意义是直接的：
+> 那张卡跑在 Linux 上时，没有一份官方 CUDA 二进制可供对比——
+> 每一个 Linux CUDA 数字都是某个人自己编的。**
+
+### 10.577 ⭐⭐⭐⭐⭐ 发布用的那个 CUDA 作业**也不设架构参数**
+
+[c-the-release-cuda-job-also-sets-no-architectures]
+
+> **`release.yml` 第 714-724 行**：
+> ```bat
+> cmake -S . -B build -G "Ninja Multi-Config" ^
+>   -DGGML_BACKEND_DL=ON ^
+>   -DGGML_NATIVE=OFF ^
+>   -DGGML_CPU=OFF ^
+>   -DGGML_CUDA=ON ^
+>   -DLLAMA_BUILD_BORINGSSL=ON ^
+>   -DGGML_CUDA_CUB_3DOT2=ON
+> ```
+> **六个 `-D` 参数，一个 `-DCMAKE_CUDA_ARCHITECTURES` 都没有。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当发布流水线与 CI 都不写架构时，
+> 「这个二进制含哪些架构」这个问题
+> 就只能去 `CMakeLists` 的默认值里回答——
+> 而那是一个会随 CUDA 版本变的表达式。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.540 那条「CUDA ≥ 12.8 就追加 `120a-real`；
+> ≥ 12.9 就追加 `121a-real`」
+> 在这条流水线上是唯一的架构来源。**
+>
+> ⚠️ **而这条把 §10.567 / §10.568 的结论统一了：
+> CI 与发布都不写架构，
+> 故「编了什么」完全由「用哪个 CUDA 版本」间接决定。**
+
+### 10.578 🔥🔥🔥🔥🔥 CUDA 那份发布物是**一个 `.dll`**
+
+[c-the-cuda-release-artifact-is-one-dll]
+
+> **第 724 行**：`cmake --build build --config Release -j %NINJA_JOBS% --target ggml-cuda`
+> **第 734 行**：`7z a -snl llama-bin-win-cuda-${{ matrix.cuda }}-x64.zip .\build\bin\Release\ggml-cuda.dll`
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当发布物是一个后端 `.dll` 而不是一个可执行文件时，
+> 「这个包能用」这句话就多了一个前提：
+> 运行它的那个 `llama-server` 必须与它 ABI 兼容。**
+>
+> **⭐⭐ 判据：**
+> **故 `GGML_BACKEND_DL=ON`（第 717 行）
+> 不是「更模块化」，而是「必须再配一个主程序」。**
+>
+> ⚠️ **而这条与本报告 §10.36 那个「wheel shadowing」是同一件事的两面：
+> 动态后端既能让你换掉它，也能让别人的那份顶替你。**
+
+### 10.579 ⭐⭐⭐⭐⭐ 三个 CUDA 版本号：12.4 / 13.0.2 / 13.3
+
+[c-the-release-matrix-is-cuda-12-4-and-13-3]
+
+> **`release.yml` 第 679-681 行**：
+> ```yaml
+> strategy:
+>   matrix:
+>     cuda: ['12.4', '13.3']
+> ```
+> **而 BTL-3 自己的打包脚本用的是 CUDA 13.0.2。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一个仓库里出现三个不同的 CUDA 版本号时，
+> 它们不是「三个版本」，
+> 而是「三个不同的承诺」——
+> CI 承诺 Ada 能编，
+> 发布承诺 Windows 能用，
+> 打包承诺这张卡能跑。**
+>
+> **⭐⭐ 判据：**
+> **故「用 CUDA 13 就行」这句话，在这份仓库里至少对应三个不同的具体版本。**
+>
+> ⚠️ **而这条对 RTX PRO 6000 是可操作的：
+> `121a-real` 需要 ≥ 12.9，
+> 故上游 12.4 那一档的 Windows 二进制里没有 Blackwell 架构。**
+
+### 10.580 ⚠️⚠️⚠️ 被注释掉的是 **sycl 与 cann**，不是 cuda
+
+[c-the-disabled-jobs-are-sycl-and-cann-not-cuda]
+
+> **`release.yml` 里被 `#` 注释掉的顶层作业名只有三个**：
+> ```
+> windows-sycl      (759 行)
+> ubuntu-24-sycl    (872 行)
+> openEuler-cann    (1265 行)
+> ```
+> **第 757-758 行的注释**：
+> ```
+> # TODO: this build is disabled to save Github Actions resources
+> #       (https://github.com/ggml-org/llama.cpp/pull/23705)
+> #       in order to enable it again, we have to provision dedicated runners
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「被禁用」的作业旁边写着「为了省资源」时，
+> 不能用它反推「它曾经能跑」——
+> 而更不能用它反推「另一个作业曾经存在过」。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.576 那个「没有 `linux-cuda`」
+> 不能被解释成「linux-cuda 被禁用了」，
+> 它从来没有被写过。**
+>
+> ⚠️ **而这条正是本报告反复遇到的那类错：
+> 看到一段被注释的 YAML 就以为「这里本来有一个」，
+> 而那个「本来」是我补上去的。**
+
+### 10.581 ⚠️⚠️⚠️ 四条 CUDA 下载链接**全部带 `win`**
+
+[c-no-linux-cuda-binary-is-ever-published]
+
+> **`release.yml` 第 1493-1494 行**：
+> ```
+> - [Windows x64 (CUDA 12)](.../llama-...-bin-win-cuda-12.4-x64.zip)
+>   - [CUDA 12.4 DLLs](.../cudart-llama-bin-win-cuda-12.4-x64.zip)
+> - [Windows x64 (CUDA 13)](.../llama-...-bin-win-cuda-13.3-x64.zip)
+>   - [CUDA 13.3 DLLs](.../cudart-llama-bin-win-cuda-13.3-x64.zip)
+> ```
+> **四条链接的档名里全部含 `win`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份发布说明里同一个后端的四条链接都带同一个平台词时，
+> 那个平台词不是修饰，而是范围。**
+>
+> **⭐⭐ 判据：**
+> **故「llama.cpp 有 CUDA 发布」这句话在 Linux 上是假的——
+> 它有 Windows 的 CUDA 发布。**
+>
+> ⚠️ **而这条给本报告一个关于语料质量的结论：
+> 任何声称「用官方 llama.cpp CUDA 二进制测得」的 Linux 数字，
+> 都不可能是官方二进制。**
+
+### 10.582 🔥🔥🔥🔥🔥 故语料里每一个 Linux + CUDA 数字，**都是自己编的**
+
+[c-every-linux-cuda-number-in-the-corpus-is-self-built]
+
+> **三条串起来**：
+> ① 发布流水线没有 `linux-cuda` 作业（§10.576）；
+> ② 发布说明里四条 CUDA 链接全部是 `win`（§10.581）；
+> ③ 而 RTX PRO 6000 上的实测
+> （`llama-bench -ngl 99 -p 512 -n 128 -r 3`）全部是 Linux。
+> **故那些数字背后的二进制，没有一份能追溯到官方发布物。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「官方没有这个平台的二进制」时，
+> 这个平台上的每一个数字都自带一个未记录的变量：
+> 编译器版本、架构列表、CMake 开关。**
+>
+> **⭐⭐ 判据：**
+> **故本报告 §10 里那些 PRO 6000 数字的「可比性」，
+> 不能只问「同一个模型、同一个量化」，
+> 还必须问「同一份自编方式」。**
+>
+> ⚠️ **而这条把 §10.34 那个「同一个 build」的限定
+> 从「版本号」推进到了「构建配置」：
+> 连官方都不提供这个平台的构建配置，
+> 因为它不提供这个平台的二进制。**
+
+### 10.583 ⭐⭐⭐⭐⭐ 这条链有四个环节，**没有一个检查 Blackwell**
+
+[c-the-release-chain-has-four-links-and-none-checks-blackwell]
+
+> | 环节 | 覆盖的架构 | 是否检查 Blackwell |
+> |---|---|---|
+> | CI（`build-cuda-ubuntu.yml`） | `89-real`（Ada） | **否** |
+> | 发布（`release.yml`） | Windows，不设架构 | **否**（Windows 上没人测这张卡） |
+> | 打包（`build-linux.sh`） | `120-real` → CMake 改写为 `120a-real` | 编，但不验证 |
+> | 实测（用户自己编） | 用户决定 | **这一步才是唯一的验证** |
+>
+> **四个环节里只有第三与第四会碰到 `120a`，
+> 而它们都不产出「被验证过」的证据。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条链上的每一环都只保证「我这一环没报错」时，
+> 整条链不保证任何端到端的事——
+> 而「Blackwell 能跑」恰好是一件端到端的事。**
+>
+> **⭐⭐ 判据：**
+> **故本报告 §10 里所有 PRO 6000 的正面结果，
+> 都是「第四环成功」的单点证据，
+> 而不是「前三环都为它准备过」。**
+>
+> ⚠️ **而这条也解释了 §10.568 那个反直觉结论：
+> 唯一会编到 Blackwell 的自动化是手动触发的 Windows 作业，
+> 而 Windows 上并没有人测 RTX PRO 6000。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -42125,6 +42339,44 @@ shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 480
 ⭐⭐ 判据（本轮最重要）「**当一句话可以配六个不同的分母时，它就不是一句可反驳的话——它是一句还没有说完的话。故本报告的写法定为：凡提「BTL-3 支持 N 种量化」，N 必须带一个括号说明它数的是什么**」——**⚠️ 而这条的普适形态是：「支持」这个词在这份仓库里有六层，而每一层的数字都不一样**；
  — [src-btl3-ci-cuda-ubuntu] [src-btl3-ci-cuda-windows] [src-btl3-ci-code-style] [src-btl3-cuda-cmakelists]
 
+### 发布流水线里没有 linux-cuda 这个作业（第一百七十轮补充）
+
+上一轮结尾说「查那 45 个跨类型 `fattn-vec` 配对在 `FA_ALL_QUANTS=ON` 时的编译时间代价」。**那个数语料里没有，查不到。**故改去查 `release.yml`（57,190 字节，最大的 workflow），看发布二进制实际编了哪些架构——**结果发现它根本没有 linux-cuda 这个作业。**
+
+1. 🔥🔥🔥🔥🔥 **发布流水线里没有 `linux-cuda` 这个作业**：
+按 2 空格缩进逐一枚举 `release.yml` 的 15 个顶层作业：「**check-release(41) / macos-cpu(62) / ubuntu-cpu(143) / ubuntu-vulkan(229) / android-arm64(314) / ubuntu-24-openvino(406) / windows-cpu(503) / windows(571) / windows-cuda(670) / ubuntu-22-rocm(962) / windows-hip(1082) / ios-xcode(1205) / ui(1355) / release(1360) / ui-publish(1531)**」，**15 个名字里带 cuda 的只有 `windows-cuda` 一个**；
+
+⭐⭐ 判据（本轮最重要）「**当一个发布流水线有 15 个作业、而 Linux 与 CUDA 这两件事从未在同一行出现时，这不是「漏了」，而是「那两件事被分配给两个平台」**」——**⚠️ 而这对 RTX PRO 6000 的意义是直接的：那张卡跑在 Linux 上时，没有一份官方 CUDA 二进制可供对比——每一个 Linux CUDA 数字都是某个人自己编的**；
+2. ⭐⭐⭐⭐⭐ **发布用的那个 CUDA 作业也不设架构参数**：
+`release.yml` 第 714-724 行的六个 `-D` 参数是 「**GGML_BACKEND_DL / GGML_NATIVE=OFF / GGML_CPU=OFF / GGML_CUDA=ON / LLAMA_BUILD_BORINGSSL / GGML_CUDA_CUB_3DOT2**」，**一个 `-DCMAKE_CUDA_ARCHITECTURES` 都没有**；
+
+⭐⭐ 判据（本轮最重要）「**当发布流水线与 CI 都不写架构时，「这个二进制含哪些架构」这个问题就只能去 CMakeLists 的默认值里回答——而那是一个会随 CUDA 版本变的表达式。故 §10.540 那条「CUDA >= 12.8 追加 120a-real；>= 12.9 追加 121a-real」在这条流水线上是唯一的架构来源**」——**⚠️ 而这条把 §10.567 / §10.568 统一了：CI 与发布都不写架构，故「编了什么」完全由「用哪个 CUDA 版本」间接决定**；
+3. 🔥🔥🔥🔥🔥 **CUDA 那份发布物是一个 `.dll`**：
+第 724 行是「**--target ggml-cuda**」，第 734 行是「**7z a ... .\build\bin\Release\ggml-cuda.dll**」；
+
+⭐⭐ 判据（本轮最重要）「**当发布物是一个后端 .dll 而不是一个可执行文件时，「这个包能用」这句话就多了一个前提：运行它的那个 llama-server 必须与它 ABI 兼容。故 GGML_BACKEND_DL=ON 不是「更模块化」，而是「必须再配一个主程序」**」——**⚠️ 而这条与 §10.36 那个「wheel shadowing」是同一件事的两面：动态后端既能让你换掉它，也能让别人的那份顶替你**；
+4. ⭐⭐⭐⭐⭐ **三个 CUDA 版本号：12.4 / 13.0.2 / 13.3**：
+`release.yml` 第 679-681 行的矩阵是 「**cuda: ['12.4', '13.3']**」，而 BTL-3 自己的打包脚本用的是 13.0.2；
+
+⭐⭐ 判据（本轮最重要）「**当同一个仓库里出现三个不同的 CUDA 版本号时，它们不是「三个版本」，而是「三个不同的承诺」——CI 承诺 Ada 能编，发布承诺 Windows 能用，打包承诺这张卡能跑**」——**⚠️ 而这条对 RTX PRO 6000 是可操作的：`121a-real` 需要 >= 12.9，故上游 12.4 那一档的 Windows 二进制里没有 Blackwell 架构**；
+5. ⚠️⚠️⚠️ **被注释掉的是 sycl 与 cann，不是 cuda**：
+`release.yml` 里被 `#` 注释掉的顶层作业名只有三个——「**windows-sycl（759 行）、ubuntu-24-sycl（872 行）、openEuler-cann（1265 行）**」，第 757-758 行注释说「**disabled to save Github Actions resources (PR 23705)**」；
+
+⭐⭐ 判据（本轮最重要）「**当一个「被禁用」的作业旁边写着「为了省资源」时，不能用它反推「它曾经能跑」——而更不能用它反推「另一个作业曾经存在过」。故那个「没有 linux-cuda」不能被解释成「linux-cuda 被禁用了」，它从来没有被写过**」——**⚠️ 而这条正是本报告反复遇到的那类错：看到一段被注释的 YAML 就以为「这里本来有一个」，而那个「本来」是我补上去的**；
+6. ⚠️⚠️⚠️ **四条 CUDA 下载链接全部带 `win`**：
+第 1493-1494 行的四条链接是 「**llama-...-bin-win-cuda-12.4-x64.zip / cudart-...-win-cuda-12.4-x64.zip / llama-...-bin-win-cuda-13.3-x64.zip / cudart-...-win-cuda-13.3-x64.zip**」；
+
+⭐⭐ 判据（本轮最重要）「**当一份发布说明里同一个后端的四条链接都带同一个平台词时，那个平台词不是修饰，而是范围。故「llama.cpp 有 CUDA 发布」这句话在 Linux 上是假的——它有 Windows 的 CUDA 发布**」——**⚠️ 而这条给本报告一个关于语料质量的结论：任何声称「用官方 llama.cpp CUDA 二进制测得」的 Linux 数字，都不可能是官方二进制**；
+7. 🔥🔥🔥🔥🔥 **故语料里每一个 Linux + CUDA 数字，都是自己编的**：
+把三条串起来：① 发布流水线没有 `linux-cuda` 作业；② 发布说明里四条 CUDA 链接全部是 `win`；③ 而 PRO 6000 上的实测全部是 Linux。**故那些数字背后的二进制，没有一份能追溯到官方发布物**；
+
+⭐⭐ 判据（本轮最重要）「**当「官方没有这个平台的二进制」时，这个平台上的每一个数字都自带一个未记录的变量：编译器版本、架构列表、CMake 开关。故那些 PRO 6000 数字的「可比性」，不能只问「同一个模型、同一个量化」，还必须问「同一份自编方式」**」——**⚠️ 而这条把 §10.34 那个「同一个 build」的限定从「版本号」推进到了「构建配置」：连官方都不提供这个平台的构建配置，因为它不提供这个平台的二进制**；
+8. ⭐⭐⭐⭐⭐ **这条链有四个环节，没有一个检查 Blackwell**：
+「**CI（89-real，Ada）→ 发布（Windows，不设架构）→ 打包（120-real 被 CMake 改成 120a-real）→ 实测（用户自己编）**」，**四个环节里只有第三与第四会碰到 120a，而它们都不产出「被验证过」的证据**；
+
+⭐⭐ 判据（本轮最重要）「**当一条链上的每一环都只保证「我这一环没报错」时，整条链不保证任何端到端的事——而「Blackwell 能跑」恰好是一件端到端的事。故本报告里所有 PRO 6000 的正面结果，都是「第四环成功」的单点证据，而不是「前三环都为它准备过」**」——**⚠️ 而这条也解释了 §10.568 那个反直觉结论：唯一会编到 Blackwell 的自动化是手动触发的 Windows 作业，而 Windows 上并没有人测 RTX PRO 6000**；
+ — [src-btl3-ci-release]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -42264,7 +42516,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=466, evidence=2913, claims=2119, claims_high=1769, claims_disputed=9, trace_events=1003, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=467, evidence=2919, claims=2127, claims_high=1777, claims_disputed=9, trace_events=1005, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
