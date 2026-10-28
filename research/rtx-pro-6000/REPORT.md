@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：312 ｜ **证据数**：2313 ｜ **主张数**：1706（高置信 1362，争议 9）
+> **来源数**：313 ｜ **证据数**：2318 ｜ **主张数**：1711（高置信 1367，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -20613,6 +20613,239 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⚠️ **边界**：**本报告只读了词表路径的 AVQ2 解码器；
 > 解码器主路径 `btl3-avq.cu`（7,070 字节）尚未读。**
 
+### 10.160 🔥🔥🔥🔥🔥 八个 magic 全是 **ASCII 字符串**
+
+[c-magics-are-ascii-strings]
+
+> | 常量 | 十六进制 | 解码 |
+> |---|---|---|
+> | `AVQ2_MAGIC` | `0x42544c3341565132` | **`BTL3AVQ2`** |
+> | `INT4_MAGIC` | `0x42544c33494e5434` | **`BTL3INT4`** |
+> | `VOCAB_ROWS_MAGIC` | `0x42544c3356475257` | **`BTL3VGRW`** |
+> | `VOCAB_HEAD_MAGIC` | `0x42544c3356484544` | **`BTL3VHED`** |
+> | `AVQ2_PROBE_MAGIC` | `0x42544c3343415651` | **`BTL3CAVQ`** |
+> | `INT4_PROBE_MAGIC` | `0x42544c3343494e54` | **`BTL3CINT`** |
+> | `VOCAB_ROWS_PROBE_MAGIC` | `0x42544c3343565257` | **`BTL3CVRW`** |
+> | `VOCAB_HEAD_PROBE_MAGIC` | `0x42544c3343564844` | **`BTL3CVHD`** |
+
+> **⭐⭐⭐⭐ 这条把 §10.116 那条「magic 是假指针」彻底闭合了，
+> 而且答案比「随机常量」好得多**：
+> **我一直以为那是一个「魔法数」——
+> ⚠️ 而它其实是「一个被塞进指针字段的字符串」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当你在一个二进制格式里看到「8 字节对齐的大数」时，
+> 先试试「按大写 ASCII 读」——**
+> **⚠️ 因为工程师把字符串塞进整数，
+> 是一个远比「随机常量」常见的做法。**
+>
+> ⭐⭐ **`BTL3C` 前缀这个设计尤其精妙**：
+> **算子 magic 是 `BTL3AVQ2`，probe magic 是 `BTL3CAVQ`——
+> ⚠️ 即 `C` 插在第三位，代表 CUDA。**
+>
+> **⭐⭐ 判据：**
+> **「一个 probe」与「一个算子」用不同的 magic，
+> 意味着「我想占这个张量」与「我要执行这个算子」是两个独立声明——**
+> **⚠️ 而这正是 §10.150 那个「两种放置标记」机制的实现层。**
+>
+> ⭐⭐ **为什么是 8 字节**：
+> **`sizeof(void*)` 在 64 位平台上就是 8，
+> ⚠️ 故「把 8 个 ASCII 字符塞进一个指针」刚好不浪费一位。**
+>
+> **⭐⭐ 判据：**
+> **「一个 hack 是否优雅」的一个判据是：
+> 「它有没有把容器的容量用满」——**
+> **⚠️ 这里 8 字符 / 8 字节，正好。**
+>
+> ⭐⭐ **对读者的实际用处**：
+> **如果你在调试器里看到 `0x42544c33…` 这样的指针值，
+> 它大概率不是一个合法地址，而是一个标签——
+> ⚠️ 而 `0x42` 开头的地址在 x86-64 用户态里本来就不可能出现。**
+
+### 10.161 🔥🔥🔥🔥 magic 藏在 `userdata`，而入口有一道硬门
+
+[c-magic-is-userdata-not-op-params]
+
+> ```cpp
+> std::uintptr_t ggml_cuda_custom_magic(const ggml_tensor * op) {
+>     if (op == nullptr || op->op != GGML_OP_CUSTOM) { return 0; }
+>     ggml_custom_op_params params;
+>     std::memcpy(&params, op->op_params, sizeof(params));
+>     return reinterpret_cast<std::uintptr_t>(params.userdata);
+> }
+> ```
+
+> **⭐⭐⭐⭐ 这条精确化了 §10.116 的说法，而差别在于「藏在哪个字段」**：
+> **§10.116 我说「magic 是假指针」；
+> 本条说「它藏在 `ggml_custom_op_params` 的 `userdata` 成员里，
+> 而那整个结构是由 `memcpy` 从 `op_params` 字节数组里读出来的」——**
+> **⚠️ 即这是一条「字节数组 → 结构体 → 指针 → 整数」的四段转换链。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个字段的类型」在 C 里是可以被 `memcpy` 绕过的——
+> ⚠️ 故「`userdata` 是一个指针」这个声明，
+> 在运行时可能装着一个整数。**
+>
+> ⭐⭐ **`op->op != GGML_OP_CUSTOM` 这个硬门值得单独记**：
+> **它意味着「只有被显式标为 `CUSTOM` 的算子节点，
+> 才可能带有 BTL-3 的标记」——**
+> **⚠️ 即「普通算子被误判为 BTL-3」在结构上是不可能的。**
+>
+> **⭐⭐ 判据：**
+> **「一个自定义扩展」的安全性，取决于
+> 「它有没有一个『不可能被普通数据满足』的入口条件」——**
+> **⚠️ 而 `GGML_OP_CUSTOM` 是一个枚举，普通算子永远不等于它。**
+>
+> ⭐⭐ **与 §10.115 那套「白名单 + 静默回退」形成对照**：
+> **`llama.cpp` 主线的扩展点是「类型枚举 + 白名单」，
+> BTL-3 的扩展点是「算子枚举 + magic」——**
+> **⚠️ 后者更窄（只有 `CUSTOM` 节点能带），
+> 故更安全，也更难被普通工具复用。**
+>
+> **⭐⭐ 判据：**
+> **「一个扩展点越窄，它的误触发风险越低，
+> 而它被第三方复用的可能性也越低」——**
+> **⚠️ 这是一笔无法同时优化的交易。**
+
+### 10.162 ⭐⭐⭐⭐ **probe 只声明「我要」，不声明「我能」**
+
+[c-probe-means-single-source]
+
+> ```cpp
+> bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_t magic) {
+>     if (ggml_cuda_custom_magic(op) != magic ||
+>         op->src[0] == nullptr || op->src[1] != nullptr) { return false; }
+>     return ggml_is_contiguous(op->src[0]);
+> }
+> ```
+>
+> 四个 probe 各接受不同的类型集合：
+> **AVQ2 `{I8,F32}` ｜ INT4 `{I8,F16}` ｜ VOCAB_ROWS `{I8,I32,F16,F32}` ｜
+> VOCAB_HEAD `{I8,F32}`**
+
+> **⭐⭐⭐⭐ 这条解决了 §10.155 那个矛盾为什么能存在**：
+> **「probe」不是「一个能执行算子的后端」，而是
+> 「一个愿意接收某个张量的后端」——
+> ⚠️ 它只检查「magic + 单输入 + 连续」，
+> 完全不检查「我能不能算」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个放置 probe」与「一个算子实现」是两件事，
+> 而 probe 的职责只是「声明我要这块显存」——**
+> **⚠️ 故「probe 存在」不等于「算子能跑」。**
+>
+> ⭐⭐ **在「probe 与实现都写了、但从未编译」这个状态下，
+> 两句话都能成立**：
+> **CUDA 侧四个 magic 都在（§10.155）；
+> Metal 文档说「CUDA 还没实现 INT4 与词表」（§10.150）——**
+> **⚠️ 而这两句在「代码存在、但没编译过」时并不冲突。**
+>
+> **⭐⭐ 判据：**
+> **当一个后端有「probe」与「kernel」两层时，
+> 「支持」这个词必须指明是哪一层——**
+> **⚠️ 而作者的两份文档各说了一层。**
+>
+> ⭐⭐ **`src[1] != nullptr` 这个条件特别值得记**：
+> **它要求 probe 节点恰好只有一个输入——
+> ⚠️ 即「probe 是一个一元的占位节点」，
+> 这解释了为什么四个 probe 各有一套类型集合。**
+>
+> **⭐⭐ 判据：**
+> **「用一个只检查类型的空算子来『探测』后端能力」
+> 是一种把「能力协商」编码进「计算图」的做法——**
+> **⚠️ 它的好处是不需要新的 API；
+> 坏处是「探测」与「计算」共享同一个命名空间。**
+>
+> ⚠️ **边界**：**本报告没有读 `btl3-avq.cpp`（11,368 字节），
+> 故不知道 CPU 侧是怎么响应这些 probe 的。**
+
+### 10.163 ⭐⭐⭐⭐ 形状契约：**128 是这个格式的基本量子**
+
+[c-shape-contracts-are-exact]
+
+> INT4：`codes->ne[0] == columns/2`、`scales->ne[0] == columns/128`、
+> `scales->ne[1] == rows`、`columns % 128 == 0`
+> AVQ2：`codes->ne[0] == columns/4`、`codes->ne[1] == rows`、
+> `affine->ne[0..2] == {4,4,groups}`、`rows % 128 == 0`、
+> `codebook_rows % 128 == 0`
+
+> **⭐⭐⭐⭐ 这些契约把「格式」写成了可判定的等式**：
+> **`codes->ne[0] == columns / 2` 说明 INT4 是每字节两个权重；
+> `codes->ne[0] == columns / 4` 说明 AVQ2 是每字节四个权重——
+> ⚠️ 即两条等式合起来就在说「4 bit vs 2 bit」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个量化格式的比特数」可以从
+> 「codes 的列数 ÷ 权重的列数」直接读出——**
+> **⚠️ 而这件事不应该靠阅读说明文档确认，
+> 因为它是一条结构性等式，不满足就加载失败。**
+>
+> ⭐⭐ **`columns % 128 == 0` 出现得极其频繁**：
+> **INT4 的分组是 128、AVQ2 的 transform block 是 128、
+> 词表的 `(vocabulary / groups) % 128 == 0`——**
+> **⚠️ 即 128 是这个格式的基本量子，
+> 任何不是 128 倍数的形状都不被接受。**
+>
+> **⭐⭐ 判据：**
+> **当一个格式反复出现同一个常数时，
+> 那个常数通常是「向量化宽度 × 某种分块」的乘积——**
+> **⚠️ 而这里 `128 = 4 分量 × 32`，或 `128 = 一个 warp 的 4 倍`。**
+>
+> ⭐⭐ **`affine->ne[0] == 4 && affine->ne[1] == 4` 特别值得看**：
+> **仿射张量是一个 4×4×groups 的三维张量——
+> ⚠️ 即「16 个仿射系数 × 每分量 4 个」，
+> 这与 §10.159 那个 `affine[component * 4 + index]` 完全对上。**
+>
+> **⭐⭐ 判据：**
+> **「形状契约」与「解码代码」是同一个设计的两种表述——
+> ⚠️ 当它们逐项对上时，那个设计的理解就是可靠的。**
+
+### 10.164 🔥🔥🔥🔥🔥 AVQ2 有**六个**操作数与**两组**符号向量
+
+[c-avq2-has-six-operands]
+
+> ```cpp
+> src[0]=codes  src[1]=affine  src[2]=bias
+> src[3]=input_signs  src[4]=output_signs  src[5]=input
+> ```
+>
+> 而词表侧只有四个基础操作数（`codes / affine / bias / signs`）。
+
+> **⭐⭐⭐⭐⭐ 这条解开了 §10.153 那个「种子符号」到底用在哪里的问题**：
+> **`input_signs` 与 `output_signs` 是两个不同的符号向量——
+> ⚠️ 即 AVQ2 在输入侧和输出侧各做了一次符号翻转。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一次 Hadamard 旋转」在数值上只需要一次正变换；
+> ⚠️ 而「输入侧一次 + 输出侧一次」意味着
+> 这个算子在两端都做了 incoherence 处理。**
+>
+> ⭐⭐ **这与 §10.114 那条「Hadamard 是 prior art」对得上**：
+> **QuIP# / QTIP 的做法正是「权重侧旋转 + 激活侧旋转」——
+> ⚠️ 即 BTL-3 的实现与它自己声明的 prior art 在结构上一致。**
+>
+> **⭐⭐ 判据：**
+> **当一份文档列出 prior art，而代码结构又与那些 prior art 一致时，
+> 「它不是原创」这个判断就从「作者自述」升级成了「结构证据」。**
+>
+> ⭐⭐ **`input_signs->ne[0] == columns` 这条等式说明**：
+> **输入侧的符号是逐列的（长度 = columns），
+> ⚠️ 即它对激活做逐元素符号翻转，而不是对权重。**
+>
+> **⭐⭐ 判据：**
+> **「符号向量的长度」决定了它作用在谁身上——
+> ⚠️ 长度 = columns → 作用在激活；
+> 长度 = rows → 作用在权重。**
+>
+> ⚠️ **边界**：**本报告没有读 `btl3-avq.cu`（7,070 字节），
+> 故不知道这两个符号向量在 kernel 里具体怎么用。**
+>
+> ⚠️ **另注**：**本轮发现 `src-btl3-cuda-marker` 这个来源已存在
+> （指向同一个 `btl3-avq-marker.h`），与本轮新增的
+> `src-btl3-cuda-avq-marker-h` 指向同一 URL。
+> 这是本报告第 5 次重复注册来源（§10.117 记过 4 次），
+> 下一轮将合并二者。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -24077,6 +24310,33 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-int4.cu`（2,682 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-int4.cu) —（2026-10 抓取）。⚠️⚠️⚠️ **INT4 内核的并行结构是「一个 block 算一个输出元素」**：「**int4_mul_mat<<<rows * tokens, group_size, 0, ctx.stream()>>>(...)**」，`group_size = 128`，block 内 128 线程各算一个 group 的部分和再树形归约；⭐⭐⭐ 可算的后果：**4,096×4,096 单 token → grid = 4,096 block × 128 = 524,288 线程，而 RTX PRO 6000 的 188 SM × 2,048 = 385,024 可常驻线程，即这个 grid 连「填满机器一次」都差 27%**；⭐⭐ 判据（本轮最重要）「**『一个 kernel 能不能填满 GPU』可以用『总线程数 ÷ 可常驻线程数』粗算——小于 1 就意味着『每个线程只跑一遍，机器从头到尾没被填满』**」；⭐⭐ 判据「**当一个 kernel 的并行维度是『输出元素』而不是『输出元素 × 归约段』时，归约就成了瓶颈**」 — [src-btl3-cuda-int4-cu]
 
 3. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-vocab.cu`（9,552 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-vocab.cu) —（2026-10 抓取）。🔥🔥🔥🔥 **AVQ2 的内部结构第一次完整暴露**：「**constexpr int transform_block = 128; constexpr float transform_scale = 0.08838834764831845F**」（= `1/(8*sqrt(2))`）；「**const float lattice = static_cast<float>((code >> shift) & 3U) - 1.5F**」，即格点 = **`{-1.5, -0.5, 0.5, 1.5}`**；**每字节 4 个分量 × 每分量 2 bit**；**每组 16 个仿射 float + 4 个偏置 float**；⭐⭐⭐⭐ 判据（本轮最重要）「**『一个比特数』在不同量化方案里指的不是同一个东西：标量量化 → 每个权重 N bit；向量量化 → 每个分量 N bit，而一个码字覆盖 4 个权重——两者在『每权重比特数』上相同，但在『表达力』上差一个维度**」；⭐⭐ 判据「**『一个没有零点的格点』意味着『它不能精确表示 0』——而解释它的正是那个 FWHT：旋转把『集中在零附近』变成『分散在球面上』，故格点不需要零点**」；⭐⭐ 判据「**当两个设计选择『单独看都很奇怪、合起来看很自然』时，它们大概率来自同一个数学约束**」；⭐ 救助行格式：**2 bit 低位 + 6 bit 高位 = 8 bit**，「**Invalid token IDs explicitly produce zero rows**」 — [src-btl3-cuda-vocab-cu]
+### 八个 ASCII magic、userdata 假指针、probe 与形状契约（第九十六轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq-marker.h`（8,700 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq-marker.h)
+ —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **八个 magic 全是 ASCII 字符串**：
+`0x42544c3341565132` = `BTL3AVQ2`；`0x42544c33494e5434` = `BTL3INT4`；
+`0x42544c3356475257` = `BTL3VGRW`；`0x42544c3356484544` = `BTL3VHED`；
+**CUDA probe 多一个 `C`（插在第三位）**：`BTL3CAVQ` / `BTL3CINT` / `BTL3CVRW` / `BTL3CVHD`；
+⭐⭐ 判据（本轮最重要）「**当你在一个二进制格式里看到「8 字节对齐的大数」时，先试试「按大写 ASCII 读」——因为工程师把字符串塞进整数，是一个远比「随机常量」常见的做法**」；
+⭐⭐ 判据「**「一个 hack 是否优雅」的一个判据是：「它有没有把容器的容量用满」——这里 8 字符 / 8 字节，正好**」；
+(b) 🔥🔥🔥🔥 **magic 藏在 `userdata`，而入口有一道硬门**：
+「**if (op == nullptr || op->op != GGML_OP_CUSTOM) { return 0; } ggml_custom_op_params params; std::memcpy(&params, op->op_params, sizeof(params)); return reinterpret_cast<std::uintptr_t>(params.userdata);**」；
+⭐⭐ 判据「**「一个字段的类型」在 C 里是可以被 `memcpy` 绕过的——故「`userdata` 是一个指针」这个声明，在运行时可能装着一个整数**」；
+⭐⭐ 判据「**「一个扩展点越窄，它的误触发风险越低，而它被第三方复用的可能性也越低」——这是一笔无法同时优化的交易**」；
+(c) ⭐⭐⭐⭐ **probe 只声明「我要」，不声明「我能」**：
+「**if (ggml_cuda_custom_magic(op) != magic || op->src[0] == nullptr || op->src[1] != nullptr) { return false; } return ggml_is_contiguous(op->src[0]);**」，四个 probe 各接受不同类型集合 **AVQ2 `{I8,F32}` ｜ INT4 `{I8,F16}` ｜ VOCAB_ROWS `{I8,I32,F16,F32}` ｜ VOCAB_HEAD `{I8,F32}`**；
+⭐⭐ 判据（本轮最重要）「**「一个放置 probe」与「一个算子实现」是两件事，而 probe 的职责只是「声明我要这块显存」——故「probe 存在」不等于「算子能跑」**」，**这正是 §10.155 那个矛盾能存在的原因**；
+(d) ⭐⭐⭐⭐ **形状契约：128 是基本量子**：
+INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->ne[1] == rows；columns % 128 == 0**」；AVQ2「**codes->ne[0] == columns / 4；codes->ne[1] == rows；affine->ne[0] == 4 && affine->ne[1] == 4 && affine->ne[2] == groups；rows % 128 == 0；codebook_rows % 128 == 0**」；
+⭐⭐ 判据「**「一个量化格式的比特数」可以从「codes 的列数 ÷ 权重的列数」直接读出**」；
+(e) 🔥🔥🔥🔥🔥 **AVQ2 有六个操作数与两组符号向量**：
+「**src[0]=codes src[1]=affine src[2]=bias src[3]=input_signs src[4]=output_signs src[5]=input**」，而词表侧只有四个基础操作数；
+⭐⭐ 判据（本轮最重要）「**「一次 Hadamard 旋转」在数值上只需要一次正变换；而「输入侧一次 + 输出侧一次」意味着这个算子在两端都做了 incoherence 处理**」；
+⭐⭐ 判据「**当一份文档列出 prior art，而代码结构又与那些 prior art 一致时，「它不是原创」这个判断就从「作者自述」升级成了「结构证据」**」 — [src-btl3-cuda-avq-marker-h]
+
+> ⚠️ **来源去重声明**：`src-btl3-cuda-marker` 与本轮新增的 `src-btl3-cuda-avq-marker-h` 指向同一 URL。这是本报告第 5 次重复注册来源（§10.117 记过 4 次）。本轮已删除因此产生的重复证据行 `e-btl3-magic-is-userdata-pointer`，但两个来源条目**仍然并存**，下一轮合并。
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -24216,7 +24476,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=312, evidence=2313, claims=1706, claims_high=1362, claims_disputed=9, trace_events=693, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=313, evidence=2318, claims=1711, claims_high=1367, claims_disputed=9, trace_events=695, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
