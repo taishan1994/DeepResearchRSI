@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：436 ｜ **证据数**：2796 ｜ **主张数**：1991（高置信 1642，争议 9）
+> **来源数**：439 ｜ **证据数**：2804 ｜ **主张数**：1999（高置信 1650，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -32044,6 +32044,256 @@ exit 0
 > （未获取 / 实验缺口 / 不可检验）——三者恰好是 `untested` 的三种成因，
 > 而它们没有被分开标注。**
 
+### 10.448 🔥🔥🔥🔥🔥 「研究」这一行的真值信号是**两件事**，不是「结论对不对」
+
+[c-the-research-plate-truth-signal-is-citations-and-agreement]
+
+> **`Prism/README.md` 的「Not just code」表**：
+> ```
+> | Domain   | The truth signal                              |
+> |----------|-----------------------------------------------|
+> | Coding   | tests / compile / type-check                  |
+> | Data     | schema + reconciliation (do the numbers add up?) |
+> | Research | citations resolve, sources agree              |
+> | Ops      | records reconcile, APIs return 200            |
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个领域如果它的「真值信号」是「引用能解析、来源一致」，
+> 那它就不能用「结论对不对」当验收标准——
+> 因为没有第三方能判定结论对不对。**
+>
+> **⭐⭐ 判据：**
+> **故本报告的可验收目标从一开始就应该是那两条，
+> 而不是「RTX PRO 6000 到底多快」——
+> 后者要的是一台机器，而不是一次检索。**
+>
+> ⭐⭐ **而这条给本报告一个迟到的自我定位：
+> §10 里每一节都在做的事，本质是「让引用能解析」；
+> 而「来源一致」那一条，本报告是靠 `contradicted` / `disputed`
+> 两个字段做的。**
+>
+> ⚠️ **而这张表也解释了为什么本报告不能给出那个「到底多快」的答案**：
+> **那不是一次研究能给出的事实，而是一次实验的产物。**
+
+### 10.449 ⭐⭐⭐⭐⭐ 「每块牌单独基准化，以抵消模型原始能力」
+
+[c-each-plate-is-benchmarked-in-isolation]
+
+> **`Prism/README.md` 第 58 行**：
+> ```
+> Prism benchmarks each plate in isolation — so the model's raw ability is
+> factored out and you see the exoskeleton's actual contribution.
+> ```
+> **而两条示例命令把「不依赖模型」与「依赖模型」分开**：
+> ```bash
+> # model-free plates (context, verification)
+> PYTHONPATH=src python benchmarks/layer_bench.py --layers context,verify
+>
+> # model-dependent plates (needs Ollama)
+> PYTHONPATH=src python benchmarks/layer_bench.py --model qwen3:8b \
+>     --layers reasoning,tools
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个基准如果测的是「模型 + 脚手架」的合计，
+> 那它无法回答「脚手架贡献了多少」；
+> 而要把这两项分开，唯一的办法是让被测的那一项单独出现。**
+>
+> **⭐⭐ 判据：**
+> **故这条与 §10.446 那个「`Declared controls` 是协议的一部分，
+> 而引擎不独立认证每一个控制」是同一件事：
+> 两者都在说「我能测的东西比我声称的少」。**
+>
+> ⭐⭐ **而这对本报告的直接含义是：
+> §10.397 那张三来源表之所以不能算「一次比较」，
+> 正因为它是「卡 + 软件栈 + 模型 + 配置」四项的合计。**
+
+### 10.450 🔥🔥🔥🔥🔥 他们**删掉了自己的主基准**
+
+[c-the-main-benchmark-was-deleted-not-kept]
+
+> **`Prism/benchmarks/tasks.py` 第 3-5 行**：
+> ```python
+> """Benchmark task fixtures (shared).
+>
+> Each Task is a tiny repo whose tests define success. Used by layer_bench.py
+> (the layer-delta benchmark that isolates Prism's contribution). The old
+> final-code-resolution benchmark that used these has been removed.
+> """
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「保留一个测不出增量的基准」是一个很常见的失败模式，
+> 而它的症状不是数字错，而是数字对但没用。**
+>
+> **⭐⭐ 判据：**
+> **故这条给本报告一个可引用的形式：
+> 一个基准如果它的结果无法归因到某一个变量，
+> 那它的正确性就不能弥补它的无用。**
+>
+> ⚠️ **而这条对本报告是一次提醒：
+> §10 里有若干张表是「多变量同时变化」的，
+> 而它们被放在一起时，读者会以为每个变量都被测过。**
+> **§10.386 那张 DSpark 表是最典型的一张。**
+
+### 10.451 ⭐⭐⭐⭐⭐ 48 个噪声模块是**故意注进去的**
+
+[c-noise-modules-are-injected-to-make-context-hard]
+
+> **`Prism/benchmarks/tasks.py` 301-311 行**：
+> ```python
+> def _noise_files(n: int = 48) -> dict[str, str]:
+>     files: dict[str, str] = {}
+>     for i in range(n):
+>         files[f"noise/module_{i:02d}.py"] = (
+>             f"def helper_{i}(value):\n"
+>             f"    return value + {i}\n\n"
+>             f"class Noise{i}:\n"
+>             f"    def compute(self, x):\n"
+>             f"        return helper_{i}(x)\n"
+>         )
+>     return files
+> ```
+> **而它被「context」档的任务用 `_noise_files()` 展开（319 行）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「context」档的任务，其难度不是「问题更难」，
+> 而是「正确答案藏在一堆无关文件里」——
+> 这两件事需要完全不同的能力。**
+>
+> **⭐⭐ 判据：**
+> **故这条给本报告一个可借用的设计：
+> 如果要测「检索能不能找到那一页」，
+> 就必须在语料里放入已知数量的无关页，
+> 否则测出来的只是「语料小的时候能找到」。**
+>
+> ⭐⭐ **而本报告的语料已经 439 个来源——
+> 它自带噪声，只是这个噪声从来没有被量化过。**
+> **这是本轮发现的一个新的、可量化的缺口：
+> 本报告从未测过「在 439 个来源里找到某一页」的成功率。**
+
+### 10.452 🔥🔥🔥🔥🔥 朴素基线**看不到评分器**
+
+[c-the-naive-baseline-cannot-see-the-grader]
+
+> **`Prism/benchmarks/tasks.py` 358-362 行**：
+> ```python
+> def _visible_source(root: str) -> str:
+>     """Concatenate non-test source for the naive baseline prompt."""
+>     chunks = []
+>     for dirpath, dirnames, filenames in os.walk(root):
+>         dirnames[:] = [d for d in dirnames
+>                        if d not in (".prism", "__pycache__", "tests")]
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「被测量者看不到测量者」是一条必须用代码保证的防火墙，
+> 因为一旦基线能看到测试，它就不是基线，而是答案。**
+>
+> **⭐⭐ 判据：**
+> **故这条给本报告一个直接的检验：
+> §10 里那些「社区跑分」的来源，
+> 有多少是「提交者自己知道自己会被怎么评分」的？**
+>
+> ⚠️ **而本报告已经记录过一例：
+> §10.386 那张表允许提交 `Q2_0`——
+> 而 `Q2_0` 是一个官方说不要用来跑分的格式。**
+> **⭐⭐ 那正是「基线能看到评分器」的一种变体**：
+> **提交者知道自己会被按 TG128 排序，而选了一个在 TG128 上占优、
+> 但在质量上不被支持的格式。**
+
+### 10.453 ⭐⭐⭐⭐⭐ 「找不到」与「改不对」是两种能力
+
+[c-task-bands-separate-undetectable-from-unfindable]
+
+> **`Prism/benchmarks/tasks.py` 第 19 行**：
+> ```python
+> band: str = "basic"    # basic | recoverable | context
+> ```
+> **而三类的扩展顺序是（344-345 行）**：
+> ```python
+> TASKS.extend(RECOVERABLE_TASKS)
+> TASKS.extend(CONTEXT_TASKS)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **`recoverable` 与 `context` 是两种不同的失败模式：
+> 前者是「代码有 bug 但测试会告诉你」，
+> 后者是「代码对但你找不到它该改哪里」。**
+>
+> **⭐⭐ 判据：**
+> **故这条给本报告一个可引用的分类：
+> 「找不到」与「改不对」是两种能力，
+> 而一个只测其中一种的基准会把另一种的缺失读成「不需要」。**
+>
+> ⭐⭐ **而本报告的「未获取项」清单里这两类恰好都有**：
+> **「读不到那个页面」是 `recoverable`**（换个入口还能试），
+> **「不知道那个数在哪」是 `context`**（要遍历整个语料）。
+> **而本报告从未把这两类分开标注过。**
+
+### 10.454 🔥🔥🔥🔥🔥 `scope` 是命令行默认输出的**最后一行**
+
+[c-scope-is-the-last-line-the-user-sees]
+
+> **`btl_lab/cli.py` 的 `display`（189-194 行）**：
+> ```python
+> elif command in {"run", "evidence"}:
+>     print(f"Run: {value['id']}\nKind: {value['kind']}\nStatus: {value['status']}")
+>     result = value.get("result") or {}
+>     print(result.get("scope", value["plan"].get("claim", "")))
+>     for blocker in result.get("blockers", []):
+>         print(f"- {blocker}")
+> ```
+> **故一个 run 的人类可读输出只有四行，而第四行是 `scope`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个字段如果出现在「默认输出」里而不是「详细输出」里，
+> 那它的作者认为它和 `id`、`kind`、`status` 一样重要。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.423 那个「`scope` 应该是一个必填字段」的建议，
+> 在这里被推到了更强的一档：它不只是必填，而且必须被打印。**
+>
+> ⭐⭐ **而这几轮的证据合起来是一条完整的链**：
+> ```
+> 数据层   btl-measure 的返回值里有 scope         §10.423
+> 接口层   btl-lab 的每个返回值里有 scope         §10.443
+> 显示层   CLI 把它印在最后一行                   §10.454
+> ```
+> **⭐⭐ 三层各有一份，而三份的内容互不相同——
+> 这正是一个「scope 不可省」的系统该有的样子。**
+
+### 10.455 ⭐⭐⭐⭐⭐ 「诊断」这个动词至少有两个含义
+
+[c-doctor-covers-two-different-kinds-of-check]
+
+> **`btl_lab/cli.py` 第 44-45 行**：
+> ```python
+> doctor = sub.add_parser("doctor", help="Check workspace and selected runtime without executing models")
+> doctor.add_argument("--engine",
+>     choices=["control", "advance", "adapt", "prime-rl", "measure"],
+>     default="control")
+> ```
+> **而 `measure` 在 lane 表里的 `model_execution` 是
+> `external-evaluator-input; no model execution`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「诊断」命令如果接受一个「不执行模型」的引擎，
+> 那它诊断的不是那个引擎能不能跑，
+> 而是那个引擎的输入是否齐备。**
+>
+> **⭐⭐ 判据：**
+> **故这条说明 `doctor` 这个词在这个仓库里覆盖了两种不同的检查：
+> 环境可执行性（`control` / `advance` / `adapt` / `prime-rl`），
+> 与输入完整性（`measure`）。**
+>
+> ⭐⭐ **而这条给本报告一个可引用的形式：
+> 「诊断通过」这句话至少有两个含义，
+> 而混用它们会让一个通过的诊断无法被解释。**
+> **⚠️ 而 `--engine measure` 现在会被一个名为 doctor 的命令接受，
+> 而它检查的东西与另外四个完全不同——这是一处未命名的多义。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -37692,6 +37942,41 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐⭐⭐⭐ **实验模板的六个小节**：**决策与假设 / 冻结对比 / 执行与预算 / 验收门 / 结果与证据 / 决策；头部有 Lifecycle 五档（proposed / active / paused / completed / archived）与 Evidence status 五档**；**其中「What result would disprove the hypothesis?」与「Accept / reject / inconclusive, with reasons and claim limits」两句把「可证伪」与「结论限额」写成了模板字段**；
  — [src-btl-lab-research-py] [src-btl-lab-workflows-md] [src-btl-lab-experiment-template] [src-btl-lab-agents-md]
 
+### 「研究」的真值信号是两件事，而不是「结论对不对」（第一百五十三轮补充）
+
+上一轮说重试 `Prism`。`git/trees` 端点仍 403，但 `raw.githubusercontent.com` 直接给到了 README（7,224 字节）与 `benchmarks/tasks.py`（13,918 字节）——**14 个仓库里唯一的 benchmark 目录，而它给出一份完整的基准设计。**同时读了 `btl_lab/cli.py`（11,130 字节）。
+
+1. [GitHub / Badtheorylabs — `Prism/README.md`（7,224 字节，162 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/README.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「研究」这一行的真值信号是两件事，不是「结论对不对」**：**README 的「Not just code」表写 | Research | citations resolve, sources agree |，而同一张表的另外三行各有判据（Coding: tests / compile / type-check；Data: schema + reconciliation；Ops: records reconcile, APIs return 200）**；
+⭐⭐ 判据（本轮最重要）「**一个领域如果它的「真值信号」是「引用能解析、来源一致」，那它就不能用「结论对不对」当验收标准——因为没有第三方能判定结论对不对**」——**故本报告的可验收目标从一开始就应该是那两条，而不是「RTX PRO 6000 到底多快」：后者要的是一台机器，而不是一次检索**；
+⭐⭐ **而这条给本报告一个迟到的自我定位：§10 里每一节都在做的事，本质是「让引用能解析」；而「来源一致」那一条，本报告是靠 contradicted / disputed 两个字段做的**；
+(a) ⭐⭐⭐⭐⭐ **「每块牌单独基准化，以抵消模型原始能力」**：**README 第 58 行写「Prism benchmarks each plate in isolation — so the model's raw ability is factored out and you see the exoskeleton's actual contribution」，而两条示例命令把「不依赖模型」与「依赖模型」分开（--layers context,verify 与 --model qwen3:8b --layers reasoning,tools）**；
+⭐⭐ 判据（本轮最重要）「**一个基准如果测的是「模型 + 脚手架」的合计，那它无法回答「脚手架贡献了多少」；而要把这两项分开，唯一的办法是让被测的那一项单独出现**」——**故 10.397 那张三来源表之所以不能算「一次比较」，正因为它是「卡 + 软件栈 + 模型 + 配置」四项的合计**；
+2. [GitHub / Badtheorylabs — `Prism/benchmarks/tasks.py`（13,918 字节，370 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/benchmarks/tasks.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **他们删掉了自己的主基准**：**docstring 第 3-5 行写「Used by layer_bench.py (the layer-delta benchmark that isolates Prism's contribution). The old final-code-resolution benchmark that used these has been removed.」**；
+⭐⭐ 判据（本轮最重要）「**「保留一个测不出增量的基准」是一个很常见的失败模式，而它的症状不是数字错，而是数字对但没用**」——**故一个基准如果它的结果无法归因到某一个变量，那它的正确性就不能弥补它的无用**；
+⚠️ **而这条对本报告是一次提醒：§10 里有若干张表是「多变量同时变化」的，而它们被放在一起时，读者会以为每个变量都被测过——10.386 那张 DSpark 表是最典型的一张**；
+(a) ⭐⭐⭐⭐⭐ **48 个噪声模块是故意注进去的**：**_noise_files(n: int = 48) 生成 noise/module_00.py 到 noise/module_47.py，而它被「context」档的任务展开**；
+⭐⭐ 判据「**一个「context」档的任务，其难度不是「问题更难」，而是「正确答案藏在一堆无关文件里」——这两件事需要完全不同的能力**」——**如果要测「检索能不能找到那一页」，就必须在语料里放入已知数量的无关页，否则测出来的只是「语料小的时候能找到」**；
+⭐⭐ **而本报告的语料已经 439 个来源——它自带噪声，只是这个噪声从来没有被量化过。这是一个新的、可量化的缺口：本报告从未测过「在 439 个来源里找到某一页」的成功率**；
+(b) 🔥🔥🔥🔥🔥 **朴素基线看不到评分器**：**_visible_source 的 docstring 是「Concatenate non-test source for the naive baseline prompt」，而它把 dirnames 里的 .prism / __pycache__ / tests 都剔除**；
+⭐⭐ 判据（本轮最重要）「**「被测量者看不到测量者」是一条必须用代码保证的防火墙，因为一旦基线能看到测试，它就不是基线，而是答案**」——**故 §10 里那些「社区跑分」的来源，有多少是「提交者自己知道自己会被怎么评分」的？本报告已记录过一例：10.386 那张表允许提交 Q2_0，而 Q2_0 是一个官方说不要用来跑分的格式——那正是「基线能看到评分器」的一种变体**；
+(c) ⭐⭐⭐⭐⭐ **「找不到」与「改不对」是两种能力**：**第 19 行的 band 是 basic | recoverable | context，而三类的扩展顺序是 TASKS.extend(RECOVERABLE_TASKS) 再 extend(CONTEXT_TASKS)**；
+⭐⭐ 判据「**recoverable 与 context 是两种不同的失败模式：前者是「代码有 bug 但测试会告诉你」，后者是「代码对但你找不到它该改哪里」**」——**而本报告的「未获取项」清单里这两类恰好都有：「读不到那个页面」是 recoverable，「不知道那个数在哪」是 context——而本报告从未把这两类分开标注过**；
+3. [GitHub / Badtheorylabs — `btl_lab/cli.py`（11,130 字节，244 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/btl_lab/cli.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **scope 是命令行默认输出的最后一行**：**display（189-194 行）在 command in {"run", "evidence"} 时只打印四行：Run / Kind / Status，与 result.get("scope", value["plan"].get("claim", ""))——第四行就是 scope**；
+⭐⭐ 判据（本轮最重要）「**一个字段如果出现在「默认输出」里而不是「详细输出」里，那它的作者认为它和 id、kind、status 一样重要**」——**故 10.423 那个「scope 应该是一个必填字段」的建议，在这里被推到了更强的一档：它不只是必填，而且必须被打印**；
+⭐⭐ **而这几轮的证据合起来是一条完整的链：数据层（btl-measure 的返回值里有 scope，10.423）、接口层（btl-lab 的每个返回值里有 scope，10.443）、显示层（CLI 把它印在最后一行，本轮）——三层各有一份，而三份的内容互不相同，这正是一个「scope 不可省」的系统该有的样子**；
+(a) ⭐⭐⭐⭐⭐ **「诊断」这个动词至少有两个含义**：**cli.py 44-45 行的 doctor 接受 --engine choices=["control", "advance", "adapt", "prime-rl", "measure"]，而 measure 在 lane 表里的 model_execution 是 external-evaluator-input; no model execution**；
+⭐⭐ 判据「**一个「诊断」命令如果接受一个「不执行模型」的引擎，那它诊断的不是那个引擎能不能跑，而是那个引擎的输入是否齐备**」——**故 doctor 这个词覆盖了环境可执行性（前四个）与输入完整性（measure）两种不同的检查；而混用它们会让「诊断通过」无法被解释**；
+ — [src-prism-readme] [src-prism-benchmarks-tasks] [src-btl-lab-cli-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -37831,7 +38116,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=436, evidence=2796, claims=1991, claims_high=1642, claims_disputed=9, trace_events=943, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=439, evidence=2804, claims=1999, claims_high=1650, claims_disputed=9, trace_events=949, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
