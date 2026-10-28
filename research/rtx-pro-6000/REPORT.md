@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：451 ｜ **证据数**：2852 ｜ **主张数**：2046（高置信 1697，争议 9）
+> **来源数**：454 ｜ **证据数**：2858 ｜ **主张数**：2052（高置信 1702，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -33836,6 +33836,185 @@ exit 0
 > 而第二类没有自动化——
 > 这正是 §10.485 说「存在性检查不等于正确性检查」的地方。**
 
+### 10.503 🔥🔥🔥🔥🔥 省掉了正文，但 `Budget:` 行的数字**一个也不减**
+
+[c-include-source-does-not-reduce-the-reported-budget]
+
+> **`Prism/src/prism/packer.py` 第 288-289 行**：
+> ```python
+> used += t
+> pkg.fits_in = used
+> ```
+> **其中 `t` 是含 `full_source` 的估算（281-282 行 `full_source=src, tokens=t`）。
+> 而 `Prism/src/prism/render.py` 第 12-14 行无条件打印**：
+> ```python
+> lines.append(
+>     f"Budget: {payload.get('fits_in', 0)} / "
+>     f"{payload.get('token_budget', 0)} estimated tokens"
+> )
+> ```
+> **完全不看 `include_source`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「省了多少」的数字由「本来会花多少」算出，
+> 而不是由「实际花了多少」算出时，
+> 它就不是一个预算，而是一个上限估计——
+> 而两者在省略发生时必然分叉。**
+>
+> **⭐⭐ 判据：**
+> **故 `include_source` 是一个「只影响输出、不影响记账」的开关，
+> 而这类开关是最危险的：它让读者以为省了，而账本说没省。**
+>
+> ⚠️ **而这条直接削弱 §10.495：
+> 规划阶段用 `include_source=False`，
+> 而它拿到的 dossier 头部写着「Budget: 8000 / 8000」——
+> 故模型看到的是一个「已经用满」的信号，
+> 而实际正文远少于这个数。**
+
+### 10.504 🔥🔥🔥🔥🔥 一个名为 `include_source` 的布尔，实际只控制**九节里的两节**
+
+[c-include-source-controls-only-two-of-nine-sections]
+
+> **`Prism/src/prism/render.py` 的 `render_markdown` 依次渲染九节**：
+> ```
+> Budget Use (21) / Why These Files (39) / Dependency Edges (51) /
+> Quality Signals (58) / Relevant Chunks (70) / Files To Edit (85) /
+> Periphery (104) / Relevant Tests (115) / Notes (124)
+> ```
+> **而 `include_source` 只出现在第 78 行（chunk 正文）与第 94 行（`full_source`）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个布尔被命名为 `include_source` 时，
+> 读者会以为它控制「所有源码」；
+> 而它实际只控制「两处内联的代码块」。**
+>
+> **⭐⭐ 判据：**
+> **故一个参数的**名字**描述的是一类，
+> 而它的**实现**往往只是几个点——
+> 而这两者的差距，只有在读完全部调用点之后才知道。**
+>
+> ⚠️ **而这条对本报告是一个可借用的检验：
+> 本报告的 `evidence_ids` 也叫得像「一类」，
+> 而它实际只装 `supports` 一种立场——
+> 故那 20 条 `high` 主张含非 `primary` 证据这件事，
+> 在字段设计上就没有位置。**
+
+### 10.505 🔥🔥🔥🔥🔥 六个裁剪循环，**从不裁最贵的那一项**
+
+[c-packer-never-trims-files-to-edit]
+
+> **`Prism/src/prism/packer.py` 第 461-501 行的六个 `while`**：
+> ```
+> periphery (461) / relevant_tests (468) / quality_signals (475) /
+> relevant_chunks (486) / dependency_edges (494)
+> ```
+> **没有一个碰 `pkg.files_to_edit`。
+> 而第 503-506 行超预算时只做一件事**：
+> ```python
+> if pkg.fits_in > token_budget:
+>     pkg.notes.append(
+>         "could not fully fit edit excerpts; increase token_budget for this file"
+>     )
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「按优先级裁剪」的循环集合，
+> 如果它永远不碰最贵的那一项，
+> 那它不是裁剪，而是「裁掉便宜的，保留贵的，然后报告没裁够」。**
+>
+> **⭐⭐ 判据：**
+> **故 `files_to_edit` 在这里的地位不是「最重要」，而是「不可裁」——
+> 而这两者在预算里是完全不同的东西。**
+>
+> ⚠️ **而这条给 §10.495 一个更硬的解释：
+> 既然 `files_to_edit` 不可裁，
+> 那 `include_source=False` 是唯一能省掉它的手段——
+> 而它恰好不在记账里。**
+> **⭐⭐ 故 Prism 的预算系统有一个精确的形状：
+> 「裁得掉的都裁了，裁不掉的都没记账」。**
+
+### 10.506 ⚠️⚠️⚠️ chunk 的标题仍打印 `X tokens`，而正文**已被省略**
+
+[c-chunk-header-claims-tokens-for-omitted-text]
+
+> **`Prism/src/prism/render.py` 第 74-81 行**：
+> ```python
+> for chunk in chunks[:8]:
+>     symbols = ", ".join(chunk.get("symbols") or [])
+>     suffix = f" symbols: {symbols}" if symbols else ""
+>     lines.append(
+>         f"### {chunk.get('file')}:{chunk.get('start_line')}-"
+>         f"{chunk.get('end_line')} "
+>         f"(score={chunk.get('score')}, {chunk.get('tokens')} tokens){suffix}"
+>     )
+>     if include_source:
+>         lines.append("```python")
+>         lines.append((chunk.get("text") or "").rstrip())
+>         lines.append("```")
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「成本标签」与被标成本的东西可以分开出现时，
+> 读者会把这个标签当成事实——
+> 而它描述的是一段被删掉的文本。**
+>
+> **⭐⭐ 判据：**
+> **故「省略」这个动作必须同时修改所有引用被省略物的字段，
+> 否则就是留下一个悬空的引用。**
+>
+> ⚠️ **而这条直接对应本报告的 76 条未引用主张：
+> 它们在 `claims.csv` 里有一个 id，而正文里没有对应位置——
+> 这与 chunk 的 token 标签是同一个形状：
+> 元数据在，所指的东西不在。**
+
+### 10.507 ⭐⭐⭐⭐⭐ 194 行的文件，一个函数占 124 行
+
+[c-the-whole-render-layer-is-one-untested-function]
+
+> **`Prism/src/prism/render.py` 全文 194 行，
+> `render_markdown` 从第 6 行到第 129 行（124 行），
+> `render_stats` 从 132 行开始。**
+> **124 / 194 = 63.9%。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个函数如果占了文件的三分之二，
+> 那它的每一个布尔参数都是一个「分支密度」——
+> 故它没有被测试，等价于「这个分支组合从未被枚举过」。**
+>
+> **⭐⭐ 判据：**
+> **故 `include_source` 这个参数的两个取值，
+> 在 §10.495 那条路径上只被走过一个（`False`），
+> 而另一个（`True`，默认值）只在执行阶段被走过。**
+>
+> ⚠️ **而本报告没有任何证据表明有人枚举过这两者的输出差异。
+> 置信度 `medium`：这一条描述的是「没有测试」，
+> 而「没有测试」是一个否定命题，只能用「我找过」来支撑。**
+
+### 10.508 ⭐⭐⭐⭐⭐ 在**边界**剥掉思考标签，而不是在每个解析器里各剥一次
+
+[c-think-tags-are-stripped-before-parsers]
+
+> **`Prism/src/prism/llm.py` 第 10-12 行**：
+> ```
+> - R1-distill models emit think.../think reasoning traces. Those must NOT
+>   reach the FILE/JSON parsers, so chat() strips them from the returned content
+>   by default (while streaming still shows them live for visibility).
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个脏数据源只有一个入口时，
+> 正确的清洗位置是入口，而不是每一个消费者——
+> 因为后者的数量会增长，而前者的数量恒为一。**
+>
+> **⭐⭐ 判据：**
+> **故「流式仍显示」这个附加说明是关键：
+> 它表明清洗是有意只在「返回内容」这一层做的，而不是在传输层。**
+>
+> ⚠️ **而这条与 §10.491 构成一对：
+> `llm.py` 在**入口**做清洗（正确的边界），
+> `tools.py` 在**出口**做模糊修复（错误的边界）——
+> 同一个仓库里，两个方向相反的边界处理。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -39722,6 +39901,34 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⚠️ **而这条给本报告一个可借用的说法：本报告的「免费大模型」是 `validate_research.py` 与十一个 audit 脚本——它们不会替我写 §10，但会告诉我哪条引用悬空。故本报告真正的「外部信号」只有两类：校验器的不变量，与原文的逐字引用。而第二类没有自动化——这正是 10.485 说「存在性检查不等于正确性检查」的地方**；
  — [src-prism-trace-py] [src-prism-verify-py]
 
+### 省掉了正文，而预算数字一个也不减（第一百六十轮补充）
+
+上一轮说「读 `render.py`，因为 `include_source` 就在它里面，而 10.495 说那个假设从未被单独测过」。本轮读完 `render.py`（7,095 字节 / 194 行）、`packer.py`（17,883 字节 / 509 行）与 `llm.py`（9,832 字节 / 243 行）——**结果 10.495 那个假设不只是「没被测过」，而是「记账上根本不成立」。**
+
+1. 🔥🔥🔥🔥🔥 **省掉了正文，但 `Budget:` 行的数字一个也不减**：
+`Prism/src/prism/packer.py` 第 288-289 行写「**used += t / pkg.fits_in = used**」，而 `t` 是含 `full_source` 的估算（281-282 行）；`render.py` 第 12-14 行无条件打印「**Budget: {fits_in} / {token_budget} estimated tokens**」，完全不看 `include_source`；
+⭐⭐ 判据（本轮最重要）「**当一个「省了多少」的数字由「本来会花多少」算出，而不是由「实际花了多少」算出时，它就不是一个预算，而是一个上限估计——而两者在省略发生时必然分叉。故 `include_source` 是一个「只影响输出、不影响记账」的开关，而这类开关是最危险的：它让读者以为省了，而账本说没省**」；
+⚠️ **而这条直接削弱 10.495：规划阶段用 `include_source=False`，而它拿到的 dossier 头部写着「Budget: 8000 / 8000」——故模型看到的是一个「已经用满」的信号，而实际正文远少于这个数**；
+2. 🔥🔥🔥🔥🔥 **一个名为 `include_source` 的布尔，实际只控制九节里的两节**：
+`render_markdown` 依次渲染 Budget Use / Why These Files / Dependency Edges / Quality Signals / Relevant Chunks / Files To Edit / Periphery / Relevant Tests / Notes 九节，而 `include_source` 只出现在第 78 行（chunk 正文）与第 94 行（`full_source`）；
+⭐⭐ 判据（本轮最重要）「**当一个布尔被命名为 `include_source` 时，读者会以为它控制「所有源码」；而它实际只控制「两处内联的代码块」。故一个参数的名字描述的是一类，而它的实现往往只是几个点——而这两者的差距，只有在读完全部调用点之后才知道**」——**⚠️ 而这条对本报告是一个可借用的检验：本报告的 `evidence_ids` 也叫得像「一类」，而它实际只装 `supports` 一种立场——故那 20 条 `high` 主张含非 `primary` 证据这件事，在字段设计上就没有位置**；
+3. 🔥🔥🔥🔥🔥 **六个裁剪循环，从不裁最贵的那一项**：
+`packer.py` 第 461-501 行的六个 `while` 分别裁 periphery（461）/ relevant_tests（468）/ quality_signals（475）/ relevant_chunks（486）/ dependency_edges（494）——**没有一个碰 `pkg.files_to_edit`**；而第 503-506 行超预算时只追加一条 note「**could not fully fit edit excerpts; increase token_budget for this file**」；
+⭐⭐ 判据（本轮最重要）「**一个「按优先级裁剪」的循环集合，如果它永远不碰最贵的那一项，那它不是裁剪，而是「裁掉便宜的，保留贵的，然后报告没裁够」。故 `files_to_edit` 在这里的地位不是「最重要」，而是「不可裁」——而这两者在预算里是完全不同的东西**」——**⚠️ 而这条给 10.495 一个更硬的解释：既然 `files_to_edit` 不可裁，那 `include_source=False` 是唯一能省掉它的手段——而它恰好不在记账里。故 Prism 的预算系统有一个精确的形状：「裁得掉的都裁了，裁不掉的都没记账」**；
+4. ⚠️⚠️⚠️ **chunk 的标题仍打印 `X tokens`，而正文已被省略**：
+`render.py` 第 74-77 行的 `lines.append` 里有「**(score={score}, {tokens} tokens)**」，而紧接着的第 78 行才是 `if include_source:`；
+⭐⭐ 判据（本轮最重要）「**当一个「成本标签」与被标成本的东西可以分开出现时，读者会把这个标签当成事实——而它描述的是一段被删掉的文本。故「省略」这个动作必须同时修改所有引用被省略物的字段，否则就是留下一个悬空的引用**」——**⚠️ 而这条直接对应本报告的 76 条未引用主张：它们在 `claims.csv` 里有一个 id，而正文里没有对应位置——这与 chunk 的 token 标签是同一个形状：元数据在，所指的东西不在**；
+5. ⭐⭐⭐⭐⭐ **194 行的文件，一个函数占 124 行**：
+`render.py` 全文 194 行，`render_markdown` 从第 6 行到第 129 行（124 行），`render_stats` 从 132 行开始——**124 / 194 = 63.9%**；
+⭐⭐ 判据「**一个函数如果占了文件的三分之二，那它的每一个布尔参数都是一个「分支密度」——故它没有被测试，等价于「这个分支组合从未被枚举过」。故 `include_source` 的两个取值，在 10.495 那条路径上只被走过一个（`False`），而另一个（`True`，默认值）只在执行阶段被走过**」——**⚠️ 置信度 medium：这一条描述的是「没有测试」，而「没有测试」是一个否定命题，只能用「我找过」来支撑**；
+6. [GitHub / Badtheorylabs — `Prism/src/prism/llm.py`（9,832 字节，243 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/llm.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **在边界剥掉思考标签，而不是在每个解析器里各剥一次**：**docstring 第 10-12 行写「R1-distill models emit `think...` reasoning traces. Those must NOT reach the FILE/JSON parsers, so chat() strips them from the returned content by default (while streaming still shows them live for visibility).」**；
+⭐⭐ 判据（本轮最重要）「**当一个脏数据源只有一个入口时，正确的清洗位置是入口，而不是每一个消费者——因为后者的数量会增长，而前者的数量恒为一**」——
+⚠️ **而这条与 10.491 构成一对：`llm.py` 在入口做清洗（正确的边界），`tools.py` 在出口做模糊修复（错误的边界）——同一个仓库里，两个方向相反的边界处理**；
+ — [src-prism-render-py] [src-prism-packer-py] [src-prism-llm-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -39861,7 +40068,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=451, evidence=2852, claims=2046, claims_high=1697, claims_disputed=9, trace_events=973, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=454, evidence=2858, claims=2052, claims_high=1702, claims_disputed=9, trace_events=979, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
