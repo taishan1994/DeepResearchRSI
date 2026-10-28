@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：313 ｜ **证据数**：2321 ｜ **主张数**：1714（高置信 1370，争议 9）
+> **来源数**：315 ｜ **证据数**：2329 ｜ **主张数**：1719（高置信 1374，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -20979,6 +20979,229 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⚠️ **边界**：**本报告没有看到这段逻辑被触发时的实际输出**，
 > 因为那台机器没有 NVCC（§10.156）。
 
+### 10.168 🔥🔥🔥🔥🔥 AVQ2 的三 kernel 流水线，与**被推翻的 §10.152**
+
+[c-avq3-kernel-pipeline]
+
+> ```cuda
+> transform_input <<<input_blocks * tokens, 128>>> (...)   // 写 transformed_input
+> decode_mul_mat  <<<rows * tokens, 256>>> (...)           // 读 transformed_input
+> transform_output<<<output_blocks * tokens, 128>>> (...)   // 写 dst
+> ```
+>
+> 两块临时缓冲：**`tokens × columns`** 与 **`tokens × rows`** 个 `float`。
+
+> **⭐⭐⭐⭐⭐ 这条印证了 §10.152 的预测，而且是「作者已经修掉了」这个版本**：
+> **§10.152 我从 `btl3-vocab.cu` 推断「每个输出块重算一次输入变换」，
+> 而 `btl3-avq.cu` 的实际写法是：
+> `transformed_input` 先算一次写进临时缓冲，
+> `decode_mul_mat` 只读不算——**
+> **⚠️ 即那条批评对词表路径成立，对主路径不成立。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「同一个项目里的两个 kernel」不等于「同一个工程质量」——**
+> **⚠️ 因为它们是不同时间、不同目的写的，
+> 而「词表 head」与「解码主路径」是两个不同的性能场景。**
+>
+> ⭐⭐ **这也修正了 §10.159 那条边界声明**：
+> **我当时写「本报告只读了词表路径的 AVQ2 解码器」，
+> 并暗示主路径可能类似——
+> ⚠️ 现在看，主路径更成熟（有临时缓冲复用），
+> 而词表路径更朴素（就地重算）。**
+>
+> **⭐⭐ 判据：**
+> **「从一个实现推断另一个实现」是危险的，
+> 即使它们名字相似、作者相同——**
+> **⚠️ 而「名字相似」恰恰是这个推断最容易被接受的原因。**
+>
+> ⭐⭐ **三 kernel 结构的可算代价**：
+> **两块临时缓冲 = `tokens × (columns + rows) × 4` 字节——
+> ⚠️ 以 `columns = rows = 4,096`、`tokens = 2,048` 计，
+> 就是 2 × 4,096 × 2,048 × 4 ≈ 67 MB 的显存。**
+>
+> **⭐⭐ 判据：**
+> **「把中间结果落到显存」这个优化，
+> 在「算得少」时是净赚，在「显存紧」时是净亏——**
+> **⚠️ 而 67 MB 对 96 GB 的卡是无所谓的，
+> 对一张 8 GB 的卡就是 1% 的硬开销。**
+>
+> ⭐⭐ **`tokens` 这一维是关键**：
+> **两块缓冲都随 `tokens` 线性增长——
+> ⚠️ 即 batch 越大，它们越大，
+> 而它们的「复用收益」与 batch 无关。**
+>
+> ⚠️ **边界**：**本报告没有实测这三个 kernel 的耗时占比。**
+
+### 10.169 🔥🔥🔥🔥 **输入变换被提到循环外**——§10.152 的适用范围要收窄
+
+[c-avq-input-transform-hoisted]
+
+> `transformed_input` 由 `transform_input` 写一次；
+> `decode_mul_mat` 内只做 `const float * token_input = input + token * columns;`
+> **不再重算 FWHT**。
+
+> **⭐⭐⭐⭐⭐ 这是本报告第一次「推翻自己上一轮的一个推论，
+> 而依据是同一个项目里的另一个文件」**：
+> **§10.152 我写「每个输出块重算一次输入变换」，
+> 而主路径已经把它提到循环外——
+> ⚠️ 即那个结论的适用范围，比我在 §10.152 里写的窄得多。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当你在一个多文件项目里发现一个性能缺陷时，
+> 必须立刻问：「这是这个文件的问题，还是这个项目的问题？」——**
+> **⚠️ 因为前者只需要改一个文件，后者需要改架构。**
+>
+> ⭐⭐ **而 §10.152 的教训更精确**：
+> **我从「词表 head 的实现」推断「解码主路径的实现」，
+> 而两者恰好在这个点上相反——
+> ⚠️ 即那条推断的方向是「从边缘推核心」，
+> 而边缘往往比核心更朴素（因为写得更早、优化得更少）。**
+>
+> **⭐⭐ 判据：**
+> **在一个代码库里，
+> 「越边缘的模块越能代表作者的第一版想法」，
+> 而「越核心的模块越能代表作者的最终方案」——**
+> **⚠️ 故从边缘推核心，推出来的永远是「第一版」而不是「现状」。**
+>
+> ⭐⭐ **正式修正**：
+> **「词表 head 路径每个输出块重算一次输入变换；
+> 解码主路径已经用临时缓冲把它提到了循环外。」——
+> ⚠️ 即「同一个错误」在同一个项目里只存在于一个文件里。**
+
+### 10.170 ⚠️⚠️⚠️ **「一个 block 一个输出」是这个项目的通用写法**
+
+[c-avq-decode-one-block-per-row]
+
+> `decode_mul_mat<<<rows * tokens, matvec_threads>>>`，`matvec_threads = 256`；
+> `row = blockIdx.x % rows`、`token = blockIdx.x / rows`。
+> 而 `btl3-int4.cu` 是 `<<<rows * tokens, 128>>>` —— **并行维度完全一致**。
+
+> **⭐⭐⭐⭐ 这条把 §10.158 那个「INT4 一个 block 一个输出」
+> 升格成了「这个项目的通用写法」**：
+> **两个内核在并行维度上完全一致——
+> ⚠️ 即这不是一个失误，而是一个默认习惯。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「同一个作者在两个内核里用了同一个并行维度」，
+> 说明这不是一个失误，而是一个默认习惯——**
+> **⚠️ 而默认习惯比失误更难改，
+> 因为它不在任何一处代码里显式声明。**
+>
+> ⭐⭐ **而对 AVQ2 来说，这个结构的代价比 INT4 更高**：
+> **每输出元素要做 `columns/4` 次迭代 × 4 分量 × 4 格点 FMA
+> = `4 × columns` 次 FMA——
+> ⚠️ 以 `columns = 4,096` 计就是 16,384 次 FMA / 输出元素，
+> 而每块只有 256 线程分担 → 64 次迭代 / 线程。**
+>
+> **⭐⭐ 判据：**
+> **「每线程算术量」在 AVQ2 里是 INT4 的两倍（64 vs 32），
+> 但块大小也是两倍（256 vs 128）——**
+> **⚠️ 即两者的「每线程课税」相同，
+> 而 AVQ2 的「每块总工作量」是 INT4 的四倍。**
+>
+> ⭐⭐ **一个反直觉的后果**：
+> **AVQ2 的 kernel 启动次数与 INT4 相同（都是 `rows × tokens`），
+> 但每块做得更多——
+> ⚠️ 故 AVQ2 的「调度开销占比」反而比 INT4 低。**
+>
+> **⭐⭐ 判据：**
+> **「同一个并行结构」在两个工作量不同的 kernel 上，
+> 会造成不同量级的效率损失——**
+> **⚠️ 而「结构相同」不等于「问题相同」。**
+
+### 10.171 🔥🔥🔥🔥 格点解码在寄存器里，而**解压占了 80% 的算术量**
+
+[c-avq-lattice-decoded-in-registers]
+
+> ```cuda
+> const float lattice[4] = {(code>>6)&3 - 1.5F, (code>>4)&3 - 1.5F,
+>                           (code>>2)&3 - 1.5F,  code&3    - 1.5F};
+> float weight = group_bias[component];
+> for (k = 0; k < 4; ++k)
+>     weight = fmaf(lattice[k], group_weight[component*4+k], weight);
+> accumulator = fmaf(weight, token_input[input_offset + component], accumulator);
+> ```
+
+> **⭐⭐⭐⭐ 这条把 §10.159 那个「4 维格点 + 16 仿射 + 4 偏置」
+> 从「结构描述」变成了「可见的算式」**：
+> **一个码字（1 字节）→ 4 个格点值 →
+> 每个分量用 4 个仿射系数做一次 4 项 FMA → 得到一个 weight →
+> 再与激活相乘——**
+> **⚠️ 即每个码字贡献 4 个输出累加项，
+> 而每个 weight 要花 4 次 FMA 才能算出来。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「解压成本」与「矩阵乘成本」在 AVQ2 里是同一个数量级：
+> 每码字 4 格点查表 + 16 FMA 解压 + 4 FMA 乘加——
+> ⚠️ 即解压占了 80% 的算术量。**
+>
+> ⭐⭐ **这正是「2 bit 量化在 GPU 上不快」的根本原因**：
+> **它的压缩率来自「4 维码本」，
+> 而解一个 4 维码本需要 16 次 FMA——
+> ⚠️ 即「压缩率」与「解压成本」是同一个设计的两个面。**
+>
+> **⭐⭐ 判据：**
+> **「一个量化格式在 GPU 上的实际加速比」约等于
+> 「比特数之比 ÷ 解压 FMA 数之比」——**
+> **⚠️ 对 AVQ2：`32/2 = 16` 倍的比特节省，除以 `16/1` 倍解压开销
+> → 净收益约 1 倍，即「理论上不亏不赚」。**
+>
+> ⭐⭐ **这是一个可判定的预测**：
+> **AVQ2 相对 FP16 的端到端加速比，上限大约就是 1–2 倍——
+> ⚠️ 而那正好是 §10.135 那个 84.70 / 43.16 的量级。**
+>
+> **⭐⭐ 判据：**
+> **「一个 2 bit 格式只带来 2 倍加速」不一定是实现差，
+> 也可能是格式本身的解压熵决定的——**
+> **⚠️ 而区分这两种可能，只需要数一数每码字的 FMA 数。**
+>
+> ⭐⭐ **共享内存这个细节**：
+> **每 block 只搬 20 个 float（`group_weight[16]` + `group_bias[4]`），
+> 而它们在 `code_index` 循环里被读 `columns/4` 次——
+> ⚠️ 以 `columns = 4,096` 计，复用只有 4 次，故搬进共享内存是勉强划算的。**
+
+### 10.172 ⚠️ **一个被我写成「缺陷」然后撤回的例子：`fmaf` 的参数顺序**
+
+[c-avq-fmaf-argument-order-suspicious]
+
+> `weight = fmaf(lattice[k], group_weight[component*4+k], weight);`
+> —— 第一个参数是**格点值**，第二个是**仿射系数**；
+> 而 §10.159 记录的约定是 `affine[component*4+index]` 与格点相乘。
+
+> **⚠️⚠️⚠️ 本条刻意标成 `medium`，因为有两种解释都能成立**：
+> **① 参数顺序写反了（真缺陷）；
+> ② 数学上 `a·b = b·a`，故顺序无关（不是缺陷）——**
+> **⚠️ 而乘法交换律使 ② 成为默认成立的解释。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **`fmaf(a, b, c)` 与 `fmaf(b, a, c)` 在数学上完全等价，
+> 故「参数顺序看着不对」不是一个缺陷，
+> 除非能证明它影响了别的什么东西。**
+>
+> ⭐⭐ **这条的价值不在于「发现了一个 bug」，
+> 而在于它展示了本报告最容易犯的一类错**：
+> **「代码的形状与我的期待不符」→「这可能是缺陷」——
+> ⚠️ 而中间缺了一步：「它会不会只是写法不同？」**
+>
+> **⭐⭐ 判据：**
+> **当你要把一个「看起来不对」的代码片段写成缺陷时，
+> 先问：「有没有一种解释，能让这段代码完全正确？」——**
+> **⚠️ 如果答案是「有，而且很自然」，那它就不是缺陷。**
+>
+> ⭐⭐ **而本条保留在报告里的理由是这个反例本身有价值**：
+> **§10.159 我从 `btl3-vocab.cu` 读到的写法是同一个顺序，
+> 而当时我没有把它当缺陷——**
+> **⚠️ 即「同一个模式，在第一次出现时被当作正常，
+> 在第二次出现时被当作可疑」，
+> 这个不一致本身就是「我在找缺陷」而不是「我在读代码」的信号。**
+>
+> **⭐⭐ 正式结论**：**这不是缺陷。
+> `fmaf` 的两个乘数顺序无关，
+> 而两处代码用的是同一个（可读性稍差但正确的）顺序。**
+>
+> ⚠️ **边界**：**本报告没有编译或运行过这段代码**（§10.156），
+> 故只能断言「数学等价」，不能断言「无 UB」。
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -24492,6 +24715,37 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 
 > ✅ **结构性清理（第 172 轮）**：删除了重复来源 `src-btl3-cuda-avq-marker-h`（与 `src-btl3-cuda-marker` 同 URL），把 5 条证据改绑到保留条目，并同步更新全文 3 处引用。这是本报告第 5 次重复注册来源的收尾。
 
+### AVQ2 三 kernel 流水线、§10.152 的收窄、解压占 80% 算术（第九十八轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu`（7,070 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **三 kernel 流水线 + 两块临时缓冲**：
+「**ggml_cuda_pool_alloc<float> transformed_input(ctx.pool(), tokens * columns); ggml_cuda_pool_alloc<float> transformed_output(ctx.pool(), tokens * rows); transform_input<<<input_blocks * tokens, transform_block, 0, stream>>>(...); decode_mul_mat<<<rows * tokens, matvec_threads, 0, stream>>>(...); transform_output<<<output_blocks * tokens, transform_block, 0, stream>>>(...);**」；
+⭐⭐⭐⭐⭐ **这印证了 §10.152 的预测方向，而答案是「作者已经修掉了」**——**输入变换被提到循环外，`decode_mul_mat` 只读不算**，故 §10.152 的批评**只对词表路径成立，对主路径不成立**；
+⭐⭐ 判据（本轮最重要）「**「同一个项目里的两个 kernel」不等于「同一个工程质量」——因为它们是不同时间、不同目的写的**」；
+⭐⭐ 判据「**「从一个实现推断另一个实现」是危险的，即使它们名字相似、作者相同——而「名字相似」恰恰是这个推断最容易被接受的原因**」；
+⭐⭐ 判据「**在一个代码库里，「越边缘的模块越能代表作者的第一版想法」，而「越核心的模块越能代表作者的最终方案」——故从边缘推核心，推出来的永远是「第一版」而不是「现状」**」；
+(a) ⚠️⚠️⚠️ **「一个 block 一个输出」是这个项目的通用写法**：
+「**decode_mul_mat<<<rows * tokens, matvec_threads, 0, stream>>>**」，`matvec_threads = 256`，`row = blockIdx.x % rows`、`token = blockIdx.x / rows`；⚠️ 而 `btl3-int4.cu` 是 `<<<rows * tokens, 128>>>` —— **并行维度完全一致**；
+⭐⭐⭐⭐ 判据（本轮最重要）「**「同一个作者在两个内核里用了同一个并行维度」，说明这不是一个失误，而是一个默认习惯——而默认习惯比失误更难改，因为它不在任何一处代码里显式声明**」；
+⭐⭐ 可算的代价：**每输出元素 `4 × columns` 次 FMA（`columns = 4,096` → 16,384 次），256 线程分担 → 64 次迭代/线程；而 INT4 是 32 次——即「每线程课税」相同，AVQ2 的「每块总工作量」是 INT4 的四倍**；
+(b) 🔥🔥🔥🔥 **格点解码在寄存器里，而解压占了 80% 的算术量**：
+「**const float lattice[4] = {static_cast<float>((code >> 6) & 3U) - 1.5F, static_cast<float>((code >> 4) & 3U) - 1.5F, static_cast<float>((code >> 2) & 3U) - 1.5F, static_cast<float>(code & 3U) - 1.5F, }; float weight = group_bias[component]; weight = fmaf(lattice[lattice_index], group_weight[component * 4 + lattice_index], weight);**」；
+⭐⭐ 判据（本轮最重要）「**「解压成本」与「矩阵乘成本」在 AVQ2 里是同一个数量级：每码字 4 格点查表 + 16 FMA 解压 + 4 FMA 乘加——即解压占了 80% 的算术量**」；
+⭐⭐ 判据「**「一个量化格式在 GPU 上的实际加速比」约等于「比特数之比 ÷ 解压 FMA 数之比」——对 AVQ2：32/2 = 16 倍比特节省 除以 16/1 倍解压开销 → 净收益约 1 倍，即「理论上不亏不赚」**」，**而这正好是 §10.135 那个 84.70 / 43.16 的量级**；
+(c) ⚠️ **一个被我写成「缺陷」然后撤回的例子：`fmaf` 的参数顺序**：
+「**weight = fmaf(lattice[lattice_index], group_weight[component * 4 + lattice_index], weight);**」——第一个参数是格点值、第二个是仿射系数；
+⚠️ 本条标 `medium`：**① 顺序写反（真缺陷）；② `a·b = b·a`，顺序无关（不是缺陷）——而交换律使 ② 成为默认成立的解释**；
+⭐⭐ 判据（本轮最重要）「**`fmaf(a, b, c)` 与 `fmaf(b, a, c)` 在数学上完全等价，故「参数顺序看着不对」不是一个缺陷**」；
+⭐⭐ 判据「**当你要把一个「看起来不对」的代码片段写成缺陷时，先问：「有没有一种解释，能让这段代码完全正确？」——如果答案是「有，而且很自然」，那它就不是缺陷**」；
+⭐⭐ 判据「**「同一个模式，在第一次出现时被当作正常，在第二次出现时被当作可疑」——这个不一致本身就是「我在找缺陷」而不是「我在读代码」的信号**」；
+⭐⭐ **正式结论：这不是缺陷。**两处代码用的是同一个（可读性稍差但正确的）顺序 — [src-btl3-cuda-avq-cu]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cuh`（156 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cuh)
+ —（2026-10 抓取）。只声明入口函数，无逻辑：
+「**void ggml_cuda_op_btl3_avq2(ggml_backend_cuda_context & ctx, ggml_tensor * dst);**」 — [src-btl3-cuda-avq-cuh]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -24631,7 +24885,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=313, evidence=2321, claims=1714, claims_high=1370, claims_disputed=9, trace_events=695, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=315, evidence=2329, claims=1719, claims_high=1374, claims_disputed=9, trace_events=698, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
