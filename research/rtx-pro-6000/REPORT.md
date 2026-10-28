@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：456 ｜ **证据数**：2870 ｜ **主张数**：2075（高置信 1725，争议 9）
+> **来源数**：457 ｜ **证据数**：2876 ｜ **主张数**：2081（高置信 1731，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -34644,6 +34644,180 @@ exit 0
 > 它必须是假值才能让测试不依赖真实模型——
 > 但这也意味着这条路径上「sha256 校验」从来没有真正执行过一次。**
 
+### 10.532 🔥🔥🔥🔥🔥 撤回：`121-real` 的预言**不成立**
+
+[c-the-121-real-prediction-is-retracted]
+
+> **`ggml/src/ggml-cuda/CMakeLists.txt` 第 75-92 行**：
+> ```cmake
+> # Replace any plain 12X CUDA architectures with their
+> # "architecture-specific" equivalents 12Xa.
+> # 12X is forwards-compatible, 12Xa is not.
+> foreach(ARCHS IN ITEMS CMAKE_CUDA_ARCHITECTURES CMAKE_CUDA_ARCHITECTURES_NATIVE)
+>     set(FIXED_ARCHS "")
+>     foreach(ARCH IN LISTS ${ARCHS})
+>         if (ARCH MATCHES "^12[0-9](-real|-virtual)?$")
+>             string(REGEX REPLACE "^(12[0-9])((-real|-virtual)?)$" "\\1a\\2" FIXED_ARCH ${ARCH})
+>             message(STATUS "Replacing ${ARCH} in ${ARCHS} with ${FIXED_ARCH}")
+>             list(APPEND FIXED_ARCHS "${FIXED_ARCH}")
+>         else()
+>             list(APPEND FIXED_ARCHS "${ARCH}")
+>         endif()
+>     endforeach()
+>     set(${ARCHS} ${FIXED_ARCHS})
+> endforeach()
+> ```
+> **故 `121-real` 会变成 `121a-real`；上一轮的预言不成立。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一次「可预测的失败」如果它的预测链上有一环没被读过，
+> 那它就不是预测，而是猜测——
+> 而上一轮的链条断在「CMake 拿到 `121-real` 之后会做什么」这一环。**
+>
+> **⭐⭐ 判据：**
+> **故「我给出了一个可检验的预测」这件事本身，
+> 不保证这个预测是对的；它只保证这个预测是可被检验的。**
+>
+> ⚠️ **而这条对一个已经写了 238 轮的报告是一次必要的校正：
+> 上一轮把「`121-real` 与 §10.45 的症状吻合」
+> 当成「故这不是可能有问题，而是已经知道会怎样」——
+> 而「症状吻合」从来不是「因果成立」，
+> 这是本报告第 38 类缺陷（「两个数字不同」当成「两者矛盾」）的同族。**
+
+### 10.533 ⭐⭐⭐⭐⭐ `121-real` 不是错的，而是**依赖自动修正才正确**
+
+[c-the-121-real-is-correct-only-because-of-a-hidden-rewrite]
+
+> **`ggml/src/ggml-cuda/CMakeLists.txt` 第 85 行**（唯一的可见痕迹）：
+> ```cmake
+> message(STATUS "Replacing ${ARCH} in ${ARCHS} with ${FIXED_ARCH}")
+> ```
+> **而第 79 行写明了这种改写的到期日**：
+> ```
+> this should be fine until Rubin is released
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个构建系统在背后改写用户的输入时，
+> 它必须让改写可见——
+> 而 `STATUS` 与 `WARNING` 的区别，
+> 就是「默认看到」与「被 grep 才看到」的区别。**
+>
+> **⭐⭐ 判据：**
+> **故 `121-real` 这个写法是「借来的正确性」：
+> 它对，但它的正确性不在它自己身上，
+> 而在一个三十行之外的正则里。**
+>
+> ⚠️ **而这条给本报告一个新判据：
+> 一个数字如果正确的原因不在它自己的定义处，
+> 那它的正确性有到期日——
+> 而这里写明的到期日是「Rubin 发布」。**
+
+### 10.534 ⚠️⚠️⚠️ 这个修正只活在 **`ggml-cuda` 子目录里**
+
+[c-the-rewrite-only-lives-in-the-cuda-subdirectory]
+
+> **`ggml/src/ggml-cuda/CMakeLists.txt`** 第 59 行 `enable_language(CUDA)`，
+> 第 80-92 行的改写随之发生。
+> **而 `ggml/CMakeLists.txt`（21,778 字节）里
+> `grep '120a|120-real|-real|CMAKE_CUDA_ARCHITECTURES'` 零命中。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条修正规则写在子目录里时，
+> 它的作用域就是那个子目录——
+> 任何在同级或更上层添加的 CUDA 目标都不会被它覆盖。**
+>
+> **⭐⭐ 判据：**
+> **故「这个仓库已经处理了 12Xa」这句话，
+> 必须写成「`ggml-cuda` 这一个目标已经处理了」。**
+>
+> ⚠️ **而这条解释了为什么顶层零命中却仍然正确：
+> 因为 `ggml/CMakeLists.txt` 从不设置 `CMAKE_CUDA_ARCHITECTURES`，
+> 故它没有需要被修正的东西。**
+> **⭐⭐ 而这是一个正面的设计判断：
+> 把修正放在「唯一会产生 CUDA 编译的地方」比放在顶层更精确。**
+
+### 10.535 🔥🔥🔥🔥🔥 一个只为 `sm_90a` 写的 wgmma 路径
+
+[c-hopper-q1-is-sm90a-only-and-never-reachable-on-sm120a]
+
+> **`ggml/CMakeLists.txt` 第 202 行**：
+> ```cmake
+> option(GGML_CUDA_HOPPER_Q1  "ggml: opt-in sm_90a wgmma path for Q1_0/Q2_0 prefill"  OFF)
+> ```
+> **`ggml/src/ggml-cuda/CMakeLists.txt` 第 142-147 行**：
+> ```cmake
+> if (GGML_CUDA_HOPPER_Q1)
+>     # opt-in Hopper (sm_90a) wgmma path for Q1_0/Q2_0 prefill; needs CUTLASS headers (CuTe)
+>     if (NOT GGML_CUDA_CUTLASS_DIR)
+>         message(FATAL_ERROR "GGML_CUDA_HOPPER_Q1 requires GGML_CUDA_CUTLASS_DIR (CUTLASS checkout root)")
+>     endif()
+>     target_compile_definitions(ggml-cuda PRIVATE GGML_USE_HOPPER_Q1)
+> ```
+> **而 `GGML_CUDA_CUTLASS_DIR` 在第 203 行默认为空字符串。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个编译开关的名字里带的是「硬件代际」
+> 而它的描述里带的是「量化格式」时，
+> 它把两个正交的维度压进了一个名字——
+> 故任何按量化格式搜索的人都不会找到它。**
+>
+> **⭐⭐ 判据：**
+> **故「`Q1_0`/`Q2_0` 有 prefill 加速路径」这句话是真的，
+> 但它的作用域是 `sm_90a` 一个架构。**
+>
+> ⚠️ **而这条对 RTX PRO 6000 的价值是负的：
+> 本报告测的 `Q2_0` TG128 = 129.9 tok/s 在 `sm_120a` 上，
+> 而那个 prefill 加速路径在 `sm_120a` 上不存在——
+> 故 PRO 6000 的 `Q2_0` 数字里不含这个优化。**
+
+### 10.536 ⭐⭐⭐⭐⭐ 默认 OFF，而缺 CUTLASS 时**直接 FATAL**
+
+[c-the-hopper-q1-option-is-off-by-default-and-fatal-without-cutlass]
+
+> **`ggml/CMakeLists.txt` 第 202 行末尾是 `OFF`**；
+> **`ggml/src/ggml-cuda/CMakeLists.txt` 第 144-146 行是 `message(FATAL_ERROR ...)`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 opt-in 开关如果在缺依赖时 `FATAL` 而不是 `WARN`+跳过，
+> 那它的语义是「我确定你会配好」，而不是「试试看」——
+> 而这两者对应完全不同的用户。**
+>
+> **⭐⭐ 判据：**
+> **故 `FATAL_ERROR` 在这里是一个关于「谁会打开它」的声明：
+> 只有已经拥有 CUTLASS checkout 的人才会。**
+>
+> ⚠️ **而这条与本报告反复出现的「静默失败」模式正好相反：
+> §10 里记过十几个「配置错了但什么都没说」的例子，
+> 而这一个是「配置错了就立刻停下」——
+> 故同一个仓库里两种纪律并存。**
+
+### 10.537 🔥🔥🔥🔥🔥 PRO 6000 上跑得最快的那个量化，**没有 prefill 路径**
+
+[c-the-pro-6000s-fastest-quant-has-no-prefill-path]
+
+> **本报告已测 `Q2_0` 在 RTX PRO 6000 上 TG128 = 129.9 tok/s**；
+> **而 `GGML_CUDA_HOPPER_Q1` 的描述是
+> `opt-in sm_90a wgmma path for Q1_0/Q2_0 prefill`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份报告测了某个量化在某个卡上的速度，
+> 它必须同时报告「这张卡有没有为这个量化专门写的内核」——
+> 否则那个速度是「通用路径的速度」，
+> 而不是「这个量化在这个硬件上的能力」。**
+>
+> **⭐⭐ 判据：**
+> **故 PRO 6000 的 `Q2_0` 129.9 tok/s 应读作
+> 「在没有任何专门内核的情况下测到的速度」。**
+>
+> ⚠️ **而这条给本报告一个可检验的推论：
+> 如果 H100 上跑同一个 `Q2_0`，
+> 打开这个开关应当显著提高 prefill——
+> 而 corpus 里没有这个对比。**
+> **⭐⭐ 故这是一个新发现的「对照缺口」：
+> 不是「缺 PRO 6000 的数」，
+> 而是「缺一个同一量化在两个架构上的数」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -40631,6 +40805,34 @@ shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 480
 **「一个事实有两份表示，而它们靠人工同步」**——九个静态默认值加一个函数调用（「这张表里只有一个格子是活的」）、四级回退里有一级只在仓库里成立、一个布尔量靠字符串比较还原、两个平台退出码不同（exit 2 对 throw）、Linux 构建只暴露一个 build-arg、桥接测试用 `abcd * 16` 的假 digest 且从不校验；
  — [src-btl3-launch-cuda-server] [src-btl3-packaging-build-linux] [src-btl3-test-ollama-bridge]
 
+### 撤回一条预言，捡到一个开关（第一百六十四轮补充）
+
+上一轮结尾说「查实 `121-real` 在 arm64 上是否真的缺 `sm121a_*` variant——这是本报告第一次给出可预测的失败」。本轮查了，**预言不成立**；而为了查它读的那个文件里，**有一个只对 Hopper 开放、却专门优化了 RTX PRO 6000 上最快那个量化的开关**。
+
+1. 🔥🔥🔥🔥🔥 **撤回：`121-real` 的预言不成立**：
+`ggml/src/ggml-cuda/CMakeLists.txt` 第 75-92 行有一个正则循环：「**# Replace any plain 12X CUDA architectures with their "architecture-specific" equivalents 12Xa. # 12X is forwards-compatible, 12Xa is not. foreach(ARCHS IN ITEMS CMAKE_CUDA_ARCHITECTURES CMAKE_CUDA_ARCHITECTURES_NATIVE) ... if (ARCH MATCHES "^12[0-9](-real|-virtual)?$") string(REGEX REPLACE "^(12[0-9])((-real|-virtual)?)$" "\1a\2" FIXED_ARCH ${ARCH}) ... endforeach()**」——**故 `121-real` 会变成 `121a-real`，上一轮的预言不成立**；
+
+⭐⭐ 判据（本轮最重要）「**一次「可预测的失败」如果它的预测链上有一环没被读过，那它就不是预测，而是猜测——而上一轮的链条断在「CMake 拿到 121-real 之后会做什么」这一环。故「我给出了一个可检验的预测」这件事本身，不保证这个预测是对的；它只保证这个预测是可被检验的**」——**⚠️ 而这条是一次必要的校正：上一轮把「121-real 与 §10.45 的症状吻合」当成「故这不是可能有问题，而是已经知道会怎样」——而「症状吻合」从来不是「因果成立」**；
+2. ⭐⭐⭐⭐⭐ **`121-real` 不是错的，而是「依赖自动修正才正确」**：
+第 85 行是这个修正的唯一可见痕迹「**message(STATUS "Replacing ${ARCH} in ${ARCHS} with ${FIXED_ARCH}")**」，而第 79 行写明了到期日「this should be fine until Rubin is released」；
+
+⭐⭐ 判据（本轮最重要）「**当一个构建系统在背后改写用户的输入时，它必须让改写可见——而 STATUS 与 WARNING 的区别，就是「默认看到」与「被 grep 才看到」的区别。故 121-real 这个写法是「借来的正确性」：它对，但它的正确性不在它自己身上，而在一个三十行之外的正则里**」——**⚠️ 新判据：一个数字如果正确的原因不在它自己的定义处，那它的正确性有到期日——而这里写明的到期日是「Rubin 发布」**；
+3. ⚠️⚠️⚠️ **这个修正只活在 `ggml-cuda` 子目录里**：
+第 59 行 `enable_language(CUDA)` 之后发生改写，而 `ggml/CMakeLists.txt`（21,778 字节）里 `grep` 架构相关字样**零命中**；
+
+⭐⭐ 判据（本轮最重要）「**当一条修正规则写在子目录里时，它的作用域就是那个子目录——任何在同级或更上层添加的 CUDA 目标都不会被它覆盖。故「这个仓库已经处理了 12Xa」这句话，必须写成「ggml-cuda 这一个目标已经处理了」**」——⭐⭐ **而顶层零命中却仍然正确：因为 ggml/CMakeLists.txt 从不设置 CMAKE_CUDA_ARCHITECTURES。故这是一个正面的设计判断：把修正放在「唯一会产生 CUDA 编译的地方」比放在顶层更精确**；
+4. 🔥🔥🔥🔥🔥 **一个只为 `sm_90a` 写的 wgmma 路径**：
+`ggml/CMakeLists.txt` 第 202 行「**option(GGML_CUDA_HOPPER_Q1  "ggml: opt-in sm_90a wgmma path for Q1_0/Q2_0 prefill"  OFF)**」，而 `ggml-cuda/CMakeLists.txt` 第 142-147 行要求 `GGML_CUDA_CUTLASS_DIR` 存在，否则 `FATAL_ERROR`；
+
+⭐⭐ 判据（本轮最重要）「**当一个编译开关的名字里带的是「硬件代际」而它的描述里带的是「量化格式」时，它把两个正交的维度压进了一个名字——故任何按量化格式搜索的人都不会找到它**」——⚠️ **故「Q1_0/Q2_0 有 prefill 加速路径」这句话是真的，但它的作用域是 sm_90a 一个架构**；
+5. 🔥🔥🔥🔥🔥 **PRO 6000 上跑得最快的那个量化，没有 prefill 路径**：
+本报告已测 `Q2_0` 在 RTX PRO 6000 上 TG128 = 129.9 tok/s，而 `GGML_CUDA_HOPPER_Q1` 的描述是「sm_90a wgmma path for Q1_0/Q2_0 prefill」——**故这个为 Q1_0/Q2_0 写的 prefill 优化只存在于 sm_90a，而不存在于 sm_120a**；
+
+⭐⭐ 判据（本轮最重要）「**当一份报告测了某个量化在某个卡上的速度，它必须同时报告「这张卡有没有为这个量化专门写的内核」——否则那个速度是「通用路径的速度」，而不是「这个量化在这个硬件上的能力」**」——**⚠️ 故 PRO 6000 的 Q2_0 129.9 tok/s 应读作「在没有任何专门内核的情况下测到的速度」**；⭐⭐ **故这是一个新发现的「对照缺口」：不是「缺 PRO 6000 的数」，而是「缺一个同一量化在两个架构上的数」**；
+6. ⭐⭐⭐⭐⭐ **默认 OFF，而缺 CUTLASS 时直接 FATAL**：
+`FATAL_ERROR` 在这里是一个关于「谁会打开它」的声明：只有已经拥有 CUTLASS checkout 的人才会。**而这条与本报告反复出现的「静默失败」模式正好相反：§10 里记过十几个「配置错了但什么都没说」的例子，而这一个是「配置错了就立刻停下」——故同一个仓库里两种纪律并存**；
+ — [src-btl3-cuda-backend-cmake]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -40770,7 +40972,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=456, evidence=2870, claims=2075, claims_high=1725, claims_disputed=9, trace_events=983, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=457, evidence=2876, claims=2081, claims_high=1731, claims_disputed=9, trace_events=985, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
