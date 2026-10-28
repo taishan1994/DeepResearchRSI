@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：334 ｜ **证据数**：2401 ｜ **主张数**：1764（高置信 1418，争议 9）
+> **来源数**：335 ｜ **证据数**：2409 ｜ **主张数**：1769（高置信 1422，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -23373,6 +23373,286 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **「该不该在成功时输出」取决于「这个量是二值还是连续」——**
 > **⚠️ 二值的静默，连续的说话。**
 
+### 10.218 🔥🔥🔥🔥🔥 撤回 §10.214：「1024 是行方向 group」是把 benchmark 的取值当成了格式
+
+[c-vocab-groups-are-caller-chosen]
+
+> ```cpp
+> const std::size_t groups =
+>     static_cast<std::size_t>(affine_bias->ne[1]);
+> const std::size_t codebook_rows = vocabulary / groups;
+> ```
+> `decode_component` 里：`const std::size_t group = row / codebook_rows;`
+> `weight = affine_weight + group * 16;` `bias = affine_bias + group * 4;`
+
+> **⭐⭐⭐⭐⭐ 这条直接裁决了 §10.214 那个 128 vs 1024 的矛盾，
+> 而结论是「我的上一轮结论错了一半」**：
+> **§10.214 我写「128 是列方向、1024 是行方向」，
+> ⚠️ 而本轮看到：行方向的粒度根本不是常量，
+> 它是调用方建 `affine_bias` 张量时给的那个维度。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个数字出现在「测试的调用点」与出现在「实现的常量里」是两件完全不同的事——**
+> **⚠️ 而前者永远只能说明「这一次这么用了」，后者才说明「必须这么用」。**
+>
+> ⭐⭐ **§10.214 我为什么错了，可以精确复述**：
+> **我读到 `--suite` 的五个形状 `groups = rows/1024` 全部成立，
+> ⚠️ 于是我把「五个样本一致」当成了「规定」——
+> 而这正是 §10.176 那条「两次只够提一个假设」的第二次应验，
+> 只不过这次是「五次」。**
+>
+> **⭐⭐ 判据：**
+> **「N 个样本一致」永远不等于「这是一条规则」——**
+> **⚠️ 因为真正的判据是「有没有反例」，而不是「正例够不够多」，
+> 而本轮的反例就在同一个文件的 `make_fixture` 里（`rows/128`）。**
+>
+> ⭐⭐ **`validate_vocab_base` 给出了真正的约束清单**，
+> 其中只有一条含 128：
+> **`columns % 128 != 0` 就抛，即 128 是列方向的硬约束
+> （来源是 `hadamard_blocks(x, 128)`）；
+> 而行方向的唯一要求是 `codes->ne[1] % affine_bias->ne[1] != 0` 就抛，
+> 即「能被整除」，没有上下限。**
+>
+> **⭐⭐ 判据：**
+> **一个约束的「形状」比它的「数值」更有信息量——**
+> **⚠️ `columns % 128 == 0` 是「等于一个常量」，
+> `vocabulary % groups == 0` 是「整除一个变量」，
+> 而前者只能来自算法（FWHT 块大小），后者来自数据布局。**
+>
+> ⭐⭐ **这给 §10.170 那个 `group_size = 128` 一个精确的归属**：
+> **它是列方向的 FWHT 块大小，
+> ⚠️ 而它与「每多少个输出通道共用一个 affine」是两个不同的东西，
+> 只是恰好都叫 group。**
+>
+> **⭐⭐ 判据：**
+> **当一个名字在两个地方都出现时，最危险的不是「它含义不同」，
+> 而是「它数值恰好相同」——**
+> **⚠️ 因为数值相同会让 grep 与肉眼都失效。**
+>
+> ⭐⭐ **`--suite` 选 1024 而不是 128 这件事本身也有含义**：
+> **若用 128，17408 行会有 136 个 group（affine 有 2176 个 float）；
+> ⚠️ 若用 1024，只有 17 个 group（272 个 float）——
+> 故 1024 让元数据小 8 倍，代价是每组内的行共享同一个仿射变换。**
+>
+> **⭐⭐ 判据：**
+> **「分组粒度」是一个「精度与开销的权衡旋钮」——**
+> **⚠️ 而它由调用方选，说明这个格式允许不同精度档，
+> 这是一条本报告此前没有记录的设计自由度。**
+
+> ⚠️⚠️⚠️ **对 §10.214 的处理**：
+> **该节的标题与「128 是列方向、1024 是行方向」那一句**已被本节撤回**。
+> 保留下来的仍然成立的部分是：**
+> **① `--suite` 五个形状的 `groups` 确实全部等于 `rows / 1024`（这是观测，不是解释）；
+> ② `make_fixture` 的默认值确实是 `rows / 128`；
+> ③ 两者确实矛盾——但这个矛盾的答案是「它们服务不同的调用方」，
+> 而不是「两个方向的粒度不同」。**
+
+### 10.219 🔥🔥🔥🔥🔥 rescue 是一条**完整的 8-bit 码**，不是「低 2 位 + 残差」
+
+[c-vocab-rescue-is-full-8bit-code]
+
+> ```cpp
+> const uint8_t low_two =
+>     (low[column / 4] >> ((column % 4) * 2)) & 0x03U;
+> const uint8_t packed =
+>     low_two | (unpack_upper_six(upper, column) << 2);
+> row_output[column] = (static_cast<int>(packed) - 128) * scale;
+> ```
+
+> **⭐⭐⭐⭐⭐ 这是本轮最重要的语义发现**：
+> **`low_two` 是 2 bit、`unpack_upper_six` 是 6 bit，
+> ⚠️ 而它们被 `|` 与 `<< 2` 拼成一个 8-bit 整数，
+> 然后 `(packed - 128) * scale`——
+> 故 rescue 行完全不走 lattice / affine / FWHT / signs 那一整套。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「rescue」这个词在这里不是「修补」，而是「换一条完全不同的解码路径」——**
+> **⚠️ 而这个区别决定了它的代价：
+> 一条 rescue 行要存 `columns*3/4` 字节的 6-bit 平面加一个 FP16 scale，
+> 即每行 96 字节（columns=128）或更多。**
+>
+> ⭐⭐ **§10.210 我把它读成「残差/高位平面」，⚠️ 那是「对了一半」**：
+> **它是高位，但用途不是「补精度」，而是「绕开整条 AVQ2 管线」。**
+>
+> **⭐⭐ 判据：**
+> **「一个字段的名字」与「它的用途」之间可以差很远——**
+> **⚠️ 而 `upper` 这个名字（上方位）描述的是位置，
+> `rescue` 这个名字（救援）描述的是用途，
+> 两个名字都对，但只有一个说明了它在系统里的角色。**
+>
+> ⭐⭐ **`- 128` 这个零点值得单独记**：
+> **8-bit 无符号的范围是 0..255，中点 128——
+> ⚠️ 故 `(packed - 128)` 落在 `-128..+127`，
+> 即它是对称的 8-bit 整数，而不是 0..255 的偏移。**
+>
+> **⭐⭐ 判据：**
+> **「减 128」与 §10.210 那个「6-bit 减中点 32」是同一条约定——**
+> **⚠️ 而它们的位宽不同（8 vs 6），故零点也不同，
+> 这正是「中点即零」这条规则的第三次应验。**
+>
+> ⭐⭐ **scale 是 FP16 而非 FP32**：
+> **`const float scale = ggml_fp16_to_fp32(scale_data[rescue]);`——
+> ⚠️ 故 rescue 行的相对精度受 FP16 尾数限制（约 11 bit）。**
+>
+> **⭐⭐ 判据：**
+> **「一个 escape hatch 的精度」往往低于主路径——**
+> **⚠️ 而这是可以接受的，因为它的目的是「别崩」，不是「别损失精度」。**
+>
+> ⚠️ **这条留下一个未闭合的缺口**：
+> **`- 128` 让范围对称，而 `* scale` 之后仍需与主路径的输出对齐——
+> 而主路径的输出经过 FWHT（正交变换，可能放大 `sqrt(128) = 11.3` 倍），
+> 故两条路径的输出**量纲是否一致**，本报告没有证据。**
+>
+> **⭐⭐ 判据：**
+> **「一条并行路径与主路径的输出是否同量纲」是一个必须显式验证的点——**
+> **⚠️ 而本报告目前只有测试里的一个断言（rescue 行输出 `0.0`），
+> 而 `0.0` 对任何量纲都成立，故它不能验证量纲。**
+
+### 10.220 ⭐⭐⭐⭐ rescue 表用二分查找，故它**必须已排序**——而没人检查
+
+[c-vocab-rescue-lookup-needs-sorted]
+
+> ```cpp
+> const int32_t * found =
+>     std::lower_bound(row_ids, row_ids + count, token);
+> return found != row_ids + count && *found == token
+>     ? static_cast<int>(found - row_ids) : -1;
+> ```
+
+> **⭐⭐⭐⭐ 这是一个「未文档化的前置条件」（`rescued_row_ids` 必须升序）**：
+> **`std::lower_bound` 只在有序列上才是 O(log n) 且正确——
+> ⚠️ 而 `validate_vocab_base` 只检查了 `type == I32` 与 `ne[1]` 匹配，
+> 没有一行检查单调性。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个隐式前置条件」的危险度正比于「违反它的后果有多安静」——**
+> **⚠️ 而这里违反的后果是：二分查找返回 `-1`，
+> 故某几行「该走 rescue 却走了主路径」——
+> 输出仍然是一个有限的浮点数，不会崩，也不会 NaN。**
+>
+> ⭐⭐ **这正是本报告反复记录的那类失效**：
+> **「错得看起来对」比「错得明显」危险得多。**
+>
+> **⭐⭐ 判据：**
+> **「一个不检查的前置条件」应该被记成一个「契约缺陷」而不是「bug」——**
+> **⚠️ 因为 bug 是「代码写错了」，而契约缺陷是
+> 「代码对，但它假设了调用方会做一件没说的事」。**
+>
+> ⭐⭐ **可执行的检查法**：
+> **凡是用 `lower_bound` / `binary_search` / `std::set` 的地方，
+> ⚠️ 都应该去找「谁保证了有序」——
+> 若找不到，那就是一个契约缺陷。**
+>
+> **⭐⭐ 而 `find_rescue` 的返回值设计值得记**：
+> **它返回 `-1` 表示「不在表里」，而不是抛异常——
+> ⚠️ 故「不在表里」是一个正常路径，不是错误。**
+>
+> **⭐⭐ 判据：**
+> **「一个查找函数用哨兵值而不是异常」说明作者预期「找不到」是常态——**
+> **⚠️ 而 vocab 测试里 `token_ids = {1, 2, -1}`、`rescue_id = 2`，
+> 只有一个 token 触发 rescue，暗示它是极少数。**
+>
+> ⭐⭐ **此处有一个可疑点**：
+> **`rescue_id = 2`，而 token=2 应当命中 rescue，
+> ⚠️ 测试却断言 `row_output[2*columns + column] == 0.0F`——
+> 这意味着 `packed - 128 == 0` 或 `scale == 0`；
+> 而 `scale` 被显式设成 `ggml_fp32_to_fp16(1.0F)`，故只能是 `packed == 128`。**
+>
+> **⭐⭐ 判据：**
+> **「一个断言值为 0」时，必须追问「是哪一条路径产生的 0」——**
+> **⚠️ 而 0 可以由「输入是 0」「乘了 0」「减掉了自己」三种方式产生，
+> 而它们的诊断含义完全不同。**
+
+### 10.221 ⚠️⚠️ 越界 token 被静默跳过，输出该行**不被写入**
+
+[c-vocab-out-of-range-token-silently-skipped]
+
+> ```cpp
+> const int32_t token = ids[token_index];
+> if (token < 0 || static_cast<std::size_t>(token) >= vocabulary) {
+>     continue;
+> }
+> ```
+
+> **⭐⭐⭐⭐ 这是一个「静默跳过」而非「报错」的设计**：
+> **`continue` 让这一行输出完全不被写，
+> ⚠️ 故 `dst->data` 那一行是分配时的内容。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个 `continue` 的后果」取决于「目标缓冲区是否保证零初始化」——**
+> **⚠️ 而这一条本报告没有证据，
+> 故我只能确认「不写」，不能确认「是 0」。**
+>
+> ⭐⭐ **这就是为什么置信度是 `medium` 而不是 `high`**：
+> **C1 要求「primary + supports + 至少一条证据」即可给 high，
+> ⚠️ 而我自己额外加了一条「结论的每个分句都要有证据」——
+> 故我把「静默跳过」写成事实（有证据），
+> 把「输出是 0」写成未确认（无证据）。**
+>
+> **⭐⭐ 判据：**
+> **`high` 的门槛是「证据存在」，而一份好的报告需要的是「每个断言都有证据」——**
+> **⚠️ 前者是校验器能查的，后者只能自己查。**
+>
+> ⭐⭐ **这条与 §10.211 那个 `n_gpu_layers = 0` 构成一个有趣的对照**：
+> **两者都是「配置改变行为」，但一个是显式（写了 0），
+> 一个是隐式（越界就跳过）。**
+>
+> **⭐⭐ 判据：**
+> **「显式的排除」与「隐式的排除」在代码里长得完全不一样——**
+> **⚠️ 前者是一行赋值，后者是一个 `if` 的副作用。**
+>
+> ⭐⭐ **`token < 0` 这个条件还暗示一件事**：
+> **`token_ids` 允许负数，⚠️ 而 vocab 测试里确实有 `-1`——
+> 故「负数 token」不是错误，而是约定的一部分（可能是 padding）。**
+>
+> **⭐⭐ 判据：**
+> **当一个类型允许负数而语义上不应为负时，先假设「负数有特殊含义」——**
+> **⚠️ 而这份代码里负数等于「跳过」，即 padding 语义。**
+
+### 10.222 🔥🔥🔥 `get_rows` 与 `head` 互为转置，故它们的**数值路径不同**
+
+[c-vocab-head-and-rows-are-transposes]
+
+> `get_rows`：decode → `hadamard_blocks(x, 128)` → ×signs
+> `head`：×signs → `hadamard_blocks(x, 128)` → dot(decode)
+
+> **⭐⭐⭐⭐⭐ 这条给本报告一个可复用的判断法**：
+> **当两个函数一个「先 A 后 B」、另一个「先 B 后 A」，
+> 且 A 与 B 都是线性算子时，它们大概率互为转置——
+> ⚠️ 而「互为转置」意味着「数学上等价、数值上不等价」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「数学等价」与「数值等价」之间的差距，
+> 恰好等于两次运算的舍入误差之差——**
+> **⚠️ 故 §10.217 那个「Metal `2e-4` vs CUDA `2e-3`」的差异，
+> 有可能就来自「哪一侧做了 FWHT」。**
+>
+> ⭐⭐ **这是一个可检验的假设，而它比「作者保守」更具体**：
+> **若 `get_rows` 侧在 GPU 上做 FWHT、`head` 侧在 CPU 上做，
+> ⚠️ 则两条路径的舍入不同，而测试同时比对两者——
+> 故容差必须覆盖最差的那一侧。**
+>
+> **⭐⭐ 判据：**
+> **「转置对」是容差差异的一个「结构性」解释，
+> ⚠️ 而「保守」只是一个「心理学」解释——
+> 当两者都能解释数据时，优先选结构性的那个。**
+>
+> ⭐⭐ **这条还解释了一个此前没注意的细节**：
+> **`head` 没有 rescue 路径（只有 5 个 src，而 `get_rows` 有 8 个）——
+> ⚠️ 故「谁是低频词」这件事只影响 embedding，不影响输出层。**
+>
+> **⭐⭐ 判据：**
+> **「同一个格式的两个 op 有不同数量的操作数」说明其中一个被裁剪过——**
+> **⚠️ 而裁剪掉的那部分（rescue）正是「质量敏感」的部分。**
+>
+> ⭐⭐ **这与 §10.170 那条「AVQ2 有六个操作数」对上**：
+> **`mul_mat` 是 6 个、`vocab_get_rows` 是 8 个、`vocab_head` 是 5 个——
+> ⚠️ 三个 op、三个操作数个数，同一个格式。**
+>
+> **⭐⭐ 判据：**
+> **「操作数个数」是「这个 op 需要多少独立信息」的直接度量——**
+> **⚠️ 而它比「参数个数」更好用，因为它不受形状影响。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -27241,6 +27521,35 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 ⭐⭐ 判据「**「一个元数据张量相对于主体张量的比例」说明它是「每块一份」还是「每行一份」——而 0.0012% 只能是「每 1024 行一份」**」；
 ⭐⭐ **AVQ2 的十个形状里 AVQ2 部分合计 21,967,667,200 个权重元素（按 2 bit 约 5.11 GiB），INT4 部分合计 1,756,364,800 个（按 4 bit 约 0.82 GiB）** — [src-btl3-metal-suite-shapes]
 
+### BTL-3 的 vocab / embedding 实现（第一百零八轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/src/btl3-vocab.cpp`（10,963 字节，293 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/btl3-vocab.cpp)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **行方向的分组数是从张量形状推出来的，不是常量**：
+「**const std::size_t groups = static_cast<std::size_t>(affine_bias->ne[1]); const std::size_t codebook_rows = vocabulary / groups;**」；
+⭐⭐⭐⭐⭐ 这直接裁决了 §10.214 那个 128 vs 1024 的矛盾 —— **「1024」只是 `--suite` 传进 `groups` 的一个取值，不是格式常量**；
+⭐⭐ 判据（本轮最重要）「**一个数字出现在「测试的调用点」与出现在「实现的常量里」是两件完全不同的事——而前者永远只能说明「这一次这么用了」，后者才说明「必须这么用」**」；
+⭐⭐ 判据「**「N 个样本一致」永远不等于「这是一条规则」——因为真正的判据是「有没有反例」，而不是「正例够不够多」**」；
+(a) ⭐⭐⭐⭐⭐ **唯一的硬约束清单，其中只有一条含 128**：「**columns <= 0 || columns % 128 != 0 || codes->ne[0] != columns / 4 || affine_weight->ne[0] != 4 || affine_weight->ne[1] != 4 || affine_bias->ne[0] != 4 || affine_weight->ne[2] != affine_bias->ne[1] || codes->ne[1] % affine_bias->ne[1] != 0 || input_signs->ne[0] != columns**」→「**throw std::invalid_argument("BTL3 vocabulary tensor layout is invalid");**」；
+⭐⭐ 判据「**一个约束的「形状」比它的「数值」更有信息量——`columns % 128 == 0` 是「等于一个常量」，`vocabulary % groups == 0` 是「整除一个变量」，而前者只能来自算法（FWHT 块大小），后者来自数据布局**」；
+(b) 🔥🔥🔥🔥 **`128` 在 vocab 路径里只作为 FWHT 块大小出现**：「**std::vector<float> transformed(row_output, row_output + columns); hadamard_blocks(transformed, 128);**」，**而这正是 `columns % 128 != 0` 那条约束的来源**；
+(c) 🔥🔥🔥🔥🔥 **rescue 是一条完整的 8-bit 码，不是补残差**：「**const uint8_t low_two = (low[column / 4] >> ((column % 4) * 2)) & 0x03U; const uint8_t packed = low_two | (unpack_upper_six(upper, column) << 2); row_output[column] = (static_cast<int>(packed) - 128) * scale;**」；
+⭐⭐ 判据「**「rescue」这个词在这里不是「修补」，而是「换一条完全不同的解码路径」——而一条 rescue 行要存 `columns*3/4` 字节的 6-bit 平面加一个 FP16 scale**」；
+⭐⭐ 判据「**「减 128」与 §10.210 那个「6-bit 减中点 32」是同一条约定——而它们的位宽不同，故零点也不同，这正是「中点即零」这条规则的第三次应验**」；
+⭐⭐ 判据「**「一个 escape hatch 的精度」往往低于主路径——而这是可以接受的，因为它的目的是「别崩」，不是「别损失精度」**」；
+⚠️ **未闭合缺口**：**主路径的输出经过 FWHT（可能放大 `sqrt(128) = 11.3` 倍），故两条路径的输出**量纲是否一致**，本报告没有证据**；
+(d) ⭐⭐⭐⭐ **rescue 表用二分查找，故它必须已排序**：「**const int32_t * found = std::lower_bound(row_ids, row_ids + count, token); return found != row_ids + count && *found == token ? static_cast<int>(found - row_ids) : -1;**」；
+⭐⭐ 判据「**「一个隐式前置条件」的危险度正比于「违反它的后果有多安静」——而这里违反的后果是二分查找返回 -1，故某几行「该走 rescue 却走了主路径」，输出仍然是一个有限的浮点数，不会崩，也不会 NaN**」；
+⭐⭐ 判据「**「一个不检查的前置条件」应该被记成一个「契约缺陷」而不是「bug」——因为 bug 是「代码写错了」，而契约缺陷是「代码对，但它假设了调用方会做一件没说的事」**」；
+(e) ⚠️⚠️ **越界的 token 被静默跳过，输出该行不被写入**：「**const int32_t token = ids[token_index]; if (token < 0 || static_cast<std::size_t>(token) >= vocabulary) { continue; }**」；
+⭐⭐ 判据「**「一个 `continue` 的后果」取决于「目标缓冲区是否保证零初始化」——而这一条本报告没有证据，故我只能确认「不写」，不能确认「是 0」**」；
+⭐⭐ 判据「**「显式的排除」与「隐式的排除」在代码里长得完全不一样——前者是一行赋值，后者是一个 `if` 的副作用**」；
+(f) 🔥🔥🔥 **`get_rows` 与 `head` 的 FWHT 位置相反，两者互为转置**：get_rows 是 decode 后 `hadamard_blocks(transformed, 128)`，head 是 `transformed[column] = input_data[token * columns + column] * static_cast<float>(sign_data[column]);` 之后才 `hadamard_blocks`；
+⭐⭐⭐ 判据「**当两个函数一个「先 A 后 B」、另一个「先 B 后 A」，且 A 与 B 都是线性算子时，它们大概率互为转置——而「互为转置」意味着「数学上等价、数值上不等价」**」；
+⭐⭐ 判据「**「转置对」是容差差异的一个「结构性」解释，而「保守」只是一个「心理学」解释——当两者都能解释数据时，优先选结构性的那个**」；
+(g) ⭐⭐⭐⭐ **两个 op 各带一个自己的 magic**：「**reinterpret_cast<void *>(vocab_rows_custom_magic)**」「**reinterpret_cast<void *>(vocab_head_custom_magic)**」；⚠️ **这两个 magic 的数值本文件不含，需读 contract 头**；
+⭐⭐ 判据「**「操作数个数」是「这个 op 需要多少独立信息」的直接度量——而它比「参数个数」更好用，因为它不受形状影响**」（`mul_mat` 6 个、`vocab_get_rows` 8 个、`vocab_head` 5 个） — [src-btl3-src-vocab-cpp]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -27380,7 +27689,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=334, evidence=2401, claims=1764, claims_high=1418, claims_disputed=9, trace_events=736, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=335, evidence=2409, claims=1769, claims_high=1422, claims_disputed=9, trace_events=738, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
