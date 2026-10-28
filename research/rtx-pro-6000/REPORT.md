@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：396 ｜ **证据数**：2682 ｜ **主张数**：1890（高置信 1542，争议 9）
+> **来源数**：398 ｜ **证据数**：2690 ｜ **主张数**：1895（高置信 1547，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -29042,11 +29042,165 @@ exit 0
 > **⚠️ 而这条正好接上本报告已有的 `native/llama.cpp/common/dspark-markov.cu`
 > 与 `.h`**：**那个文件是 DSpark 的实现，而本轮第一次拿到它的收益曲线。**
 
+> **✅ 而下一轮（§10.348 到 §10.351）读完了那两个文件，
+> 那条曲线现在有了一个机制而不只是一个相关性**：
+> **DSpark 的串行链并行度上限是 1（`dspark-markov.h` 20-24 行），
+> 故它的绝对耗时与卡的宽度无关、只与链长有关——
+> 这正是「基线越快、加速比越低」的形状。**
+
 > **⭐⭐ 文档并明说**：
 > 「**The optional DSpark column records speculative decoding with a paired
 > drafter. Plain `llama-bench` does not exercise it. Server and standalone
 > harness results are not directly comparable.**」
 > **⭐ 故这张表里有两套 harness 的结果混在一起，而它自己标注了这一点。**
+
+### 10.347 🔥🔥🔥🔥🔥 DSpark 的 CUDA 路径是**默认开**，且有一个 `=0` 可关
+
+[c-dspark-cuda-is-default-with-an-off-switch]
+
+> **`native/llama.cpp/common/dspark-markov.h` 5-11 行**：
+> 「**This is an acceleration of the sequential per-position resample that
+> common/speculative.cpp otherwise runs host-side (scalar or BLAS). It is
+> compiled whenever the build has CUDA (LLAMA_DSPARK_MARKOV_CUDA) and,
+> when the drafter carries a Markov head, is the DEFAULT resample path at
+> runtime; set the environment variable LLAMA_DSPARK_MARKOV_CUDA=0 to fall
+> back to the host path.**」
+
+> **🔥 故 DSpark 有两层开关：编译期 `LLAMA_DSPARK_MARKOV_CUDA`、
+> 运行时同名环境变量 `=0`。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个能力如果同时有「编译期开关」与「运行时开关」，
+> 说明作者认为它「在有些机器上必须能关」；
+> 而这两层的存在本身就是一次承认。**
+>
+> **⭐⭐ 判据：**
+> **而 §10.346 观察到的「PRO 6000 的 DSpark 列是空的」，
+> 在这个头文件面前就不再是「没人测」，
+> 而是「有一个开关可以解释为什么没有数」。**
+
+### 10.348 🔥🔥🔥🔥🔥 它只算一个**低秩外积**，不是完整词表打分
+
+[c-dspark-costs-a-low-rank-outer-product]
+
+> **`dspark-markov.h` 14-19 行**：
+> 「**for a drafted position k,
+> correction[v] = sum_r w1[prev * R + r] * w2[v * R + r]
+> step_logit[v] = base_logits[k][v] + correction[v]
+> out[k] = argmax_v step_logit[v] (lowest v wins ties)**」
+>
+> **故额外算力是 `O(n_vocab * rank)`，不是 `O(n_vocab * hidden)`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个投机解码器如果只用一个低秩修正，
+> 那它的成本随 `rank` 线性增长而不是随模型宽度；
+> 而 `rank` 是一个可以小到 32 的数。**
+>
+> **⭐⭐ 判据：**
+> **故「DSpark 的算力开销小」不是因为它优化得好，
+> 而是因为它本来就只算了一个外积。**
+>
+> **⭐⭐ 而这条与 §10.346 的收益曲线吻合**：
+> **因为开销小，所以它的收益上限由「接受的 token 数」而不是「算力」决定。**
+
+### 10.349 🔥🔥🔥🔥🔥 串行链的**并行度上限是 1**
+
+[c-dspark-chain-parallelism-is-one]
+
+> **`dspark-markov.h` 20-24 行**：
+> 「**where prev is the anchor token for k == 0 and the ACTUAL argmax of
+> position k-1 for k > 0. The sequential chaining is preserved structurally
+> on the device: position k's kernel reads the argmax that position k-1's
+> kernel wrote into device memory -- it is never precomputed on the host.**」
+
+> **🔥 故无论卡有多少 SM，这条链的耗时只取决于链长与单步延迟。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 kernel 链如果必须逐位置串行，
+> 那么它的绝对耗时与「卡的宽度」无关，只与「链长与单步延迟」有关。**
+>
+> **⭐⭐ 判据：**
+> **而这一点正好解释了 §10.346 那条曲线：
+> 基线越快（卡的宽度越大），这条固定长度的链占的比例越高，
+> 故加速比越低——`1.57x` 在 `107.5 tok/s` 的 L40S 上、
+> `2.40x` 在 `29.2 tok/s` 的 GB10 上。**
+>
+> **⭐⭐ 判据：**
+> **故「DSpark 在 RTX PRO 6000 上会接近 `1.6x` 那个下限」这个推断，
+> 现在有了一个机制而不只是一个相关性。**
+
+### 10.350 ⭐⭐⭐⭐⭐ 它自己声明「**函数等价、非逐位相同**」
+
+[c-dspark-declares-not-bit-identical]
+
+> **`dspark-markov.h` 26-33 行**：
+> 「**The device reduces `correction` with a warp tree-reduction, so its
+> floating-point accumulation order differs from the host scalar loop (and
+> from BLAS, which uses yet another order). The result is therefore
+> functionally equivalent, not bit-identical: at an exact argmax tie the
+> rounding can select a different token. That only changes which speculative
+> draft is proposed -- the target verify still arbitrates the committed
+> output -- so it never affects correctness, only (rarely) the accept rate.**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个数值路径如果自己声明「函数等价、非逐位相同」，
+> 那它的回归测试就不能比对数值，
+> 只能比对「最后被验证的那个 token」。**
+>
+> **⭐⭐ 判据：**
+> **而它把后果也说清了：只影响接受率，不影响正确性——
+> 因为「the target verify still arbitrates the committed output」。**
+>
+> **⭐⭐ 判据：**
+> **「接受率不同」是一个可观测的差，而它不是 bug；
+> 故任何「两个后端 DSpark 结果不同」的报告都要先排除这一条。**
+
+> ⭐ **而这条与本报告 §10.190 那个 `ggml_custom_4d` 从不零化输出的发现属于同一类**：
+> **两者都是「同一份数学在两个后端上不等价」，
+> 而区别是这里作者写下来了，那里没有。**
+
+### 10.351 🔥🔥🔥🔥🔥 一个候选块发射 **`2 * n_use`** 个 kernel，两半网格差 **1024:1**
+
+[c-dspark-emits-2n-kernels-with-1024-to-1-grid-skew]
+
+> **`dspark-markov.cu` 286-293 行的 host 侧循环**：
+> ```c
+> for (int32_t k = 0; k < n_use; ++k) {
+>     dspark_gemv_argmax_partial<<<DSPARK_NBLOCKS, DSPARK_BLK_THREADS, shmem, ctx->stream>>>(
+>             ctx->d_w1, ctx->d_w2, ctx->d_base, ctx->d_prev,
+>             V, R, (int64_t) k, ctx->d_part_val, ctx->d_part_idx);
+>     dspark_argmax_final<<<1, DSPARK_BLK_THREADS, 0, ctx->stream>>>(
+>             ctx->d_part_val, ctx->d_part_idx, DSPARK_NBLOCKS, (int64_t) k,
+>             ctx->d_out, ctx->d_prev);
+> }
+> ```
+> **而常量是**（13-16 行）：
+> `DSPARK_WARP 32`、`DSPARK_WARPS_PER_BLOCK 8`、
+> `DSPARK_BLK_THREADS (32 * 8) // 256`、`DSPARK_NBLOCKS 1024`。
+
+> **故：**
+> ```
+> 发射次数            = 2 * n_use
+> partial 网格        = 1024 块 x 256 线程 = 262,144 线程
+> final   网格        =    1 块 x 256 线程 =     256 线程
+> 不对称比            = 262144 / 256 = 1024 : 1
+> h_base（pinned）    = n_use * n_vocab * 4 字节
+>                     n_use=128, n_vocab=131072 -> 64 MiB
+> ```
+> **而每个 round 都要：`memcpy` 到 `h_base` 一次、`cudaMemcpyAsync` H2D 一次。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「每位置一对 kernel」的循环，
+> 它的固定开销随候选块长度线性增长，而不是随卡的能力变化。**
+>
+> **⭐⭐ 判据：**
+> **故评价 DSpark 的收益时，「`n_use` 取多大」与「卡有多快」是两个独立的旋钮；
+> 而本报告只知道前者被硬编码成块长，后者被实测成 `1.57x`–`2.40x`。**
+
+> ⚠️ **而 `cudaGetLastError()` 只在 `2 * n_use` 个发射全部入队之后被调一次**（294 行）：
+> **它捕获的是「有没有发射失败」，而不是「第几个 kernel 算错了」。**
+> **⭐ 这是一个「一次同步、一次查错」的设计——**
+> **对一个必须串行的链来说是合理的，但它让「哪一个位置出错」不可定位。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -34155,6 +34309,39 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 (b) 🔥 **一个纯算术导出量**：**PP/TG 比：白皮书 4520/140.6 = 32.15、模型卡 4020/124.8 = 32.21、社区 4552.38/129.92 = 35.04、而 BTL-3 84.70/43.16 = 1.96**；⭐⭐ 判据「**三个独立来源给出同一个比值（32-35），说明这个比值是「这类实现」的属性，不是某次测量的偶然**」；
  — [src-bonsai-community-benchmarks] [src-bonsai-cb-pro-6000] [src-bonsai-cb-ternary-readme]
 
+### DSpark 的实现（第一百三十九轮补充）
+
+继续按上一轮的待追项推进。本轮读 `native/llama.cpp/common/` 下的
+`dspark-markov.h` 与 `.cu`，这是本报告第一次读这两个文件。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/common/dspark-markov.h`（2,885 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/common/dspark-markov.h)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **DSpark 的 CUDA 重采样是默认路径，且有一个 `=0` 可关**：
+「**It is compiled whenever the build has CUDA (LLAMA_DSPARK_MARKOV_CUDA) and, when the drafter carries a Markov head, is the DEFAULT resample path at runtime; set the environment variable LLAMA_DSPARK_MARKOV_CUDA=0 to fall back to the host path**」——
+⭐⭐ 判据（本轮最重要）「**一个能力如果同时有「编译期开关」与「运行时开关」，说明作者认为它「在有些机器上必须能关」；而这两层的存在本身就是一次承认**」；
+⭐⭐ 判据「**而 §10.346 观察到的「PRO 6000 的 DSpark 列是空的」，在这个头文件面前就不再是「没人测」，而是「有一个开关可以解释为什么没有数**」；
+(a) 🔥🔥🔥🔥🔥 **它只算一个低秩外积，不是完整词表打分**：「**correction[v] = sum_r w1[prev * R + r] * w2[v * R + r]；step_logit[v] = base_logits[k][v] + correction[v]；out[k] = argmax_v step_logit[v] (lowest v wins ties)**」——**故额外算力是 O(n_vocab * rank)，不是 O(n_vocab * hidden)**；
+⭐⭐ 判据「**一个投机解码器如果只用一个低秩修正，那它的成本随 rank 线性增长而不是随模型宽度；而 rank 是一个可以小到 32 的数**」；
+(b) 🔥🔥🔥🔥🔥 **串行链的并行度上限是 1**：「**position k's kernel reads the argmax that position k-1's kernel wrote into device memory -- it is never precomputed on the host**」——**故无论卡有多少 SM，这条链的耗时只取决于链长与单步延迟**；
+⭐⭐ 判据「**一个 kernel 链如果必须逐位置串行，那么它的绝对耗时与「卡的宽度」无关，只与「链长与单步延迟」有关**」；
+⭐⭐ **而这一点正好解释了 §10.346 那条曲线：基线越快（卡的宽度越大），这条固定长度的链占的比例越高，故加速比越低——1.57x 在 107.5 tok/s 的 L40S 上、2.40x 在 29.2 tok/s 的 GB10 上**；
+**故「DSpark 在 PRO 6000 上会接近 1.6x 那个下限」这个推断，现在有了一个机制而不只是一个相关性**；
+(c) ⭐⭐⭐⭐⭐ **它自己声明「函数等价、非逐位相同」**：「**The device reduces `correction` with a warp tree-reduction, so its floating-point accumulation order differs from the host scalar loop (and from BLAS, which uses yet another order). The result is therefore functionally equivalent, not bit-identical: at an exact argmax tie the rounding can select a different token. That only changes which speculative draft is proposed -- the target verify still arbitrates the committed output -- so it never affects correctness, only (rarely) the accept rate**」；
+⭐⭐ 判据「**一个数值路径如果自己声明「函数等价、非逐位相同」，那它的回归测试就不能比对数值，只能比对「最后被验证的那个 token」**」；
+⭐⭐ 判据「**「接受率不同」是一个可观测的差，而它不是 bug；故任何「两个后端 DSpark 结果不同」的报告都要先排除这一条**」；
+2. [GitHub / Badtheorylabs — `native/llama.cpp/common/dspark-markov.cu`（11,706 字节，303 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/common/dspark-markov.cu)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **一个候选块发射 2 * n_use 个 kernel，两半网格差 1024:1**：
+「**for (int32_t k = 0; k < n_use; ++k) { dspark_gemv_argmax_partial<<<DSPARK_NBLOCKS, DSPARK_BLK_THREADS, shmem, ctx->stream>>>(...); dspark_argmax_final<<<1, DSPARK_BLK_THREADS, 0, ctx->stream>>>(...); }**」——
+**而常量是 `DSPARK_WARP 32`、`DSPARK_WARPS_PER_BLOCK 8`、`DSPARK_BLK_THREADS (32*8) // 256`、`DSPARK_NBLOCKS 1024`**；
+**故 partial 是 1024 块 x 256 线程 = 262,144 线程、final 是 1 块 x 256 线程 = 256 线程——262144/256 = 1024:1**；
+⭐⭐ 判据「**一个「每位置一对 kernel」的循环，它的固定开销随候选块长度线性增长，而不是随卡的能力变化**」；
+(a) 🔥🔥🔥🔥🔥 **每轮都要把 `n_use * n_vocab * 4` 字节搬两次**：「**h_base = pinned staging for the H2D of base logits**」+「**cudaHostAlloc(&ctx->h_base, rows * n_vocab * sizeof(float), ...)**」+「**memcpy(ctx->h_base, base_logits, ...); cudaMemcpyAsync(ctx->d_base, ctx->h_base, ..., cudaMemcpyHostToDevice)**」——**故 n_use=128、n_vocab=131072 时是 64 MiB 一次，且是 host memcpy 加 H2D 共两次**；
+(b) ⚠️ **`cudaGetLastError()` 只在 2 * n_use 个发射全部入队之后被调一次**：**它捕获的是「有没有发射失败」，而不是「第几个 kernel 算错了」**；
+ — [src-btl3-dspark-markov-h] [src-btl3-dspark-markov-cu]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -34294,7 +34481,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=396, evidence=2682, claims=1890, claims_high=1542, claims_disputed=9, trace_events=863, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=398, evidence=2690, claims=1895, claims_high=1547, claims_disputed=9, trace_events=867, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
