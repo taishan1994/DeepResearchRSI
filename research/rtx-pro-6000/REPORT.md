@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：463 ｜ **证据数**：2902 ｜ **主张数**：2109（高置信 1759，争议 9）
+> **来源数**：466 ｜ **证据数**：2913 ｜ **主张数**：2119（高置信 1769，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -35631,6 +35631,269 @@ exit 0
 > 当一个仓库里有一类「长得都一样」的文件时，
 > 先去找那个写它们的循环，再决定要不要逐个读。**
 
+### 10.566 🔥🔥🔥🔥🔥 那个生成器，**没有任何 CI 运行它**
+
+[c-the-generator-is-never-run-by-any-ci]
+
+> **七个 workflow 逐一 grep `generate_cu_files`**：
+> ```
+> build-cuda-ubuntu.yml      0 处
+> build-cuda-windows.yml     0 处
+> code-style.yml             0 处
+> python-lint.yml            0 处
+> build-self-hosted.yml      0 处
+> release.yml                0 处
+> build-cache.yml            0 处
+> ```
+> **而 `ggml-cuda/CMakeLists.txt` 第 106-112 行直接用 `file(GLOB ...)` 吃现成的 `.cu`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「先删后写」的生成器没有任何 CI 运行它时，
+> 那 120 个文件就是「有人最后一次手动跑过它」的快照——
+> 故它们与脚本之间没有任何机制保证同步。**
+>
+> **⭐⭐ 判据：**
+> **故「仓库里的文件等于脚本的输出」这件事，
+> 在 §10.561 的字节公式成立时是真的，
+> 但在脚本被改过而没人重跑时就不再是真的。**
+>
+> ⚠️ **而这条给本报告一个可检验的分辨法：
+> 如果某天这 120 个文件的字节数不再满足 `134 + 名长`，
+> 那就说明脚本改了而产物没重生成。**
+
+### 10.567 🔥🔥🔥🔥🔥 CI 只编 `89-real`，**从不编 Blackwell**
+
+[c-ci-compiles-only-sm-89-never-blackwell]
+
+> **`build-cuda-ubuntu.yml` 第 68 行**：`-DCMAKE_CUDA_ARCHITECTURES=89-real`
+> **第 41 行**：`container: nvidia/cuda:12.6.2-devel-ubuntu24.04`
+> **而发布包用的是 CUDA 13.0.2 与 `120a-real`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当 CI 编的架构与被测硬件的架构不是同一个时，
+> CI 绿不能推出「这张卡上能跑」——
+> 它只能推出「Ada 上能编过」。**
+>
+> **⭐⭐ 判据：**
+> **故 §10 里所有「Blackwell 路径存在」的结论，
+> 都是靠人工在 `120a-real` 上编出来的，
+> 而不是靠 CI 保证的。**
+>
+> ⚠️ **而这条把 §10.545–§10.557 那一族
+> （`tcgen05` 零命中 / FP4 是唯一分支 / `iter_k` 翻倍）
+> 放进了一个更冷的语境：
+> 那四行代码在本仓库的 CI 里从未被编译过。**
+
+### 10.568 ⭐⭐⭐⭐⭐ 唯一会编 Blackwell 的自动化，是那条**手动**的
+
+[c-the-windows-ci-is-manual-and-sets-no-architectures]
+
+> **`build-cuda-windows.yml` 第 8 行**：
+> ```yaml
+> on:
+>   workflow_dispatch: # allows manual triggering
+> ```
+> **是 `on:` 下的唯一条目**（第 3-4 行注释：「only triggered manually
+> because it is very heavy on the CI」）；
+> **而第 60-68 行的 cmake 参数里没有 `-DCMAKE_CUDA_ARCHITECTURES`**，
+> 故走 `ggml-cuda/CMakeLists.txt` 第 40-55 行的默认值（含 `120a-real`）。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当唯一一条会编到 Blackwell 的 CI 是手动触发时，
+> 「Blackwell 那条路径被编过」这件事就没有周期性保证——
+> 它只保证「有人愿意点那个按钮时它会被编」。**
+>
+> **⭐⭐ 判据：**
+> **故 Linux CI（自动、`89-real`）与 Windows CI（手动、默认含 `120a`）
+> 覆盖的架构集合是不相交的。**
+>
+> ⚠️ **而这条给出一个反直觉的结论：
+> 这份仓库里唯一会编 Blackwell 的自动化，
+> 是那个「因为太重所以改成手动」的 Windows 作业。**
+
+### 10.569 ⭐⭐⭐⭐⭐ 唯一的「代码风格」CI，只检查模型命名
+
+[c-the-only-style-ci-checks-model-naming]
+
+> **`code-style.yml` 只有一个作业**：
+> ```yaml
+> model-naming:
+>   runs-on: [self-hosted, fast]
+> ```
+> 它读 `src/llama-model.cpp`（第 28 行），
+> 校验 `src/models/{fname}` 是否存在（第 45 行）。
+> **全程没有 `ggml-cuda`、没有 `template-instances`、没有 `generate_cu_files`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「代码风格」这个作业名涵盖的范围只有一种命名约定时，
+> 它不检查的东西比它检查的多得多——
+> 而「它不检查什么」这件事，只能靠读它才知道。**
+>
+> **⭐⭐ 判据：**
+> **故「CI 通过」在这份仓库里的含义是窄的：
+> Ada 上编得过 + 模型名对得上 + flake8 无 `print`。**
+>
+> ⚠️ **而这三件事与「Blackwell 上跑得对」之间没有推理链。**
+
+### 10.570 🔥🔥🔥🔥🔥 默认只编 **75 个**，不是 120 个
+
+[c-default-build-compiles-75-of-120-not-all]
+
+> **`ggml-cuda/CMakeLists.txt` 第 115-125 行**：
+> ```cmake
+> if (GGML_CUDA_FA_ALL_QUANTS)
+>     file(GLOB   SRCS "template-instances/fattn-vec*.cu")
+>     list(APPEND GGML_SOURCES_CUDA ${SRCS})
+> else()
+>     list(APPEND GGML_SOURCES_CUDA
+>         template-instances/fattn-vec-instance-f16-f16.cu
+>         template-instances/fattn-vec-instance-q4_0-q4_0.cu
+>         template-instances/fattn-vec-instance-q8_0-q8_0.cu
+>         template-instances/fattn-vec-instance-bf16-bf16.cu)
+> endif()
+> ```
+> **而 `ggml/CMakeLists.txt` 第 213 行**：
+> `option(GGML_CUDA_FA_ALL_QUANTS "ggml: compile all quants for FlashAttention" OFF)`
+
+> **`12 + 21 + 22 + 16 + 4 = 75`；`120 − 75 = 45` 不编。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份目录里有 120 个文件、而默认只编 75 个时，
+> 「这 120 个是它的实现」这句话就已经不准确了——
+> 准确的说法是「其中 75 个是它的实现，45 个是它的备选」。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.565 那句「120 个文件 = 一个脚本的输出」需要补一句：
+> 但只有 75 个进得了默认二进制。**
+>
+> ⚠️ **而这条给本报告一个分母上的第三次收紧：
+> 生成器写 120，CMake 默认编 75，
+> 而 `TYPES_MMQ` 那 22 个全在 75 里面。**
+
+### 10.571 ⭐⭐⭐⭐⭐ 那 45 个被跳过的是**跨类型配对**
+
+[c-the-45-skipped-are-cross-type-kv-pairs]
+
+> **`TYPES_KV` 有 7 个类型**（F16 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 / BF16），
+> 7×7 = 49 个 `fattn-vec` 实例；
+> 默认只编 4 个对角项：`f16-f16`、`q4_0-q4_0`、`q8_0-q8_0`、`bf16-bf16`。
+> **`49 − 4 = 45` 个跨类型配对（如 `q4_0-q8_0`）默认不编。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个 7×7 的表只编对角线时，
+> 被省掉的不是「一半」，
+> 而是「所有 K 与 V 用了不同量化的情形」——
+> 而那恰恰是 KV cache 量化的常见配置。**
+>
+> **⭐⭐ 判据：**
+> **故「FA 支持 7 种 KV 类型」这句话，
+> 在默认构建下只对「K 与 V 同类型」成立。**
+>
+> ⚠️ **而这条与本报告 §10 里那族「按文件数算能力」同源：
+> 49 个文件里只有 4 个进默认二进制，
+> 故「49 种组合」是一个不存在的分母。**
+
+### 10.572 ⚠️⚠️⚠️ `Q1_0` 与 `Q2_0` **没有**任何 `fattn-vec` 实例
+
+[c-q1-0-and-q2-0-have-no-vec-attention-instance]
+
+> **`generate_cu_files.py` 第 11 行**：
+> ```python
+> TYPES_KV = ["GGML_TYPE_F16", "GGML_TYPE_Q4_0", "GGML_TYPE_Q4_1",
+>             "GGML_TYPE_Q5_0", "GGML_TYPE_Q5_1", "GGML_TYPE_Q8_0",
+>             "GGML_TYPE_BF16"]
+> ```
+> **七项里没有 `Q1_0`，也没有 `Q2_0`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当两个类型在 MMQ 的 22 项里排最前、
+> 而在 FA 的 7 项里完全没有时，
+> 它们支持的不是「量化」，而是「权重量化」——
+> 不是「KV cache 量化」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告凡写「BTL-3 支持 Q1_0/Q2_0」，
+> 都必须限定在权重那一侧。**
+>
+> ⚠️ **而这条把 §10.562 那个「22 项里只有 2 项独有」又收紧了一层：
+> 那 2 项独有，且只独有在权重路径上。**
+
+### 10.573 🔥🔥🔥🔥🔥 「120 个文件」这句话需要**第三个分句**
+
+[c-the-120-files-need-a-third-clause]
+
+> **三个数放在一起**：
+> | 问题 | 答案 | 出处 |
+> |---|---:|---|
+> | 生成了多少个？ | **120** | `generate_cu_files.py` 五个循环 |
+> | 编进默认二进制多少个？ | **75** | `ggml-cuda/CMakeLists.txt` 115-125 |
+> | 被 CI 验证过多少个？ | **在 `89-real` 上编过的那部分** | `build-cuda-ubuntu.yml` 68 |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一批文件有三个不同的「数量」时，
+> 它们不是三个估计值，
+> 而是三个不同的问题——
+> 「生成了多少」「编进多少」「验证了多少」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后凡引用「120 个实例文件」，
+> 都必须同时说清是在回答哪一个问题。**
+>
+> ⚠️ **而这条是本报告第 N 次遇到同一个形状：
+> 一个数字听起来像答案，
+> 只是因为它没有说它在回答哪个问题。**
+
+### 10.574 ⚠️⚠️⚠️ 改生成器**不会触发** CUDA 构建
+
+[c-ci-trigger-paths-ignore-python-changes]
+
+> **`build-cuda-ubuntu.yml` 第 8-18 行 `push` 路径**：
+> `.github/workflows/build-cuda-ubuntu.yml`、`**/CMakeLists.txt`、`**/.cmake`、
+> `**/*.h`、`**/*.hpp`、`**/*.c`、`**/*.cpp`、`**/*.cu`、`**/*.cuh`
+> **第 22-25 行 `pull_request` 路径**：
+> `.github/workflows/build-cuda-ubuntu.yml`、`ggml/src/ggml-cuda/**`
+> **两处都没有 `**/*.py`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当改了生成器却不触发「编那些生成物」的 CI 时，
+> 「改脚本 → 产物过期」这条链上没有任何一道闸门。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.566 那个「同步没有保证」不是猜测：
+> 它有三条独立的机制性理由——
+> 无 CI 生成、CMake 只 GLOB、路径过滤器不含 `.py`。**
+>
+> ⚠️ **而这条也解释了为什么 §10.561 那个字节公式至今仍然成立：
+> 因为还没有人改过那个脚本。**
+
+### 10.575 ⭐⭐⭐⭐⭐ 这一族给「BTL-3 支持什么」这句话的**最终分母**
+
+[c-the-final-denominator-for-what-btl3-supports]
+
+> **把 §10.559 到 §10.574 的六个分母排在一起**：
+> | 说法 | 数字 | 真实含义 |
+> |---|---:|---|
+> | 「生成器写多少种」 | 22 | `TYPES_MMQ` |
+> | 「其中 BTL-3 独有」 | **2** | `Q1_0`、`Q2_0` |
+> | 「MMQ 实例文件数」 | 22 | 一份实现的 22 次实例化 |
+> | 「template-instances 下文件数」 | 120 | 含 `fattn`/`mmf` 四族 |
+> | 「默认编进二进制的」 | 75 | `FA_ALL_QUANTS=OFF` |
+> | 「CI 编的架构」 | **89 一个** | Ada，不是 Blackwell |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一句话可以配六个不同的分母时，
+> 它就不是一句可反驳的话——
+> 它是一句还没有说完的话。**
+>
+> **⭐⭐ 判据：**
+> **故本报告的写法定为：
+> 凡提「BTL-3 支持 N 种量化」，
+> N 必须带一个括号说明它数的是什么。**
+>
+> ⚠️ **而这条的普适形态是：
+> 「支持」这个词在这份仓库里有六层，
+> 而每一层的数字都不一样。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -41816,6 +42079,52 @@ shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 480
 ⭐⭐ 判据（本轮最重要）「**当这三件事同时成立时，「这个目录是人工维护的」这个假设就被彻底排除了——而排除它比证明它更有用，因为它一次性解释了 120 个文件。故本报告此后凡引用这些文件，都应当引用那个脚本的行号，而不是文件本身**」——**⚠️ 而这条的普适价值是：当一个仓库里有一类「长得都一样」的文件时，先去找那个写它们的循环，再决定要不要逐个读**；
  — [src-btl3-generate-cu-files]
 
+### 那个生成器没有 CI 在跑（第一百六十九轮补充）
+
+上一轮结尾说「查 CI 里是否跑 generate_cu_files.py，以及是否校验输出」。本轮查了：**七个 workflow，零命中；而 CMake 直接用 `file(GLOB ...)` 吃现成的 `.cu`**。顺着这条线，又发现**默认只编 75 个，不是 120 个**。
+
+1. 🔥🔥🔥🔥🔥 **那个生成器，没有任何 CI 运行它**：
+七个 workflow 逐一 grep `generate_cu_files`：`build-cuda-ubuntu` / `build-cuda-windows` / `code-style` / `python-lint` / `build-self-hosted` / `release` / `build-cache` **各 0 处**，而 `ggml-cuda/CMakeLists.txt` 第 106-112 行直接用 `file(GLOB ...)`；
+
+⭐⭐ 判据（本轮最重要）「**当一个「先删后写」的生成器没有任何 CI 运行它时，那 120 个文件就是「有人最后一次手动跑过它」的快照——故它们与脚本之间没有任何机制保证同步。故「仓库里的文件等于脚本的输出」这件事，在字节公式成立时是真的，但在脚本被改过而没人重跑时就不再是真的**」——**⚠️ 可检验的分辨法：如果某天这 120 个文件的字节数不再满足 134 + 名长，那就说明脚本改了而产物没重生成**；
+2. 🔥🔥🔥🔥🔥 **CI 只编 `89-real`，从不编 Blackwell**：
+`build-cuda-ubuntu.yml` 第 68 行是 「**-DCMAKE_CUDA_ARCHITECTURES=89-real**」，第 41 行容器是「**nvidia/cuda:12.6.2-devel-ubuntu24.04**」，而发布包用的是 CUDA 13.0.2 与 `120a-real`；
+
+⭐⭐ 判据（本轮最重要）「**当 CI 编的架构与被测硬件的架构不是同一个时，CI 绿不能推出「这张卡上能跑」——它只能推出「Ada 上能编过」。故 §10 里所有「Blackwell 路径存在」的结论，都是靠人工在 120a-real 上编出来的**」——**⚠️ 而这条把 §10.545-§10.557 那一族（tcgen05 零命中 / FP4 是唯一分支 / iter_k 翻倍）放进了一个更冷的语境：那四行代码在本仓库的 CI 里从未被编译过**；
+3. ⭐⭐⭐⭐⭐ **唯一会编 Blackwell 的自动化，是那条手动的**：
+`build-cuda-windows.yml` 第 8 行「**workflow_dispatch:**」是 `on:` 下的唯一条目（第 3-4 行注释「only triggered manually because it is very heavy」），而第 60-68 行的 cmake 参数里**没有 `-DCMAKE_CUDA_ARCHITECTURES`**，故走 CMakeLists.txt 的默认值（含 `120a-real`）；
+
+⭐⭐ 判据（本轮最重要）「**当唯一一条会编到 Blackwell 的 CI是手动触发时，「Blackwell 那条路径被编过」这件事就没有周期性保证——它只保证「有人愿意点那个按钮时它会被编」。故 Linux CI（自动、89-real）与 Windows CI（手动、默认含 120a）覆盖的架构集合是不相交的**」——**⚠️ 反直觉的结论：这份仓库里唯一会编 Blackwell 的自动化，是那个「因为太重所以改成手动」的 Windows 作业**；
+4. ⭐⭐⭐⭐⭐ **唯一的「代码风格」CI，只检查模型命名**：
+`code-style.yml` 只有一个 `model-naming` 作业，读 `src/llama-model.cpp` 并校验 `src/models/{fname}` 是否存在，**全程没有 ggml-cuda、没有 template-instances、没有 generate_cu_files**；
+
+⭐⭐ 判据（本轮最重要）「**当「代码风格」这个作业名涵盖的范围只有一种命名约定时，它不检查的东西比它检查的多得多——而「它不检查什么」这件事，只能靠读它才知道**」——**⚠️ 故「CI 通过」在这份仓库里的含义是窄的：Ada 上编得过 + 模型名对得上 + flake8 无 print。而这三件事与「Blackwell 上跑得对」之间没有推理链**；
+5. 🔥🔥🔥🔥🔥 **默认只编 75 个，不是 120 个**：
+`ggml-cuda/CMakeLists.txt` 第 115-125 行：`GGML_CUDA_FA_ALL_QUANTS` 为 ON 时 `file(GLOB ... fattn-vec*.cu)`，否则只列 4 个对角项；而 `ggml/CMakeLists.txt` 第 213 行该选项**默认 OFF**。故 `12 + 21 + 22 + 16 + 4 = 75`，**`120 − 75 = 45` 不编**；
+
+⭐⭐ 判据（本轮最重要）「**当一份目录里有 120 个文件、而默认只编 75 个时，「这 120 个是它的实现」这句话就已经不准确了——准确的说法是「其中 75 个是它的实现，45 个是它的备选」**」——**⚠️ 故 §10.565 那句「120 个文件 = 一个脚本的输出」需要补一句：但只有 75 个进得了默认二进制。而 TYPES_MMQ 那 22 个全在 75 里面**；
+6. ⭐⭐⭐⭐⭐ **那 45 个被跳过的是「跨类型配对」**：
+`TYPES_KV` 有 7 个类型，7x7 = 49 个 `fattn-vec` 实例；默认只编 4 个对角项（`f16-f16`、`q4_0-q4_0`、`q8_0-q8_0`、`bf16-bf16`），故 `49 − 4 = 45` 个跨类型配对默认不编；
+
+⭐⭐ 判据（本轮最重要）「**当一个 7x7 的表只编对角线时，被省掉的不是「一半」，而是「所有 K 与 V 用了不同量化的情形」——而那恰恰是 KV cache 量化的常见配置。故「FA 支持 7 种 KV 类型」这句话，在默认构建下只对「K 与 V 同类型」成立**」——**⚠️ 而这条与本报告那族「按文件数算能力」同源：49 个文件里只有 4 个进默认二进制，故「49 种组合」是一个不存在的分母**；
+7. ⚠️⚠️⚠️ **`Q1_0` 与 `Q2_0` 没有任何 `fattn-vec` 实例**：
+`generate_cu_files.py` 第 11 行的 `TYPES_KV` 七项是「**F16 / Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 / BF16**」，**没有 `Q1_0`，也没有 `Q2_0`**；
+
+⭐⭐ 判据（本轮最重要）「**当两个类型在 MMQ 的 22 项里排最前、而在 FA 的 7 项里完全没有时，它们支持的不是「量化」，而是「权重量化」——不是「KV cache 量化」。故本报告凡写「BTL-3 支持 Q1_0/Q2_0」，都必须限定在权重那一侧**」——**⚠️ 而这条把 §10.562 那个「22 项里只有 2 项独有」又收紧了一层：那 2 项独有，且只独有在权重路径上**；
+8. 🔥🔥🔥🔥🔥 **「120 个文件」这句话需要第三个分句**：
+三个数放在一起：「**生成 120 个 / 默认编进 75 个 / CI 编的架构只有 89 一个**」；
+
+⭐⭐ 判据（本轮最重要）「**当同一批文件有三个不同的「数量」时，它们不是三个估计值，而是三个不同的问题——「生成了多少」「编进多少」「验证了多少」**」——**⚠️ 故本报告此后凡引用「120 个实例文件」，都必须同时说清是在回答哪一个问题。而这条是本报告第 N 次遇到同一个形状：一个数字听起来像答案，只是因为它没有说它在回答哪个问题**；
+9. ⚠️⚠️⚠️ **改生成器不会触发 CUDA 构建**：
+`build-cuda-ubuntu.yml` 第 8-18 行 `push` 路径清单里有 `.h/.hpp/.c/.cpp/.cu/.cuh` 与 `CMakeLists.txt`，第 22-25 行 `pull_request` 路径是 `ggml/src/ggml-cuda/**`，**两处都没有 `**/*.py`**；
+
+⭐⭐ 判据（本轮最重要）「**当改了生成器却不触发「编那些生成物」的 CI 时，「改脚本 → 产物过期」这条链上没有任何一道闸门。故那个「同步没有保证」不是猜测：它有三条独立的机制性理由——无 CI 生成、CMake 只 GLOB、路径过滤器不含 .py**」——**⚠️ 而这条也解释了为什么那个字节公式至今仍然成立：因为还没有人改过那个脚本**；
+10. ⭐⭐⭐⭐⭐ **这一族给「BTL-3 支持什么」这句话的最终分母**：
+六个分母排在一起：「**22（生成器写的）/ 2（BTL-3 独有）/ 22（实例文件）/ 120（目录里全部）/ 75（默认编进）/ 89（CI 编的架构）**」；
+
+⭐⭐ 判据（本轮最重要）「**当一句话可以配六个不同的分母时，它就不是一句可反驳的话——它是一句还没有说完的话。故本报告的写法定为：凡提「BTL-3 支持 N 种量化」，N 必须带一个括号说明它数的是什么**」——**⚠️ 而这条的普适形态是：「支持」这个词在这份仓库里有六层，而每一层的数字都不一样**；
+ — [src-btl3-ci-cuda-ubuntu] [src-btl3-ci-cuda-windows] [src-btl3-ci-code-style] [src-btl3-cuda-cmakelists]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -41955,7 +42264,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=463, evidence=2902, claims=2109, claims_high=1759, claims_disputed=9, trace_events=997, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=466, evidence=2913, claims=2119, claims_high=1769, claims_disputed=9, trace_events=1003, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
