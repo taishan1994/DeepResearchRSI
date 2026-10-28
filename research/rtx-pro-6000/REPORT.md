@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：287 ｜ **证据数**：2233 ｜ **主张数**：1642（高置信 1303，争议 9）
+> **来源数**：288 ｜ **证据数**：2238 ｜ **主张数**：1647（高置信 1307，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -18130,6 +18130,149 @@ static ggml_prec ggml_cuda_mmq_get_prec_env() {
 > ⭐ **`numerical overflows` 与 §10.46 记的「greedy 解码乱码」形成对照**：
 > **一个是量化误差，一个是数值溢出——两者都表现为「输出不对」，而诊断路径完全不同。**
 
+### 10.96 🔥🔥🔥 `-ngl 0` 不等于「关闭 GPU」
+
+**官方文档明确区分了这两个状态** [c-ngl0-is-not-gpu-off]：
+
+> 「**The GPU may still be used to accelerate some parts of the computation
+> even when using the `-ngl 0` option.
+> You can fully disable GPU acceleration by using `--device none`.**」
+
+> ⚠️ 即 **「GPU 层数设为 0」与「禁用 GPU」是两个不同的状态**。
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个人用「一个数字」来控制「一种能力」时，
+> 「数字为 0」与「能力关闭」在语义上并不等价——**
+> **⚠️ 因为「0」通常表示「这一项不做」，而不是「相关的所有项都不做」。**
+>
+> ⭐⭐ **对基准测试方法学的影响是直接的**：
+> **一份「GPU vs CPU」的对比，如果 CPU 侧用的是 `-ngl 0`，
+> 那么它测的不是 CPU，而是「CPU + 一部分 GPU」。**
+>
+> **⭐⭐ 判据：**
+> **「对照组没有真的被改成对照组」是 §10.55 记的那种失败，
+> 而它的变体是「对照组被改成了一个混合状态」——**
+> **⚠️ 后者更危险，因为它给出的数字仍然合理。**
+>
+> ⭐⭐ **这也解释了 §10.43 记录的一个现象**：
+> **有人报告「`-ngl 0` 下仍然看到显存占用」——这不是 bug，是文档写明的行为。**
+
+### 10.97 ⭐⭐⭐ 官方对「便携二进制」的回答是 `GGML_BACKEND_DL`
+
+[c-backend-dl-for-portable-binary]
+
+> 「**Backends can be built as dynamic libraries that can be loaded
+> dynamically at runtime. This allows you to use the same llama.cpp binary
+> on different machines with different GPUs.
+> To enable this feature, use the `GGML_BACKEND_DL` option when building.**」
+
+> ⚠️ 即 **每个后端一个 `.so`/`.dll`，主程序在运行时选。**
+>
+> **⭐⭐ 这条与 §10.59–§10.61 / §10.94 记录的「架构编译」问题形成一对完整的答案**：
+> **那个问题：一个二进制不可能同时优化所有架构，而「为一个卡编」会导致「换一张卡就慢」；
+> 这个答案：把「一个二进制」拆成「一个主程序 + N 个后端库」。**
+>
+> **⭐⭐ 判据：**
+> **当一个「配置问题」反复出现在不同用户身上时，
+> 它往往已经有一个「结构性解法」存在，只是那个解法不在你遇到的问题的那个层面——**
+> **⚠️ 而「编译参数」层面的问题，答案可能在「分发形态」层面。**
+>
+> ⭐⭐ **对 RTX PRO 6000 的具体含义**：
+> **如果你的机器上要同时跑不同代的卡（例如 RTX PRO 6000 + 一张老卡），
+> `GGML_BACKEND_DL` 是比「编两个二进制」更干净的方案。**
+>
+> **⭐⭐ 判据：**
+> **「同一个二进制在不同机器上跑」这个需求，
+> 在「静态链接」范式里是无解的，而在「插件」范式里是一行 CMake 选项——**
+> **⚠️ 而范式切换的代价通常不是技术，是「人们已经习惯了旧范式」。**
+
+### 10.98 ⭐⭐ **第四处**静默回退：`CUB DeviceTopK` 在旧 CCCL 上退回排序
+
+[c-topk-silent-sort-fallback]
+
+> 「**CUB DeviceTopK requires CCCL 3.4.3 or newer;
+> older versions use the sort fallback.**」
+
+> ⚠️ 即 **top-k 采样在旧 CCCL 上仍然能跑，但走的是慢路径——而它不报错。**
+>
+> **⭐⭐ 四次「编译期白名单 + 运行时静默回退」**：
+
+| 序 | 位置 | 回退到 |
+|---|---|---|
+| 1 | §10.62 MMQ 32 条 `CASE` | Ampere 配置 |
+| 2 | §10.81 `GGML_TYPE_COUNT` 哨兵 | 同上 |
+| 3 | §10.93 FA 7 种组合 | `f16-f16` |
+| 4 | **本条 `DeviceTopK`** | **排序实现** |
+
+> **⭐⭐ 而这条的独特性在于：它的开关是「依赖库版本」而不是「编译选项」——**
+> **即用户即使什么都没改，换一个 CUDA Toolkit 版本就会改变 top-k 的实现路径。**
+>
+> **⭐⭐ 判据：**
+> **当一条性能路径的选择依赖于「间接依赖的版本」时，
+> 它的可复现性低于依赖于「显式参数」的路径——**
+> **⚠️ 而这正是「同一个模型在不同机器上快慢不同」这类报告的常见来源。**
+>
+> ⭐⭐ **对 RTX PRO 6000 的读者**：
+> **top-k 采样在每个 token 上都要跑，故它属于「每 token 开销」而非「一次性开销」——
+> 如果它在慢路径上，tok/s 会被直接拉低，而没有任何报错。**
+> ⚠️ **但「sort fallback」慢多少，文档没说——本报告没有这个数字。**
+
+### 10.99 ⭐⭐ 多后端可同时编译，用 `--list-devices` 选择
+
+[c-multi-backend-runtime-select]
+
+> 「**you can build llama.cpp with both CUDA and Vulkan support by using
+> the `-DGGML_CUDA=ON -DGGML_VULKAN=ON` options with CMake.
+> At runtime, you can specify which backend devices to use with the `--device` option.
+> To see a list of available devices, use the `--list-devices` option.**」
+
+> **⭐⭐ 这条给了本报告一个可立刻执行的诊断动作：`--list-devices`。**
+>
+> ⭐⭐ **它是「验证 §10.94 那条诊断链」的第一步**：
+> **如果 `--list-devices` 里能看到 RTX PRO 6000，说明后端加载成功；
+> 但如果产物里没有 `sm_120`，设备仍然会列出来，只是 FP4 走慢路径。**
+>
+> **⭐⭐ 判据：**
+> **「设备被识别」与「设备被优化」是两个不同的检查，
+> 而工具通常只提供前者——**
+> **⚠️ 因为前者是一个枚举，后者需要一个基准。**
+>
+> ⭐⭐ **这正是 §10.82 那条「`GGML_CUDA_MMQ_PREC=q4` 强制一次」
+> 为什么重要的原因**：
+> **它是少数能从外部区分「识别」与「优化」的手段。**
+
+### 10.100 ⭐⭐ CUDA 构建**同时**产出 CPU 后端
+
+[c-cuda-build-includes-cpu-backend]
+
+> 「**Note that this also builds the CPU backend by default.**」
+> 而 Windows on ARM 上：「**MSVC's support for the ARM NEON intrinsics used by the
+> CPU backend may be incomplete, so a CUDA build produced entirely with MSVC
+> might have a slower CPU backend.**」
+
+> ⚠️ **这条的具体内容（WoA + MSVC + NEON）与本报告目标平台不直接相关，
+> 故置信度 medium；但它的结构性含义是通用的。**
+>
+> **⭐⭐ 判据：**
+> **当一次「构建」同时产出多个组件时，
+> 「为 A 选的编译器」会静默地成为「B 的编译器」——**
+> **⚠️ 而用户只会为 A 检查结果。**
+>
+> ⭐⭐ **这给了 §10.44 记的一个现象另一种解释**：
+> **「GPU 很快但整体 tok/s 不高」——
+> 如果 CPU 后端参与了采样、tokenize，或者 `-ngl` 不到全部层，
+> 那 CPU 侧的速度就在总延迟里。**
+>
+> **⭐⭐ 判据：**
+> **「我优化了 GPU」与「我优化了瓶颈」之间，
+> 隔着一个「瓶颈在不在 GPU」的测量——**
+> **⚠️ 而这个测量需要 `--device none` 与默认配置的对比（见 §10.96）。**
+>
+> ⭐ 这两条互补：**§10.96 说「`-ngl 0` 不关闭 GPU」，
+> 本条说「CUDA 构建也包含 CPU 后端」——
+> 合起来的意思是：一台机器上同时跑着两个后端，
+> 而 `-ngl` 只控制其中一个的层数。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -21527,6 +21670,10 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 1. [ggml-org/llama.cpp — `docs/build.md` 的「Non-Native Builds」/「Override Compute Capability」/「Unified Memory」/「Peer Access」/「Performance Tuning」五节（第 206–336 行）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/docs/build.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **作者自述：MMQ 内核主要针对 RTX 3000/4000 调优**——`GGML_CUDA_FORCE_CUBLAS` 说明里的一句括号补充：「**Prompt processing may become faster on recent datacenter GPUs (the custom kernels were tuned primarily for RTX 3000/4000).**」；⭐⭐ 判据（本轮最重要）「**『自研内核』与『更快的内核』是两个不同的问题——自研内核的目标可能是『省显存』『避开 cuBLAS 的精度问题』或『在消费级卡上更快』，而这三者都不蕴含『在数据中心卡上更快』**」；⭐ 对 RTX PRO 6000：**它是「工作站卡」而非「RTX 3000/4000 消费卡」，故「MMQ 为它调优过」这个假设不成立**；⭐⭐ **这与 §10.62/§10.64「Blackwell 表只有 Ampere 表的 1/10」互相印证：不是「Blackwell 被忽略了」，而是「整个 MMQ 内核的调优目标就不是数据中心/工作站卡」**；⭐⭐ 判据「**当一个内核的调优目标是『某几代消费卡』时，『新一代卡上没优化』不是遗漏，而是设计的自然结果——而这与『有没有为此写代码』是两个独立的问题**」；⭐ 可立刻执行的 A/B：**对比 `GGML_CUDA_FORCE_CUBLAS=1` 与默认**；⚠️ 边界：**文档没说 Blackwell，也没说 RTX PRO 6000**。(b) 🔥🔥🔥 **`GGML_CUDA_P2P`：官方承认「可能崩溃或损坏输出」**——「**Requires driver support (usually restricted to workstation/datacenter GPUs). May cause crashes or corrupted outputs for some motherboards and BIOS settings (e.g. IOMMU).**」；⚠️ **RTX PRO 6000 正好落在「工作站卡」这一类，即它是 P2P 的目标平台，也是这个风险的目标平台**；⭐⭐ 判据（本轮最重要之一）「**当一份文档把一个开关描述为『可能更快』同时『可能损坏输出』时，它就是一条『需要用正确性检查来验证的性能建议』——而多数基准测试不做正确性检查**」；⭐⭐ 这与 §10.46「slow 会被基准测试发现，wrong 只有正确性检查能发现」完全同构；⭐⭐ 「IOMMU」这个原因是可操作的：**多卡机器出现偶发乱码/崩溃且开了 P2P 时，关掉 P2P 或关掉 IOMMU 是可试的分离实验**；⭐⭐ 判据「**『一个已知会损坏数据的优化项』比『一个未知的 bug』更容易处理——因为前者的第一步是『关掉它』，后者的第一步是『找到它』**」。(c) ⭐⭐⭐ **第三次「编译期白名单 + 运行时静默回退」**——`GGML_CUDA_FA_QUANTS` 默认只编 `q4_0-q4_0;q8_0-q8_0;f16-f16;bf16-bf16`，关键句「**Combinations that were not compiled fall back to `f16-f16` kernel with a warning.**」，合法类型只有 `f16/bf16/q4_0/q4_1/q5_0/q5_1/q8_0` 七种；⭐⭐ 判据（本轮最重要）「**当同一个代码库里出现第三次『白名单 + 静默回退』时，它就不再是『某个模块的写法』，而是『这个项目的默认设计哲学』——而这个哲学的直接后果是：『我编译了它』不等于『我用上了它』**」；ⓘ 三次分别是 **§10.62 MMQ 的 32 条 `CASE` 表、§10.81 的 `GGML_TYPE_COUNT` 哨兵、本条 FA 的 7 种组合白名单**；⭐⭐ 对 RTX PRO 6000 的直接含义：**用 `q4_1`/`q5_1` 的 KV cache 不会报错，只会退回 `f16-f16`——即「显存省不下来」而「速度也没变快」，而你可能以为它在用 4 比特**；⭐⭐ 判据「**一个『有警告的静默回退』在工程上等价于『静默回退』，除非警告被计数或被断言——而『启动时打印一次』是所有警告形式里最弱的一种**」。(d) ⭐⭐⭐ **`GGML_NATIVE=OFF` 是官方推荐的架构覆盖手段**——「**By default llama.cpp will be built for the hardware that is connected to the system at that time. For a build covering all CUDA GPUs, disable `GGML_NATIVE`**」，官方警告「**nvcc warning : Cannot find valid GPU for '-arch=native', default arch is used**」，代价「**a large binary that takes a long time to compile**」；⭐⭐⭐ **这把 §10.60 记的「native 构建陷阱」从「我的推断」变成「官方承认」**；⭐⭐ 判据「**当一份报告的一条推断被官方文档以不同措辞确认时，那条推断的置信度应该升级，而升级的理由不是『我说对了』，而是『两个独立来源说同一件事』——而这两个来源的独立性，取决于它们是否抄了同一份内容**」；⭐ 具体诊断：**编译机上插的不是 RTX PRO 6000 时产物里没有 `sm_120`，于是 `blackwell_mma_available` 假 → `can_use_q4` 假 → FP4 静默退回 `Q8`**；⭐⭐ 判据「**当一条『构建配置』的后果要在『三层运行时判断』之后才显现时，它的可诊断性几乎为零——而这正是 §10.82 那条「`GGML_CUDA_MMQ_PREC=q4` 强制一次」存在的意义**」。(e) ⭐⭐ **MMQ 与 cuBLAS 是一条三元权衡，不是「哪个更快」**——`GGML_CUDA_FORCE_MMQ`：「**speed for large batch sizes will be worse but VRAM consumption will be lower**」；`GGML_CUDA_FORCE_CUBLAS`：「**There may be issues with numerical overflows … and memory use will be higher**」；⭐⭐ 判据（本轮最重要）「**当你在深挖一个组件的实现细节时，最该先问的问题是『这个组件是不是唯一的选择』——而这个问题通常不在这份源码里，而在它的上一层的文档里**」；⭐⭐ 判据「**『我读的代码不在我的执行路径上』是性能分析里最昂贵的一种错误——而它无法通过『读得更细』来发现，只能通过『问一句还有没有别的路径』来发现**」 — [src-llamacpp-docs-build-perf]
 
+### `-ngl 0` 不等于关闭 GPU，与第四处静默回退（第八十三轮补充）
+
+1. [ggml-org/llama.cpp — `docs/build.md` 的「CUDA / Compilation」（第 189–206 行）与「Notes about GPU-accelerated backends」（第 900–906 行）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/docs/build.md) —（2026-10 抓取）。(a) 🔥🔥🔥 **`-ngl 0` 不等于「关闭 GPU」**——「**The GPU may still be used to accelerate some parts of the computation even when using the `-ngl 0` option. You can fully disable GPU acceleration by using `--device none`.**」；⚠️ 即 **「GPU 层数设为 0」与「禁用 GPU」是两个不同的状态**；⭐⭐ 判据（本轮最重要）「**当一个人用『一个数字』来控制『一种能力』时，『数字为 0』与『能力关闭』在语义上并不等价——因为『0』通常表示『这一项不做』，而不是『相关的所有项都不做』**」；⭐⭐ 对基准测试方法学的影响是直接的：**一份「GPU vs CPU」的对比，如果 CPU 侧用的是 `-ngl 0`，那么它测的不是 CPU，而是「CPU + 一部分 GPU」**；⭐⭐ 判据「**『对照组没有真的被改成对照组』是 §10.55 记的那种失败，而它的变体是『对照组被改成了一个混合状态』——后者更危险，因为它给出的数字仍然合理**」；⭐ 这也解释了 §10.43 记录的现象：**有人报告「`-ngl 0` 下仍然看到显存占用」——这不是 bug，是文档写明的行为**。(b) ⭐⭐⭐ **官方对「便携二进制」的回答是 `GGML_BACKEND_DL`**——「**Backends can be built as dynamic libraries that can be loaded dynamically at runtime. This allows you to use the same llama.cpp binary on different machines with different GPUs. To enable this feature, use the `GGML_BACKEND_DL` option when building.**」；⚠️ 即 **每个后端一个 `.so`/`.dll`，主程序在运行时选**；⭐⭐ **这与 §10.59–§10.61 / §10.94 记录的「架构编译」问题形成一对完整的答案**：那个问题是「一个二进制不可能同时优化所有架构」，这个答案是「拆成一个主程序 + N 个后端库」；⭐⭐ 判据「**当一个『配置问题』反复出现在不同用户身上时，它往往已经有一个『结构性解法』存在，只是那个解法不在你遇到的问题的那个层面——而『编译参数』层面的问题，答案可能在『分发形态』层面**」；⭐⭐ 判据「**『同一个二进制在不同机器上跑』这个需求，在『静态链接』范式里是无解的，而在『插件』范式里是一行 CMake 选项——而范式切换的代价通常不是技术，是『人们已经习惯了旧范式』**」。(c) ⭐⭐ **第四处静默回退：`CUB DeviceTopK` 在旧 CCCL 上退回排序**——「**CUB DeviceTopK requires CCCL 3.4.3 or newer; older versions use the sort fallback.**」；ⓘ 四次分别是 **§10.62 MMQ 32 条 `CASE`、§10.81 `GGML_TYPE_COUNT` 哨兵、§10.93 FA 7 种组合、本条 `DeviceTopK`**；⭐⭐ **这条的独特性在于：它的开关是「依赖库版本」而不是「编译选项」——即用户即使什么都没改，换一个 CUDA Toolkit 版本就会改变 top-k 的实现路径**；⭐⭐ 判据「**当一条性能路径的选择依赖于『间接依赖的版本』时，它的可复现性低于依赖于『显式参数』的路径——而这正是『同一个模型在不同机器上快慢不同』这类报告的常见来源**」；⭐ 对 RTX PRO 6000：**top-k 采样在每个 token 上都要跑，故它属于「每 token 开销」而非「一次性开销」——如果它在慢路径上，tok/s 会被直接拉低，而没有任何报错**（⚠️ 「sort fallback」慢多少，文档没说）。(d) ⭐⭐ **多后端可同时编译，用 `--list-devices` 选择**——「**you can build llama.cpp with both CUDA and Vulkan support by using the `-DGGML_CUDA=ON -DGGML_VULKAN=ON` options with CMake. At runtime, you can specify which backend devices to use with the `--device` option. To see a list of available devices, use the `--list-devices` option.**」；⭐⭐ 这是「验证 §10.94 那条诊断链」的第一步：**如果 `--list-devices` 里能看到 RTX PRO 6000，说明后端加载成功；但如果产物里没有 `sm_120`，设备仍然会列出来，只是 FP4 走慢路径**；⭐⭐ 判据「**『设备被识别』与『设备被优化』是两个不同的检查，而工具通常只提供前者——因为前者是一个枚举，后者需要一个基准**」；⭐ 这正是 §10.82 那条「`GGML_CUDA_MMQ_PREC=q4` 强制一次」为什么重要。(e) ⭐⭐ **CUDA 构建同时产出 CPU 后端**——「**Note that this also builds the CPU backend by default.**」，而 WoA 上「**MSVC's support for the ARM NEON intrinsics used by the CPU backend may be incomplete, so a CUDA build produced entirely with MSVC might have a slower CPU backend**」（⚠️ 具体内容与目标平台不直接相关，故 medium；结构性含义通用）；⭐⭐ 判据「**当一次『构建』同时产出多个组件时，『为 A 选的编译器』会静默地成为『B 的编译器』——而用户只会为 A 检查结果**」；⭐⭐ 这给了 §10.44「GPU 很快但整体 tok/s 不高」另一种解释：**CPU 后端参与了采样/tokenize，或 `-ngl` 不到全部层时，CPU 侧速度就在总延迟里**；⭐⭐ 判据「**『我优化了 GPU』与『我优化了瓶颈』之间，隔着一个『瓶颈在不在 GPU』的测量——而这个测量需要 `--device none` 与默认配置的对比**」 — [src-llamacpp-docs-build-dl]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -21666,7 +21813,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=287, evidence=2233, claims=1642, claims_high=1303, claims_disputed=9, trace_events=643, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=288, evidence=2238, claims=1647, claims_high=1307, claims_disputed=9, trace_events=645, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
