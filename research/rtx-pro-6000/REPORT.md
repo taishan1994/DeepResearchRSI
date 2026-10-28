@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：425 ｜ **证据数**：2768 ｜ **主张数**：1967（高置信 1618，争议 9）
+> **来源数**：429 ｜ **证据数**：2776 ｜ **主张数**：1975（高置信 1626，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -31305,6 +31305,260 @@ exit 0
 > **一份性能数据如果要被跨来源比较，它的每个数都该带一个 `scope`；
 > 而不带的那一份，就只能被当作「自洽」，不能被当作「可比」。**
 
+### 10.424 🔥🔥🔥🔥🔥 那个对照实验，在作者自己的计划里也是「没做」
+
+[c-the-inference-lane-is-planned-and-undecided]
+
+> **`btl-lab/backends.json` 的第八条 lane**：
+> ```json
+> {"id": "inference", "preferred": "pending-comparison",
+>  "status": "planned",
+>  "comparison": "vllm/sglang",
+>  "control_stages": ["operation-plan", "input-integrity-preflight"],
+>  "model_execution": "not-implemented",
+>  "display_name": "BTL Serve"}
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个缺口如果连数据产生方自己都写成了「planned」与「not-implemented」，
+> 那继续找它就不是「资料不全」，而是「那个实验还没人做」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告应该把「SGLang vs vLLM 对照缺失」
+> 从「本报告的缺口」改述为「该团队已声明但未执行的计划」——
+> 这两句话对读者的含义完全不同。**
+>
+> ⭐ **而这条给 §10.423 那个 `scope` 建议补了一个用例：
+> `status: planned` 与 `model_execution: not-implemented` 就是 `scope` 的极端值。**
+>
+> ⚠️ **这是本报告第 224 轮之后第二次「缺口不是缺资料」**：
+> 上一次是 §10.416（那个仓库先声明自己什么都没做），
+> 这一次是「那个实验先被声明为未做」。**两次都指向同一件事：
+> 这个团队把「没做」写成了可查的字段，而不是留给读者去发现。**
+
+### 10.425 ⚠️⚠️⚠️ 同一个仓库，两份 lane 表，**同一个 lane 两个状态**
+
+[c-two-backends-json-give-one-lane-two-statuses]
+
+> **根目录 `backends.json`（4,456 字节）的 sft lane**：
+> ```
+> "status": "a100-profile-qualified-experimental"
+> ```
+> **`btl_lab/resources/backends.json`（805 字节）的 sft lane**：
+> ```
+> "status": "requires-pinned-cuda-runtime"
+> ```
+> **而 kernels lane 在两处分别是 `source-integrity-check-implemented`
+> 与 `source-integrity-only`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **同一个量在同一仓库里有两个值时，先问的不是「哪个对」，
+> 而是「这两份文件各自被谁读」。**
+>
+> **⭐⭐ 判据：**
+> **故这里最可能的解释是：根目录那份是给人读的状态说明，
+> `resources/` 那份是被代码加载的最小集——
+> 而后者更保守，因为它要驱动一次真实的启动检查。**
+>
+> **⭐⭐ 这是一个可检验的推论：若如此，`resources/` 那份应当被某个 Python
+> 模块读取。** ⚠️ **本轮没有验证这一点**——它在 `btl_lab/store.py` 或
+> `btl_lab/bootstrap.py` 里，而这两个文件本轮未读。
+
+### 10.426 ⭐⭐⭐⭐⭐ 那份五条的 lane 表**恰好等于一条查询的结果**
+
+[c-the-resources-table-is-the-implemented-subset]
+
+> **两份表的 lane 数**：
+> ```
+> backends.json            10 条
+>   research / sft / distillation / agentic-rl / large-moe /
+>   pretraining / inference / kernels / environments / evaluation
+>
+> resources/backends.json   5 条
+>   research / sft / agentic-rl / evaluation / kernels
+> ```
+> **少掉的五条（distillation、large-moe、pretraining、inference、
+> environments）恰好是 status 为 `planned` 或 `integration-planned` 的那五条。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个子集如果恰好等于全集里某个谓词为真的那部分，
+> 那它就不是一个子集，而是一次查询的结果。**
+>
+> **⭐⭐ 判据：**
+> **故 `resources/` 那份最准确的读法是「当前已实现的五条」，
+> 而根目录那份是「包含计划在内的十条」。**
+>
+> ⭐ **而这里「已实现」的判据可以被写出来**：
+> **`status` 不含 `planned`，且（若有）`model_execution` 不以
+> `not-implemented` 开头。** 五条对五条，无一例外。
+
+### 10.427 🔥🔥🔥🔥🔥 「不要相乘不同论文的加速比」
+
+[c-speedups-from-different-papers-must-not-be-multiplied]
+
+> **`FOUNDATION_REVIEW_2026-09-09.md` 第 64 行**：
+> ```
+> Do not multiply speedups from these papers. Their baselines, workloads and
+> optimization targets differ, and gains can overlap.
+> ```
+> **而本报告在 DSpark 那一族里确实把五行的加速比并列成了一张表**：
+> ```
+> Bonsai 1-bit L40S 48 GB       1.57x
+> Ternary L40S 48 GB            2.02x
+> Bonsai 1-bit DGX Spark        2.12x
+> Ternary RTX 5060 Ti 16 GB     1.78x
+> Ternary DGX Spark             2.40x
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「不要相乘加速比」这条禁令成立的理由不是保守，而是三个具体的不同：
+> 基线不同、工作负载不同、优化目标不同——
+> 而第三个最容易被忽略：两个 2x 如果优化的是不同的东西，它们不能叠加。**
+>
+> **⭐⭐ 判据：**
+> **故本报告那张表要加一句限定：那五行的加速比各自是对自己基线的，
+> 而它们之间不能相乘，也不能推出「PRO 6000 会因为 DSpark 变快多少」。**
+>
+> ⚠️ **这一条是对 §10.386 的实质性修正**：
+> **此前那张表被放在「越快的基线，DSpark 的相对收益越小」这个叙述下，
+> 而按这条标准，那个叙述本身是把五个不同的优化目标放进了同一个坐标轴。**
+
+### 10.428 🔥🔥🔥🔥🔥 「没有一个头条数字能确立普世胜者」
+
+[c-no-headline-figure-establishes-a-universal-winner]
+
+> **`FOUNDATION_REVIEW_2026-09-09.md` 第 41 行**：
+> ```
+> Compare SGLang and vLLM as the main serving candidates. Keep separate
+> profiles for interactive decode, throughput serving and training rollouts.
+> Match model revision, precision, prompt/output distribution, concurrency and
+> quality. Neither a headline tokens/second figure nor one backend's default
+> settings establishes a universal winner.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **这句话承认了两件事：单一数字不够，单一配置也不够。**
+>
+> **⭐⭐ 判据：**
+> **故本报告 §10 里所有「A 比 B 快」的句子都应该带一个 profile 名；
+> 而没带的那几句，按这条标准是未完成的。**
+>
+> ⭐ **而三个 profile 的名字本身值得记录**：
+> ```
+> interactive decode      交互式解码
+> throughput serving      吞吐服务
+> training rollouts       训练采样
+> ```
+> **因为本报告一直在混用「预填」与「生成」这两个量**——
+> 而按这条标准，`PP` 属于 throughput serving 一侧，
+> `TG` 属于 interactive decode 一侧，**两者从来不在同一个 profile 里**。
+>
+> ⭐⭐ **这一条可能是本轮对本报告最有用的东西**：
+> **它说明了为什么 §10.334 那个「PP/TG ≈ 1 是异常」的判断
+> 从一开始就把两个 profile 的量放进了同一个比值。**
+
+### 10.429 ⭐⭐⭐⭐⭐ 「在支持列表里」覆盖的是**名字**，不是实体
+
+[c-a-support-list-entry-covers-a-name-not-an-entity]
+
+> **`FOUNDATION_REVIEW_2026-09-09.md` 第 28 行**：
+> ```
+> No winner is established. A model-family entry in a support list does not
+> verify a modified checkpoint, expert count, LoRA layout, backward kernel or
+> long-context configuration.
+> ```
+> **五个不被覆盖的维度**：
+> ```
+> 改过的检查点
+> 专家数
+> LoRA 布局
+> 反向内核
+> 长上下文配置
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份支持列表覆盖的是「模型家族」，
+> 而不覆盖「改过的检查点、专家数、LoRA 布局、反向内核、长上下文配置」——
+> 即它覆盖的是名字，不是那个名字下的实体。**
+>
+> **⭐⭐ 判据：**
+> **故这条与 §10.417 那个「`scope` 必填」是同一件事：
+> 支持列表缺的正是一个 `scope` 字段。**
+>
+> ⚠️⚠️⚠️ **而本报告引用过的「vLLM 支持 GLM」「SGLang 支持 SM120」
+> 都属于这类「名字级支持」——按这条标准不能直接当结论用。**
+> **这是对 §10.x 里若干条「支持」断言的统一降级理由。**
+
+### 10.430 ⭐⭐⭐⭐⭐ 下一个交付物是**审计**，不是倍数
+
+[c-the-next-deliverable-is-an-audit-not-a-multiplier]
+
+> **`FOUNDATION_REVIEW_2026-09-09.md` 第 74 行**：
+> ```
+> No paid run or public release was launched by this review. The next
+> deliverable is a pinned compatibility audit for the selected workload, not an
+> assumed multi-fold gain.
+> ```
+> **第 72 行是同一件事的操作化**：
+> ```
+> Develop the first BTL contribution at a measured bottleneck. Retain the other
+> stack as a comparison, not a second permanent implementation to support
+> immediately.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个团队如果把自己的下一个交付物写成「审计」而不是「数字」，
+> 那它对「可信」的定义比它对「亮眼」的定义更严。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.416 一个同族证据：同一个团队有三处「先说不」，
+> 而三处拒绝的是同一类东西——未经验证的增益。**
+> ```
+> btl-kernels/README.md       No GPU kernel... or performance gain is claimed
+> btl-measure/README.md       It cannot turn training reward... into a release claim
+> FOUNDATION_REVIEW.md        ...not an assumed multi-fold gain
+> ```
+>
+> ⭐ **而第 72 行解释了为什么 vLLM 与 SGLang 会长期并存于对比表里**：
+> **「Retain the other stack as a comparison, not a second permanent
+> implementation」——即「保留一个对照，而不是养一个第二实现」。**
+
+### 10.431 🔥🔥🔥🔥🔥 「恰一个可见 CUDA 设备」，不是「至少一个」
+
+[c-the-runtime-probe-requires-exactly-one-cuda-device]
+
+> **`btl_lab/runtime_probe.py`（1,077 字节）**：
+> ```python
+> if result["ready_for_worker_start"]:
+>     try:
+>         import torch
+>         result["cuda_devices"] = torch.cuda.device_count()
+>         if not torch.cuda.is_available() or result["cuda_devices"] != 1:
+>             result["blockers"].append("Adapt requires exactly one visible CUDA device")
+>         elif config["precision"] == "bf16" and not torch.cuda.is_bf16_supported():
+>             result["blockers"].append("The selected CUDA device cannot execute the BF16 recipe")
+>     except (ImportError, RuntimeError, OSError) as error:
+>         result["blockers"].append(f"CUDA initialization failed: {error}")
+> result["ready_for_worker_start"] = not result["blockers"]
+> return 0 if result["ready_for_worker_start"] else 2
+> ```
+> **判定是 `!= 1`，不是 `< 1`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个诊断脚本如果对「多于一个」也报错，
+> 那说明它的下游代码在「设备索引」这件事上做了单卡假设。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.27（那个至今未知的「multi-GPU on RTX Pro 6000」
+> 官方 known issue）一个侧证——**
+> ⚠️⚠️⚠️ **但必须立刻限定：这是 Adapt（训练）lane，不是推理 lane，
+> 故它不能直接解释那个 known issue。**
+>
+> **⭐⭐ 而这条恰好演示了「同一句话的适用范围」：
+> 一个单卡约束在训练 lane 上成立，在推理 lane 上未被验证。**
+> **这正是 §10.429 那条「名字级支持」在方向上的反面：**
+> **一个约束如果被写在一个具体 lane 里，它就只能被用在那一个 lane 上。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -36806,6 +37060,44 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据（本轮最重要）「**一个输出结构里如果有一个必填的 scope 字段，那「这个数是在什么范围内成立的」就不再依赖读者去翻文档**」——**若这些数据的产生方一开始就带 scope 字段，本报告 §10 里那几十个「百分比的分母未核对」就不会存在**；
  — [src-btl-kernels-readme] [src-btl-kernels-manifest-py] [src-btl-measure-readme] [src-btl-measure-core-py]
 
+### 那个对照实验在作者的计划里也是「没做」（第一百五十轮补充）
+
+上一轮结尾说读 `btl-lab` 与 `Prism` 的 benchmark。本轮读了 `btl-lab`，而它给出的是这个团队对自身技术栈的**完整状态矩阵**，其中一条正是本报告追了 200 轮的那个缺口。
+
+1. [GitHub / Badtheorylabs — `btl-lab/backends.json`（4,456 字节）与 `btl_lab/resources/backends.json`（805 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/backends.json)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **那个对照实验，在作者自己的计划里也是「没做」**：**根目录 backends.json 的第八条 lane 是 {"id": "inference", "preferred": "pending-comparison", "status": "planned", "comparison": "vllm/sglang", "model_execution": "not-implemented", "display_name": "BTL Serve"}**；
+⭐⭐ 判据（本轮最重要）「**一个缺口如果连数据产生方自己都写成了「planned」与「not-implemented」，那继续找它就不是「资料不全」，而是「那个实验还没人做」**」——**故本报告应该把「SGLang vs vLLM 对照缺失」从「本报告的缺口」改述为「该团队已声明但未执行的计划」**；
+⚠️ **这是第二次「缺口不是缺资料」**：上一次是那个仓库先声明自己什么都没做，这一次是那个实验先被声明为未做——**两次都指向同一件事：这个团队把「没做」写成了可查的字段，而不是留给读者去发现**；
+(a) ⚠️⚠️⚠️ **同一个仓库，两份 lane 表，同一个 lane 两个状态**：**根目录那份的 sft 是 a100-profile-qualified-experimental，而 resources 那份是 requires-pinned-cuda-runtime；kernels 在两处分别是 source-integrity-check-implemented 与 source-integrity-only**；
+⭐⭐ 判据「**同一个量在同一仓库里有两个值时，先问的不是「哪个对」，而是「这两份文件各自被谁读」**」——**故最可能的解释是：根目录那份是给人读的状态说明，resources 那份是被代码加载的最小集，而后者更保守，因为它要驱动一次真实的启动检查**（⚠️ 这个推论本轮没验证——它在 btl_lab/store.py 或 bootstrap.py 里）；
+(b) ⭐⭐⭐⭐⭐ **那份五条的 lane 表恰好等于一条查询的结果**：**根目录十条例，resources 五条例；少掉的五条（distillation、large-moe、pretraining、inference、environments）恰好是 status 为 planned 或 integration-planned 的那五条**；
+⭐⭐ 判据（本轮最重要）「**一个子集如果恰好等于全集里某个谓词为真的那部分，那它就不是一个子集，而是一次查询的结果**」——**而「已实现」的判据可以被写出来：status 不含 planned，且（若有）model_execution 不以 not-implemented 开头。五条对五条，无一例外**；
+2. [GitHub / Badtheorylabs — `FOUNDATION_REVIEW_2026-09-09.md`（10,838 字节，79 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/FOUNDATION_REVIEW_2026-09-09.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「不要相乘不同论文的加速比」**：**第 64 行写「Do not multiply speedups from these papers. Their baselines, workloads and optimization targets differ, and gains can overlap.」——而本报告在 DSpark 那一族里确实把五行的加速比并列成了一张表**；
+⭐⭐ 判据（本轮最重要）「**这条禁令成立的理由不是保守，而是三个具体的不同：基线不同、工作负载不同、优化目标不同——而第三个最容易被忽略：两个 2x 如果优化的是不同的东西，它们不能叠加**」——**故那张表要加一句限定：那五行各自是对自己基线的，它们之间不能相乘**；
+⚠️ **这一条是对 10.386 的实质性修正**：**此前那个「越快的基线，DSpark 的相对收益越小」的叙述，按这条标准是把五个不同的优化目标放进了同一个坐标轴**；
+(a) 🔥🔥🔥🔥🔥 **「没有一个头条数字能确立普世胜者」**：**第 41 行写「Keep separate profiles for interactive decode, throughput serving and training rollouts. Match model revision, precision, prompt/output distribution, concurrency and quality. Neither a headline tokens/second figure nor one backend's default settings establishes a universal winner.」**；
+⭐⭐ 判据（本轮最重要）「**这句话承认了两件事：单一数字不够，单一配置也不够**」——**故 §10 里所有「A 比 B 快」的句子都应该带一个 profile 名**；
+⭐⭐ **而三个 profile 的名字值得记录：interactive decode / throughput serving / training rollouts——因为本报告一直在混用「预填」与「生成」这两个量：PP 属于 throughput serving 一侧，TG 属于 interactive decode 一侧，两者从来不在同一个 profile 里**；
+⭐⭐ **这一条可能是本轮对本报告最有用的东西：它说明了为什么 10.334 那个「PP/TG 约等于 1 是异常」的判断从一开始就把两个 profile 的量放进了同一个比值**；
+(b) ⭐⭐⭐⭐⭐ **「在支持列表里」覆盖的是名字，不是实体**：**第 28 行写「A model-family entry in a support list does not verify a modified checkpoint, expert count, LoRA layout, backward kernel or long-context configuration.」，五个不被覆盖的维度全部列出**；
+⭐⭐ 判据「**一份支持列表覆盖的是「模型家族」，而不覆盖改过的检查点、专家数、LoRA 布局、反向内核、长上下文配置——即它覆盖的是名字，不是那个名字下的实体**」——**故这条与「scope 必填」是同一件事：支持列表缺的正是一个 scope 字段**；
+⚠️⚠️⚠️ **而本报告引用过的「vLLM 支持 GLM」「SGLang 支持 SM120」都属于这类「名字级支持」，按这条标准不能直接当结论用**；
+(c) ⭐⭐⭐⭐⭐ **下一个交付物是审计，不是倍数**：**第 74 行写「The next deliverable is a pinned compatibility audit for the selected workload, not an assumed multi-fold gain.」；第 72 行写「Retain the other stack as a comparison, not a second permanent implementation to support immediately.」**；
+⭐⭐ 判据「**一个团队如果把自己的下一个交付物写成「审计」而不是「数字」，那它对「可信」的定义比它对「亮眼」的定义更严**」——**故同一个团队现在有三处「先说不」，而三处拒绝的是同一类东西——未经验证的增益**：btl-kernels 拒绝声明内核、btl-measure 拒绝把奖励变成发布声明、这份评审拒绝假定的多倍增益；
+3. [GitHub / Badtheorylabs — `btl_lab/runtime_probe.py`（1,077 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/btl_lab/runtime_probe.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「恰一个可见 CUDA 设备」，不是「至少一个」**：**判定是 result["cuda_devices"] != 1，不是 < 1；而 precision == bf16 时还要检查 torch.cuda.is_bf16_supported()**；
+⭐⭐ 判据（本轮最重要）「**一个诊断脚本如果对「多于一个」也报错，那说明它的下游代码在「设备索引」这件事上做了单卡假设**」——
+⚠️⚠️⚠️ **但必须立刻限定：这是 Adapt（训练）lane，不是推理 lane，故它不能直接解释那个至今未知的「multi-GPU on RTX Pro 6000」official known issue**；
+⭐⭐ **而这条恰好演示了「同一句话的适用范围」：一个单卡约束在训练 lane 上成立，在推理 lane 上未被验证**；
+ — [src-btl-lab-backends-json] [src-btl-lab-resources-backends-json] [src-btl-foundation-review] [src-btl-lab-runtime-probe]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -36945,7 +37237,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=425, evidence=2768, claims=1967, claims_high=1618, claims_disputed=9, trace_events=921, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=429, evidence=2776, claims=1975, claims_high=1626, claims_disputed=9, trace_events=929, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
