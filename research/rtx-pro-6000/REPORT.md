@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：371 ｜ **证据数**：2626 ｜ **主张数**：1858（高置信 1510，争议 9）
+> **来源数**：375 ｜ **证据数**：2634 ｜ **主张数**：1863（高置信 1515，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -27788,6 +27788,253 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⭐ **而这条与 §10.36 是同一件事的两面**：
 > **§10.36 记的是症状（用了旧的），这一条记的是正解（显式指路）。**
 
+### 10.315 🔥🔥🔥🔥🔥 第一次给「资料齐全」一个**可数的分母**
+
+[c-tree-coverage-is-6-5-percent]
+
+> **`git/trees/main?recursive=1` 返回 3,439 个路径（3,069 blob + 369 tree，
+> `truncated=false`）。而 `sources.csv` 的 371 条 URL 只覆盖其中 **198 个**。**
+
+| 目录 | blob 数 | 未命中 | 占该目录 |
+|---|---|---|---|
+| `native/` | 2,990 | 2,832 | **95%** |
+| `tools/` | 17 | 4 | 24% |
+| `papers/` | 16 | 11 | 69% |
+| `integrations/` | 12 | 8 | 67% |
+| `tests/` | 9 | 8 | 89% |
+| `docs/` | 7 | 2 | 29% |
+| `artifacts/` | 6 | 2 | 33% |
+| （root） | 5 | 4 | 80% |
+| `launch/` | 4 | 0 | **0%** |
+| `packaging/` | 3 | 0 | **0%** |
+
+> **🔥 总计：命中 198 / 3,069 = 6.5%，未命中 2,871。**
+>
+> **⭐⭐ 但真正有用的那个数是另一行**：
+> **`native/llama.cpp` 之外、且未命中的只有 39 个文件。**
+> **那 39 个才是本项目的决策，其余 2,832 个是上游 `llama.cpp` 的代码。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「资料齐全」这个要求，只有在给出分母之后才是一个可检验的目标；
+> 在此之前它只是一个方向。**
+>
+> **⭐⭐ 判据：**
+> **一个覆盖率如果只有 6.5%，那么「继续挖能挖到东西」
+> 不是一个猜测，而是一个必然；
+> 而这就解释了为什么三百多轮里没有一轮是空手而归的。**
+>
+> **⭐⭐ 而这条也给了停止条件一个形式**：
+> **当「`native/llama.cpp` 之外的未命中文件数」为 0 时，
+> 剩下的就只是上游代码，而不是本项目的决策。**
+>
+> **⭐⭐ 判据：**
+> **一个语料的「已挖尽」不应该按总量算，
+> 而应该按「与结论相关的子集」算。**
+
+> ⭐ **那 39 个文件的清单（`native/llama.cpp` 之外、未登记）**：
+> `AGENTS.md`、`LICENSE`、`THIRD_PARTY_NOTICES.md`、`pytest.ini`；
+> `docs/compact-release-readme.md`、`docs/launch-btl3-compact.md`；
+> `integrations/lmstudio/btl3-native/` 7 个（含 `src/config.ts`、`src/index.ts`）；
+> `integrations/ollama/Modelfile`；
+> `tests/` 8 个（`test_cuda_packaging.py`、`test_launch_release.py`、
+> `test_lmstudio_package.py`、`test_patched_ollama_package.py`、
+> `test_consumer_installer.py`、`test_btl3_gguf_signs.py`、
+> `test_btl3_qwen35.py`、`test_btl3_safetensor_view.py`）；
+> `tools/export_btl3_compact_gguf.py`、`tools/probe_windows_runner.ps1`；
+> `artifacts/conformance/btl-3-compact-layer40.report.json`、
+> `artifacts/release/native-load-report.json`；
+> `papers/behavior-before-perplexity/` 11 个（含 `references.bib`、
+> `RESEARCH_MANIFEST.json`、`SHA256SUMS`、3 张 PNG、2 个 PDF、3 个 tools）。
+>
+> **📌 本轮读了其中 4 个（`probe_windows_runner.ps1`、`Modelfile`、
+> 两个测试），故剩余 35 个。**
+
+### 10.316 🔥🔥🔥🔥🔥 r207 说的「目标机探针」找到了，而它把 `platform` **写死**
+
+[c-probe-hardcodes-its-only-platform]
+
+> **`tools/probe_windows_runner.ps1`（1,041 字节，39 行）**：
+> ```powershell
+> param(
+>     [Parameter(Mandatory = $true)]
+>     [string]$Runner,
+>     [string]$Output = "runner-cli-contract.json"
+> )
+> $requiredFlags = @("--model","--port","--host","--no-webui","--offline","-np")
+> $helpText = (& $runnerPath --help 2>&1 | Out-String)
+> if ($LASTEXITCODE -ne 0) { throw "Runner --help exited with code $LASTEXITCODE" }
+> foreach ($flag in $requiredFlags) {
+>     if (-not $helpText.Contains($flag)) { throw "Runner --help lacks required flag: $flag" }
+> }
+> $contract = [ordered]@{
+>     schema_version = 1
+>     platform     = "windows-amd64-cuda13"
+>     runner_sha256 = (Get-FileHash $runnerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+>     required_flags = $requiredFlags
+> }
+> ```
+
+> **🔥 六项 flag 与 `build_patched_ollama.REQUIRED_RUNNER_FLAGS` 逐字相同；
+> 而 `platform` 不接受参数，故这个脚本只能产出一个平台的契约。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「只能产出一种结果」的探针，
+> 不是探针，而是一张预先填好的表加上一次校验。**
+>
+> **⭐⭐ 判据：**
+> **一个参数的缺省值如果是硬编码，那么它就不是「默认」而是「唯一」；
+> 而这两者在调用方看来一模一样。**
+>
+> **⭐⭐ 判据：**
+> **同一套契约在两门语言里各写一遍，且逐条对应，
+> 说明这条契约是被认真对待的，而不是某一侧的副产品。**
+
+> ⚠️ **两份实现有一处机制差异**：
+> **Python 版 `help_text = result.stdout + result.stderr`；
+> PowerShell 版 `(& $runnerPath --help 2>&1 | Out-String)`。
+> 效果相同（都合并两路输出），但前者是拼接、后者是重定向。**
+
+### 10.317 🔥🔥🔥🔥🔥 同一模型**两套采样默认值，一个参数都不重合**
+
+[c-two-sampling-defaults-mark-platforms-not-model]
+
+> **`integrations/ollama/Modelfile`（171 字节）**：
+> ```
+> # Requires the explicitly labeled BTL-3 Patched Ollama distribution.
+> FROM ./BTL-3-Compact-AVQ2.gguf
+> PARAMETER num_ctx 32768
+> PARAMETER temperature 0.6
+> PARAMETER top_p 0.95
+> ```
+>
+> **`integrations/lmstudio/btl3-native/src/config.ts`（§10.302 已登记）**：
+> `temperature: 0.2` / `top_p: 0.9` / `repeat_penalty: 1.1` / `repeat_last_n: 512`
+
+| 平台 | temperature | top_p | 重复惩罚 |
+|---|---|---|---|
+| **Ollama** | **0.6** | **0.95** | **（无）** |
+| **LM Studio** | **0.2** | **0.9** | **1.1 / 512** |
+
+> **🔥 三个采样参数一个都不重合。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当两个集成给出两套完全不同的采样默认值，
+> 这两套值就不是「模型的推荐值」，而是「平台的惯例值」。**
+>
+> **⭐⭐ 判据：**
+> **「模型的推荐值」只能有一份；
+> 凡是一份以上，它们标的是平台，不是模型。**
+>
+> **⚠️ 而这意味着：同一个 prompt 在 Ollama 与 LM Studio 上会得到不同输出，
+> 而两份文档都没有提醒这一点。**
+
+> ⭐ **`num_ctx 32768` 是第四个写死的上下文值，也是唯一写在模型定义里的那个**：
+> 全仓库六个位置分两族——
+> **分层族（最大 `131072`）三处**：`btl3-cuda-server`（sh）、`.ps1`、`nativeRunner.ts`；
+> **写死 `32768` 三处**：`btl3-server`（macOS）、`btl3-ollama-bridge`、**`Modelfile`**。
+>
+> **⭐⭐ 判据：**
+> **一个默认值写进模型定义与写进启动脚本，含义不同：
+> 前者是「这个模型自带的建议」，后者是「这个启动器的兜底」。**
+
+### 10.318 🔥🔥🔥🔥🔥 「篡改测试」篡改的是**长度**，不是内容
+
+[c-tamper-test-covers-length-not-checksum]
+
+> **`tests/test_consumer_installer.py`（2,786 字节，82 行）**：
+> ```python
+> def fixture(tmp_path, monkeypatch):
+>     binary = runtime / "libexec/llama-server"
+>     binary.write_bytes(b"runner")            # 6 字节
+>     ...
+>     "files": {
+>         "libexec/llama-server": {"bytes": 6, "sha256": digest(b"runner")},
+>     ...
+>
+> def test_rejects_modified_runtime(tmp_path, monkeypatch):
+>     runtime, model = fixture(tmp_path, monkeypatch)
+>     (runtime / "libexec/llama-server").write_bytes(b"tampered")   # 8 字节
+>     with pytest.raises(installer.InstallError, match="size mismatch"):
+>         installer.install(runtime, model, tmp_path / "installed", False)
+> ```
+
+> **🔥 `b"runner"` = 6 字节，`b"tampered"` = **8** 字节，manifest 记 `bytes: 6`。
+> 故 `8 != 6` 在 `verify_runtime` 的 `stat().st_size` 处就 `raise` 了，
+> `sha256(path) != expected["sha256"]` 那一层**从未被执行到**。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「应该失败」的测试，如果它失败得比预期的更早，
+> 它就同时通过了，且掩盖了后面那一层。**
+>
+> **⭐⭐ 判据：**
+> **拒绝测试的价值不在于「它抛了异常」，
+> 而在于「它抛的是哪一个异常」；
+> 而 `match=` 里那串字符就是这条信息。**
+>
+> **⚠️ 而这里 `match="size mismatch"` 恰好诚实地写出了它是哪一层。**
+> **⭐⭐ 判据：**
+> **一个测试如果诚实地写出它测的是哪一层，
+> 那它的名字与它的断言就会不一致——
+> 而这就是最好的缺陷提示。**
+
+> **📌 三个测试只走到 11 个 `raise` 里的 2 个**：
+> **未被走到的六条**：`checksum mismatch`（等长篡改）、
+> `model SHA-256 mismatch`、`model size mismatch`、
+> `runtime expects a different BTL-3 model`、`runtime symlink mismatch`、
+> `runtime file is missing`。
+>
+> **⭐ 要真正测到 SHA-256 那层，只需等长篡改**：
+> `b"runner"` → `b"runnar"`（改 1 字节、长度不变）。
+
+### 10.319 🔥🔥🔥🔥🔥 同仓库两个校验器，测试强度**差三倍**，而分界在假数据的真实度
+
+[c-test-strength-tracks-fake-data-realism]
+
+| 文件 | 行数 | 测试数 | 拒绝路径 | raise 数 | 覆盖率 |
+|---|---|---|---|---|---|
+| **`test_patched_ollama_package.py`** | **198** | **7** | **4** | 17 | **5/17 = 29%** |
+| **`test_consumer_installer.py`** | **82** | **3** | **1** | 11 | **2/11 = 18%** |
+
+> **`test_patched_ollama_package.py` 的七个测试**：
+> `test_builds_direct_runner_distribution`（正常 unix）、
+> `test_rejects_payload_without_cuda_backend`、
+> `test_refuses_to_overwrite_output`、
+> `test_rejects_runner_without_ollama_cli_contract`、
+> `test_builds_windows_x64_cuda13_distribution`（正常 windows）、
+> `test_windows_rejects_non_pe_cuda_backend`、
+> `test_windows_rejects_contract_for_different_runner`。
+
+> **🔥 而它真造可执行脚本与真 PE 头**：
+> ```python
+> def executable(path, content="#!/bin/sh
+exit 0
+"):
+>     path.write_text(content); path.chmod(path.stat().st_mode | stat.S_IXUSR)
+>
+> def pe_x64(path):
+>     payload = bytearray(512)
+>     payload[:2] = b"MZ"
+>     struct.pack_into("<I", payload, 0x3C, 0x80)
+>     payload[0x80:0x84] = b"PE  "
+>     struct.pack_into("<H", payload, 0x84, 0x8664)
+> ```
+> **而消费端那个只用 `b"runner"` / `b"model"` 这类 4-7 字节字符串。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「这个仓库有测试」不等于「这个仓库的每个校验都被测试」；
+> 测试的数量应该按被测的 `raise` 数归一化，而不是按文件数。**
+>
+> **⭐⭐ 判据：**
+> **一个校验器写了 11 个 `raise`，而测试只覆盖 2 个，
+> 那另外 9 个就是「写在代码里的意图」，不是「被验证的行为」。**
+>
+> **⭐⭐ 而强弱的分界不在测试数量，在假数据的真实度**：
+> **前者造了真 PE 头与真可执行脚本，后者只造 4-7 字节字符串。**
+>
+> **⭐⭐ 判据：**
+> **一个测试的假数据越接近真数据，它能测到的层就越深；
+> 而 `b"model"` 这种假数据只能测到「长度对不对」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -32607,6 +32854,50 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个缺口如果修它只需要读 64 字节，那么它存在的原因不是成本，而是没人想到**」；
  — [src-btl3-tools-modal-consumer-gpu-bench] [src-btl3-tools-build-cuda-bundle]
 
+### 覆盖审计、目标机探针与两个测试（第一百三十三轮补充）
+
+1. 🔥🔥🔥🔥🔥 **第一次给「资料齐全」一个可数的分母**：
+`git/trees/main?recursive=1` 返回 3,439 个路径（3,069 blob + 369 tree，`truncated=false`），**而 `sources.csv` 的 371 条 URL 只覆盖其中 198 个（6.5%），未命中 2,871**；
+**按目录：`native/` 2,832（95%）、`tests/` 8（89%）、`papers/` 11（69%）、`integrations/` 8（67%）、`docs/` 2（29%）、`tools/` 4（24%）、而 `launch/` 与 `packaging/` 是 0%**；
+⭐⭐ **但真正有用的数是：`native/llama.cpp` 之外未命中的只有 39 个文件**——**那 39 个才是本项目的决策，其余 2,832 个是上游代码**；
+⭐⭐ 判据（本轮最重要）「**「资料齐全」这个要求，只有在给出分母之后才是一个可检验的目标；在此之前它只是一个方向**」；
+⭐⭐ 判据「**一个覆盖率如果只有 6.5%，那么「继续挖能挖到东西」不是一个猜测，而是一个必然**」；
+⭐⭐ **而这条给了停止条件一个形式**：**当「`native/llama.cpp` 之外的未命中文件数」为 0 时，剩下的就只是上游代码**；
+⭐⭐ 判据「**一个语料的「已挖尽」不应该按总量算，而应该按「与结论相关的子集」算**」；
+2. [GitHub / Badtheorylabs — `tools/probe_windows_runner.ps1`（1,041 字节，39 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/probe_windows_runner.ps1)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **§10.310 说的「目标机探针」找到了，而它把 platform 写死**：
+「**param([Parameter(Mandatory = $true)][string]$Runner, [string]$Output = runner-cli-contract.json)**」+「**$contract = [ordered]@{ schema_version = 1; platform = windows-amd64-cuda13; runner_sha256 = (Get-FileHash $runnerPath -Algorithm SHA256).Hash.ToLowerInvariant(); required_flags = $requiredFlags }**」——**platform 不接受参数，故它只能产出一个平台的契约**；
+⭐⭐ 判据（本轮最重要）「**一个「只能产出一种结果」的探针，不是探针，而是一张预先填好的表加上一次校验**」；
+⭐⭐ 判据「**一个参数的缺省值如果是硬编码，那么它就不是「默认」而是「唯一」；而这两者在调用方看来一模一样**」；
+(a) ⭐⭐⭐⭐⭐ **六项 flag 与 Python 版逐字相同**：`--model / --port / --host / --no-webui / --offline / -np`——**而与 `build_patched_ollama.validate_runner_cli` 的逻辑逐条对应（同样合并 stderr、同样先查退出码、同样逐 flag 查 Contains）**；
+⭐⭐ 判据「**同一套契约在两门语言里各写一遍，且逐条对应，说明这条契约是被认真对待的**」；
+⚠️ **一处机制差异**：Python 版 `help_text = result.stdout + result.stderr`；PowerShell 版 `(& $runnerPath --help 2>&1 | Out-String)`——**效果相同（都合并两路输出），但前者是拼接、后者是重定向**；
+3. [GitHub / Badtheorylabs — `integrations/ollama/Modelfile`（171 字节，5 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/integrations/ollama/Modelfile)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **同一模型两套采样默认值，一个参数都不重合**：
+「**FROM ./BTL-3-Compact-AVQ2.gguf; PARAMETER num_ctx 32768; PARAMETER temperature 0.6; PARAMETER top_p 0.95**」vs §10.302 记的 LM Studio「**temperature 0.2, top_p 0.9, repeat_penalty 1.1, repeat_last_n 512**」——**三个采样参数一个都不重合**；
+⭐⭐ 判据（本轮最重要）「**当两个集成给出两套完全不同的采样默认值，这两套值就不是「模型的推荐值」，而是「平台的惯例值」**」；
+⭐⭐ 判据「**「模型的推荐值」只能有一份；凡是一份以上，它们标的是平台，不是模型**」；
+⚠️ **故同一个 prompt 在 Ollama 与 LM Studio 上会得到不同输出，而两份文档都没有提醒这一点**；
+(a) ⭐ **`num_ctx 32768` 是第四个写死的上下文值，也是唯一写在模型定义里的那个**：**全仓库六个位置分两族——分层族（最大 131072）三处（btl3-cuda-server sh/.ps1、nativeRunner.ts）；写死 32768 三处（btl3-server、btl3-ollama-bridge、Modelfile）**；
+⭐⭐ 判据「**一个默认值写进模型定义与写进启动脚本，含义不同：前者是「这个模型自带的建议」，后者是「这个启动器的兜底」**」；
+4. 🔥🔥🔥🔥🔥 **「篡改测试」篡改的是长度，不是内容**：
+`tests/test_consumer_installer.py` 的 fixture 里`binary.write_bytes(b"runner")`（**6 字节**）、manifest 记 `bytes: 6`；而 `test_rejects_modified_runtime` 写入 `b"tampered"`（**8 字节**），断言 `pytest.raises(InstallError, match="size mismatch")`——**故 `8 != 6` 在 `verify_runtime` 的 `stat().st_size` 处就 raise 了，`sha256(path) != expected["sha256"]` 那一层从未被执行到**；
+⭐⭐ 判据（本轮最重要）「**一个「应该失败」的测试，如果它失败得比预期的更早，它就同时通过了，且掩盖了后面那一层**」；
+⭐⭐ 判据「**拒绝测试的价值不在于「它抛了异常」，而在于「它抛的是哪一个异常」；而 `match=` 里那串字符就是这条信息**」；
+⚠️ **三个测试只走到 11 个 raise 里的 2 个**：**未被走到的六条**：`checksum mismatch`、`model SHA-256 mismatch`、`model size mismatch`、`runtime expects a different BTL-3 model`、`runtime symlink mismatch`、`runtime file is missing`；
+⭐ **要真正测到 SHA-256 那层，只需等长篡改**：`b"runner"` -> `b"runnar"`（改 1 字节、长度不变）；
+5. 🔥🔥🔥🔥🔥 **同仓库两个校验器，测试强度差三倍**：
+`tests/test_patched_ollama_package.py`（7,536 字节，198 行）**7 个测试、4 条拒绝路径**，vs `tests/test_consumer_installer.py`（2,786 字节，82 行）**3 个测试、1 条拒绝路径**——**覆盖率 5/17 = 29% vs 2/11 = 18%**；
+⭐⭐ 判据（本轮最重要）「**「这个仓库有测试」不等于「这个仓库的每个校验都被测试」；测试的数量应该按被测的 raise 数归一化，而不是按文件数**」；
+⭐⭐ 判据「**一个校验器写了 11 个 raise，而测试只覆盖 2 个，那另外 9 个就是「写在代码里的意图」，不是「被验证的行为」**」；
+(a) 🔥🔥🔥🔥🔥 **强弱分界在假数据的真实度**：前者真造 `#!/bin/sh` 可执行脚本（带 `--help` 分支）与真 PE 头（`MZ` / `e_lfanew@0x3C=0x80` / `PE\0\0` / `0x8664`）；后者只用 `b"runner"` / `b"model"` 这类 4-7 字节字符串；
+⭐⭐ 判据「**一个测试的假数据越接近真数据，它能测到的层就越深；而 `b"model"` 这种假数据只能测到「长度对不对」**」；
+ — [src-btl3-repo-tree] [src-btl3-tools-probe-windows-runner] [src-btl3-integrations-ollama-modelfile] [src-btl3-tests-consumer-installer] [src-btl3-tests-patched-ollama]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -32746,7 +33037,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=371, evidence=2626, claims=1858, claims_high=1510, claims_disputed=9, trace_events=813, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=375, evidence=2634, claims=1863, claims_high=1515, claims_disputed=9, trace_events=821, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
