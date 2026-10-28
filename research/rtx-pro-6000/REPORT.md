@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：345 ｜ **证据数**：2494 ｜ **主张数**：1813（高置信 1466，争议 9）
+> **来源数**：348 ｜ **证据数**：2509 ｜ **主张数**：1818（高置信 1471，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -25847,6 +25847,218 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **「一个工具能做什么」应该用它的输入集合来描述，而不是用它的输出——**
 > **⚠️ 而这里输入集合的大小是 1。**
 
+### 10.269 🔥🔥🔥🔥🔥 GGUF 的 `file_type` 是一个**常量**，与模型构成无关
+
+[c-file-type-metadata-is-a-template]
+
+> 源码写死 `writer.add_file_type(gguf.LlamaFileType.MOSTLY_BF16)`，
+> 而真实的 BF16 只占 **14.4% 的字节**、**0.50% 的张量**（2,416 个里 12 个）。
+> 故这个字段描述的不是这份文件，而是一个模板。
+
+> **🔥🔥🔥🔥🔥 这条把「GGUF 元数据」这个我一直当作权威的东西降了一级**：
+> **`file_type` 在标准用法里是「这份文件主要是什么精度」，
+> ⚠️ 而这里它是一行无条件的 writer 调用。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个元数据字段」有两种来源：被测量的，和被声明的——**
+> **⚠️ 而两者在文件里长得完全一样。**
+>
+> ⭐⭐ **而这条的实际危害是可量化的**：
+> **任何按 `file_type` 决定加载路径的下游工具，
+> ⚠️ 都会以为这份 8.4 GB 的文件「主要是 BF16」——
+> 而实际上 85.6% 的字节是 AVQ2 与 INT4 的打包码。**
+>
+> **⭐⭐ 判据：**
+> **「一个字段的错」的危险度，正比于有多少下游依赖它——**
+> **⚠️ 而 `file_type` 恰好是一个被广泛读取的标准字段。**
+>
+> ⭐⭐ **而这条与 §10.264 那条「verified_payload_count 是恒等式」是同一类**：
+> **两者都是代码路径的副产品，而不是被测量的量——
+> ⚠️ 故这已经是同一个反模式的第二次实例。**
+>
+> **⭐⭐ 判据：**
+> **「同一个反模式出现两次」就不再是偶然，而是风格——**
+> **⚠️ 而这次风格是「用声明代替测量」。**
+>
+> ⭐⭐ **而这条也解释了为什么四份报告的这个字段都一样**：
+> **因为它们都是同一个 `add_metadata` 跑出来的，
+> ⚠️ 而那个函数不接受「这份文件是什么格式」这个参数。**
+>
+> **⭐⭐ 判据：**
+> **「一个函数的形参表」暴露了它允许什么变化——**
+> **⚠️ 而 `add_metadata(writer, gguf, source, *, include_tokenizer)`
+> 里没有「格式」这个位置，故格式不可能被如实记录。**
+
+### 10.270 ⭐⭐⭐⭐⭐ BF16 到 F32 是**纯位移**，且它是精确的
+
+[c-bf16-to-f32-is-exact-both-ways-in-scope]
+
+> `bfloat16_to_float32` 用 `astype(uint32) << 16`。
+> 本轮实测全部 **65,536** 个位模式往返 **0 失败**。
+
+> **⭐⭐⭐⭐⭐ 这条的价值在于它推翻了我自己的一个怀疑**：
+> **我读到这里时的第一反应是「位移法没做舍入，会不会错」，
+> ⚠️ 而我跑了一遍全空间才发现：这个方向不需要舍入。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个看起来偷懒的实现」可能只是它做的那件事本来就简单——**
+> **⚠️ 而判据是「它的定义域里有没有需要舍入的点」。**
+>
+> ⭐⭐ **而这条给出一个可复用的判据**：
+> **BF16 到 F32 是扩展（16 位到 32 位，低位补零），故无损；
+> F32 到 BF16 是收缩（要丢 16 位），故有损——
+> ⚠️ 而「扩展无损、收缩有损」这个方向性是所有浮点格式对之间的通例。**
+>
+> **⭐⭐ 判据：**
+> **「一次转换会不会丢精度」取决于它是变宽还是变窄——**
+> **⚠️ 而不取决于它有没有写舍入代码。**
+>
+> ⭐⭐ **而这条也与 §10.267 那条「small-state 混着 BF16 与 F32」接上**：
+> **既然升到 F32 无损，那作者「强制四类升 F32」就没有引入任何误差——
+> ⚠️ 故那不是一次精度妥协，而是一次纯扩容。**
+>
+> **⭐⭐ 判据：**
+> **「一个精度提升」如果发生在扩展方向，它就是免费的——**
+> **⚠️ 故「为什么不全部升到 F32」的答案不是「为了精度」，而是「为了体积」。**
+>
+> ⭐⭐ **而这条还让 `reorder_v_heads` 与负指数那些变换变得可审计**：
+> **因为它们都作用在已经无损升到 F32 的数组上，
+> ⚠️ 故这些变换的误差只来自它们自己，不来自读取。**
+>
+> **⭐⭐ 判据：**
+> **「一条变换链的可审计性」取决于它的第一环是否无损——**
+> **⚠️ 而这里第一环是无损的，故后面每一步都能单独验。**
+
+### 10.271 ⭐⭐⭐⭐⭐ RMSNorm 权重存的是**相对 1 的偏移**
+
+[c-rmsnorm-weights-are-stored-as-offsets]
+
+> `convert_small_state` 对它们做 `value + np.float32(1.0)`，
+> 且只排除 `linear_attn.norm.weight`。
+> 故任何按「norm.weight 就是 gamma」假设做的分析，都会差一个 1。
+
+> **⭐⭐⭐⭐⭐ 这条与下一条（`A_log` 存的是负指数）是同一类**：
+> **这个模型的文件里，有若干张量的名字与它的实际内容不符——
+> ⚠️ 而修正它们的地方全在 `convert_small_state` 这一个函数里。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个张量的名字」是写它的人起的，
+> 「一个张量的语义」是读它的人必须知道的——**
+> **⚠️ 而两者之间可以差一次变换，而这个差只写在转换器里。**
+>
+> ⭐⭐ **而这条的实际意义是**：
+> **任何绕过 `convert_small_state` 直接读 safetensors 的下游，
+> ⚠️ 都会得到一组偏移了 1 的 gamma——
+> 而这个错误不会报错，只会让输出分布轻微偏移。**
+>
+> **⭐⭐ 判据：**
+> **「一个静默偏移」比一个「静默截断」更难发现——**
+> **⚠️ 因为前者只改变数值大小，不改变形状或量级。**
+>
+> ⭐⭐ **而这条也解释了为什么 `linear_attn.norm.weight` 要排除**：
+> **它是另一类归一化（可能是 QK-norm），
+> ⚠️ 而 QK-norm 的权重在原始权重里本来就是「1 附近」的 gamma，不是偏移量。**
+>
+> **⭐⭐ 判据：**
+> **「一个例外分支」往往标记着两个不同来源的张量被放进了同一张表——**
+> **⚠️ 而 `not in` 这个写法正是那个标记。**
+>
+> ⭐⭐ **而这条对「我要不要相信一个 checkpoint」给出具体答案**：
+> **要相信它，你需要的不只是权重文件，还需要那份转换代码——
+> ⚠️ 因为没有它，权重是不可解释的。**
+>
+> **⭐⭐ 判据：**
+> **「一份权重的自足性」取决于它有没有隐式的读法约定——**
+> **⚠️ 而有约定时，权重与代码必须一起发布，否则不构成一个可复现的制品。**
+>
+> ⭐⭐ **同类的还有 `A_log`**：
+> **「`if name.endswith(".A_log"): value = -np.exp(value, dtype=np.float32)`」——
+> ⚠️ 故这个张量存的不是 log，而是负指数；
+> 它的名字与语义是反的。**
+
+### 10.272 ⭐⭐⭐⭐ 元数据里有**七处**硬编码，而非四处
+
+[c-token-ids-and-revision-are-literals]
+
+> `btl3.base.revision` = `6a9e13bd...`、
+> `add_eos_token_id(248046)`、`add_pad_token_id(248044)`
+> 都是字面量，而同一函数里 `vocab_size`、`num_hidden_layers` 都是读配置。
+
+> **⭐⭐⭐⭐ 这条给「口径不一致」一个可判定的形式**：
+> **在同一个函数里，字段 A 读配置、字段 B 写字面量——
+> ⚠️ 故「为什么这个可以硬编码」这个问题没有统一答案，
+> 而它本该有：要么全读配置，要么全写死。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个函数内部的常量与变量混用」暴露了作者对每个字段的信任程度不同——**
+> **⚠️ 而那个信任程度没有写下来，只体现在写法里。**
+>
+> ⭐⭐ **而这条的具体风险是可指出的**：
+> **如果词表变了（换一个 tokenizer），`248046` 不会跟着变——
+> ⚠️ 而 `vocab_size` 会跟着变——
+> 故两者会在某一天互相矛盾，而那一天不会报错。**
+>
+> **⭐⭐ 判据：**
+> **「两个应当同步的字段」如果一个读配置、一个写字面量，那它们迟早会不同步——**
+> **⚠️ 而判据是「它们有没有同一个来源」。**
+>
+> ⭐⭐ **而 `btl3.base.revision` 这个哈希还有一层含义**：
+> **它是第二个哈希（第一个是 `EXPECTED_MANIFEST`）——
+> ⚠️ 故这个项目用两个哈希分别锁「基座」与「制品」，
+> 而这恰好说明作者清楚这两者是不同的东西。**
+>
+> **⭐⭐ 判据：**
+> **「一个项目里有几个哈希」反映它认为有几层需要锁——**
+> **⚠️ 而两层（基座、制品）是一个成熟的划分。**
+>
+> ⭐⭐ **而这条也修正 §10.268 那句「四处硬编码」**：
+> **加上这三处，硬编码总数是七处——
+> ⚠️ 故「四个硬编码就是设计」那条判据应当升级为「七个」。**
+
+### 10.273 ⭐⭐⭐⭐⭐ 导出链**五个文件读完**，是一条可审计的单向流水线
+
+[c-export-chain-is-now-fully-read]
+
+> `safetensor_view.py`（mmap 读）→ `qwen35.py`（命名与变换）→
+> `signs.py`（符号生成）→ `metadata.py`（元数据）→ `exporter.py`（编排与校验）。
+> 且读取层刻意不依赖 torch。
+
+> **⭐⭐⭐⭐⭐ 这条是「读完整条链」之后的整体判断**：
+> **五个文件的分工是一条单向流水线，而每一层都可以单独验——
+> ⚠️ 读取层查边界、变换层查形状、编排层查哈希。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一条流水线的可审计性」取决于它的每一段是否有自己的断言——**
+> **⚠️ 而这条链的每一段都有：
+> `safetensor_view` 查字节数与边界、
+> `qwen35` 的 `reorder_v_heads` 查 16x3x128、
+> `exporter` 查 manifest 哈希与重名。**
+>
+> ⭐⭐ **而这条链最值得记的一点是：它不依赖 torch**：
+> **「Read-only, mmap-backed safetensors access without importing Torch」——
+> ⚠️ 故导出 8.4 GB 不需要把权重读进内存，也不需要装 torch。**
+>
+> **⭐⭐ 判据：**
+> **「一个导出工具的依赖面」决定了它能不能在受限环境里跑——**
+> **⚠️ 而「不依赖 torch」这个选择，把一个本来很重的活变成了纯 numpy 运算。**
+>
+> ⭐⭐ **而这条也解释了为什么这个项目的导出是可信的**：
+> **因为它把「读」与「变换」与「写」与「验」分在四层，
+> ⚠️ 故任何一层的错误都会被下一个断言挡住，而不是被带到制品里。**
+>
+> **⭐⭐ 判据：**
+> **「一条链的质量」不取决于它有多长，而取决于接缝处有没有断言——**
+> **⚠️ 而这里每个接缝都有。**
+>
+> ⭐⭐ **而这条给本报告一个边界**：
+> **导出链读完了，但运行时那条链（`btl3-avq.cu` 等）读完了却没跑过——
+> ⚠️ 故「制品的正确性有强证据，而运行时的性能没有」这个不对称，
+> 正是这个项目当前的真实状态。**
+>
+> **⭐⭐ 判据：**
+> **「一个项目的证据强度」可以按制品链与运行时链分别评估——**
+> **⚠️ 而两者常常一强一弱，且弱者不会因为强者强而变强。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -30160,6 +30372,55 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
  —（2026-10 抓取）。⭐⭐⭐⭐⭐ **两个 `.cuh` 是纯声明**：「**#pragma once #include "common.cuh" #include "btl3-avq-marker.h" void ggml_cuda_op_btl3_avq2(ggml_backend_cuda_context & ctx, ggml_tensor * dst);**」——**故「CUDA 的形状校验在哪里」的答案是「只在 `btl3-avq-marker.h` 里」**；
  — [src-btl3-tools-exporter-py] [src-btl3-gguf-writer-py] [src-btl3-cuda-avq-cuh] [src-btl3-cuda-int4-cuh]
 
+### 导出链其余三个模块（第一百一十九轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/metadata.py`（4,183 字节，100 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/metadata.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **`file_type` 是常量，与模型构成无关**：
+「**writer.add_file_type(gguf.LlamaFileType.MOSTLY_BF16)**」——**而真实 BF16 只占 14.4% 字节、0.50% 张量（2,416 个里 12 个）**；
+⭐⭐ 判据（本轮最重要）「**「一个元数据字段」有两种来源：被**测量**的，和被**声明**的——⚠️ 而两者在文件里长得完全一样**」；
+⭐⭐ 判据「**「同一个反模式出现两次」就不再是偶然，而是**风格**——⚠️ 而这次风格是「用**声明**代替**测量**」**」；
+⭐⭐ 判据「**「一个函数的形参表」暴露了它**允许什么变化**——⚠️ 而 `add_metadata(writer, gguf, source, *, include_tokenizer)` 里没有「格式」这个位置**」；
+(a) ⭐⭐⭐⭐ **EOS/PAD 的 id 是字面量**：
+「**writer.add_eos_token_id(248046) writer.add_pad_token_id(248044)**」——**而 `vocab_size` 是读配置的**；
+(b) ⭐⭐⭐⭐⭐ **基座版本号也是硬编码**：
+「**writer.add_string("btl3.base.revision", "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9")**」——**它与 `EXPECTED_MANIFEST` 是两个不同的哈希**；
+(c) ⭐⭐⭐⭐⭐ **词表里没有的 id 会被合成成 `[PAD<n>]`**：
+「**else: tokens.append(f"[PAD{index}]") types.append(gguf.TokenType.UNUSED)**」——**故「词表 248,046 项」里可能含并未真实存在的占位符**；
+(d) ⭐⭐⭐⭐ **控制 token 靠字符串形状猜**：
+「**looks_control = token.startswith("<|") and token.endswith("|>")**」——**即 `special` 字段缺失时的兜底启发式**；
+(e) ⭐⭐⭐ **mrope 分段被补齐/截断到 4**：
+「**writer.add_rope_dimension_sections((sections + [0])[:4])**」——**两种越界都是静默的**；
+(f) ⭐⭐⭐⭐ **BPE merge 对把空格编码成 `chr(32 + 256)`**：
+「**encoded_merges.append(" ".join(part.replace(" ", chr(ord(" ") + 256)) for part in merge))**」——**GPT-2 byte-level BPE 约定的复现**；
+2. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/qwen35.py`（3,459 字节，99 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/qwen35.py)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **RMSNorm 权重存的是相对 1 的偏移**：
+「**if name.endswith("norm.weight") and "linear_attn.norm.weight" not in name: value = value + np.float32(1.0)**」——**故任何按「norm.weight 就是 gamma」做的分析都会差一个 1**；
+⭐⭐ 判据「**「一个张量的名字」是**写它的人**起的，「一个张量的语义」是**读它的人**必须知道的——⚠️ 而两者之间可以差一次变换，而这个差只写在**转换器**里**」；
+⭐⭐ 判据「**「一个静默偏移」比一个「静默截断」更难发现——⚠️ 因为前者只改变数值大小，不改变形状或量级**」；
+⭐⭐ 判据「**「一份权重的自足性」取决于它有没有**隐式的读法约定**——⚠️ 而有约定时，权重与代码必须一起发布**」；
+(a) 🔥🔥🔥🔥🔥 **`A_log` 存的是负指数，不是 log**：
+「**if name.endswith(".A_log"): value = -np.exp(value, dtype=np.float32)**」——**名字与语义是反的**；
+(b) ⭐⭐⭐⭐⭐ **V 头的形状断言是硬编码的 `16 * 3 * 128 = 6144`**：
+「**def reorder_v_heads(array, axis, *, key_heads=16, values_per_key=3, head_dim=128)**」「**expected = key_heads * values_per_key * head_dim**」；
+(c) ⭐⭐⭐⭐⭐ **conv1d 的切分点是字面量 `2 * 16 * 128`**：
+「**qk_channels = 2 * 16 * 128**」——**这三个数与 `reorder_v_heads` 的默认参数是同一组，故「Q/K 各 16 头、每头 128 维」这条事实在两个函数里各写了一遍**；
+(d) ⭐⭐⭐⭐ **`.dt_bias` 被改名为 `.dt_proj.bias` 才能映射**：
+「**source = source.removesuffix(".dt_bias") + ".dt_proj.bias"**」——**名字不同源于上游转换器的命名约定**；
+3. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/safetensor_view.py`（2,902 字节，91 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/safetensor_view.py)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **BF16 到 F32 是纯位移，且精确**：
+「**words = array.astype(np.uint32) << np.uint32(16) return words.view(np.float32)**」——**本轮实测全部 65,536 个位模式往返 0 失败**；
+⭐⭐ 判据（本轮最重要）「**「一个看起来偷懒的实现」可能只是**它做的那件事本来就简单**——⚠️ 而判据是「它的定义域里有没有**需要舍入的点**」**」；
+⭐⭐ 判据「**「一次转换会不会丢精度」取决于它是**变宽**还是**变窄**——⚠️ 而不取决于它有没有写舍入代码**」；
+⭐⭐ 判据「**「一条变换链的可审计性」取决于它的**第一环**是否无损**」；
+(a) ⭐⭐⭐⭐ **两道读取校验：字节数与文件边界**：
+「**if end - start != expected: raise ValueError(...) if self.data_offset + end > file_bytes: raise ValueError(...)**」；
+(b) ⭐⭐⭐⭐ **读取层刻意不 import torch**：
+「**"""Read-only, mmap-backed safetensors access without importing Torch."""**」——**故导出 8.4 GB 不需要把权重读进内存**；
+ — [src-btl3-tools-metadata-py] [src-btl3-tools-qwen35-py] [src-btl3-tools-safetensor-view-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -30299,7 +30560,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=345, evidence=2494, claims=1813, claims_high=1466, claims_disputed=9, trace_events=759, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=348, evidence=2509, claims=1818, claims_high=1471, claims_disputed=9, trace_events=765, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
