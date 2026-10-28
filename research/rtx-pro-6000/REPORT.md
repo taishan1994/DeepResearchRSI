@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：368 ｜ **证据数**：2613 ｜ **主张数**：1852（高置信 1504，争议 9）
+> **来源数**：370 ｜ **证据数**：2621 ｜ **主张数**：1855（高置信 1507，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -27499,6 +27499,158 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **一份技术报告里最稀缺的不是「我成功了」，而是「我试过这些，都不行」；
 > 因为后者能省掉读者重复那五级阶梯。**
 
+### 10.309 🔥🔥🔥🔥🔥 `verify_model` 被**复制到两个入口，且逐字同构**
+
+[c-verify-model-is-copied-to-two-entries]
+
+> **发布侧 `tools/build_launch_release.py` 25-41**：
+> ```python
+> def verify_model(model: Path) -> None:
+>     if not model.is_file():
+>         raise ReleaseError(f"model is missing: {model}")
+>     if model.stat().st_size != MODEL_BYTES:
+>         raise ReleaseError(f"model size mismatch: expected {MODEL_BYTES}, got {model.stat().st_size}")
+>     if sha256(model) != MODEL_SHA256:
+>         raise ReleaseError("model SHA-256 mismatch")
+> ```
+>
+> **消费侧 `tools/install_consumer_bundle.py` 74-80**：
+> ```python
+> def verify_model(model: Path) -> None:
+>     if not model.is_file():
+>         raise InstallError(f"model is missing: {model}")
+>     if model.stat().st_size != MODEL_BYTES:
+>         raise InstallError(f"model size mismatch: {model.stat().st_size}")
+>     if sha256(model) != MODEL_SHA256:
+>         raise InstallError("model SHA-256 mismatch")
+> ```
+
+> **🔥🔥🔥🔥🔥 三层完全一致（`is_file()` → `stat().st_size` → `sha256()`），
+> 差异只有异常类型与 size 报错的措辞。**
+>
+> **故 §10.297 那条「发布侧真的校验」在消费侧同样成立——两个入口都验。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个校验逻辑被复制到几个入口，等于作者认为有几个入口需要它；
+> 而复制次数比单点强度更能说明作者的意图。**
+>
+> **⭐ 而这一条推翻 §10.299 那张「四个校验器四档强度」表的普遍性**：
+> **那张表只列五个文件，而我当时把它写成了这个仓库的全貌。**
+> **实际数到七个文件：五个带 `sha256(`，两个零**（`ollama_bridge.py`、
+> `validate_lmstudio_package.py`）。
+>
+> **⭐⭐ 判据：**
+> **一张强度表的分母必须是「这个仓库里所有同类文件」，
+> 而我只填了我读过的那些；故那张表看起来像排序，实际上是采样。**
+>
+> **⭐⭐ 判据：**
+> **「A 比 B 强」是一个偏序，而「这张表覆盖了全部」是一个全称断言——
+> 而我把前者当成了后者。**
+
+> ⭐⭐⭐⭐⭐ **顺带解掉一个次要悬念：五个 `sha256()`，三种块大小**
+> **`8 MiB`（`build_launch_release`）、`4 MiB`（`install_consumer_bundle`）、
+> `1 MiB`（其余三个）——没有两个实现块大小相同，
+> 而三层校验语句序列逐字同构。**
+> **故差异不在逻辑，而在复制粘贴时随手改的块大小。**
+
+> **⭐⭐⭐ 而消费侧的顺序值得单记**：
+> `read_manifest` → `verify_runtime` → `verify_model` → 检查 prefix 是否已存在
+> → `mkdtemp` 暂存 → `copytree`。
+> **故一次坏的安装不会留下半截目录：先验、再拷、最后原子替换。**
+
+### 10.310 🔥🔥🔥🔥🔥 唯一会**执行目标二进制**的校验器
+
+[c-patched-ollama-executes-the-binary]
+
+> **`tools/build_patched_ollama.py` 54-70 行**：
+> ```python
+> def validate_runner_cli(path: Path) -> None:
+>     try:
+>         result = subprocess.run(
+>             [path, "--help"],
+>             text=True, capture_output=True, timeout=10, check=False,
+>         )
+>     except (OSError, subprocess.TimeoutExpired) as error:
+>         raise PackageError(f"runner CLI contract probe failed: {error}") from error
+>     help_text = result.stdout + result.stderr
+>     missing = [flag for flag in REQUIRED_RUNNER_FLAGS if flag not in help_text]
+>     if result.returncode != 0 or missing:
+>         raise PackageError(
+>             f"runner CLI contract missing flags {missing}; exit={result.returncode}"
+>         )
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **源码层面的子串检查证明「字符串在」，
+> 执行层面的 `--help` 检查证明「这个二进制能起来且认这些参数」；
+> 后者比前者强一个数量级。**
+>
+> **⭐⭐ 而它还有 `timeout=10` 与 `check=False`**：
+> **故它能区分「起不来」与「起来了但缺参数」两种失败。**
+>
+> **⭐⭐ 判据：**
+> **一个探针如果只检查退出码，它会把「起不来」和「起来了但答错」混成一种；
+> 而把 `stdout` 与 `stderr` 合并后再查内容，
+> 是为了兼容那些把帮助打到 `stderr` 的程序。**
+
+> ⭐⭐⭐⭐ **它要求的六个 flag 值得记**：
+> **`REQUIRED_RUNNER_FLAGS = ("--model", "--port", "--host",
+> "--no-webui", "--offline", "-np")`**
+>
+> **⚠️ 而其中 `--no-webui` / `--offline` / `-np` 三项
+> 在 `btl3-cuda-server` 启动器的 18 个参数里一次都没出现。**
+>
+> **⭐⭐ 判据：**
+> **两条路径要求不同的 flag 集合，
+> 说明它们调用的是两个不同的二进制入口，
+> 而不是同一个的二种包法。**
+
+> ⭐⭐⭐⭐⭐ **而 Windows 侧不能交叉编译**：
+> **`validate_windows_contract` 要求 `runner-cli-contract.json` 存在，
+> 且其 `runner_sha256` 必须等于 `sha256(runner)`——
+> 而那个 json 由目标机探针生成。**
+> **故要让 `windows-amd64-cuda13` 这个 target 通过，
+> 必须先在没有交叉环境的目标机上跑一次探针。**
+
+### 10.311 🔥🔥🔥🔥🔥 `sm_120` 只落在 **`cuda13` 一侧**
+
+[c-sm120-lives-on-the-cuda13-side]
+
+> **`build_patched_ollama.py` 第 29-35 行**：
+> ```python
+> PLATFORMS = {
+>     "linux-amd64-cuda12": {"cuda_dir": "cuda_v12", "windows": False},
+>     "linux-amd64-cuda13": {"cuda_dir": "cuda_v13", "windows": False},
+>     "linux-arm64-cuda12": {"cuda_dir": "cuda_v12", "windows": False},
+>     "linux-arm64-cuda13": {"cuda_dir": "cuda_v13", "windows": False},
+>     "windows-amd64-cuda13": {"cuda_dir": "cuda_v13", "windows": True},
+> }
+> ```
+
+> **🔥🔥🔥🔥🔥 五个 target 里三个是 `cuda13`，而 CUDA 12 的两个是给更老的卡用的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份平台矩阵里的 `cuda12` / `cuda13` 分野，
+> 实际上是一条「哪些卡能跑」的分界线；
+> 而 `sm_120` 恰好落在 `cuda13` 一侧。**
+>
+> **⭐⭐ 而这条与 §10.281 那条独立吻合**：
+> **§10.281 从 CMake 里读到 `120-real` 只在 CUDA 13 的 target 清单里，
+> 而这里从打包脚本里读到 `cuda13` 是单独的 target——
+> 两处独立地说明「这张卡需要 CUDA 13」。**
+>
+> **⭐⭐ 判据：**
+> **当同一件事在两个不同层（编译目标清单与打包平台表）被分别编码时，
+> 它就不是一个巧合，而是这套构建系统的硬约束。**
+>
+> ⚠️ **而这条也解释了为什么性能数字只在 `cuda13` 上出现**：
+> **因为在 `cuda12` 上它根本编不出来。**
+
+> **📌 对 RTX PRO 6000 的读者最直接的三条**：
+> **① 必须用 `*-cuda13` 的 Ollama 补丁包，不能用 `cuda12` 的；**
+> **② `linux-amd64-cuda13` 就是性能数字所在的 target；**
+> **③ `windows-amd64-cuda13` 需要目标机探针，故它不能在一台 Linux 机器上一次做完。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -32262,6 +32414,36 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一份技术报告里最稀缺的不是「我成功了」，而是「我试过这些，都不行」**」；
  — [src-btl3-paper-article] [src-btl3-paper-readme]
 
+### `build_patched_ollama.py` 与 `install_consumer_bundle.py`（第一百三十一轮补充）
+
+继续执行「按字节/证据比补读」的策略。
+
+1. [GitHub / Badtheorylabs — `tools/build_patched_ollama.py`（9,541 字节，271 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/build_patched_ollama.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **唯一会执行目标二进制的校验器**：
+「**def validate_runner_cli(path: Path) -> None: result = subprocess.run([path, --help], text=True, capture_output=True, timeout=10, check=False) ... help_text = result.stdout + result.stderr; missing = [flag for flag in REQUIRED_RUNNER_FLAGS if flag not in help_text]; if result.returncode != 0 or missing: raise PackageError(...)**」——
+⭐⭐ 判据（本轮最重要）「**源码层面的子串检查证明「字符串在」，执行层面的 --help 检查证明「这个二进制能起来且认这些参数」；后者比前者强一个数量级**」；
+⭐⭐ 判据「**一个探针如果只检查退出码，它会把「起不来」和「起来了但答错」混成一种**」；
+(a) ⭐⭐⭐⭐ **六个必需 flag**：「**REQUIRED_RUNNER_FLAGS = (--model, --port, --host, --no-webui, --offline, -np)**」——**而其中 `--no-webui` / `--offline` / `-np` 三项在 `btl3-cuda-server` 的 18 个参数里一次都没出现**；
+⭐⭐ 判据「**两条路径要求不同的 flag 集合，说明它们调用的是两个不同的二进制入口，而不是同一个的二种包法**」；
+(b) 🔥🔥🔥🔥🔥 **PLATFORMS 五个 target，三个是 cuda13**：「**linux-amd64-cuda12 / linux-amd64-cuda13 / linux-arm64-cuda12 / linux-arm64-cuda13 / windows-amd64-cuda13**」——**而 RTX PRO 6000 是 sm_120（CC 12.0），只落在 cuda13 一侧**；
+⭐⭐ 判据「**一份平台矩阵里的 cuda12 / cuda13 分野，实际上是一条「哪些卡能跑」的分界线**」；
+⭐⭐ **这与 §10.281 那条独立吻合**：**编译目标清单说 120-real 在 CUDA 13 里，打包平台表说 cuda13 是单独 target**——**两个不同层分别编码同一件事**；
+(c) ⭐⭐⭐⭐⭐ **Windows 侧不能交叉编译**：`validate_windows_contract` 要求 `runner-cli-contract.json` 存在，且其 `runner_sha256` 必须等于 `sha256(runner)`——**而那个 json 由目标机探针生成**；
+(d) ⭐⭐⭐⭐ **PE 检查内联，与 build_cuda_bundle 不同构**：**这里真解析 `e_lfanew` @0x3C 与 `machine == 0x8664`，而 build_cuda_bundle 的 CUDA 后端检查只是文件名匹配**；
+(e) ⭐⭐⭐⭐⭐ **raise 17 次**，七个校验文件里最多（build_launch_release 13、install_consumer_bundle 11、build_cuda_bundle 8、validate_lmstudio 8、ollama_bridge 6、build_macos_arm64 0）；
+2. [GitHub / Badtheorylabs — `tools/install_consumer_bundle.py`（5,065 字节，149 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/install_consumer_bundle.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **消费端 `verify_model` 与发布侧逐字同构**：
+「**if not model.is_file(): raise InstallError(...); if model.stat().st_size != MODEL_BYTES: raise InstallError(...); if sha256(model) != MODEL_SHA256: raise InstallError(model SHA-256 mismatch)**」——**而 `build_launch_release.py` 25-41 的三层完全相同，差异只有异常类型与 size 报错措辞**；
+⭐⭐ 判据「**一个校验逻辑被复制到几个入口，等于作者认为有几个入口需要它；而复制次数比单点强度更能说明作者的意图**」；
+⚠️⚠️ **而这一条推翻 §10.299 那张「四个校验器四档强度」表的普遍性**：**那张表只列五个文件，而我把它写成了这个仓库的全貌；实际是七个文件——五个带 `sha256(`，两个零**；
+⭐⭐ 判据「**一张强度表的分母必须是「这个仓库里所有同类文件」，而我只填了我读过的那些；故那张表看起来像排序，实际上是采样**」；
+⭐⭐ 判据「**「A 比 B 强」是一个偏序，而「这张表覆盖了全部」是一个全称断言——而我把前者当成了后者**」；
+(a) ⭐⭐⭐⭐⭐ **先验、再拷、最后原子替换**：`read_manifest` -> `verify_runtime` -> `verify_model` -> 检查 prefix -> `mkdtemp` -> `copytree`——**故一次坏的安装不会留下半截目录**；
+(b) ⭐⭐⭐⭐⭐ **五个 sha256()，三种块大小**：**8 MiB（build_launch_release）、4 MiB（install_consumer_bundle）、1 MiB（其余三个）**——**没有两个实现块大小相同，而三层校验语句序列逐字同构**，**故差异不在逻辑而在复制粘贴时随手改的块大小**；
+ — [src-btl3-tools-build-patched-ollama] [src-btl3-tools-install-consumer-bundle]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -32401,7 +32583,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=368, evidence=2613, claims=1852, claims_high=1504, claims_disputed=9, trace_events=807, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=370, evidence=2621, claims=1855, claims_high=1507, claims_disputed=9, trace_events=811, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
