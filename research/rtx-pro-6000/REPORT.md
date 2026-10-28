@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：305 ｜ **证据数**：2295 ｜ **主张数**：1691（高置信 1347，争议 9）
+> **来源数**：307 ｜ **证据数**：2301 ｜ **主张数**：1696（高置信 1352，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -19938,6 +19938,207 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **⚠️ 因为前者暗示「我们没考虑它」，
 > 后者暗示「我们考虑过并排除了它」。**
 
+### 10.145 🔥🔥🔥🔥 符号向量是**用种子重新生成的**，不是存在文件里的
+
+[c-sign-vectors-are-regenerated]
+
+> 「**AVQ2 codes, affines, and exact Torch-seeded sign vectors**」
+> 而五条校验里有一条是「**exact regeneration of seeded signs**」
+
+> **⚠️ 即一个张量能不能被正确读出，
+> 取决于「能不能复现那个随机数发生器」。**
+>
+> **⭐⭐⭐⭐ 这条把 §10.140 的结论又推进了一层**：
+> **§10.140 说「GGUF 用标准张量类型 + 自定义张量名」；
+> 本条说「还有一部分『权重』根本不在文件里——它们是种子」——**
+> **⚠️ 即这个文件不是一个自足的产物。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个模型文件是不是自足的」取决于「它有没有隐藏的随机状态」——**
+> **⚠️ 而「用种子生成」意味着：文件 + 种子才等于权重，
+> 文件本身只等于「权重的一部分 + 一个索引」。**
+>
+> ⭐⭐ **与 §10.114 那条「Hadamard 旋转」对得上**：
+> **Hadamard 旋转需要「符号」来确定旋转方向，
+> 而如果符号是随机生成的，那它就必须被复现——
+> ⚠️ 即「随机符号」在这里不是「噪声」，而是「算法的一部分」。**
+>
+> **⭐⭐ 判据：**
+> **当「随机性」进入一个确定性管线的中间步骤时，
+> 它就从「噪声」变成了「参数」——**
+> **⚠️ 而「参数」必须被存储或被复现，二者必居其一。**
+>
+> ⭐⭐ **代价很具体**：
+> **存下来 → 文件更大；复现 → 依赖 Torch 的 RNG 实现——
+> ⚠️ 而 Torch 的 RNG 在不同版本 / 不同设备上是否逐位一致，
+> 是一个已知的坑。**
+>
+> **⭐⭐ 判据：**
+> **「用种子代替数据」把「文件大小」换成了「环境依赖」——**
+> **⚠️ 而这笔交易在「同一个人同一台机器」上几乎免费，
+> 在「别人复现」时可能非常昂贵。**
+
+### 10.146 🔥🔥🔥 导出器**从不重建一个稠密解码器**
+
+[c-exporter-never-builds-dense]
+
+> 「**It never reconstructs a dense decoder. Safetensors are mmap-backed and
+> materialized one tensor at a time.**」
+>
+> **⚠️ 即整条流水线里，显存从来没有同时装下过一个完整的 BF16 解码器。**
+
+> **⭐⭐⭐ 这是本报告见过最「反直觉」的工程约束**：
+> **大多数人压缩模型的流程是「加载 FP16 模型 → 逐层量化 → 保存」，
+> 而这条流水线是「mmap 一个张量 → 转换 → 写一个张量 → 释放」——**
+> **⚠️ 即峰值显存不是「模型大小」，而是「一个张量的大小」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「能不能在一张卡上做出一个比它显存更大的模型」——
+> 答案是能，只要你不把模型整体读进来——**
+> **⚠️ 而这条流水线证明了两件事：① 逻辑上可行；② 工程上有人做了。**
+>
+> ⭐⭐ **对 RTX PRO 6000 的可操作推论**：
+> **96 GB 显存不是「能做多大的模型」的上界，
+> 而是「能推理多大的模型」的上界——**
+> **⚠️ 而「能生产多大的模型」的上界是「磁盘」与「单张量」。**
+>
+> **⭐⭐ 判据：**
+> **「显存」这个约束在「推理」与「生产」两个阶段是不同量级的——**
+> **⚠️ 而大多数讨论只谈推理，故把「96 GB」当成了整个流程的瓶颈。**
+>
+> ⭐⭐ **还有一个更细的含义**：
+> **「materialized one tensor at a time」意味着「转换过程是串行的」——
+> ⚠️ 即它的瓶颈不是算力，是 I/O。**
+>
+> **⭐⭐ 判据：**
+> **「一个逐张量处理的流水线」的吞吐由「随机读」决定，
+> 而「一个整模型处理的流水线」的吞吐由「显存带宽」决定——**
+> **⚠️ 两者相差一个数量级。**
+>
+> ⚠️ **另一面**：**158 个文件全部做 size + SHA-256 校验后才开始规划或写入**（同一节）。
+
+### 10.147 ⚠️⚠️ 基座是 **Qwen3.6**
+
+[c-base-is-qwen36]
+
+> 「**The exporter turns the frozen BTL-3 Compact package into the tensor
+> contract consumed by the custom Qwen3.6 llama.cpp backend.**」
+
+> **⭐⭐ 这条把一个悬了四轮的「哪个模型」补上了**：
+> **§10.101 只写「a 27B-class agentic model」，
+> §10.126 的作者说「not a general claim about Qwen sensitivity」——
+> ⚠️ 而「Qwen」在那时只是一个形容词，现在是一个确指的版本号。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个模型的名字」在被写作「XX-class」时，它是一个规格；
+> 在被写作「Qwen3.6」时，它是一个可查的对象——**
+> **⚠️ 而「可查」意味着「它的层数、隐藏维度、注意力结构
+> 都可以被独立验证」。**
+>
+> ⭐⭐ **实际含义**：
+> **「336 个 AVQ2 矩阵 + 64 个 INT4 矩阵」这个分布，
+> 现在可以被「Qwen3.6 的架构」解释，
+> 而不是只能被「作者的测量」解释——**
+> **⚠️ 即这条把一个「经验事实」变成了一个「可推导事实」。**
+>
+> **⭐⭐ 判据：**
+> **「补上一个模型名」的价值，不在于名字本身，
+> 而在于「它让一堆孤立数字有了一个可以对照的结构」——**
+> **⚠️ 而这一步在 §10.101–§10.167 之间一直没有做到。**
+>
+> ⭐⭐ **「custom Qwen3.6 backend」也与 §10.131 的 `adds` 一致**：
+> **不是「通用的 `llama.cpp`」，而是「针对 Qwen3.6 定制过的」——
+> ⚠️ 即「fork」的定制范围不只是「加算子」，还包括「改架构支持」。**
+
+### 10.148 ⭐⭐⭐ `source_weight_bytes` 是一个**归档包**，不是模型
+
+[c-source-package-is-not-a-model]
+
+> 「**The 170,510,920-byte reduction from the source package is expected:
+> the package retains two superseded BF16 island files for provenance,
+> while the export emits only their final INT4 demotions.**」
+
+> **⚠️ 即那个「source」是一个「保留了历史文件的归档包」，
+> 不是一个可加载的模型。**
+>
+> **⭐⭐ 这条补完了 §10.138 那个「口径陷阱」的另一半**：
+> **§10.138 我只知道「`source_weight_bytes` 不是 BF16 的 27B」；
+> 本条告诉我「它是一个『归档包』的字节数」——**
+> **⚠️ 即它包含「两个被取代的 BF16 岛文件」，
+> 而那些文件不会进最终产物。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个『源』的字节数」可以大于「一个『模型』的字节数，
+> 因为它可能包含「为了可追溯性而保留的历史」——**
+> **⚠️ 而「保留历史」这件事在版本控制里是默认的，
+> 在模型分发里是罕见的。**
+>
+> ⭐⭐ **与 §10.128 的「可审计性」完全一致**：
+> **§10.128 说「精确预算强迫出可审计的取舍记录」；
+> 本条说「可审计性还包括『把被舍弃的东西留着』」——**
+> **⚠️ 即「账本」不只记「我用了什么」，还记「我原来有什么」。**
+>
+> **⭐⭐ 判据：**
+> **「一个可复现的产物」与「一个可审计的产物」的差别在于：
+> 前者只需要「最终状态」，后者还需要「被舍弃的分支」——**
+> **⚠️ 而后者通常更大、更慢，且看起来「不干净」。**
+>
+> ⭐⭐ **算一下**：
+> **8,551,772,952 − 8,381,262,032 = 170,510,920 字节，
+> 而它恰好对应「两个被取代的 BF16 岛文件」
+> （L13 in-proj QKV 104.86 MB + L33 in-proj Z 62.91 MB = 167.77 MB）
+> 再加约 2.74 MB 的其它差异。**
+>
+> **⭐⭐ 判据：**
+> **「一个差额能被两项解释清楚」是一个强信号——
+> ⚠️ 因为它意味着「没有第三个未知项」。**
+
+### 10.149 ⚠️⚠️⚠️ 全仓库**没有任何 kernel 计时**，§10.129 的推断仍未被验证
+
+[c-no-kernel-timing-anywhere]
+
+> `artifacts/release/BTL-3-Compact-AVQ2.report.json`（1,058 字节）的全部字段：
+> **字节账本 ｜ `exporter_unsupported: []` ｜ `native_runtime_gaps: []` ｜
+> `output_bytes: 8392369600` ｜
+> `output_sha256: 2ddf9527…dc30c` ｜
+> `verified_tensor_count: 2416` ｜ `verified_payload_count: 2416`**
+
+> **⚠️ 这是一次明确的「预期落空」，而它本身是一个发现**：
+> **§10.129 我推断「AVQ2 的 matvec 无 batch + LoRA 的瘦矩阵乘
+> 是两个低利用率开销叠在一起」，并预期「发布报告里会有分解」——
+> ⚠️ 而发布报告是一个纯粹的「字节 + 校验和」报告，
+> 它对这个模型的性能一个字都没有。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个发布报告里有什么字段」反映了
+> 「发布者认为什么是需要证明的」——**
+> **⚠️ 这份报告证明的是「字节对、校验和对」，不是「跑得快」。**
+>
+> ⭐⭐ **与 §10.130 那条「honest launch sentence 里没有速度」完全一致**：
+> **两处独立地表明「性能不是这个工作的证据维度」——
+> ⚠️ 即它不是「忘了写」，而是「不在证明范围内」。**
+>
+> **⭐⭐ 判据：**
+> **当一份产物有两份独立文档都省略了同一个维度时，
+> 那个维度的缺失是设计，不是疏漏——**
+> **⚠️ 而「设计上的省略」比「疏漏」更能说明
+> 「这个维度对他们不重要」。**
+>
+> ⭐⭐ **对本报告主题的尖锐后果**：
+> **本报告一直在找「RTX PRO 6000 上这个模型为什么这么慢」，
+> 而这个问题的答案不在 BTL-3 的任何一份文档里——**
+> **⚠️ 因为作者从未把「慢」当作一个问题。**
+>
+> **⭐⭐ 判据：**
+> **「一个问题在源材料里找不到答案」有两种情况：
+> ① 材料不全；② 那个问题不在材料的问题空间里——**
+> **⚠️ 而区分它们的方法是：看材料有没有在别处讨论这件事。
+> 这里 §10.130 证明是 ②。**
+>
+> ⭐⭐ **故本报告必须换一个问题**：
+> **不是「它为什么慢」，而是「它在什么条件下能达到作者认可的速度」——
+> ⚠️ 而作者认可的唯一速度标准是「能生成」（`executes`）。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -23385,6 +23586,11 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 ### GGUF 里没有新张量类型、三张表面、与 `native` 构建的两面（第九十二轮补充）
 
 1. [GitHub / Badtheorylabs — BTL-3 `docs/patched-ollama-and-lmstudio.md`（10,347 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/patched-ollama-and-lmstudio.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它是 §10.106 那场「stock engine 不兼容」误读的物理对象的说明书**，开篇即「**separates three products that must not be conflated**」。(a) 🔥🔥🔥🔥🔥 **决定性的一句**：「**The GGUF stores BTL's packed representation in ordinary I8/F32/BF16 tensors with custom names, so no new GGUF tensor-type enum is required.**」——⚠️ **即这个 GGUF 文件本身是合法的，只是张量名字是自定义的**；⭐⭐ 判据（本轮最重要）「**『兼容性』这个判断被拆成了两层：第一层『文件格式（GGUF 容器 + 张量类型枚举）』是标准的；第二层『语义（哪个张量名对应哪个权重）』是私有的——即『stock Ollama 读不了』不是因为『文件格式不对』，而是因为『它不知道叫这个名字的张量该怎么算』**」；⭐⭐ 与 §10.116 是同一设计的两面：**magic 用「假指针」传递类型标签，张量名用「自定义字符串」传递语义，两者都不改枚举**；⭐⭐ 判据（本轮最重要）「**在不改标准的前提下扩展有两种做法：① 塞进未使用的字段；② 用标准类型 + 私有命名——两种做法的共同代价是『标准工具能打开文件，但读不懂内容』**」；⭐⭐ 判据「**『格式合规』与『语义可读』是两个独立的性质，而『合规但不语义可读』是最难诊断的一种状态**」；(b) ⭐⭐⭐ **开篇一张「三个产品不可混淆」的表**：「**Stock Ollama | Stock runner | Does not execute AVQ2；BTL-3 Patched Ollama | Ollama directly spawns BTL's native `llama-server` | Packaging scaffold complete; target packages pending；LM Studio | Official generator plugin calls BTL's native local endpoint | Development preview; plugin unpublished and Windows validation pending**」；⭐⭐ 判据（本轮最重要）「**『一个产品有几种用法』的最佳答案形式是一张表，而表里必须有一列叫『当前状态』——因为『支持 X』这句话在没有状态列时，会被读成『X 已经完全可用』**」；⚠️ **RTX PRO 6000 在这张表里完全没有出现**；(c) ⭐⭐⭐ **Ollama 本身就是一个「壳」**：「**At official Ollama commit `573386c35eac76124ffce571f4b0fefa0a7fe13c`, `llm.NewLlamaServer` delegates every GGUF model to a `llama-server` subprocess. Ollama locates that executable under `lib/ollama`, starts it on an ephemeral loopback port, and speaks its native `/health`, `/completion`, `/v1/chat/completions`, tokenization, and embedding endpoints.**」、「**The patched distribution replaces Ollama's runtime payload, not its public API, scheduler, CLI, model store, or UI.**」；⭐⭐ 判据（本轮最重要）「**『一个中间层能不能被替换』取决于『它有没有把自己做成一个协议边界』——而 Ollama 做对了这件事：它和 runner 之间是 HTTP，不是链接**」；⭐⭐ 判据「**『一个系统的可扩展性』不取决于『它有没有插件机制』，而取决于『它的边界是不是进程边界』**」；(d) ⭐⭐⭐ **「没有 HTTP 翻译层」在进程维度对、在协议维度错**：「**No HTTP translation bridge sits between patched Ollama and the runner.**」，而 LM Studio 插件「**calls the native runner's OpenAI-compatible endpoint**」；⭐⭐ 判据「**当作者说『没有 X』时，要问的是『X 是按什么粒度定义的』——因为『进程』『协议』『数据格式』三个粒度下，同一个句子会给出不同答案**」；⚠️ 本条置信度 `medium`；(e) ⭐⭐⭐ **构建用 `-DCMAKE_CUDA_ARCHITECTURES=native`，且必须在本机**：「**Build on the target machine so CMake selects the target GPU**」，命令含 **`-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CUDA=ON -DLLAMA_CURL=OFF`**；⚠️ 硬件目标表只有 **RTX 4090 / RTX 5090 / Windows 4090-5090 / DGX Spark**（「**Current DGX Spark software is ARM64 and ships CUDA 13; do not reuse an x86_64 payload**」），**没有 RTX PRO 6000**；⭐⭐ 与 §10.94 对照：**同一个 `native` 选项，在「发行二进制」场景下是坑，在「本机构建」场景下是正解**；⭐⭐ 判据（本轮最重要）「**『一个选项是好是坏』取决于『谁在什么机器上跑它』**」；(f) ⭐⭐⭐ **六条 release gate，且明说「这是打包候选，不是兼容发布」**：「**Until those checks pass on a real CUDA executable, the output is a packaging candidate - not an Ollama-compatible release.**」，适用对象只有「**each 4090, 5090, and DGX Spark artifact**」，含 SHA-256 `2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c` — [src-btl3-doc-patched-integrations]
+### 种子符号、无稠密导出、Qwen3.6、归档包、与完全没有 kernel 计时（第九十三轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-gguf-exporter.md`（2,464 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-gguf-exporter.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥 **符号向量是用种子重新生成的**：「**AVQ2 codes, affines, and exact Torch-seeded sign vectors**」，而五条校验之一是「**exact regeneration of seeded signs**」；⭐⭐⭐⭐ 判据（本轮最重要）「**『一个模型文件是不是自足的』取决于『它有没有隐藏的随机状态』——而『用种子生成』意味着：文件 + 种子才等于权重**」；⭐⭐ 判据「**当『随机性』进入一个确定性管线的中间步骤时，它就从『噪声』变成了『参数』——而『参数』必须被存储或被复现**」；⭐⭐ 判据「**『用种子代替数据』把『文件大小』换成了『环境依赖』——而这笔交易在『同一个人同一台机器』上几乎免费，在『别人复现』时可能非常昂贵**」；(b) 🔥🔥🔥 **导出器从不重建稠密解码器**：「**It never reconstructs a dense decoder. Safetensors are mmap-backed and materialized one tensor at a time.**」，且「**Every one of the 158 source files is size- and SHA-256-checked against the frozen package manifest before planning or writing.**」；⭐⭐⭐ 判据（本轮最重要）「**『能不能在一张卡上做出一个比它显存更大的模型』——答案是能，只要你不把模型整体读进来**」；⭐⭐ 对 RTX PRO 6000 的推论：**96 GB 显存是「能推理多大的模型」的上界，不是「能生产多大的模型」的上界**；⭐⭐ 判据「**『显存』这个约束在『推理』与『生产』两个阶段是不同量级的**」；(c) ⚠️⚠️ **基座是 Qwen3.6**：「**the custom Qwen3.6 llama.cpp backend**」；⭐⭐ 判据（本轮最重要）「**『一个模型的名字』在被写作『XX-class』时，它是一个规格；在被写作『Qwen3.6』时，它是一个可查的对象**」；⭐⭐ 判据「**『补上一个模型名』的价值，不在于名字本身，而在于『它让一堆孤立数字有了一个可以对照的结构』**」；(d) ⭐⭐⭐ **170,510,920 字节的差额有解释**：「**The 170,510,920-byte reduction from the source package is expected: the package retains two superseded BF16 island files for provenance, while the export emits only their final INT4 demotions.**」；⭐⭐ 判据（本轮最重要）「**『一个源的字节数』可以大于『一个模型的字节数』，因为它可能包含『为了可追溯性而保留的历史』**」；⭐⭐ 判据「**『一个可复现的产物』与『一个可审计的产物』的差别在于：前者只需要『最终状态』，后者还需要『被舍弃的分支』**」；(e) ⭐⭐⭐ **五条逐张量校验**：「**canonical-name equality; source-shape equality; exact GGUF storage-type equality; exact raw payload-byte equality after required Qwen transformations; exact regeneration of seeded signs**」，三层抽样 **L13 28 张量 / 322,295,104 B；L40 44 / 98,427,808 B；L47 35 / 122,932,064 B** — [src-btl3-doc-gguf-exporter]
+
+2. [GitHub / Badtheorylabs — BTL-3 `artifacts/release/BTL-3-Compact-AVQ2.report.json`（1,058 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/artifacts/release/BTL-3-Compact-AVQ2.report.json) —（2026-10 抓取）。⚠️⚠️⚠️ **本报告预期它含 kernel 开销分解——但它没有**：全部字段只有「**字节账本 + `exporter_unsupported: []` + `native_runtime_gaps: []` + `output_bytes: 8392369600` + `output_sha256: 2ddf9527...dc30c` + `verified_tensor_count: 2416` + `verified_payload_count: 2416`**」；⭐⭐ 判据（本轮最重要）「**『一个发布报告里有什么字段』反映了『发布者认为什么是需要证明的』——这份报告证明的是『字节对、校验和对』，不是『跑得快』**」；⭐⭐ 判据「**当一份产物有两份独立文档都省略了同一个维度时，那个维度的缺失是设计，不是疏漏**」；⭐⭐ 判据（本轮最重要）「**『一个问题在源材料里找不到答案』有两种情况：① 材料不全；② 那个问题不在材料的问题空间里——而区分它们的方法是：看材料有没有在别处讨论这件事。这里证明是 ②**」；⭐ 故本报告必须换问题：**不是「它为什么慢」，而是「它在什么条件下能达到作者认可的速度」——而作者认可的唯一速度标准是「能生成」** — [src-btl3-release-report]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -23524,7 +23730,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=305, evidence=2295, claims=1691, claims_high=1347, claims_disputed=9, trace_events=679, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=307, evidence=2301, claims=1696, claims_high=1352, claims_disputed=9, trace_events=683, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
