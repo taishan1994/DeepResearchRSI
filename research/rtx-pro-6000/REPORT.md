@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：343 ｜ **证据数**：2482 ｜ **主张数**：1809（高置信 1462，争议 9）
+> **来源数**：343 ｜ **证据数**：2479 ｜ **主张数**：1808（高置信 1461，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -20332,6 +20332,10 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⚠️ **边界**：**本报告没有验证这份 Python 实现与 Torch 的输出逐位一致**，
 > 只能说「按代码看，常量与流程都是标准 MT19937」。
 
+> ⭐⭐ **第 192 轮复核**：本条曾在 §10.261 被作为「新发现」重复提出一次，现已删除该节。
+> ⚠️ 重复的成因是我在查孤儿源时把 `source_id` 拼错了（写成 `src-btl3-cuda-validation`，真实值是 `src-btl3-doc-cuda-validation`），
+> 于是「这个源零证据」这个前提本身是假的，后面三条「新证据」也就全是既有证据的复述。
+
 ### 10.154 ⚠️⚠️ 词表尺寸：**248,320 × 5,120**
 
 [c-vocab-is-248320x5120]
@@ -20467,6 +20471,10 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **「不声称」比「声称没有」更精确——
 > ⚠️ 因为「没有」是一个关于世界的断言，
 > 而「不声称」是一个关于自己证据的断言。**
+>
+> ⭐⭐ **第 192 轮复核**：本条在 §10.258 曾被作为「新发现」重复提出一次，现已删除该节。
+> **⚠️ 重复的成因是我把 `source_id` 拼错了（写成 `src-btl3-cuda-validation`，真实值是 `src-btl3-doc-cuda-validation`），
+> 于是「孤儿源」与「新证据」两个结论同时错了。**
 >
 > ⭐⭐ **对本报告主题的直接后果**：
 > **本报告分析的那个 43.16 tok/s，
@@ -25458,39 +25466,8 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⭐⭐ **而这条也标志着 btl3 的 C++/CUDA 源码语料到此全部读完**：
 > **十九个文件，全部有证据落在库里。**
 
-### 10.258 🔥🔥🔥🔥🔥 作者承认：CUDA 后端**从未被编译、也从未在 GPU 上跑过**
-
-[c-cuda-backend-never-executed]
-
-> 「These checks pass locally. The CUDA test sources also pass host C++ syntax
-> checking, but this machine has **neither NVCC nor an NVIDIA GPU**.
-> CUDA compilation, device correctness and speed are therefore **not claimed**.」
-> —— `native/llama.cpp/docs/btl3-avq-cuda-validation.md`
-
-> **⭐⭐⭐⭐⭐ 这是本报告第一次拿到「这个后端从未执行」的直接证据**：
-> **在此之前，任何「它不 work」或「它 work」的推断都是**双向的猜测**。**
->
-> **⭐⭐ 而这条重新标定了本报告过去几十轮的工作性质**：
-> **我从 `btl3-avq.cu`、`btl3-int4.cu`、`btl3-vocab.cu` 里读出的
-> 每一个常量、每一次归约、每一个 `__syncthreads()`，都是真实的代码，
-> ⚠️ 而「这些代码在 RTX PRO 6000 上跑出来是多少 tok/s」是完全没有依据的。**
->
-> **⭐⭐ 判据（本轮最重要）：**
-> **「读源码能得到的」与「读源码不能得到的」之间有一条清晰的界线——**
-> **源码能告诉你它会做什么，不能告诉你它做出来多快、对不对——
-> ⚠️ 而后者恰恰是本报告的主题（性能分析）。**
->
-> ⭐⭐ **而这条也给「作者为什么写这个后端」一个解释**：
-> **因为他能写（host C++ 语法检查通过），
-> ⚠️ 而他没有硬件去验证——
-> 故这份 CUDA 后端是一个可编译的提案，而不是一个已交付的实现。**
->
-> **⭐⭐ 判据：**
-> **「一个实现的状态」应该分成四档：
-> ① 能编译；② 能跑；③ 跑对；④ 跑得快——**
-> **⚠️ 而这一份停在①，而本报告此前一直按③在写它。**
-
 ### 10.259 🔥🔥🔥🔥🔥 契约说「越界 token 产 0 行」，**CPU 违反了它**
+（本轮更正：作者早已在 §10.156 承认过「没有 GPU」这件事，故 §10.258 是重复发现，已删除）
 
 [c-contract-vs-cpu-disagree-on-invalid-token]
 
@@ -25568,51 +25545,6 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **不改写内容，而是在段末加一句「本节为源码推断，未经 profile 验证」——**
 > **⚠️ 这与 §10.183 那条「撤回有两种做法，只有保留并标注有价值」是同一招。**
 
-### 10.261 ⭐⭐⭐⭐⭐ 符号张量必须**逐位复现** `torch.randint`
-
-[c-signs-must-be-bit-reproducible]
-
-> `tools/btl3_gguf/signs.py` 用纯 Python 重写了 **MT19937**：
-> 624 字状态、`1812433253` 初始化乘数、`0x9908B0DF` twist 常数、三段 tempering 全部硬编码。
-> 取符号只用最低位：`values[index] = 1 if generator.next_u32() & 1 else -1`。
-
-> **⭐⭐⭐⭐⭐ 这条揭示了一个反直觉的事实**：
-> **模型里那两个「符号向量」看起来是随机的，而实际上每一个比特都由种子唯一决定——
-> ⚠️ 故它们与任何其他权重一样，是可枚举、可版本化、可校验的常量。**
->
-> **⭐⭐ 判据（本轮最重要）：**
-> **「一个张量是不是『随机的』」，取决于它有没有被冻结进制品，
-> 而不是取决于怎么生成它——**
-> **⚠️ 而一旦它随 GGUF 一起发布，那个种子就只是一个生成方式的说明，
-> 而不是一个运行时依赖。**
->
-> ⭐⭐ **而这条给 §10.178 那条「把符号烘进权重」一个具体的实现路径**：
-> **符号不是「运行时随机生成」，而是「构建时用固定种子生成一次」——
-> ⚠️ 故「烘进去」不是优化，而是唯一合理的做法。**
->
-> **⭐⭐ 判据：**
-> **「一个随机量的生命周期」越长，它就越应该被物化——**
-> **⚠️ 而判据是「它的种子会不会变」。**
->
-> ⭐⭐ **而这条还有一个安全含义**：
-> **若符号表是固定的，那么它就是一个可被公开的常量，
-> ⚠️ 故它不提供任何「每模型唯一」的隔离性——
-> 而若有人以为它在防什么，那是一个误解。**
->
-> **⭐⭐ 判据：**
-> **「一个『随机』张量」常常被误当成密钥，而它只是参数——**
-> **⚠️ 判据是「它会不会被写进发布制品」——若会，它就不是秘密。**
->
-> ⭐⭐ **而这条的技术细节还说明作者的严谨程度**：
-> **他没有调 `torch.randint`，而是重写了一个 MT19937——
-> ⚠️ 因为「torch 的版本变了会不会改 PRNG」是一个真实风险，
-> 而重写之后，这个依赖就被彻底去掉了。**
->
-> **⭐⭐ 判据：**
-> **「为了消除一个隐式依赖而重写一个标准算法」是一种极端的确定性追求——**
-> **⚠️ 而它的判据是「这个值会不会进制品」：
-> 若会，重写就值得；若只是中间量，就不值得。**
-
 ### 10.262 🔥🔥🔥🔥🔥 「2.9 bpw」掩盖了一个 **1.2 GB 的 bf16 孤岛**
 
 [c-bf16-island-is-14-percent-of-model]
@@ -25663,6 +25595,58 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **⭐⭐ 判据：**
 > **「一个平均比特数」必须能被分解回每一层，否则它无法指导任何决策——**
 > **⚠️ 因为「我要不要用这个格式」取决于我要跑的那个层是什么格式。**
+
+### 10.263 🔥🔥🔥🔥🔥 撤回：那两个「孤儿源」从来不是孤儿源
+
+[c-misspelt-source-id-produces-two-false-findings]
+
+> 第 191 轮我宣布「清掉两个已登记但零证据的孤儿源」。
+> **而我查的时候把 `src-btl3-doc-cuda-validation` 写成了 `src-btl3-cuda-validation`**（少一个 `doc-` 前缀）。
+> grep 返回 0，于是两个结论同时成立：**「这个源零证据」+「我读到了新内容」**。
+> 真相是：它当时已有 3 条证据，而「没有 NVCC」这条事实早在 §10.156 就写过。
+
+> **⭐⭐⭐⭐⭐ 这条是本轮唯一真正的发现，而它不是关于 btl3 的，是关于流程的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个 grep 返回 0」有三种解释，而我只考虑了第一种：
+> ① 真的没有；② 我拼错了键；③ 我搜错了文件——**
+> **⚠️ 而区分它们只需要一步：把要搜的键**从数据里读出来**，而不是**从记忆里写出来**。**
+>
+> ⭐⭐ **而这条危害之所以大，是因为两个假结论互相印证**：
+> **「零证据」请来了「新发现」，
+> ⚠️ 而「新发现」又反过来让「零证据」显得可信——
+> 故单看任何一个都通得过审查。**
+>
+> **⭐⭐ 判据：**
+> **「两个结论互相支持」不等于「两个结论都对」——**
+> **⚠️ 因为它们可能共享同一个错误前提，
+> 而共享前提的互证，其证据力等于单条证据。**
+>
+> ⭐⭐ **而这条的检出靠的是一次例行去重**：
+> **我把新证据的引文与旧证据逐条比对，
+> 才发现「explicitly produce zero rows」与「Do not publish a throughput」
+> 这两句早就在库里。**
+>
+> **⭐⭐ 判据：**
+> **「新证据入库前必须与旧证据比对引文」——**
+> **⚠️ 而比对的键应该是**引文的规范化前缀**（去空白后前 70 字符），
+> 而不是 `evidence_id`，因为 id 是我自己起的，必然不撞。**
+>
+> ⭐⭐ **而这条给「孤儿源」这个检查本身一个正确做法**：
+> **先把 `sources.csv` 的全部 `source_id` 与 `evidence.csv` 的 distinct `source_id`
+> 做集合差，**
+> **⚠️ 而不是在记忆里挑几个 id 去 grep——
+> 因为集合差用的是数据里的真键，而 grep 用的是我以为的键。**
+>
+> **⭐⭐ 判据：**
+> **「一次审计的可信度」取决于它用的是**数据里的键**还是**我记忆里的键**——**
+> **⚠️ 而前者是可复现的，后者每次都可能拼错。**
+>
+> ⭐⭐ **而这条给 §10.241 那条「一个缺口是真的吗，要去 grep 自己的 `sources.csv`」
+> 一个修正**：
+> **那条说要去查，这条说**查的时候键必须从文件里取**——**
+> **⚠️ 否则「查过了」反而比「没查」更危险，
+> 因为它会产出一个带证据编号的错误结论。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -29891,6 +29875,22 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (f) ⭐⭐⭐⭐ **第 47 层是唯一同时含 avq2 与 affine-int4 两份的层报告**：「**"avq2": {"tensors": 15, "bytes": 66917424}, "affine-int4": {"tensors": 12, "bytes": 54886400}**」——**而第 13 层用的是 `affine-int4-demotion`，故 INT4 在这份模型里有**两种角色****；
  — [src-btl3-doc-cuda-validation] [src-btl3-tools-signs-py] [src-btl3-conformance-layer13] [src-btl3-conformance-layer47]
 
+### 一次自我审计的撤回记录（第一百一十七轮）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/docs/btl3-avq-cuda-validation.md`（同一份文档，本轮用于自我审计）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/docs/btl3-avq-cuda-validation.md)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **「没有 NVCC」这条事实早在第 170 轮（`c-cuda-code-never-compiled`，§10.156）就写过**：
+「**These checks pass locally. The CUDA test sources also pass host C++ syntax checking, but this machine has neither NVCC nor an NVIDIA GPU.**」——**⚠️ 而第 191 轮我又用一条新证据重写了一遍同一句原文**；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个 grep 返回 0」有三种解释，而我只考虑了第一种：① 真的没有；② 我拼错了键；③ 我搜错了文件——⚠️ 而区分它们只需要一步：把要搜的键**从数据里读出来**，而不是**从记忆里写出来****」；
+⭐⭐ 而**两个假结论互相印证**：**「零证据」请来了「新发现」，⚠️ 而「新发现」又反过来让「零证据」显得可信**；
+⭐⭐ 判据「**「两个结论互相支持」不等于「两个结论都对」——⚠️ 因为它们可能**共享同一个错误前提**，而共享前提的互证，其证据力**等于单条证据****」；
+⭐⭐ 判据「**「新证据入库前必须与旧证据**比对引文**」——⚠️ 而比对的键应该是**引文的规范化前缀**（去空白后前 70 字符），而不是 `evidence_id`，因为 id 是我自己起的，**必然不撞****」；
+⭐⭐ 判据「**「孤儿源」的正确查法：先把 `sources.csv` 的全部 `source_id` 与 `evidence.csv` 的 distinct `source_id` 做**集合差**——⚠️ 因为集合差用的是**数据里的真键**，而 grep 用的是**我以为的键****」；
+⭐⭐ 判据「**「一次审计的可信度」取决于它用的是**数据里的键**还是**我记忆里的键****」；
+⭐⭐ 判据「**「查过了」有时比「没查」更危险——⚠️ 因为它会产出一个**带证据编号**的错误结论**」；
+(a) ⚠️⚠️⚠️ **本轮撤回清单**：删 5 条重复证据（`e-btl3-val-cuda-never-compiled-or-run`、`e-btl3-val-contract-says-zero-rows`、`e-btl3-signs-reimplements-mt19937`、`e-btl3-signs-tempering-is-inline`、`e-btl3-signs-only-parity-is-the-point`）；删 2 条重复主张（`c-cuda-backend-never-executed`、`c-signs-must-be-bit-reproducible`）；删 2 个小节（原 §10.258、原 §10.261）；**并在 §10.156 与 §10.153 各加一句「本条曾被重复提出，已撤回」**；
+ — [src-btl3-doc-cuda-validation]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -30030,7 +30030,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=343, evidence=2482, claims=1809, claims_high=1462, claims_disputed=9, trace_events=753, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=343, evidence=2479, claims=1808, claims_high=1461, claims_disputed=9, trace_events=753, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
