@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：370 ｜ **证据数**：2621 ｜ **主张数**：1855（高置信 1507，争议 9）
+> **来源数**：371 ｜ **证据数**：2626 ｜ **主张数**：1858（高置信 1510，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -27651,6 +27651,143 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **② `linux-amd64-cuda13` 就是性能数字所在的 target；**
 > **③ `windows-amd64-cuda13` 需要目标机探针，故它不能在一台 Linux 机器上一次做完。**
 
+### 10.312 🔥🔥🔥🔥🔥 `43.16` / `84.70` 的**生成脚本找到了**
+
+[c-speed-numbers-come-from-one-modal-script]
+
+> **`tools/modal_consumer_gpu_bench.py`（3,203 字节，125 行）**：
+> ```python
+> image = (
+>     modal.Image.from_registry(
+>         "nvidia/cuda:13.0.2-devel-ubuntu24.04",
+>         add_python="3.12",
+>     )
+>     .run_commands(
+>         "cmake -S /src -B /src/build -G Ninja "
+>         "-DCMAKE_BUILD_TYPE=Release "
+>         "-DCMAKE_CUDA_ARCHITECTURES=120-real "
+>         "-DGGML_CUDA=ON -DGGML_BACKEND_DL=ON -DGGML_NATIVE=OFF "
+>         "-DBUILD_SHARED_LIBS=ON -DLLAMA_OPENSSL=OFF "
+>         "-DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON "
+>         "-DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=ON "
+>         "-DLLAMA_BUILD_UI=OFF",
+>         "cmake --build /src/build --target llama-bench --parallel",
+>     )
+> )
+>
+> @app.function(image=image, gpu="RTX-PRO-6000", ...)
+> def benchmark() -> dict:
+>     command = [
+>         "/src/build/bin/llama-bench",
+>         "-m", MODEL, "-ngl", "99",
+>         "-p", "512", "-n", "128", "-r", "3", "-o", "json",
+>     ]
+> ```
+
+> **⭐⭐ `-ngl 99` / `-p 512` / `-n 128` / `-r 3` 四项与 §10.195 从速度文档
+> 记录的逐字相同；模型是 `/vol/release/compact/BTL-3-Compact-AVQ2.gguf`。**
+>
+> **故那两组数字就是这个脚本的产物。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个性能数字的完整证据链是四段：
+> 测量脚本 → 参数 → 硬件标识 → 原始输出；
+> 而速度文档只给了第三段和第四段。**
+>
+> **⭐⭐ 判据：**
+> **一个数字如果没有生成它的脚本，它就是不可复现的；
+> 而「可复现」是性能数字与广告词的唯一分界。**
+
+> ⚠️ **而这条也解释了为什么性能表只有两个设备**：
+> **脚本里 `gpu` 参数是一个字符串（`"RTX-PRO-6000"`），
+> 故它不是扫描式的，而是每次手工改一行。**
+>
+> **⭐⭐ 判据：**
+> **一个基准脚本里硬编码的设备名，
+> 说明这张表是「想测哪张就改哪行」的产物，
+> 而不是「把手上所有卡都跑一遍」的产物。**
+
+> ⭐⭐⭐⭐ **它查了 `clocks.max.memory`，而速度文档没记这一项**：
+> **`nvidia-smi --query-gpu=name,memory.total,memory.used,clocks.max.memory
+> --format=csv,noheader,nounits`**
+> **故 97,887 MiB（`memory.total`）来自这一行，
+> 而同一行里的 `clocks.max.memory` 从未被记录。**
+>
+> **⭐⭐ 判据：**
+> **一个查询了却没被记录的字段，
+> 说明写文档的人认为它对本结论不重要；
+> ⚠️ 而它恰好是判断「是不是内存带宽瓶颈」最直接的证据。**
+
+### 10.313 🔥🔥🔥🔥🔥 那个不对称是**两个不同的问句**，不是缺陷
+
+[c-cuda-bundle-checks-two-different-questions]
+
+| 对象 | 做法 | 检查 | 它回答的问题 |
+|---|---|---|---|
+| `server` / `cli` | `executable_machine()` 真解析 | 不匹配即 `ValueError` | **「是不是为这个架构编的」** |
+| `lib/*.so` / `*.dll` | `glob` 全拷 | **无** | （不检查） |
+| CUDA 后端库 | **文件名匹配** | 不存在即 `ValueError` | **「有没有这个后端」** |
+| `LICENSE.*` | 排除 `.cpp` 后全拷 | 无 | （§10.288 已裁决） |
+
+> **🔥 上一轮我说这个不对称「未追」，这一轮追完了。答案很干净：它回答两个不同的问句。**
+
+> **⚠️ 但这里有一个真的缝隙**：
+> **若 `libggml-cuda.so` 是错架构（比如 arm64 的 `.so` 拷进 x86_64 包），
+> `server` 的解析通过、后端库的名字匹配也通过，
+> ⚠️ 而运行时会在 `dlopen` 处失败。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「存在性检查」被放在一个「架构检查」旁边时，
+> 读者会以为两个都检查了架构；
+> 而它只回答了一个更弱的问题。**
+>
+> **⭐⭐ 判据：**
+> **凡是「主二进制 + 可插拔后端」的布局，
+> 后端目录天然缺少一个与主二进制同级的架构校验位。**
+>
+> **⭐⭐ 而修法很便宜**：
+> **对 `lib/` 下每个 `*.so` 也跑一次 `executable_machine`，
+> 成本是每个文件读 64 字节——比一次 `sha256` 便宜三个数量级。**
+>
+> **⭐⭐ 判据：**
+> **一个缺口如果修它只需要读 64 字节，
+> 那么它存在的原因不是成本，而是没人想到。**
+
+### 10.314 🔥🔥🔥🔥🔥 `GGML_BACKEND_PATH` 是 §10.36 那条坑的**正解**
+
+[c-backend-path-env-is-the-fix-for-shadowing]
+
+> **编译时**：`-DGGML_BACKEND_DL=ON`
+> **运行时**：
+> ```python
+> environment = {
+>     "GGML_BACKEND_PATH": "/src/build/bin/libggml-cuda.so",
+> }
+> ```
+
+> **🔥🔥🔥🔥🔥 §10.36 记的是「wheel 遮蔽」——
+> 装好的 wheel 里的 `ggml` 抢先被加载，于是你以为在用新编的 CUDA 后端，
+> 实际用的是旧的那份。**
+>
+> **而这里不靠搜索路径找后端，而是显式指定。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「绕过搜索路径」的做法，比一个「把搜索路径排对」的做法强，
+> 因为后者依赖运行时环境的顺序，而前者不依赖。**
+>
+> **⭐⭐ 判据：**
+> **凡是一个坑的正解是「显式指定」而不是「调整优先级」，
+> 说明这个坑的根因是「有多个候选」，而不是「优先级排错了」。**
+
+> **📌 对 RTX PRO 6000 的读者最直接的一条**：
+> **如果你用 `pip` 装了任何带 `ggml` 的包（`llama-cpp-python`、
+> `llama_cpp` 的 wheel、或任何把 `libggml*` 打进 `.so` 的发行版），
+> ⚠️ 你会需要 `GGML_BACKEND_PATH` 指向你自己编的那份，
+> 否则 `sm_120a` 的 kernel 会「存在但不用」。**
+>
+> ⭐ **而这条与 §10.36 是同一件事的两面**：
+> **§10.36 记的是症状（用了旧的），这一条记的是正解（显式指路）。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -32444,6 +32581,32 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 (b) ⭐⭐⭐⭐⭐ **五个 sha256()，三种块大小**：**8 MiB（build_launch_release）、4 MiB（install_consumer_bundle）、1 MiB（其余三个）**——**没有两个实现块大小相同，而三层校验语句序列逐字同构**，**故差异不在逻辑而在复制粘贴时随手改的块大小**；
  — [src-btl3-tools-build-patched-ollama] [src-btl3-tools-install-consumer-bundle]
 
+### `modal_consumer_gpu_bench.py` 与 PE 不对称的裁决（第一百三十二轮补充）
+
+1. [GitHub / Badtheorylabs — `tools/modal_consumer_gpu_bench.py`（3,203 字节，125 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/modal_consumer_gpu_bench.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **`43.16` / `84.70 tok/s` 的生成脚本找到了**：
+「**@app.function(image=image, gpu=RTX-PRO-6000, volumes={/vol: volume}, timeout=900, startup_timeout=300, scaledown_window=2, max_containers=1)**」+「**command = [/src/build/bin/llama-bench, -m, MODEL, -ngl, 99, -p, 512, -n, 128, -r, 3, -o, json]**」——
+**`-ngl 99` / `-p 512` / `-n 128` / `-r 3` 四项与 §10.195 逐字相同**；
+⭐⭐ 判据（本轮最重要）「**一个性能数字的完整证据链是四段：测量脚本 -> 参数 -> 硬件标识 -> 原始输出；而速度文档只给了第三段和第四段**」；
+⭐⭐ 判据「**一个数字如果没有生成它的脚本，它就是不可复现的；而「可复现」是性能数字与广告词的唯一分界**」；
+(a) ⭐⭐⭐⭐ **架构写死 `120-real`**，而产品构建是三目标（`89-real;120-real` 与 `121-real`）——**故它是「只为本卡编」的专用脚本**；
+(b) 🔥🔥🔥🔥🔥 **`-DGGML_BACKEND_DL=ON` + `GGML_BACKEND_PATH=/src/build/bin/libggml-cuda.so`**——**这是 §10.36「wheel 遮蔽」的正解在测量脚本里的落地**；
+⭐⭐ 判据「**一个「绕过搜索路径」的做法，比一个「把搜索路径排对」的做法强，因为后者依赖运行时环境的顺序，而前者不依赖**」；
+⭐⭐ 判据「**凡是一个坑的正解是「显式指定」而不是「调整优先级」，说明这个坑的根因是「有多个候选」，而不是「优先级排错了」**」；
+(c) ⭐⭐⭐⭐ **查了 `clocks.max.memory` 而速度文档没记**：`nvidia-smi --query-gpu=name,memory.total,memory.used,clocks.max.memory`——**97,887 MiB 来自这一行，而同一行的 clocks.max.memory 从未被记录**；
+⭐⭐ 判据「**一个查询了却没被记录的字段，说明写文档的人认为它对本结论不重要；而它恰好是判断「是不是内存带宽瓶颈」最直接的证据**」；
+(d) ⭐⭐ **脚本里 gpu 是一个字符串**，**故这张表是「想测哪张就改哪行」的产物，不是「把手上所有卡都跑一遍」的产物**；
+2. 🔥🔥🔥🔥🔥 **`build_cuda_bundle.py` 的检查不对称是设计**：
+**对 `server`/`cli` 真解析 `executable_machine()`（ELF `e_machine` / PE `Machine`），不匹配即 `ValueError`；而对 `lib/` 下 `*.so`/`*.dll` 只 `glob` 全拷、不解析；对 CUDA 后端只做文件名匹配（`libggml-cuda.so*` / `ggml-cuda*`）**——
+**故它回答两个不同问句：「是不是为这个架构编的」与「有没有这个后端」**；
+⚠️ **缝隙：错架构的 `libggml-cuda.so` 能同时通过两层检查，运行时才在 `dlopen` 处失败**；
+⭐⭐ 判据「**一个「存在性检查」被放在一个「架构检查」旁边时，读者会以为两个都检查了架构；而它只回答了一个更弱的问题**」；
+⭐⭐ 判据「**凡是「主二进制 + 可插拔后端」的布局，后端目录天然缺少一个与主二进制同级的架构校验位**」；
+⭐⭐ 判据「**一个缺口如果修它只需要读 64 字节，那么它存在的原因不是成本，而是没人想到**」；
+ — [src-btl3-tools-modal-consumer-gpu-bench] [src-btl3-tools-build-cuda-bundle]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -32583,7 +32746,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=370, evidence=2621, claims=1855, claims_high=1507, claims_disputed=9, trace_events=811, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=371, evidence=2626, claims=1858, claims_high=1510, claims_disputed=9, trace_events=813, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
