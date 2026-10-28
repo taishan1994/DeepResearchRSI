@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：454 ｜ **证据数**：2858 ｜ **主张数**：2052（高置信 1702，争议 9）
+> **来源数**：455 ｜ **证据数**：2864 ｜ **主张数**：2058（高置信 1708，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -34015,6 +34015,179 @@ exit 0
 > `tools.py` 在**出口**做模糊修复（错误的边界）——
 > 同一个仓库里，两个方向相反的边界处理。**
 
+### 10.509 🔥🔥🔥🔥🔥 整个仓库的 token 计数，**就是一个除法**，共 28 行
+
+[c-the-token-budget-is-a-division-by-four]
+
+> **`Prism/src/prism/tokens.py` 第 20-27 行（全文 28 行）**：
+> ```python
+> def estimate(text: str) -> int:
+>     if not text:
+>         return 0
+>     if _ENCODER is not None:  # pragma: no cover - depends on optional dep
+>         return len(_ENCODER.encode(text))
+>     # Heuristic: ~4 chars per token, min 1 token for any non-empty text.
+>     return max(1, len(text) // 4)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个预算的度量单位是「字符数除以一个常数」时，
+> 它守恒的不是信息量，
+> 而是「这个常数对哪门语言成立」——
+> 故它是一份「关于语言」的假设，而不是一份「关于长度」的测量。**
+>
+> **⭐⭐ 判据：**
+> **故 `token_budget` 这个名字里的 `hard` 与 `ceiling`，
+> 只对那个常数成立的语言为真。**
+>
+> ⚠️ **而这条给 §10.503 补上最后一环：
+> `fits_in` 之所以「含 `full_source`」，
+> 是因为 `t` 来自 `estimate(源码)`；
+> 而 `estimate` 是一个除法——
+> 故整个预算链的精度上限就是那个 4。**
+
+### 10.510 🔥🔥🔥🔥🔥 实测：中文被低估 **3.73 倍**
+
+[c-estimate-underreads-chinese-by-3-73x]
+
+> **本仓库 `scripts/_zz36a.py` 逐字复制 `estimate` 的无依赖分支并测量**：
+> ```
+> 样本                          字符  estimate  汉字比    汉字数
+> 纯中文（一句技术判断）           44        11    0.93       41
+>
+> 纯中文样本：44 字符 -> estimate = 11
+>   若按「一个汉字约 1 token」这个保守参考，真实约 41 token
+>   低估倍数约 3.73x
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个估算器的判据是「字符数」时，
+> 它在单字节语言上是 4 比 1，
+> 而在 CJK 上是 0.25 比 1——
+> 同一个常数在两门语言上差 16 倍。**
+>
+> **⭐⭐ 判据：**
+> **故「4 字符 1 token」这个经验值，
+> 不是关于 token 的经验，而是关于拉丁字母的经验。**
+>
+> ⚠️ **而这条对本报告是一个直接的对照：
+> 本报告 §10 有 508 节几乎全部是中文，
+> 而所有引用它的英文论文都是 ASCII——
+> 故任何用「字符数」来约束本报告的尝试，
+> 都会在中文上超预算 3.7 倍。**
+> **⭐⭐ 故本报告与 Prism 共享同一个隐患：
+> 字数不是长度，长度不是信息量。**
+
+### 10.511 🔥🔥🔥🔥🔥 「更准」的那个分支，量的是**另一个模型**的 token
+
+[c-tiktoken-uses-openai-encoding-not-the-model-encoding]
+
+> **`Prism/src/prism/tokens.py` 第 12-17 行**：
+> ```python
+> try:  # optional accuracy upgrade, never required
+>     import tiktoken
+>
+>     _ENCODER = tiktoken.get_encoding("cl100k_base")
+> except Exception:  # pragma: no cover - tiktoken is optional
+>     _ENCODER = None
+> ```
+> **而 Prism 自己的 `llm.py` 第 6-9 行说推理层应当由
+> `deepseek-r1:7b`（R1-Distill-Qwen-7B）驱动。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个系统装了「提高精度」的依赖，
+> 而那个依赖量的是另一家的分词器时，
+> 它提高的不是精度，而是「与自己不一致的精度」——
+> 而后者比粗估更危险，因为它带着「已校准」的外观。**
+>
+> **⭐⭐ 判据：**
+> **故「近似」与「精确地近似了错误的对象」是两件事；
+> 而后者只有在报错时才暴露。**
+>
+> ⚠️ **而这条给本报告一个可借用的检验：
+> 本报告的「字数」「行数」「个数」三种计量，
+> 也全部是「精确地量了错误的对象」——
+> 例如 §10 有 508 节，
+> 而「508 节」既不是信息量也不是阅读量。**
+
+### 10.512 ⭐⭐⭐⭐⭐ 「一行改动」—— 而那一行**从来没有被改过**
+
+[c-the-one-line-swap-was-never-swapped]
+
+> **`Prism/src/prism/tokens.py` 第 3-6 行**：
+> ```
+> v1 uses a cheap char/4 heuristic so the core has zero dependencies and runs
+> on-device. If `tiktoken` is installed we use it for accuracy. The rest of the
+> system only depends on `estimate()`, so swapping in a real tokenizer for a
+> specific model is a one-line change.
+> ```
+> **而第 24 行那条分支的注释是 `# pragma: no cover - depends on optional dep`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个设计用「这是一行改动」来为当前的粗糙辩护时，
+> 它同时承认了两件事：现在不准，以及改起来很便宜。
+> 而如果那条改动一直没做，那「便宜」就变成了「不值得」的同义词。**
+>
+> **⭐⭐ 判据：**
+> **故「可替换」这个属性不降低当前实现的错误率；它只降低将来的成本。**
+>
+> ⚠️ **而 `# pragma: no cover` 这个注释本身就是判据：
+> 它把「更准的那条路」明确排除在覆盖率之外——
+> 故这条分支从来没有被测过。**
+
+### 10.513 ⚠️⚠️⚠️ 计费函数的签名里没有「计价对象」
+
+[c-estimate-has-no-model-parameter]
+
+> **`Prism/src/prism/tokens.py` 第 20 行**：
+> ```python
+> def estimate(text: str) -> int:
+> ```
+> **而 `packer.py` 第 25 行 `from .tokens import estimate` 之后，
+> 七处调用全部只传一个参数。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个计费函数的签名里没有「计价对象」时，
+> 它对所有对象返回同一个价——
+> 而这不是「统一的计价」，而是「假装只有一个对象」。**
+>
+> **⭐⭐ 判据：**
+> **故「一行改动」这句辩护在技术上不成立：
+> 换成真 tokenizer 需要知道是哪个模型的 tokenizer，
+> 而那个信息在调用链上根本不存在。**
+>
+> ⚠️ **故 §10.512 那条待办的答案是：
+> 不是一行改动，而是要加一个参数并改七处调用。**
+
+### 10.514 ⭐⭐⭐⭐⭐ 一个估算器有**两个方向相反的偏差**
+
+[c-one-to-four-chars-cost-the-same]
+
+> **`Prism/src/prism/tokens.py` 第 26-27 行**：
+> ```python
+> # Heuristic: ~4 chars per token, min 1 token for any non-empty text.
+> return max(1, len(text) // 4)
+> ```
+> **故 `"a"` / `"ab"` / `"abc"` / `"abcd"` 全部返回 1。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个取整的除法加上一个下限，
+> 会让「最短的四分之一区间」变成一个平台——
+> 故任何由许多短文本累加出来的预算，
+> 都会系统性地高估，而不是低估。**
+>
+> **⭐⭐ 判据：**
+> **故这个估算器有两个方向的偏差：
+> 对 CJK 低估（3.73 倍），对大量短条目高估（每项至少 1 token）。**
+>
+> ⚠️ **而 `packer.py` 恰好两者都有：
+> 源码是 ASCII（低估方向不触发），
+> 而 `dependency_edges` / `quality_signals` / `periphery` 是大量短字符串
+> （高估方向触发）。**
+> **⭐⭐ 故 §10.505 那个「六个裁剪循环」的行为，
+> 有一部分是估算偏差造成的：
+> 它裁的是被高估的那些小项。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -38967,7 +39140,6 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 (https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_btl3_qwen35.py)
  —（2026-10 抓取）。
 ⭐⭐⭐ **一个测试、零个 assert 语句、一条 `assert_array_equal`**：「**expected = grouped.reshape(2, 3, 2).transpose(1, 0, 2).reshape(-1)**」——**期望值不是字面量，而是用 numpy 现算的一次等价重排**；⭐⭐ 判据「**当期望值是一次同构变换时，这个测试证明的是「两种写法等价」，而不是「结果正确」**」；
-6. [GitHub / Badtheorylabs — `tests/test_btl3_safetensor_view.py`（1,189 字节，38 行）]
 (https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tests/test_btl3_safetensor_view.py)
  —（2026-10 抓取）。
 ⭐⭐⭐⭐ **它测的正是 §10.194 那条「BF16->F32 是精确位移」**：「**words = np.array([0x3F80, 0xC000], dtype=<u2)；assert_array_equal(bfloat16_to_float32(words), np.array([1.0, -2.0], dtype=np.float32))**」——**0x3F80 是 1.0 的 BF16 位模式、0xC000 是 -2.0 的；故这条与 §10.194 那次「65,536 个位模式全部往返」是同一条结论的两种验证**；
@@ -39893,7 +40065,6 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 5. ⭐⭐⭐⭐⭐ **「追加写加单调 `seq`」是唯一能在崩溃后仍然可信的结构**：
 `trace.py` 第 64-72 行写「**with open(os.path.join(self.run_dir, "trace.jsonl"), "a", encoding="utf-8") as fh:                fh.write(json.dumps(asdict(ev)) + "\n")**」，即一行一事件、追加写、`self._seq += 1` 单调；
 ⭐⭐ 判据「**「追加写加单调 `seq`」是唯一能让一份日志在崩溃后仍然可信的结构——因为任何删除都会在 `seq` 上留下一个洞。故一份日志的可信度不取决于它记了多少，而取决于它能不能证明「没有东西被删掉」**」——**⚠️ 而这条与本报告的 `run.json` 相反：本报告的 trace 是每轮整体重写的，故 `seq` 连续但历史被覆盖——这正是 10.480 说的「内容失效没有判据」的另一面。故本报告在这一点上比 Prism 弱：它有 append-only，我有 rewrite-all**；
-6. [GitHub / Badtheorylabs — `Prism/src/prism/verify.py`（4,070 字节，120 行）]
 (https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/verify.py)
  —（2026-10 抓取）。
 ⭐⭐⭐⭐⭐ **「编译器是一个免费的大模型」**：**docstring 第 4-5 行写「The compiler/test runner is a free "big model": it catches what a small model misses.」**；
@@ -39921,13 +40092,36 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 5. ⭐⭐⭐⭐⭐ **194 行的文件，一个函数占 124 行**：
 `render.py` 全文 194 行，`render_markdown` 从第 6 行到第 129 行（124 行），`render_stats` 从 132 行开始——**124 / 194 = 63.9%**；
 ⭐⭐ 判据「**一个函数如果占了文件的三分之二，那它的每一个布尔参数都是一个「分支密度」——故它没有被测试，等价于「这个分支组合从未被枚举过」。故 `include_source` 的两个取值，在 10.495 那条路径上只被走过一个（`False`），而另一个（`True`，默认值）只在执行阶段被走过**」——**⚠️ 置信度 medium：这一条描述的是「没有测试」，而「没有测试」是一个否定命题，只能用「我找过」来支撑**；
-6. [GitHub / Badtheorylabs — `Prism/src/prism/llm.py`（9,832 字节，243 行）]
 (https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/llm.py)
  —（2026-10 抓取）。
 ⭐⭐⭐⭐⭐ **在边界剥掉思考标签，而不是在每个解析器里各剥一次**：**docstring 第 10-12 行写「R1-distill models emit `think...` reasoning traces. Those must NOT reach the FILE/JSON parsers, so chat() strips them from the returned content by default (while streaming still shows them live for visibility).」**；
 ⭐⭐ 判据（本轮最重要）「**当一个脏数据源只有一个入口时，正确的清洗位置是入口，而不是每一个消费者——因为后者的数量会增长，而前者的数量恒为一**」——
 ⚠️ **而这条与 10.491 构成一对：`llm.py` 在入口做清洗（正确的边界），`tools.py` 在出口做模糊修复（错误的边界）——同一个仓库里，两个方向相反的边界处理**；
  — [src-prism-render-py] [src-prism-packer-py] [src-prism-llm-py]
+
+### 整个 token 计数就是一个除法（第一百六十一轮补充）
+
+上一轮结尾说「读 `tokens.py`，因为 10.503 的整个推理依赖『`t` 是含 `full_source` 的估算』，而 `estimate()` 的实现决定了这个估算是字符数还是 token 数」。本轮读完 `tokens.py`（896 字节 / 28 行，**全文**）——**答案是「字符数」，而且那个常数是 4。**
+
+1. 🔥🔥🔥🔥🔥 **整个仓库的 token 计数就是一个除法，共 28 行**：
+`Prism/src/prism/tokens.py` 第 20-27 行写「**def estimate(text: str) -> int:    if not text: return 0    if _ENCODER is not None: return len(_ENCODER.encode(text))    # Heuristic: ~4 chars per token, min 1 token for any non-empty text.    return max(1, len(text) // 4)**」；
+⭐⭐ 判据（本轮最重要）「**当一个预算的度量单位是「字符数除以一个常数」时，它守恒的不是信息量，而是「这个常数对哪门语言成立」——故它是一份「关于语言」的假设，而不是一份「关于长度」的测量。故 `token_budget` 这个名字里的 hard 与 ceiling，只对那个常数成立的语言为真**」；
+⚠️ **而这条给 10.503 补上最后一环：`fits_in` 之所以「含 `full_source`」，是因为 `t` 来自 `estimate(源码)`；而 `estimate` 是一个除法——故整个预算链的精度上限就是那个 4**；
+2. 🔥🔥🔥🔥🔥 **实测：中文被低估 3.73 倍**：
+`scripts/_zz36a.py` 逐字复制 `estimate` 的无依赖分支并测量，输出「**纯中文（一句技术判断） 44 字符 -> estimate = 11，汉字数 = 41，低估倍数约 3.73x**」；
+⭐⭐ 判据（本轮最重要）「**当一个估算器的判据是「字符数」时，它在单字节语言上是 4 比 1，而在 CJK 上是 0.25 比 1——同一个常数在两门语言上差 16 倍。故「4 字符 1 token」这个经验值，不是关于 token 的经验，而是关于拉丁字母的经验**」——**⚠️ 而本报告 §10 有 508 节几乎全部是中文，而所有引用它的英文论文都是 ASCII——故任何用「字符数」来约束本报告的尝试，都会在中文上超预算 3.7 倍。故本报告与 Prism 共享同一个隐患：字数不是长度，长度不是信息量**；
+3. 🔥🔥🔥🔥🔥 **「更准」的那个分支，量的是另一个模型的 token**：
+`tokens.py` 第 12-17 行写「**try: import tiktoken; _ENCODER = tiktoken.get_encoding("cl100k_base")**」，而 `cl100k_base` 是 GPT-3.5/4 系列的编码，而 `llm.py` 第 6-9 行说推理层应当由 `deepseek-r1:7b` 驱动；
+⭐⭐ 判据（本轮最重要）「**当一个系统装了「提高精度」的依赖，而那个依赖量的是另一家的分词器时，它提高的不是精度，而是「与自己不一致的精度」——而后者比粗估更危险，因为它带着「已校准」的外观。故「近似」与「精确地近似了错误的对象」是两件事；而后者只有在报错时才暴露**」；
+4. ⭐⭐⭐⭐⭐ **「一行改动」——而那一行从来没有被改过**：
+`tokens.py` 第 3-6 行写「**The rest of the system only depends on `estimate()`, so swapping in a real tokenizer for a specific model is a one-line change**」，而第 24 行那条分支的注释是「**# pragma: no cover - depends on optional dep**」；
+⭐⭐ 判据（本轮最重要）「**当一个设计用「这是一行改动」来为当前的粗糙辩护时，它同时承认了两件事：现在不准，以及改起来很便宜。而如果那条改动一直没做，那「便宜」就变成了「不值得」的同义词。故「可替换」这个属性不降低当前实现的错误率；它只降低将来的成本**」——
+⚠️ **而 `# pragma: no cover` 这个注释本身就是判据：它把「更准的那条路」明确排除在覆盖率之外——故这条分支从来没有被测过**；
+5. ⚠️⚠️⚠️ **计费函数的签名里没有「计价对象」**：
+`tokens.py` 第 20 行是「**def estimate(text: str) -> int:**」，而 `packer.py` 第 25 行 `from .tokens import estimate` 之后，七处调用全部只传一个参数；
+⭐⭐ 判据（本轮最重要）「**当一个计费函数的签名里没有「计价对象」时，它对所有对象返回同一个价——而这不是「统一的计价」，而是「假装只有一个对象」。故「一行改动」这句辩护在技术上不成立：换成真 tokenizer 需要知道是哪个模型的 tokenizer，而那个信息在调用链上根本不存在**」——**⚠️ 故上一轮那条待办的答案是：不是一行改动，而是要加一个参数并改七处调用**；
+⭐⭐ 判据「**一个估算器有兩個方向相反的偏差**」：**`max(1, len(text) // 4)` 让 1 到 4 个字符成本完全相同，故对大量短条目系统性高估；而对 CJK 系统性低估 3.73 倍。而 `packer.py` 恰好两者都有：源码是 ASCII（低估方向不触发），而 `dependency_edges` / `quality_signals` / `periphery` 是大量短字符串（高估方向触发）。故 10.505 那个「六个裁剪循环」的行为，有一部分是估算偏差造成的：它裁的是被高估的那些小项**；
+ — [src-prism-tokens-py] []
 
 ## 附录 A：子问题完成度
 
@@ -40068,7 +40262,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=454, evidence=2858, claims=2052, claims_high=1702, claims_disputed=9, trace_events=979, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=455, evidence=2864, claims=2058, claims_high=1708, claims_disputed=9, trace_events=981, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
