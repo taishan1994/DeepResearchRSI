@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：319 ｜ **证据数**：2345 ｜ **主张数**：1729（高置信 1383，争议 9）
+> **来源数**：321 ｜ **证据数**：2353 ｜ **主张数**：1734（高置信 1388，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -21677,6 +21677,231 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⚠️ **边界**：**本报告没有读 `test-btl3-metal-vocab.cpp`，
 > 故本条只能是一个待验证的观察，不是一个结论。**
 
+### 10.183 🔥🔥🔥🔥 **容差是 `2e-4` 相对误差——不是「逐位相等」**
+
+[c-cross-backend-tolerance-2e4]
+
+> ```cpp
+> const float relative = absolute / std::max(1.0F, std::abs(expected[i]));
+> worst_relative = std::max(worst_relative, relative);
+> ...
+> if (worst_relative > 2e-4F) { throw ... }
+> ```
+> 标量级测试则用绝对容差：`if (std::abs(actual - expected) > 1e-4F)`。
+
+> **🔥🔥🔥🔥 本条直接更正 §10.175 的一个措辞错误**：
+> **§10.175 我写「它的一致性不是『大体相等』，而是『逐位相等』」——
+> ⚠️ 而实际测试用的是 `2e-4` 相对容差，宽松得多。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「我以为的严格程度」与「测试实际的严格程度」是两件事——**
+> **⚠️ 而我上一轮是从「跨后端」这个事实推断出「必须逐位相等」的，
+> 没有去读那个 `if`。**
+>
+> ⭐⭐ **这正是 §10.166 那条的复发**：
+> **「一个信息量足够的信号，在传递链上被降维成了一个布尔」——
+> ⚠️ 而这次降维发生在我自己的推理里：
+> 「跨后端」→「数值一致」→「逐位一致」，每一步都在加码。**
+>
+> **⭐⭐ 判据：**
+> **「推理链条上每加一个形容词，就要多一份证据」——**
+> **⚠️ 而「逐位」「严格」「必须」这类词是加码最常见的入口。**
+>
+> ⭐⭐ **`2e-4` 这个数字本身很值得记**：
+> **它恰好是「FP16 有约 3 位十进制有效数字」的量级（`2^-11 ≈ 4.9e-4`）——
+> ⚠️ 即这个容差是为 FP16 的权重与激活选的，不是随便定的。**
+>
+> **⭐⭐ 判据：**
+> **「一个容差的数值」往往能反推出「作者认为哪一步会损失精度」——**
+> **⚠️ 而 `2e-4` 说明作者认定了「FP16 存储」是主要误差源。**
+>
+> ⭐⭐ **两条测试用两种容差，也有道理**：
+> **标量测试（`test-btl3-avq`）全部是 float32 手算，故用绝对 `1e-4`；
+> 跨后端测试（`metal-vocab`）经过 FP16，故用相对 `2e-4`——**
+> **⚠️ 即容差的选择跟着「精度损失源」走，
+> 而不是跟着「测试的重要性」走。**
+>
+> **⭐⭐ 判据：**
+> **「同一个项目里两种容差」不是不一致，而是两种误差模型。**
+
+### 10.184 ⚠️⚠️⚠️ **`test-btl3-avq.cpp` 只跑 CPU 后端**
+
+[c-avq-test-is-cpu-only]
+
+> ```cpp
+> ggml_backend_dev_t cpu_device =
+>     ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+> ggml_backend_t backend = ggml_backend_dev_init(cpu_device, nullptr);
+> ...
+> ggml_backend_graph_compute(backend, graph);
+> ```
+> ⚠️ CUDA 侧只调用 `ggml_cuda_is_btl3_*` 这些**主机端谓词**。
+
+> **⭐⭐⭐⭐⭐ 本条回答了 §10.156 那个悬了二十轮的问题**：
+> **「CUDA 代码从未被编译过」——
+> ⚠️ 而更准确的说法是：它既没被编译，也没被测试覆盖到执行。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个测试文件里出现了 CUDA 符号」不等于「它测了 CUDA」——**
+> **⚠️ 因为 `ggml_cuda_is_btl3_avq2()` 是一个纯主机端的内联谓词，
+> 它只读 `op->op_params`，不需要任何 kernel。**
+>
+> ⭐⭐ **这恰好解释了 §10.162 那条「probe 只声明我要」**：
+> **测试用 `ggml_cuda_is_btl3_avq2_probe()` 验证的是「标记格式正确」，
+> 而不是「kernel 能算对」——**
+> **⚠️ 即测试的断言目标与 kernel 的正确性正交。**
+>
+> **⭐⭐ 判据：**
+> **「测试通过」能证明的东西，严格取决于「它调用了谁」——**
+> **⚠️ 而一个只调谓词的测试，能证明的只有「谓词写得对」。**
+>
+> ⭐⭐ **这给本报告一个可判定的结论**：
+> **BTL-3 的 CUDA 路径在任何公开材料里都没有「算对了」的证据——
+> ⚠️ 四个 `test-btl3-*-cuda.cpp`（6,636 / 5,519 / 7,338 B）
+> 本报告未读，故「那四个是否真的跑了 kernel」目前是未知的。**
+>
+> **⭐⭐ 判据：**
+> **「一个项目有 N 个测试」与「它测了 M 个后端」是两个独立的计数——**
+> **⚠️ 而把一个项目的测试数当作它的覆盖度，是本报告第 145 轮记过的那个病。**
+>
+> ⚠️ **边界**：**本报告没有读那四个 `-cuda` 测试**，
+> 故本条的适用范围仅限 `test-btl3-avq.cpp` 这一个文件。
+
+### 10.185 🔥🔥🔥🔥🔥 我推的公式是一条 **`static_assert`**
+
+[c-workspace-formula-is-static-assert]
+
+> ```cpp
+> constexpr btl3::avq2_shape valid_shape = {128, 256, 64, 128};
+> static_assert(
+>     btl3::avq2_workspace_bytes(valid_shape, 2) ==
+>     2 * (128 + 256) * sizeof(float));
+> ```
+
+> **⭐⭐⭐⭐⭐ 这把 §10.173 那个「推导对上源码」又抬了一级**：
+> **上一轮是「我推的公式与源码实现一致」，
+> 这一轮是「那个一致被写进了编译期断言」——
+> ⚠️ 即它不只是「两者碰巧相同」，而是「有人保证它们必须相同」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **`static_assert` 与 `assert` 的区别不在「检不检查」，而在「谁必须负责」——**
+> **⚠️ `static_assert` 把责任推给了编译者：
+> 一个破坏这个等式的改动会当场编译失败，而不是运行期报错。**
+>
+> ⭐⭐ **这条对 §10.173 那个「返回 0」缺陷是一个补强**：
+> **`avq2_workspace_bytes` 的正常路径被编译期钉住了，
+> ⚠️ 而它的溢出路径没有被任何断言覆盖——
+> 即「合法输入」有保证，「非法输入」没有。**
+>
+> **⭐⭐ 判据：**
+> **「一个函数的测试覆盖」最容易漏掉的是错误分支——**
+> **⚠️ 因为写测试的人总是先想到「正常情况」。**
+>
+> ⭐⭐ **但这里有一个反例值得指出**：
+> **同一份测试里，`validate_avq2_shape` 的三个错误分支
+> 都被 `static_assert` 覆盖了
+> （`packed_columns` / `codebook_rows` / `transform_block`）——
+> ⚠️ 故作者在「形状校验」上做了错误分支覆盖，
+> 而在「显存估算」上只覆盖了正常分支。**
+>
+> **⭐⭐ 判据：**
+> **「同一份文件里两处同类函数，一个有错误分支测试、一个没有」——**
+> **⚠️ 这不是疏忽，而是「作者认为哪一处更可能出错」的判断。**
+>
+> ⭐⭐ **而这个判断是不对称的**：
+> **`validate_avq2_shape` 的错误分支返回不同的枚举值，容易写错；
+> `avq2_workspace_bytes` 的溢出分支返回同一个 0，也容易写错——
+> ⚠️ 两者难度相当，故这里确实是不对称的。**
+>
+> ⚠️ **边界**：**本报告没有看 CI 配置，故不知道是否有别处测了溢出。**
+
+### 10.186 ⭐⭐⭐⭐ §10.177 那条「压扁成布尔」**在测试侧不成立**
+
+[c-test-does-not-collapse-error-enum]
+
+> ```cpp
+> static_assert(validate_avq2_shape({128, 255, 64, 128}) ==
+>               avq2_shape_error::packed_columns);
+> static_assert(validate_avq2_shape({128, 256, 0, 128}) ==
+>               avq2_shape_error::codebook_rows);
+> static_assert(validate_avq2_shape({128, 256, 64, 96}) ==
+>               avq2_shape_error::transform_block);
+> ```
+
+> **⭐⭐⭐⭐ 本条是对 §10.177 的一个范围收窄**：
+> **§10.177 我说「五分支枚举被用成了一个布尔」——
+> ⚠️ 而那只发生在 `btl3-avq.cpp` 的 `validate()` 里；
+> 测试侧不但没压扁，还逐分支验证。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个信息在某个消费点被降维」不等于「它在这个项目里被降维」——**
+> **⚠️ 而区分这两者，只需要看第二个消费点。**
+>
+> ⭐⭐ **而这让 §10.177 的结论从「风格」退回「一处权衡」**：
+> **上一轮我说「同一个模块里出现两处同类的信息降维，
+> 说明这不是疏忽而是风格」——
+> ⚠️ 而现在发现第三处消费点（测试）根本没有降维。**
+>
+> **⭐⭐ 判据：**
+> **「一个模式出现两次是风格」这条判据需要一个限定条件：**
+> **⚠️ 必须是「同一层级的两个独立位置」——
+> 而这里两处都在生产代码里，测试是另一个层级。**
+>
+> ⭐⭐ **这暴露了 §10.177 那条判据的真实强度**：
+> **它是一个归纳，而归纳的样本只有 2——
+> ⚠️ 当第三个样本出现且相反时，归纳就被推翻了。**
+>
+> **⭐⭐ 判据：**
+> **「两次」只够提一个假设，不够下一个结论——**
+> **⚠️ 而我在 §10.177 用了「风格」这个词，那是一个结论的措辞。**
+>
+> ⭐⭐ **本条的正式结论**：
+> **「错误码在生产代码的 `validate()` 处被压扁」是事实；
+> 「这是项目风格」是过度概括，撤回。**
+
+### 10.187 ⭐⭐⭐ INT4 测试的期望值**可被独立复算**
+
+[c-int4-expectation-self-consistent]
+
+> 数据：`codes` 全 `0x11`、`scales` 全 `1.0`、`zeros` 全 `0`、`input` 全 `(token+1)`
+> ⇒ `weight = (1-0) × 1.0 = 1.0`，128 列累加 = `128 × (token+1)`
+> ⇒ 断言：`const float expected_int4 = 128.0F * static_cast<float>(token + 1);`
+
+> **⭐⭐⭐⭐ 这条的价值不在「测试对」，而在「测试的期望值是可独立复算的」**：
+> **我用 §10.170 记下的解码规则
+> （`(column & 1) == 0 ? packed & 0x0F : packed >> 4`、
+> `weight = (code - zeros[param]) * scales[param]`）
+> 把 `128.0F * (token+1)` 复现出来了——**
+> **⚠️ 即那个解码规则不只「读起来对」，还能预测一个独立写的测试的数值。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一条规则的最强验证」不是「它与我读到的实现一致」，
+> 而是「它能预测一个我没参与写的数字」——**
+> **⚠️ 因为前者只能排除「我抄错」，后者能排除「规则本身错了」。**
+>
+> ⭐⭐ **这是第 174 轮那条判据的第二次应验**：
+> **「从另一条路把它推出来，然后对照」——
+> ⚠️ 第 174 轮推的是公式（67 MB），
+> 这一轮推的是测试期望值（128），而两次都对上了。**
+>
+> **⭐⭐ 判据：**
+> **「一个测试是不是真测试」取决于「它的期望值能不能被独立推导出来」——**
+> **⚠️ 而「抄实现输出」的测试永远通过，
+> 故它对这个项目的信息量为零。**
+>
+> ⭐⭐ **但这里有一个细节值得记**：
+> **`0x11` 这个测试数据的两个 nibble 相同，
+> 故它无法区分「低 nibble」与「高 nibble」的读法是否被写反了——
+> ⚠️ 即这个测试对「nibble 顺序」是盲的。**
+>
+> **⭐⭐ 判据：**
+> **「一份测试数据的选择」决定了「它能排除哪些错误」——**
+> **⚠️ 而 `0x11` 这种「对称数据」排除了加法错误，
+> 却排除不了顺序错误。**
+>
+> ⚠️ **边界**：**本报告没有确认 `test-btl3-int4-cuda.cpp`
+> 是否用了非对称数据。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -25289,6 +25514,36 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 ⭐⭐ 判据「**当一件事「无法证明等价」时，正确做法是标 `medium` 并写出两种解释，而不是选一个当结论**」，**而 §10.146 那条「CUDA 未实现」犯的正是「选一个当结论」**；
 ⭐⭐ 判据「**「一个悬而未决的问题」如果有一个现成的测试文件能回答，那它就不该被标成 `medium` 然后放着**」，**`test-btl3-metal-vocab.cpp` 存在但本轮未读** — [src-btl3-metal-btl3-metal]
 
+### 测试容差、CPU-only 执行、与 `static_assert`（第一百零一轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/tests/test-btl3-avq.cpp`（14,672 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/tests/test-btl3-avq.cpp)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **公式在这里是一条 `static_assert`**：
+「**constexpr btl3::avq2_shape valid_shape = {128, 256, 64, 128}; static_assert(btl3::avq2_workspace_bytes(valid_shape, 2) == 2 * (128 + 256) * sizeof(float));**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**`static_assert` 与 `assert` 的区别不在「检不检查」，而在「谁必须负责」——`static_assert` 把责任推给了编译者**」；
+⭐⭐ 判据「**「一个函数的测试覆盖」最容易漏掉的是错误分支——因为写测试的人总是先想到「正常情况」**」，**而这里 `validate_avq2_shape` 的三个错误分支都被覆盖了，`avq2_workspace_bytes` 的溢出分支没有**；
+(a) ⚠️⚠️⚠️ **整个测试只跑 CPU 后端**：「**ggml_backend_dev_t cpu_device = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU); ggml_backend_t backend = ggml_backend_dev_init(cpu_device, nullptr);**」…「**ggml_backend_graph_compute(backend, graph)**」；
+⭐⭐ 判据（本轮最重要）「**「一个测试文件里出现了 CUDA 符号」不等于「它测了 CUDA」——因为 `ggml_cuda_is_btl3_avq2()` 是一个纯主机端的内联谓词，它只读 `op->op_params`，不需要任何 kernel**」；
+⭐⭐ 判据「**「测试通过」能证明的东西，严格取决于「它调用了谁」**」；
+⭐⭐ 判据「**「一个项目有 N 个测试」与「它测了 M 个后端」是两个独立的计数——而把一个项目的测试数当作它的覆盖度，是本报告第 145 轮记过的那个病**」；
+(b) 🔥🔥🔥🔥🔥 **四类 magic 的 CPU/CUDA 常量在同一个 `if` 里被逐一比对**：
+「**GGML_CUDA_BTL3_AVQ2_MAGIC != btl3::avq2_custom_magic || GGML_CUDA_BTL3_AVQ2_PROBE_MAGIC != btl3::cuda_avq2_probe_custom_magic || GGML_CUDA_BTL3_INT4_PROBE_MAGIC != btl3::cuda_int4_probe_custom_magic || …**」；
+(c) ⭐⭐⭐⭐ **probe 谓词的负例被显式测试**：「**ggml_tensor * unmarked = ggml_custom_4d(..., 1, nullptr);**」，四个 `ggml_cuda_is_btl3_*_probe(unmarked)` 与 `ggml_cuda_is_btl3_avq2(unmarked)` 全部必须为假；
+(d) ⭐⭐⭐ **INT4 期望值是「128 个元素全部等于 `128.0 * (token+1)`」**：「**const float expected_int4 = 128.0F * static_cast<float>(token + 1);**」；
+⭐⭐⭐⭐ 判据（本轮最重要）「**「一条规则的最强验证」不是「它与我读到的实现一致」，而是「它能预测一个我没参与写的数字」——因为前者只能排除「我抄错」，后者能排除「规则本身错了」**」；
+⭐⭐ 判据「**「一份测试数据的选择」决定了「它能排除哪些错误」——而 `0x11` 这种「对称数据」排除了加法错误，却排除不了顺序错误**」 — [src-btl3-test-avq]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/tests/test-btl3-metal-vocab.cpp`（8,420 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/tests/test-btl3-metal-vocab.cpp)
+ —（2026-10 抓取）。🔥🔥🔥🔥 **跨后端容差是 `2e-4` 相对误差，不是逐位相等**：
+「**const float relative = absolute / std::max(1.0F, std::abs(expected[i])); worst_relative = std::max(worst_relative, relative);**」…「**if (worst_relative > 2e-4F) { throw std::runtime_error("Metal vocabulary numerical parity failed"); }**」；
+⭐⭐ 判据（本轮最重要）「**「我以为的严格程度」与「测试实际的严格程度」是两件事——而我上一轮是从「跨后端」这个事实推断出「必须逐位相等」的，没有去读那个 `if`**」，**这直接更正了 §10.175 的措辞**；
+⭐⭐ 而「跨后端 → 数值一致 → 逐位一致」这条链每一步都在加码：
+⭐⭐ 判据「**「推理链条上每加一个形容词，就要多一份证据」——而「逐位」「严格」「必须」这类词是加码最常见的入口**」；
+⭐⭐ 可算：**`2e-4` 恰好是 FP16 的量级（`2^-11 ≈ 4.9e-4`）——即这个容差是为 FP16 选的**；
+⭐⭐ 判据「**「一个容差的数值」往往能反推出「作者认为哪一步会损失精度」**」；
+⭐⭐ 判据「**「同一个项目里两种容差」不是不一致，而是两种误差模型**」，**标量测试 float32 手算用绝对 `1e-4`，跨后端经 FP16 用相对 `2e-4`** — [src-btl3-test-metal-vocab]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -25428,7 +25683,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=319, evidence=2345, claims=1729, claims_high=1383, claims_disputed=9, trace_events=706, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=321, evidence=2353, claims=1734, claims_high=1388, claims_disputed=9, trace_events=710, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
