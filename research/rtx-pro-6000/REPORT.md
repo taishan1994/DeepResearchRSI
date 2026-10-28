@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：432 ｜ **证据数**：2784 ｜ **主张数**：1983（高置信 1634，争议 9）
+> **来源数**：436 ｜ **证据数**：2796 ｜ **主张数**：1991（高置信 1642，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -31805,6 +31805,245 @@ exit 0
 > **§10.386 与 §10.334 的两次修正（第 225 轮）都是新增条目 + 在原条目里加一行指针，
 > 而不是把原条目改写掉。这正是这条纪律在文档层的形态。**
 
+### 10.440 🔥🔥🔥🔥🔥 跨宿主平台的运行被**判为不可比**
+
+[c-comparison-rejects-runs-from-different-hosts]
+
+> **`btl_lab/research.py` 的 `compare`（387-396 行）**：
+> ```python
+> hosts.add(fingerprint(run["plan"]["host"]))
+> values[link["arm"]].append(value)
+> if len(hosts) > 1:
+>     reasons.append("Host platform differs between runs")
+> for arm in values:
+>     if len(values[arm]) != spec["repeats"]:
+>         reasons.append(f"Incomplete valid replicates for {arm}")
+> report = {"experiment_id": experiment_id, ...,
+>           "comparable": not reasons, "reasons": reasons, ...}
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个比较器如果拒绝跨机器的数据，
+> 那它就把「可比性」从读者的责任变成了程序的责任。**
+>
+> **⭐⭐ 判据：**
+> **故这条直接回应了本报告花几十轮处理的「跨机器数据是否可比」——
+> 答案是：如果两台机器的 `plan.host` 指纹不同，就不比。**
+>
+> ⚠️ **而这条对本报告是一次自我批评**：
+> **§10.397 那张三来源 PRO 6000 调和表恰好是跨来源、跨机器的，
+> 而按这条标准它只能算「描述性并列」，不能算「一次比较」。**
+> **⭐⭐ 而本报告已经在那里写了「不是矛盾」——
+> 方向是对的，但我当时没有给它一个程序化的判据。**
+
+### 10.441 ⭐⭐⭐⭐⭐ 一次冻结锁住四样东西，**其中包括自己的代码**
+
+[c-freeze-locks-the-implementations-own-source]
+
+> **`btl_lab/research.py` 的 `freeze`（184-188 行）**：
+> ```python
+> frozen = {"spec": spec, "inputs": references,
+>           "implementation_sources": implementation_sources(),
+>           "recipes": {arm: self.workspace.recipe(value["recipe"])
+>                       for arm, value in spec["arms"].items()},
+>           "literature": spec.get("literature", [])}
+> ```
+> **而 `check_frozen`（199-210 行）逐项复核**：
+> ```python
+> if frozen.get("implementation_sources") != implementation_sources():
+>     raise ValueError("Research implementation changed after freeze")
+> for artifact in frozen["inputs"]:
+>     if sha256(inside(self.workspace.root, artifact["path"])) != artifact["sha256"]:
+>         raise ValueError(f"Frozen input changed: {artifact['path']}")
+> for arm, recipe in frozen["recipes"].items():
+>     if self.workspace.recipe(recipe["id"]) != recipe:
+>         raise ValueError(f"Recipe changed after freeze: {arm}")
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个实验如果只冻结输入与配方，那么改一下分析代码就能改结论；
+> 这条实现把 `implementation_sources` 也冻进了指纹。**
+>
+> **⭐⭐ 判据：**
+> **故「Research implementation changed after freeze」是一条
+> 比「输入变了」更少见的守卫——
+> 它防的是「用同一份数据得出不同结论」这件事本身。**
+>
+> ⚠️ **而这条对本报告是一个直接的检验：
+> 本报告的「实现」是 `validate_research.py` 与 §10 的生成脚本——
+> 而它们从未被冻结过。**
+> **这不是缺陷（本报告不是一次实验，而是一份档案），
+> 但它说明「档案」与「实验」需要两套不同的纪律。**
+
+### 10.442 ⭐⭐⭐⭐⭐ 冻结后**不可改，只能另开一个**
+
+[c-a-frozen-protocol-is-superseded-not-edited]
+
+> **`btl_lab/research.py` 第 178-179 行**：
+> ```python
+> if experiment["status"] != "draft":
+>     raise ValueError("Only a draft can be frozen; create a new protocol for changes")
+> ```
+> **而 `WORKFLOWS.md` 第 51 行**：
+> ```
+> Changing the experimental design after freezing requires a new experiment.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「改一个已冻结的实验」与「开一个新实验」的区别不是工作量，
+> 而是可追溯性：后者会留下两条记录，前者只留下一条。**
+>
+> **⭐⭐ 判据：**
+> **故这条与 §10.439（`Imported evidence never changes run outcome`）
+> 是同一纪律在两个层次上的实现：
+> 一个是行级 append，一个是实验级 create。**
+> **⭐⭐ 而本报告一直遵守的是行级 append——
+> 故它在实验级也自动满足。**
+
+### 10.443 ⭐⭐⭐⭐⭐ 三个 `scope` 覆盖同一条流水线的**三个出口**
+
+[c-three-scopes-cover-three-exits-of-one-pipeline]
+
+> **`btl_lab/research.py` 里三处 `scope`**：
+> ```
+> created   (134 行)  "Protocol only; no execution"
+> ready     (362 行)  "Readiness audit under the frozen protocol;
+>                      no model execution or promotion"
+> compare   (398 行)  "Descriptive comparison under the declared protocol;
+>                      not automatic promotion or statistical significance"
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **`compare` 那一句一次否掉两件事：
+> 把描述当裁决，与把描述当检验。**
+>
+> **⭐⭐ 判据：**
+> **这三句话的时间顺序恰好是这条流水线的三个阶段——
+> 故它不是三次免责声明，而是一条「每一阶段都不许越界」的链。**
+>
+> ⭐ **而这条给 §10.423 与 §10.438 那个 `scope` 建议补了第四、第五个用例**：
+> **`scope` 可以按流水线阶段逐个写，而每一阶段否掉的东西不同。**
+> **本报告 §10 里的「未获取」大多集中在「审计」这一段，
+> 而「比较」那一段几乎没有 scope——这正是 §10.440 那条自我批评的另一个侧面。**
+
+### 10.444 ⭐⭐⭐⭐⭐ `> 0` 这个一字之差，在**第二个文件**里逐字出现
+
+[c-the-strictly-greater-threshold-appears-in-a-second-file]
+
+> **`btl_lab/research.py` 406-408 行**：
+> ```python
+> report |= {"means": means, "relative_improvement": improvement,
+>            "meets_declared_threshold": improvement is not None
+>            and improvement > 0
+>            and improvement >= spec["metric"].get("minimum_relative_improvement", 0)}
+> ```
+> **而 `btl_measure/core.py:137` 是**：
+> ```python
+> meets = comparable and relative is not None and relative > 0 and relative >= minimum_relative_improvement
+> ```
+> **两处相隔两个仓库。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一个一字之差（`>` 而不是 `>=`）在两个独立文件里逐字出现时，
+> 它就不是一次巧合，而是一条被作者认真对待的约定。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.421 那条「改进的门槛由大于零定义」现在有了第二个实例——
+> 而第二个实例的价值在于它排除了「那只是一个文件里的写法」。**
+>
+> ⭐ **而这条对本报告的意义：
+> §10 里凡是我写「更快」「更好」的地方，
+> 都应该能被这两个判定式之一复核。** ⚠️ **而绝大多数不能被复核，
+> 因为我引用的是别人给的加速比，而不是自己算的 `improvement`。**
+
+### 10.445 🔥🔥🔥🔥🔥 「runner 不能一直采样直到碰上好结果」
+
+[c-failed-attempts-consume-the-per-arm-quota]
+
+> **`WORKFLOWS.md` 第 53 行**：
+> ```
+> Attempts are reserved transactionally. Failed attempts consume the per-arm
+> limit, and the runner cannot keep sampling until it finds a favorable
+> result. Imported historical receipts are separate ledger records and cannot
+> be substituted for an experiment's newly executed observations. OS-killed
+> attempts remain in progress until explicitly reconciled; automatic crash
+> recovery is not implemented.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「runner 不能一直采样直到碰上好结果」——
+> 这句话把「样本数」与「独立样本数」的差别写成了代码约束。**
+>
+> **⭐⭐ 判据：**
+> **故这条给本报告一个可引用的形式：
+> 一个重复数如果允许失败后被重试覆盖，它就不是重复数，而是尝试数。**
+>
+> ⚠️⚠️⚠️ **而本报告引用过的多数性能数字都没写「试了几次」——
+> 按这条标准，它们连「重复数」这个字段都缺。**
+> ⭐ **唯一一个有这个字段的是 §10.x 那条 `llama-bench -r 3`——
+> 而它的 3 是「三次采样取均值」，不是「三次独立重复」。**
+
+### 10.446 🔥🔥🔥🔥🔥 六条可比性条件，与一句**承认工具边界**的话
+
+[c-comparison-requires-six-named-conditions]
+
+> **`WORKFLOWS.md` 第 55 行**：
+> ```
+> Comparison requires all planned repeats to pass, intact result artifacts,
+> the declared evidence class and numeric metric, unchanged inputs/recipes, and
+> matching recorded host platform. It reports raw observations, means and
+> relative improvement. These are descriptive statistics, not significance
+> tests. Declared controls are part of the protocol; the engine does not
+> independently certify every hardware or methodological control. Acceptance
+> or rejection requires readiness plus the frozen criterion. Missing or invalid
+> evidence supports an inconclusive decision, not a successful claim.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「Declared controls are part of the protocol; the engine does not
+> independently certify every hardware or methodological control.」——
+> 这句话承认了工具的能力边界：它能检查它记录的，
+> 不能检查它没记录的。**
+>
+> **⭐⭐ 判据：**
+> **故这条与 §10.419（一个合法文件证明结构与算术，不证明可信）
+> 是同一句话的两个版本：
+> 前者说「我不验证控制」，后者说「我不验证评估器」。**
+>
+> ⭐⭐ **而「Missing or invalid evidence supports an inconclusive decision,
+> not a successful claim」是本报告最该引用的一句：
+> 它给出了「证据不足」的唯一合法结论——`inconclusive`。**
+> **而本报告用的是 `gap_remaining` + `stop_note`——
+> 语义相同，但 `inconclusive` 是一个更短、更不含糊的词。**
+
+### 10.447 ⭐⭐⭐⭐⭐ 两套证据分级：一套是**目标**，一套是**现状**
+
+[c-two-evidence-gradings-track-target-and-current-state]
+
+> **`WORKFLOWS.md` 第 46 行的协议字段**：
+> ```
+> evidence_class [integrity|systems|behavioral]
+> ```
+> **`EXPERIMENT_TEMPLATE.md` 第 6 行**：
+> ```
+> Evidence status: untested / diagnostic / measured / reproduced / released
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **`evidence_class` 是「这次实验要产出哪一级」的声明，
+> 而 `Evidence status` 是「这条结论现在到哪一级」的状态。**
+>
+> **⭐⭐ 判据：**
+> **故两者不是两个版本的分级，而是「目标」与「现状」两个字段——
+> 而它们的取值集合不需要相同。**
+>
+> ⭐⭐ **而这条对本报告是一个可套用的结构：
+> §10 里每个数字都该声明它的 `evidence_class`（我要它证明什么），
+> 与它的 `Evidence status`（它现在证明了什么）。**
+> **而本报告目前只写了后者，且用的是自造的词
+> （未获取 / 实验缺口 / 不可检验）——三者恰好是 `untested` 的三种成因，
+> 而它们没有被分开标注。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -37379,6 +37618,80 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐ **§10.386 与 §10.334 的两次修正（第 225 轮）都是新增条目 + 在原条目里加一行指针，而不是把原条目改写掉——这正是这条纪律在文档层的形态**；
  — [src-btl-lab-bootstrap-py] [src-btl-lab-checks-py] [src-btl-lab-store-py]
 
+### 那个仓库里最大的文件，讲的是「怎样才算一次可比的实验」（第一百五十二轮补充）
+
+上一轮结尾说读 `research.py` 与 `Prism` 的 benchmark。`Prism` 的树端点返回 403（限速），本轮读了 `research.py`（24,416 字节，这个仓库最大的文件）与 `WORKFLOWS.md`。**它们给出的是一份完整的实验方法学，而其中三条直接收紧本报告的结论。**
+
+1. [GitHub / Badtheorylabs — `btl_lab/research.py`（24,416 字节，437 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/btl_lab/research.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **跨宿主平台的运行被判为不可比**：**compare（387-396 行）写 hosts.add(fingerprint(run["plan"]["host"]))，而 if len(hosts) > 1: reasons.append("Host platform differs between runs")，最后收敛成 comparable = not reasons**；
+⭐⭐ 判据（本轮最重要）「**一个比较器如果拒绝跨机器的数据，那它就把「可比性」从读者的责任变成了程序的责任**」——**故这条直接回应了本报告花几十轮处理的「跨机器数据是否可比」：如果两台机器的 plan.host 指纹不同，就不比**；
+⚠️ **而这条对本报告是一次自我批评：10.397 那张三来源 PRO 6000 调和表恰好是跨来源、跨机器的，而按这条标准它只能算「描述性并列」，不能算「一次比较」**——**而本报告已经在那里写了「不是矛盾」，方向是对的，但我当时没有给它一个程序化的判据**；
+(a) ⭐⭐⭐⭐⭐ **一次冻结锁住四样东西，其中包括自己的代码**：**freeze（184-188 行）把 spec / inputs / implementation_sources / recipes / literature 一起冻进指纹，而 check_frozen（199-210 行）逐项复核，其中一条是「Research implementation changed after freeze」**；
+⭐⭐ 判据「**一个实验如果只冻结输入与配方，那么改一下分析代码就能改结论；这条实现把 implementation_sources 也冻进了指纹——它防的是「用同一份数据得出不同结论」这件事本身**」——**而本报告的「实现」是 validate_research.py 与生成脚本，它们从未被冻结过；这不是缺陷（本报告是档案不是实验），但它说明「档案」与「实验」需要两套不同的纪律**；
+(b) ⭐⭐⭐⭐⭐ **冻结后不可改，只能另开一个**：**178-179 行「Only a draft can be frozen; create a new protocol for changes」，而 WORKFLOWS.md 第 51 行是同一句话的文档版「Changing the experimental design after freezing requires a new experiment」**；
+⭐⭐ 判据「**「改一个已冻结的实验」与「开一个新实验」的区别不是工作量，而是可追溯性：后者会留下两条记录，前者只留下一条**」——**故这条与 10.439（Imported evidence never changes run outcome）是同一纪律在两个层次上的实现：一个是行级 append，一个是实验级 create；而本报告一直遵守行级 append，故它在实验级也自动满足**；
+(c) ⭐⭐⭐⭐⭐ **三个 scope 覆盖同一条流水线的三个出口**：**created（134 行）「Protocol only; no execution」、ready（362 行）「Readiness audit under the frozen protocol; no model execution or promotion」、compare（398 行）「Descriptive comparison under the declared protocol; not automatic promotion or statistical significance」**；
+⭐⭐ 判据「**compare 那一句一次否掉两件事：把描述当裁决，与把描述当检验**」——**这三句话的时间顺序恰好是流水线的三个阶段，故它不是三次免责声明，而是一条「每一阶段都不许越界」的链**；
+(d) ⭐⭐⭐⭐⭐ **「> 0」这个一字之差在第二个文件里逐字出现**：**406-408 行写 meets_declared_threshold = improvement is not None and improvement > 0 and improvement >= minimum_relative_improvement，与 btl_measure/core.py:137 的 relative > 0 同构，而两处相隔两个仓库**；
+⭐⭐ 判据「**当同一个一字之差（> 而不是 >=）在两个独立文件里逐字出现时，它就不是一次巧合，而是一条被作者认真对待的约定**」——**故 10.421 那条「改进的门槛由大于零定义」现在有了第二个实例，而第二个实例的价值在于它排除了「那只是一个文件里的写法」**；
+⚠️ **而 §10 里凡是我写「更快」「更好」的地方，都应该能被这两个判定式之一复核——而绝大多数不能，因为我引用的是别人给的加速比，而不是自己算的 improvement**；
+2. [GitHub / Badtheorylabs — `WORKFLOWS.md`（8,274 字节，85 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/WORKFLOWS.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「runner 不能一直采样直到碰上好结果」**：**第 53 行写「Attempts are reserved transactionally. Failed attempts consume the per-arm limit, and the runner cannot keep sampling until it finds a favorable result. Imported historical receipts are separate ledger records and cannot be substituted for an experiment's newly executed observations.」**；
+⭐⭐ 判据（本轮最重要）「**这句话把「样本数」与「独立样本数」的差别写成了代码约束**」——**故一个重复数如果允许失败后被重试覆盖，它就不是重复数，而是尝试数**；
+⚠️⚠️⚠️ **而本报告引用过的多数性能数字都没写「试了几次」——按这条标准，它们连「重复数」这个字段都缺；唯一有这个字段的是那条 llama-bench -r 3——而它的 3 是「三次采样取均值」，不是「三次独立重复」**；
+(a) 🔥🔥🔥🔥🔥 **六条可比性条件，与一句承认工具边界的话**：**第 55 行写「Comparison requires all planned repeats to pass, intact result artifacts, the declared evidence class and numeric metric, unchanged inputs/recipes, and matching recorded host platform. ... These are descriptive statistics, not significance tests. Declared controls are part of the protocol; the engine does not independently certify every hardware or methodological control. ... Missing or invalid evidence supports an inconclusive decision, not a successful claim.」**；
+⭐⭐ 判据（本轮最重要）「**这句话承认了工具的能力边界：它能检查它记录的，不能检查它没记录的**」——**故这条与 10.419（一个合法文件证明结构与算术，不证明可信）是同一句话的两个版本：前者说「我不验证控制」，后者说「我不验证评估器」**；
+⭐⭐ **而「Missing or invalid evidence supports an inconclusive decision, not a successful claim」是本报告最该引用的一句：它给出了「证据不足」的唯一合法结论——inconclusive；而本报告用的是 gap_remaining + stop_note，语义相同，但 inconclusive 是一个更短、更不含糊的词**；
+(b) ⭐⭐⭐⭐⭐ **两套证据分级：一套是目标，一套是现状**：**WORKFLOWS.md 第 46 行的协议字段是 evidence_class [integrity|systems|behavioral]，而 EXPERIMENT_TEMPLATE.md 第 6 行是 Evidence status: untested / diagnostic / measured / reproduced / released**；
+⭐⭐ 判据「**evidence_class 是「这次实验要产出哪一级」的声明，而 Evidence status 是「这条结论现在到哪一级」的状态——故它们是「目标」与「现状」两个字段，取值集合不需要相同**」；
+⭐⭐ **而这条对本报告是一个可套用的结构：§10 里每个数字都该声明它的 evidence_class 与它的 Evidence status；而本报告目前只写了后者，且用的是自造的词（未获取 / 实验缺口 / 不可检验）——三者恰好是 untested 的三种成因，而它们没有被分开标注**；
+3. [GitHub / Badtheorylabs — `EXPERIMENT_TEMPLATE.md`（1,834 字节，33 行）与 `AGENTS.md`（1,980 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/EXPERIMENT_TEMPLATE.md)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **实验模板的六个小节**：**决策与假设 / 冻结对比 / 执行与预算 / 验收门 / 结果与证据 / 决策；头部有 Lifecycle 五档（proposed / active / paused / completed / archived）与 Evidence status 五档**；**其中「What result would disprove the hypothesis?」与「Accept / reject / inconclusive, with reasons and claim limits」两句把「可证伪」与「结论限额」写成了模板字段**；
+ — [src-btl-lab-research-py] [src-btl-lab-workflows-md] [src-btl-lab-experiment-template] [src-btl-lab-agents-md]
+
+### 那个仓库里最大的文件，讲的是「怎样才算一次可比的实验」（第一百五十二轮补充）
+
+上一轮结尾说读 `research.py` 与 `Prism` 的 benchmark。`Prism` 的树端点返回 403（限速），本轮读了 `research.py`（24,416 字节，这个仓库最大的文件）与 `WORKFLOWS.md`。**它们给出的是一份完整的实验方法学，而其中三条直接收紧本报告的结论。**
+
+1. [GitHub / Badtheorylabs — `btl_lab/research.py`（24,416 字节，437 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/btl_lab/research.py)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **跨宿主平台的运行被判为不可比**：**compare（387-396 行）写 hosts.add(fingerprint(run["plan"]["host"]))，而 if len(hosts) > 1: reasons.append("Host platform differs between runs")，最后收敛成 comparable = not reasons**；
+⭐⭐ 判据（本轮最重要）「**一个比较器如果拒绝跨机器的数据，那它就把「可比性」从读者的责任变成了程序的责任**」——**故这条直接回应了本报告花几十轮处理的「跨机器数据是否可比」：如果两台机器的 plan.host 指纹不同，就不比**；
+⚠️ **而这条对本报告是一次自我批评：10.397 那张三来源 PRO 6000 调和表恰好是跨来源、跨机器的，而按这条标准它只能算「描述性并列」，不能算「一次比较」**——**而本报告已经在那里写了「不是矛盾」，方向是对的，但我当时没有给它一个程序化的判据**；
+(a) ⭐⭐⭐⭐⭐ **一次冻结锁住四样东西，其中包括自己的代码**：**freeze（184-188 行）把 spec / inputs / implementation_sources / recipes / literature 一起冻进指纹，而 check_frozen（199-210 行）逐项复核，其中一条是「Research implementation changed after freeze」**；
+⭐⭐ 判据「**一个实验如果只冻结输入与配方，那么改一下分析代码就能改结论；这条实现把 implementation_sources 也冻进了指纹——它防的是「用同一份数据得出不同结论」这件事本身**」——**而本报告的「实现」是 validate_research.py 与生成脚本，它们从未被冻结过；这不是缺陷（本报告是档案不是实验），但它说明「档案」与「实验」需要两套不同的纪律**；
+(b) ⭐⭐⭐⭐⭐ **冻结后不可改，只能另开一个**：**178-179 行「Only a draft can be frozen; create a new protocol for changes」，而 WORKFLOWS.md 第 51 行是同一句话的文档版「Changing the experimental design after freezing requires a new experiment」**；
+⭐⭐ 判据「**「改一个已冻结的实验」与「开一个新实验」的区别不是工作量，而是可追溯性：后者会留下两条记录，前者只留下一条**」——**故这条与 10.439（Imported evidence never changes run outcome）是同一纪律在两个层次上的实现：一个是行级 append，一个是实验级 create；而本报告一直遵守行级 append，故它在实验级也自动满足**；
+(c) ⭐⭐⭐⭐⭐ **三个 scope 覆盖同一条流水线的三个出口**：**created（134 行）「Protocol only; no execution」、ready（362 行）「Readiness audit under the frozen protocol; no model execution or promotion」、compare（398 行）「Descriptive comparison under the declared protocol; not automatic promotion or statistical significance」**；
+⭐⭐ 判据「**compare 那一句一次否掉两件事：把描述当裁决，与把描述当检验**」——**这三句话的时间顺序恰好是流水线的三个阶段，故它不是三次免责声明，而是一条「每一阶段都不许越界」的链**；
+(d) ⭐⭐⭐⭐⭐ **「> 0」这个一字之差在第二个文件里逐字出现**：**406-408 行写 meets_declared_threshold = improvement is not None and improvement > 0 and improvement >= minimum_relative_improvement，与 btl_measure/core.py:137 的 relative > 0 同构，而两处相隔两个仓库**；
+⭐⭐ 判据「**当同一个一字之差（> 而不是 >=）在两个独立文件里逐字出现时，它就不是一次巧合，而是一条被作者认真对待的约定**」——**故 10.421 那条「改进的门槛由大于零定义」现在有了第二个实例，而第二个实例的价值在于它排除了「那只是一个文件里的写法」**；
+⚠️ **而 §10 里凡是我写「更快」「更好」的地方，都应该能被这两个判定式之一复核——而绝大多数不能，因为我引用的是别人给的加速比，而不是自己算的 improvement**；
+2. [GitHub / Badtheorylabs — `WORKFLOWS.md`（8,274 字节，85 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/WORKFLOWS.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「runner 不能一直采样直到碰上好结果」**：**第 53 行写「Attempts are reserved transactionally. Failed attempts consume the per-arm limit, and the runner cannot keep sampling until it finds a favorable result. Imported historical receipts are separate ledger records and cannot be substituted for an experiment's newly executed observations.」**；
+⭐⭐ 判据（本轮最重要）「**这句话把「样本数」与「独立样本数」的差别写成了代码约束**」——**故一个重复数如果允许失败后被重试覆盖，它就不是重复数，而是尝试数**；
+⚠️⚠️⚠️ **而本报告引用过的多数性能数字都没写「试了几次」——按这条标准，它们连「重复数」这个字段都缺；唯一有这个字段的是那条 llama-bench -r 3——而它的 3 是「三次采样取均值」，不是「三次独立重复」**；
+(a) 🔥🔥🔥🔥🔥 **六条可比性条件，与一句承认工具边界的话**：**第 55 行写「Comparison requires all planned repeats to pass, intact result artifacts, the declared evidence class and numeric metric, unchanged inputs/recipes, and matching recorded host platform. ... These are descriptive statistics, not significance tests. Declared controls are part of the protocol; the engine does not independently certify every hardware or methodological control. ... Missing or invalid evidence supports an inconclusive decision, not a successful claim.」**；
+⭐⭐ 判据（本轮最重要）「**这句话承认了工具的能力边界：它能检查它记录的，不能检查它没记录的**」——**故这条与 10.419（一个合法文件证明结构与算术，不证明可信）是同一句话的两个版本：前者说「我不验证控制」，后者说「我不验证评估器」**；
+⭐⭐ **而「Missing or invalid evidence supports an inconclusive decision, not a successful claim」是本报告最该引用的一句：它给出了「证据不足」的唯一合法结论——inconclusive；而本报告用的是 gap_remaining + stop_note，语义相同，但 inconclusive 是一个更短、更不含糊的词**；
+(b) ⭐⭐⭐⭐⭐ **两套证据分级：一套是目标，一套是现状**：**WORKFLOWS.md 第 46 行的协议字段是 evidence_class [integrity|systems|behavioral]，而 EXPERIMENT_TEMPLATE.md 第 6 行是 Evidence status: untested / diagnostic / measured / reproduced / released**；
+⭐⭐ 判据「**evidence_class 是「这次实验要产出哪一级」的声明，而 Evidence status 是「这条结论现在到哪一级」的状态——故它们是「目标」与「现状」两个字段，取值集合不需要相同**」；
+⭐⭐ **而这条对本报告是一个可套用的结构：§10 里每个数字都该声明它的 evidence_class 与它的 Evidence status；而本报告目前只写了后者，且用的是自造的词（未获取 / 实验缺口 / 不可检验）——三者恰好是 untested 的三种成因，而它们没有被分开标注**；
+3. [GitHub / Badtheorylabs — `EXPERIMENT_TEMPLATE.md`（1,834 字节，33 行）与 `AGENTS.md`（1,980 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-lab/main/EXPERIMENT_TEMPLATE.md)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **实验模板的六个小节**：**决策与假设 / 冻结对比 / 执行与预算 / 验收门 / 结果与证据 / 决策；头部有 Lifecycle 五档（proposed / active / paused / completed / archived）与 Evidence status 五档**；**其中「What result would disprove the hypothesis?」与「Accept / reject / inconclusive, with reasons and claim limits」两句把「可证伪」与「结论限额」写成了模板字段**；
+ — [src-btl-lab-research-py] [src-btl-lab-workflows-md] [src-btl-lab-experiment-template] [src-btl-lab-agents-md]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -37518,7 +37831,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=432, evidence=2784, claims=1983, claims_high=1634, claims_disputed=9, trace_events=935, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=436, evidence=2796, claims=1991, claims_high=1642, claims_disputed=9, trace_events=943, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
