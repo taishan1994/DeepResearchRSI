@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：409 ｜ **证据数**：2725 ｜ **主张数**：1928（高置信 1580，争议 9）
+> **来源数**：412 ｜ **证据数**：2732 ｜ **主张数**：1935（高置信 1587，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -29848,6 +29848,13 @@ exit 0
 > **故这句「provably harmless」是关于正确性的，不是关于性能的；
 > 而它把 `n_ctx_rows` 这个成本项藏进了一个「证明无害」的句子里。**
 
+
+> ⭐ **补一项（第 220 轮，见 §10.387）**：
+> **这次「多算再切掉」的规模完全由 `llama_dspark_ctx.n_ctx_rows` 一个整数决定**
+> （`src/llama-graph.h` 89 行），
+> **而它的来源是 `llama_context` 而不是调用方。**
+> **故它不是一个抽象的架构属性，而是一个运行时参数。**
+
 ### 10.372 ⚠️⚠️⚠️ 两个辅助头**被加载但不进图**
 
 [c-two-aux-heads-loaded-but-not-wired]
@@ -30207,6 +30214,212 @@ exit 0
 > **⭐⭐ 故 `test-dspark-loop.cpp` 引用的
 > `scratchpad/dspark_phase2_py_ref.py` 是真的不存在，
 > 而它引用的「同轮对照」因此不可复现。**
+
+### 10.385 🔥🔥🔥🔥🔥 那个成本只有一个整数在管
+
+[c-dspark-ctx-carries-two-scalars]
+
+> **`src/llama-graph.h` 87-97 行**：
+> ```cpp
+> struct llama_dspark_ctx {
+>     int64_t n_embd_cap = 0; // n_capture_layers * n_embd (raw tap width, pre dspark.fc)
+>     int64_t n_ctx_rows = 0; // number of staged context rows for the next decode call
+>
+>     // [n_ctx_rows * n_embd_cap], row-major: row i is the concatenated multi-layer
+>     // tap feature for the i-th staged context row ...
+>     std::vector<float>   v_ctx_feat;
+> };
+> ```
+
+> **🔥 这个结构体只有两个标量字段，而 §10.371 那次浪费的规模由其中一个决定。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个成本项如果其规模完全由一个整数决定，
+> 那它就不是一个「架构属性」，而是一个「运行时参数」——
+> 而后者是可以被调的。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.371 那次「多算了 `n_ctx_rows` 行」不是一个抽象的说法，
+> 它有一个具体的、可读的、可被上限约束的来源。**
+>
+> ⭐ **而注释还说清了 `n_ctx_rows` 是什么**：
+> 「**one row per accepted-since-last-round token**」——
+> **即它等于「上一轮被接受的数量」，而那个数就是 §10.366 的 `n_accepted`。**
+> **故那条链是：`n_accepted` 大 ⇒ `n_ctx_rows` 大 ⇒ 浪费大。**
+
+### 10.386 ⚠️⚠️⚠️ 「图复用」的默认是 `false`
+
+[c-graph-reuse-default-is-false]
+
+> **`src/llama-graph.h` 118-123 行**：
+> ```cpp
+> virtual bool can_reuse(const llm_graph_params & params) {
+>     // returning false here by default will prevent from reusing the graph if the
+>     //   check for the input type has not been implemented yet
+>     GGML_UNUSED(params);
+>     return false;
+> }
+> ```
+>
+> **而实测**：`llm_graph_input_embd` 覆写 1 次、`llm_graph_input_attn_kv` 覆写 1 次；
+> **`llm_graph_input_dspark_ctx` 0 次、`llm_graph_input_dspark_logsnr` 0 次。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个虚函数的默认实现如果带一句「这样更安全」的注释，
+> 那它就是一个「不写就选最慢」的设计——
+> 而对新加的输入类，作者必须先证明「我的输入可以复用」才能拿到那个优化。**
+>
+> **⭐⭐ 判据：**
+> **这不是一个缺陷，而是一次成本与正确性的交换；
+> 但它意味着「新加一个 arch 的默认代价是禁用图复用」。**
+>
+> ⭐ **而这条对 DSpark 的具体含义在下一节。**
+
+### 10.387 ⚠️⚠️⚠️ DSpark 的图**从不被复用**——第三项 per-call 成本
+
+[c-dspark-graph-is-never-reused]
+
+> **两个 dspark 输入类都不覆写 `can_reuse`，故走基类的 `return false`；
+> 而基类注释写明那会「prevent from reusing the graph」。**
+>
+> **故每一次 draft 调用都必须重建整张计算图。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「图复用」与「缓冲区复用」是两件事：
+> 前者省的是拓扑匹配与节点构建，后者省的是分配；
+> 而 `can_reuse = false` 关掉的是前者。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.349（并行度上限为 1）与 §10.363（五层捕获）
+> 加了第三项 per-call 固定成本：每次调用重建一次图。**
+>
+> **⭐⭐ 三项加起来才解释「为什么块扩散草稿器的成本与块大小解耦」**：
+> ```
+> ① 逐位置串行链        block_size 个串行步
+> ② 五层捕获            n_capture = 5 行要吐
+> ③ 图每次重建          can_reuse = false
+> ```
+> **而这三项都不随「卡的宽度」变化。**
+
+### 10.388 🔥🔥🔥🔥🔥 同一份头文件里，目标侧避免的浪费，草稿器侧接受
+
+[c-target-side-avoids-what-the-drafter-accepts]
+
+> **`src/llama-ext.h` 117-124 行**：
+> 「**If `masked == true` (default), capture is narrowed to output rows
+> (`batch.logits != 0`) at the tap point -- requesting a capture row for every
+> position therefore also forces every one of those rows through the final norm
+> + `lm_head`. If `masked == false`, capture stays dense (every position,
+> regardless of `batch.logits`) and the output-row narrowing is deferred to just
+> before `lm_head`, so `batch.logits` can stay narrow (e.g. only the sampled row)
+> while still getting a full per-position capture buffer -- **avoids the wasted
+> full-vocab projection on rows that are only needed for their capture features,
+> not their logits**.**」
+>
+> **而 `src/models/dspark.cpp` 28-40 行对草稿器自己选的是「算一整宽的 Q，再把多出来的列切掉」。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一个作者在同一个提交里、
+> 为一个组件写了「避免全词表投影」的开关，
+> 而在另一个组件里接受「多算再切掉」时，
+> 那不是他不懂，而是他判定后者的浪费不值得那个复杂度。**
+>
+> **⭐⭐ 判据：**
+> **而这个判定的可检验后果是：
+> 草稿器那次浪费的量级随 `n_ctx_rows` 增长，
+> 而 `n_ctx_rows` 是「自上次以来被接受的 token 数」——
+> 故在长上下文里它会更大。**
+>
+> **⭐⭐ 故「不值」这个判定可能只在短上下文里成立。**
+>
+> ⭐ **而这不是一个可疑之处，而是一个可以被引用的取舍**：
+> **同一位作者在同一份头文件里给出了他的判据——
+> "rows that are only needed for their capture features, not their logits"
+> 正是草稿器那 `n_ctx_rows` 行的定义。**
+
+### 10.389 ⭐⭐⭐⭐⭐ 目标特征**不带位置**，位置晚绑定到 batch
+
+[c-context-positions-are-late-bound]
+
+> **`src/llama-ext.h` 144-148 行**：
+> 「**feat is `[n_ctx_rows * n_embd_cap]` row-major (row i is the concatenated
+> multi-layer tap feature for the i-th staged context row). The decode position
+> of each context row is taken from the batch the drafter decodes next, not from
+> this staged data, so no positions are passed here.**」
+>
+> **而 `llama_dspark_ctx` 的结构体注释写的是同一件事**：
+> 「**Row positions come from the decode batch, not from this staged data.**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「数据与它的位置分开传递」的设计，
+> 说明作者认为位置属于「这一次解码」而不属于「这份特征」。**
+>
+> **⭐⭐ 判据：**
+> **而这正是 §10.349 那条「逐位置串行链」能成立的前提：
+> 特征可以一次性暂存，而位置必须逐轮由 batch 给出。**
+>
+> **⭐⭐ 故「无位置」不是一个遗漏，而是一个「位置必须晚绑定」的声明。**
+>
+> ⭐ **而这条被两处独立注释重复，说明它是作者认为最容易被误用的一点。**
+
+### 10.390 🔥🔥🔥🔥🔥 官方的投机解码文档**一次都没提到 DSpark**
+
+[c-speculative-doc-never-mentions-dspark]
+
+> **`docs/speculative.md` 全文 16,708 字节、331 行、31 个标题**，
+> **而关键词计数**：
+> ```
+> dspark            0
+> eagle             0
+> capture           0
+> markov            0
+> block-diffusion   0
+> mtp               3
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个功能的「文档覆盖」与「代码覆盖」可以完全不相交——
+> 而这两者的差就是「谁能在不读源码的情况下用它」。**
+>
+> **⭐⭐ 判据：**
+> **故 DSpark 不是「文档不全」，而是「文档里不存在」；
+> 这两个说法的差别在于后者无法通过「补一段」修复，
+> 因为它连一节都没有。**
+
+### 10.391 🔥🔥🔥🔥🔥 `--spec-type` 的类型表列了 **8 种**，没有 `draft-dspark`
+
+[c-spec-type-table-lists-eight-and-not-dspark]
+
+> **`docs/speculative.md` 246-255 行**：
+> | Type | Description |
+> |---|---|
+> | `none` | No speculative decoding (default) |
+> | `draft-simple` | Use a simple draft model for speculation |
+> | `draft-mtp` | Use Multi Token Prediction (MTP) heads from the main model |
+> | `ngram-cache` | Use n-gram cache lookup |
+> | `ngram-simple` | Use simple n-gram pattern matching |
+> | `ngram-map-k` | Use n-gram pattern matching with n-gram-keys |
+> | `ngram-map-k4v` | ... and up to four m-gram values |
+> | `ngram-mod` | Use basic ngram hasher ... |
+>
+> **而 `tests/test-dspark-real-eval.cpp:12` 说**：
+> 「**`--spec-type draft-dspark` parses (common/arg.cpp)**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 flag 能被解析，只说明 `arg.cpp` 认识那个字符串；
+> 而它是否被文档列为「一种可用的投机类型」，
+> 说明作者是否认为它已经是一个「产品功能」。**
+>
+> **⭐⭐ 判据：**
+> **故 `draft-dspark` 的准确状态是：
+> 「已注册、可解析、可被那个专用 harness 驱动，
+> 但不在文档的类型表里」。**
+>
+> **⭐⭐ 而两条独立证据指向同一个结论**：
+> **§10.360 说「接受率还没打赢 MTP」，
+> 本节说「不在文档类型表里」——
+> 一个是质量门，一个是发布门；两个都还没过。**
+> **故这是一个尚未发布的实验，而不是一个隐藏的缺陷。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -35532,6 +35745,40 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据（本轮最重要）「**要证明「一个路径不存在」，最弱的证据是 404，次强的是「树里没有」，最强的是「它不在忽略列表里，而树里没有」**」——**而 *.bin 在忽略列表里，故 ref.bin 的缺席属于第二类，scratchpad/ 的缺席属于第三类：两者看起来都是「不在仓库里」，但一个是设计，一个是遗漏**；
  — [src-btl3-llama-model-cpp] [src-btl3-model-loader-cpp] [src-btl3-speculative-h] [src-btl3-gitignore]
 
+### 那个成本只有一个整数在管，而官方文档里没有 DSpark（第一百四十五轮补充）
+
+上一轮结尾说两件事：读 `src/llama-graph.h` 里的 `llama_dspark_ctx`，以及 `llama-ext.h` 的 capture API。本轮两件都做了，并顺手读了那份额外抓下来的 `docs/speculative.md`。
+结果是三项：**那个浪费的规模由 `n_ctx_rows` 一个整数决定**；**DSpark 的两个输入类都不覆写 `can_reuse`，故图从不被复用**；**而 331 行的官方投机文档里 `dspark` 出现 0 次**。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/src/llama-graph.h`（44,394 字节，1,235 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/llama-graph.h)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **那个成本只有一个整数在管**：**struct llama_dspark_ctx 只有两个标量字段 n_embd_cap 与 n_ctx_rows，加一个 v_ctx_feat；而 10.371 那次浪费的规模完全由 n_ctx_rows 决定**；
+⭐⭐ 判据（本轮最重要）「**一个成本项如果其规模完全由一个整数决定，那它就不是一个「架构属性」，而是一个「运行时参数」——而后者是可以被调的**」；
+⭐ **而注释还说清了 n_ctx_rows 是什么：「one row per accepted-since-last-round token」——即它等于上一轮被接受的数量，那个数就是 10.366 的 n_accepted**；
+(a) ⚠️⚠️⚠️ **「图复用」的默认是 false**：基类 llm_graph_input_i::can_reuse 的实现是「**// returning false here by default will prevent from reusing the graph if the check for the input type has not been implemented yet ... return false;**」——**而实测 llm_graph_input_embd 覆写 1 次、llm_graph_input_attn_kv 覆写 1 次；llm_graph_input_dspark_ctx 0 次、llm_graph_input_dspark_logsnr 0 次**；
+⭐⭐ 判据「**一个虚函数的默认实现如果带一句「这样更安全」的注释，那它就是一个「不写就选最慢」的设计**」——**这不是一个缺陷，而是一次成本与正确性的交换**；
+(b) ⚠️⚠️⚠️ **DSpark 的图从不被复用，这是第三项 per-call 成本**：**「图复用」与「缓冲区复用」是两件事：前者省的是拓扑匹配与节点构建，后者省的是分配**；
+⭐⭐ **三项加起来才解释「为什么块扩散草稿器的成本与块大小解耦」**：**① 逐位置串行链（block_size 个串行步）；② 五层捕获（n_capture = 5 行要吐）；③ 图每次重建（can_reuse = false）——而这三项都不随「卡的宽度」变化**；
+2. [GitHub / Badtheorylabs — `native/llama.cpp/src/llama-ext.h`（10,151 字节，211 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/llama-ext.h)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **同一份头文件里，目标侧避免的浪费，草稿器侧接受**：llama_set_capture_layers 的 masked 注释写「**avoids the wasted full-vocab projection on rows that are only needed for their capture features, not their logits**」，**而 dspark.cpp 28-40 对草稿器自己选的是「算一整宽的 Q 再切掉」**；
+⭐⭐ 判据（本轮最重要）「**当同一个作者在同一个提交里、为一个组件写了「避免全词表投影」的开关，而在另一个组件里接受「多算再切掉」时，那不是他不懂，而是他判定后者的浪费不值得那个复杂度**」——
+⭐⭐ **而这个判定的可检验后果是：草稿器那次浪费的量级随 n_ctx_rows 增长，而 n_ctx_rows 是「自上次以来被接受的 token 数」——故「不值」这个判定可能只在短上下文里成立**；
+⭐ **而这不是一个可疑之处，而是一个可以被引用的取舍：同一位作者在同一份头文件里给出了他的判据——「rows that are only needed for their capture features, not their logits」正是草稿器那 n_ctx_rows 行的定义**；
+(c) ⭐⭐⭐⭐⭐ **目标特征不带位置，位置晚绑定到 batch**：「**The decode position of each context row is taken from the batch the drafter decodes next, not from this staged data, so no positions are passed here**」——**而 llama_dspark_ctx 的结构体注释写的是同一件事**；
+⭐⭐ 判据「**一个「数据与它的位置分开传递」的设计，说明作者认为位置属于「这一次解码」而不属于「这份特征」**」——**而这正是 10.349 那条「逐位置串行链」能成立的前提：特征可以一次性暂存，而位置必须逐轮由 batch 给出**；
+3. [GitHub / Badtheorylabs — `native/llama.cpp/docs/speculative.md`（16,708 字节，331 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/docs/speculative.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **官方的投机解码文档一次都没提到 DSpark**：**全文 16,708 字节、331 行、31 个标题，而 dspark / eagle / capture / markov / block-diffusion 各出现 0 次（mtp 出现 3 次）**；
+⭐⭐ 判据（本轮最重要）「**一个功能的「文档覆盖」与「代码覆盖」可以完全不相交——而这两者的差就是「谁能在不读源码的情况下用它」**」——**故 DSpark 不是「文档不全」，而是「文档里不存在」：后者无法通过「补一段」修复，因为它连一节都没有**；
+(d) 🔥🔥🔥🔥🔥 **--spec-type 的类型表列了 8 种，没有 draft-dspark**：**表里是 none / draft-simple / draft-mtp / ngram-cache / ngram-simple / ngram-map-k / ngram-map-k4v / ngram-mod**，**而 test-dspark-real-eval.cpp:12 说「--spec-type draft-dspark parses (common/arg.cpp)」**；
+⭐⭐ 判据「**一个 flag 能被解析，只说明 arg.cpp 认识那个字符串；而它是否被文档列为「一种可用的投机类型」，说明作者是否认为它已经是一个「产品功能」**」——**故 draft-dspark 的准确状态是「已注册、可解析、可被那个专用 harness 驱动，但不在文档的类型表里」**；
+⭐⭐ **而两条独立证据指向同一个结论：10.360 说「接受率还没打赢 MTP」，本节说「不在文档类型表里」——一个是质量门，一个是发布门；两个都还没过。故这是一个尚未发布的实验，而不是一个隐藏的缺陷**；
+ — [src-btl3-graph-h] [src-btl3-llama-ext-h] [src-btl3-docs-speculative-md]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -35671,7 +35918,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=409, evidence=2725, claims=1928, claims_high=1580, claims_disputed=9, trace_events=889, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=412, evidence=2732, claims=1935, claims_high=1587, claims_disputed=9, trace_events=895, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
