@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：357 ｜ **证据数**：2567 ｜ **主张数**：1836（高置信 1489，争议 9）
+> **来源数**：360 ｜ **证据数**：2576 ｜ **主张数**：1838（高置信 1491，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -26794,6 +26794,94 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > （`Dockerfile` 自己拷，`build-windows.ps1` 不拷），
 > **⚠️ 但它不构成对产品的不对称。**
 
+### 10.293 🔥🔥🔥🔥🔥 四份启动器，**两种默认上下文**
+
+[c-four-launchers-two-ctx-defaults]
+
+| 启动器 | 平台 | `--ctx-size` 默认 |
+|---|---|---|
+| `launch/btl3-cuda-server` (sh) | Linux x86_64 / arm64 | **按显存分档** |
+| `launch/btl3-cuda-server.ps1` | Windows x64 | **按显存分档** |
+| `launch/btl3-server` | **macOS arm64** | **`32768` 硬编码** |
+| `launch/btl3-ollama-bridge` | 任意（调 Python 桥） | **`32768` 硬编码** |
+
+> **🔥🔥🔥🔥🔥 同一个模型、同一张卡、同一个仓库，四条入口的默认上下文是两个数。**
+> **RTX PRO 6000 报 97,887 MiB ⇒ CUDA 两条路径得 131,072；
+> 而 macOS 与桥接两条路径得 32,768——相差 4 倍。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个默认值如果在一处是算出来的、在另一处是写死的，
+> 那它不是同一个默认值，只是同一个变量名。**
+>
+> **⭐⭐ 判据：**
+> **`BTL3_CTX_SIZE` 这个环境变量把四种行为伪装成了一种；
+> 因为「不设它就得到合理默认」这句话，在四条路径上含义不同。**
+>
+> ⭐⭐ **而这条的实用含义**：
+> **用 Ollama 桥接跑长上下文，会先在 32K 处撞墙，
+> ⚠️ 而错误信息会指向 `llama-server`，不会指向桥接脚本。**
+>
+> **⭐⭐ 判据：**
+> **一个硬编码默认值的危害，正比于它与「另一条路径上的正确值」的差距；
+> 因为用户会以为两者是同一个产品。**
+
+> ⭐⭐⭐⭐⭐ **顺带记下 `btl3-server` 的两个独有之处**：
+> **它有一道平台守卫**「**`if [ "$(uname -m)" != "arm64" ]; then echo "This bundle
+> requires macOS arm64." >&2; exit 2; fi`**」——**这是四份里唯一的硬守卫**；
+> **而它也是唯一带 `--no-mmap` 的**。
+>
+> ⭐⭐ **`--no-mmap` 只出现在 macOS 版，这与统一内存架构有关**：
+> **在 UMA 上 mmap 一份再拷进统一内存等于双倍占用**；
+> **⚠️ 而 CUDA 的两个启动器都没有这个参数**——
+> **故「BTL-3 用不用 mmap」取决于平台，而文档没有把这件事写成一张表。**
+
+### 10.294 ⭐⭐⭐⭐⭐ 四份启动器**共享 18 个参数，却不共享查找顺序**
+
+[c-four-launchers-share-params-not-search-order]
+
+> **18 个 `llama-server` 参数在 sh-CUDA 与 ps1-CUDA 之间逐字一致，一个不缺**：
+> `--model / --alias / --host / --port / --ctx-size / --parallel /
+> --n-gpu-layers / --jinja / --reasoning / --reasoning-format /
+> --cont-batching / --chat-template-kwargs / --n-predict /
+> --repeat-penalty / --repeat-last-n / --cache-ram / --no-warmup / --no-ui`
+
+> ⚠️⚠️⚠️ **但模型查找的候选数分别是 3 / 2 / 2 / 3**：
+> **`btl3-cuda-server.ps1` 少了 `../../artifacts/release/` 这一级**——
+> **故在「包放在仓库里、模型在 `artifacts/release/`」这个布局下，
+> Linux 能直接跑而 Windows 必须设 `BTL3_MODEL`。**
+>
+> ⚠️ **而两份 shell 的最后一个候选也不同**：
+> **`btl3-cuda-server` 是 `$PWD/$model_name`，
+> `btl3-server` 是 `$PWD/artifacts/release/$model_name`**——
+> **故「在仓库根目录直接跑」这件事，两个脚本期待的是两种布局。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **四份启动器共享 18 个参数，却不共享查找顺序——
+> 说明作者把「参数」当成接口，把「查找」当成实现。**
+>
+> **⭐⭐ 判据：**
+> **接口一致会掩盖实现不一致；
+> 而这正是我第 198 轮会误判的原因：我只比了参数。**
+>
+> ⭐⭐ **而这条与 §10.288 是同一个形状**：
+> **那是「构建定义只在一个开关上不同」，
+> 这是「启动器在参数上全等、在查找上不全等」。**
+>
+> **⭐⭐ 判据：**
+> **「完全一致」这个断言必须带一个范围；
+> 而范围之外的差异不会被这个断言排除。**
+
+> ⭐⭐⭐⭐ **而两个平台的后端文件名各自都对得上**：
+> **Linux 侧打包拷入 `libggml-cuda.so`（有 `lib` 前缀），
+> Windows 侧拷入 `ggml-cuda.dll`（无前缀）**——
+> **启动器分别写 `lib/libggml-cuda.so` 与 `lib\ggml-cuda.dll`，两边都对**。
+> **故这不是缺陷——但它是「两个平台的 DLL 命名惯例差异被正确处理了」的一个正面样本。**
+>
+> ⚠️ **而模型 SHA-256 在桥接脚本里是第五个副本**：
+> **`--gguf-sha256 2ddf9527…4dc30c`，同样不校验**——
+> **故 §10.290 那条「一个数字被写进第 N 个文件时，
+> 前 N-1 个文件都不再是它的证据」在这里又 +1。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -31369,6 +31457,36 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 (d) ⚠️⚠️⚠️ **`BTL3_PRINT_COMMAND=1` 时 thinking 靠字符串比较还原**：「**[ $chat_template_kwargs = {\"enable_thinking\":true} ] && printf true || printf false**」——⭐⭐ 判据「**一个由字符串比较还原的布尔量，是两处代码之间的隐式契约**」；
  — [src-btl3-tools-build-cuda-bundle] [src-btl3-launch-cuda-server]
 
+### 四份启动器（第一百二十五轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `launch/btl3-cuda-server.ps1`（3,395 字节，85 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/launch/btl3-cuda-server.ps1)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **18 个参数与 shell 版逐字一致**：
+「**--model / --alias / --host / --port / --ctx-size / --parallel / --n-gpu-layers / --jinja / --reasoning / --reasoning-format / --cont-batching / --chat-template-kwargs / --n-predict / --repeat-penalty / --repeat-last-n / --cache-ram / --no-warmup / --no-ui**」——
+⚠️ **故 r199 那条「两个平台只在一个开关上不同」在「构建定义」层成立，在「启动器」层不成立**；
+(a) ⚠️⚠️⚠️ **但模型查找只有两个候选**：
+「**$Candidates = @((Join-Path $BundleRoot 的 model 下的 $ModelName), (Join-Path (Get-Location) $ModelName))**」——**少了 `../../artifacts/release/` 这一级**；
+(b) ⭐⭐⭐⭐ **后端文件名对得上**：「**$env:GGML_BACKEND_PATH = Join-Path $BundleRoot 的 lib 下的 ggml-cuda.dll**」——**Linux 侧是 `libggml-cuda.so`（有前缀），Windows 侧是 `ggml-cuda.dll`（无前缀），两边都对**；
+(c) ⚠️⚠️⚠️ **同一个反模式第二次出现**：「**thinking_enabled=$($ChatTemplateKwargs -eq 那个 true 版 JSON)**」——**把要传出去的 JSON 再拿来和自己比一遍**；
+2. [GitHub / Badtheorylabs — BTL-3 `launch/btl3-server`（2,505 字节，86 行，macOS arm64 专用）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/launch/btl3-server)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它是 macOS arm64 版，且是四份里唯一带 `--no-mmap` 的**：
+「**if [ $(uname -m) != arm64 ]; then echo This bundle requires macOS arm64. >&2; exit 2; fi**」「**--cache-ram 0 --no-mmap --no-warmup --no-ui**」——**而 CUDA 的两个启动器都没有 `--no-mmap`**；
+⭐⭐ **这与统一内存架构有关：UMA 上 mmap 一份再拷进统一内存等于双倍占用**；
+(a) ⚠️⚠️⚠️ **它的最后一个候选与 CUDA 版不同**：「**$PWD/artifacts/release/$model_name**」vs CUDA 版的「**$PWD/$model_name**」——**故「在仓库根目录直接跑」两个脚本期待两种布局**；
+(b) ⭐⭐⭐⭐ **它的上下文硬编码 32768**：「**ctx=${BTL3_CTX_SIZE:-32768}**」，不随显存变；
+3. [GitHub / Badtheorylabs — BTL-3 `launch/btl3-ollama-bridge`（1,005 字节，30 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/launch/btl3-ollama-bridge)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **默认上下文硬编码 32768，与 CUDA 直启相差 4 倍**：
+「**--ctx-size ${BTL3_CTX_SIZE:-32768}**」——**而同卡同模型的 CUDA 直启得 131,072**；
+⭐⭐ 判据（本轮最重要）「**一个默认值如果在一处是算出来的、在另一处是写死的，那它不是同一个默认值，只是同一个变量名**」；
+⭐⭐ 判据「**`BTL3_CTX_SIZE` 这个环境变量把四种行为伪装成了一种**」；
+(a) ⚠️⚠️⚠️ **模型 SHA-256 在这里是第五个副本，同样不校验**：「**--gguf-sha256 2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c**」；
+ ⭐⭐⭐⭐⭐ **四份启动器，两种 `--ctx-size` 策略**：**CUDA 的 sh 与 ps1 按显存分档；macOS 版与 Ollama 桥接硬编码 32768**；
+⭐⭐ 判据「**四份启动器共享 18 个参数，却不共享查找顺序——说明作者把「参数」当成接口，把「查找」当成实现**」；
+⭐⭐ 判据「**「完全一致」这个断言必须带一个范围；而范围之外的差异不会被这个断言排除**」；
+ — [src-btl3-launch-cuda-server-ps1] [src-btl3-launch-server-macos] [src-btl3-launch-ollama-bridge]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -31508,7 +31626,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=357, evidence=2567, claims=1836, claims_high=1489, claims_disputed=9, trace_events=785, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=360, evidence=2576, claims=1838, claims_high=1491, claims_disputed=9, trace_events=790, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
