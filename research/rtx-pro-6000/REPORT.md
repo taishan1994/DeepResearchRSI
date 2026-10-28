@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：352 ｜ **证据数**：2543 ｜ **主张数**：1831（高置信 1484，争议 9）
+> **来源数**：355 ｜ **证据数**：2554 ｜ **主张数**：1834（高置信 1487，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -26536,6 +26536,142 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **为什么 `layer13` 跳过了 checksums 而 `layer40` 没有？
 > 答案只能在 `exporter.py` 的条件分支里，而那一层我还没读到。**
 
+### 10.287 🔥🔥🔥🔥🔥 22 组 source 是同一个 URL 的**重复登记**
+
+[c-22-duplicate-source-groups]
+
+> 归一化 URL（`strip().rstrip('/').lower()`）后分组：**22 组 >1**，
+> 涉及 **45 个 source 行**，合并可减少 **23 个**，
+> 而合并需要改 **271 条 evidence** 的 `source_id`。
+
+> **🔥🔥🔥🔥🔥 这是我这一百多轮都没查过的一个维度。**
+>
+> **⭐⭐ 校验器只检查 `source_id` 唯一，不检查 URL 唯一。**
+> **故同一个来源可以以两个 id 并存，而所有检查仍然通过。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个标识符唯一，不等于它指的东西唯一；而校验器只查前者。**
+>
+> ⭐⭐ **后果一**：
+> **同一个来源在统计里变成两个，故「352 个来源」这个数字被高估了 23 个。**
+>
+> **⭐⭐ 后果二，更严重：组内 `trust_tier` 与 `source_type` 不一致。**
+> **实测 1 组 tier 冲突、3 组 type 冲突**：
+> **`src-tpu-eol` / `src-tpu-5090-silicon` / `src-tpu-gb202` 是同一个 URL，
+> 而 tier 分别是 `tertiary` / `secondary` / `secondary`；**
+> **三个 blendercloudrender 与 proxpc 的 `source_type` 各不相同。**
+>
+> **⭐⭐ 判据：**
+> **当强度是「记录」的属性而不是「来源」的属性时，
+> 同一份证据可以有多个强度，取决于你从哪一行数上去。**
+>
+> ⭐⭐ **后果三：**
+> **284 条高置信主张至少引用了一条来自重复组的证据，占 1484 条的 19%。**
+>
+> **⭐⭐ 判据：**
+> **一个结构缺陷的危害度，等于它触及的高置信主张数；
+> 而这个缺陷触及了五分之一。**
+>
+> ⭐⭐ **故本轮不合并，只建工具与写记录**：
+> **`scripts/audit_duplicate_sources.py` 已加入 `scripts/` 作为永久工具**，
+> 它按 URL 归一化分组、报出 tier/type 冲突、并给出合并计划。
+>
+> **⭐⭐ 判据：**
+> **当一个缺陷有两种修法且都有代价时，
+> 先造一个能重复检测它的工具，比先选一种修法更有价值。**
+>
+> ⭐⭐ **那两种修法各自的代价是什么**：
+> **保留「登记最早」的，要改 271 条归属；
+> 保留「证据最多」的，只改 115 条，但会把 10 组里的原始 id 挤掉。**
+> **两种都不无损——因为组内两个 id 都被主张引用过，且引用数不同。**
+
+### 10.288 🔥🔥🔥🔥🔥 Linux 构建把测试**关掉了**，而六道门第 2 条正是要跑它们
+
+[c-linux-build-disables-the-tests-gate-2-needs]
+
+> `Dockerfile` 第 20 行：`-DLLAMA_BUILD_TESTS=OFF`
+> `build-windows.ps1` 第 23 行：`-DLLAMA_BUILD_TESTS=ON`，
+> 且第 29-31 行把三个 `test-btl3-*-cuda` 直接列入构建目标。
+
+> **🔥🔥🔥🔥🔥 这条让 §10.283 那六道门的第 2 条在 Linux 路径上不可执行**：
+> **第 2 条要求「Run `test-btl3-avq-cuda`, `test-btl3-int4-cuda`, and
+> `test-btl3-vocab-cuda` on RTX 4090, RTX 5090, and DGX Spark」。**
+> **⚠️ 而 DGX Spark 是 `linux-arm64`，恰落在把测试关掉的那条路径上。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个门槛如果在构建定义里被关掉了，
+> 那它就不是「还没跑」，而是「在这条路径上跑不了」。**
+>
+> ⭐⭐ **而十二个 CMake 开关里十一个逐字相同**：
+> **`GGML_CUDA=ON`、`GGML_BACKEND_DL=ON`、`GGML_NATIVE=OFF`、
+> `BUILD_SHARED_LIBS=ON`、`LLAMA_OPENSSL=OFF`、`LLAMA_BUILD_EXAMPLES=OFF`、
+> `LLAMA_BUILD_SERVER=ON`、`LLAMA_BUILD_TOOLS=ON`、`LLAMA_BUILD_UI=OFF`。**
+>
+> **⭐⭐ 判据：**
+> **两份构建定义如果只在一个开关上不同，
+> 那个开关就是作者唯一真正想区分的东西；而其余差异都是疏忽。**
+>
+> ⭐⭐ **而这条还带出两处不对称**：
+> **许可证——Linux 包有 `LICENSE.llama.cpp` 与 `LICENSE.NVIDIA-CUDA` 两份，
+> Windows 包只有后者；**
+> **失败方式——shell 是 `exit 2`，PowerShell 是 `throw`。**
+>
+> **⭐⭐ 判据：**
+> **一个要求与一个开关的矛盾，比两个要求的矛盾更难发现，
+> 因为前者只在一个文件里各出现一次。**
+>
+> ⭐⭐ **故结论可以写成一句可检验的话**：
+> **把 `Dockerfile` 第 20 行改成 `ON` 并加三个 `--target`，
+> 六道门第 2 条才第一次变得可执行。**
+>
+> **⭐⭐ 而这条也解释了为什么「三个目标」其实只有两条代码路径**：
+> **架构字符串在 shell 里是硬编码的两个 `case` 分支，
+> 在 PowerShell 里是一行字面量——不是一张表。**
+
+### 10.289 ⚠️⚠️⚠️ 我自己的审计脚本，字符类比数据窄
+
+[c-audit-tool-charclass-narrower-than-data]
+
+> `scripts/audit_uncited.py` 第 35 行原本是
+> `re.findall(r'\[(c-[a-z0-9\-]+)\]', rep)`——
+> **字符类只接受小写字母、数字与连字符。**
+
+> **🔥🔥🔥🔥🔥 而 `claims.csv` 里有两个 id 含下划线或大写**：
+> **`c-default-src1-is-q8_1`、`c-env-var-GGML_CUDA_MMQ_PREC`。**
+> **它们以完整形式出现在正文里，却被正则截断**，
+> **故这个脚本报 78，而真实值是 76。已修正。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个检查器的字符类比它的数据窄时，
+> 它的输出不是「错误的」，而是「偏向某一边的」。**
+>
+> ⭐⭐ **而偏向「多报未引用」这一边特别隐蔽**：
+> **因为它看起来只是「清单长了一点」。**
+>
+> **⭐⭐ 判据：**
+> **一个误报如果形状是「多报」，它就很难被发现，
+> 因为没有人会去核对一份待办清单里哪几项已经做完了。**
+>
+> ⚠️ **而这个缺陷已存在很久**：
+> **我从第 192 轮就开始引用这个数字，而它当时也可能是错的——
+> 我没有用第二种方法核过一次。**
+>
+> **⭐⭐ 判据：**
+> **一个自建工具的产出，必须至少用另一种方法复算一次；
+> 否则它就是一个有权威感的猜测。**
+>
+> ⭐⭐ **故本轮把两者并列跑了**：
+> **`audit_uncited.py` 报 78，我在 `_zz98q.py` 里的独立脚本报 76，
+> 差集正好是那两个 id。**
+>
+> **⭐⭐ 判据：**
+> **两个工具给出不同的数，比两个工具给出相同的数更有信息量，
+> 因为前者会逼你去读代码。**
+>
+> **⭐⭐ 而这条与本轮 §10.287 是同一个教训的两个实例**：
+> **那个是「校验器没查 URL 唯一」，这个是「审计器没认全字符集」。**
+> **两者都不是逻辑错误，而是「范围写得比现实窄」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -31034,6 +31170,50 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 「**from btl3_gguf.exporter import main**」——**故 r196 那条「两个入口」的判断成立，而 r195 那条「路径矛盾」的假设不成立**；
  — [src-btl3-release-report] [src-btl3-tools-exporter-py]
 
+### 三份构建定义与一个审计工具（第一百二十三轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `packaging/cuda/Dockerfile`（1,847 字节，48 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/packaging/cuda/Dockerfile)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **Linux 侧把测试关掉了**：
+「**-DLLAMA_BUILD_TESTS=OFF**」「**-DCMAKE_BUILD_TYPE=Release**」「**cmake --build build --target llama-server llama-cli --parallel**」——
+⚠️ **而 launch 文档第 152 行要求在 RTX 4090/5090/DGX Spark 上跑三个 `test-btl3-*-cuda`**；
+⭐⭐ 判据（本轮最重要）「**一个门槛如果在构建定义里被关掉了，那它就不是「还没跑」，而是「在这条路径上跑不了」**」；
+(a) ⭐⭐⭐⭐⭐ **十二个开关里十一个逐字相同**：
+「**GGML_CUDA=ON、GGML_BACKEND_DL=ON、GGML_NATIVE=OFF、BUILD_SHARED_LIBS=ON、LLAMA_OPENSSL=OFF、LLAMA_BUILD_EXAMPLES=OFF、LLAMA_BUILD_SERVER=ON、LLAMA_BUILD_TOOLS=ON、LLAMA_BUILD_UI=OFF**」——**只有 `LLAMA_BUILD_TESTS` 不同**；
+⭐⭐ 判据「**两份构建定义如果只在一个开关上不同，那个开关就是作者唯一真正想区分的东西；而其余差异都是疏忽**」；
+(b) 🔥🔥🔥🔥🔥 **`ldd` 闭包被显式收进 Linux 包**：
+「**for file in /stage/llama-server /stage/llama-cli /stage/*.so*; do ldd "$file" | awk ... done | sort -u | while read -r library; do case "$library" in /lib/*|/usr/lib/*|*libcuda.so*) ;; *) cp -L "$library" "/stage/$(basename "$library")" ;; esac; done**」——
+**故 Linux 包是自足的，而 Windows 包靠枚举三条 CUDA DLL 通配符**；
+(c) ⭐⭐⭐⭐⭐ **基础镜像用 manifest-list digest 钉住**：
+「**FROM nvidia/cuda:13.0.2-devel-ubuntu24.04@sha256:5dc1bca23d05bd37b011be68ec470c03b403a5da07ec3a86e41af9470e9d0cc6**」；
+(d) ⚠️⚠️⚠️ **Windows 包缺 `LICENSE.llama.cpp`**：Dockerfile 有「**cp LICENSE /stage/LICENSE.llama.cpp**」，而 `build-windows.ps1` 只拷 `EULA.txt`；
+2. [GitHub / Badtheorylabs — BTL-3 `packaging/cuda/build-linux.sh`（1,289 字节，52 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/packaging/cuda/build-linux.sh)
+ —（2026-10 抓取）。⭐⭐⭐⭐ **它只传一个 build-arg**：
+「**--build-arg 「CUDA_ARCHITECTURES=$architectures」**」——**故要改 Linux 编译选项必须改 Dockerfile，改 shell 无效**；
+(a) ⭐⭐⭐⭐⭐ **架构字符串是两个硬编码分支**：
+「**linux-x86_64) platform=linux/amd64 architectures=89-real;120-real**」「**linux-arm64) platform=linux/arm64 architectures=121-real**」——**故「三个目标」实际是两条代码路径，不是一张表**；
+3. [GitHub / Badtheorylabs — BTL-3 `packaging/cuda/build-windows.ps1`（2,227 字节，55 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/packaging/cuda/build-windows.ps1)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它把三个测试编进发布目标**：
+「**-DLLAMA_BUILD_TESTS=ON**」「**cmake --build $BuildDirectory --config Release --target llama-server llama-cli test-btl3-avq-cuda test-btl3-int4-cuda test-btl3-vocab-cuda --parallel**」——**同一天写的两份定义给出相反答案**；
+4. ⭐⭐⭐⭐⭐ **新增永久工具 `scripts/audit_duplicate_sources.py`**：
+按归一化 URL 分组，报出 22 组重复、45 个 source 行、271 条待改归属的证据、1 组 `trust_tier` 冲突、3 组 `source_type` 冲突；
+⭐⭐ 判据「**一个标识符唯一，不等于它指的东西唯一；而校验器只查前者**」；
+⭐⭐ 判据「**当强度是「记录」的属性而不是「来源」的属性时，同一份证据可以有多个强度，取决于你从哪一行数上去**」；
+⭐⭐ 判据「**当一个缺陷有两种修法且都有代价时，先造一个能重复检测它的工具，比先选一种修法更有价值**」；
+ — [src-btl3-packaging-dockerfile] [src-btl3-packaging-build-linux] [src-btl3-packaging-build-windows]
+
+### 自建审计工具的一次缺陷（第一百二十三轮补充）
+
+1. ⚠️⚠️⚠️ **`scripts/audit_uncited.py` 第 35 行的字符类比数据窄**：
+原正则只接受小写字母、数字与连字符，而 `claims.csv` 里有两个 id 含下划线或大写（`c-default-src1-is-q8_1`、`c-env-var-GGML_CUDA_MMQ_PREC`），
+**故它报 78 而真实值是 76**；已修正为与数据同宽的字符类；
+⭐⭐ 判据「**一个检查器的字符类比它的数据窄时，它的输出不是错误的，而是偏向某一边的**」；
+⭐⭐ 判据「**一个误报如果形状是「多报」，它就很难被发现，因为没有人会去核对一份待办清单里哪几项已经做完了**」；
+⭐⭐ 判据「**一个自建工具的产出，必须至少用另一种方法复算一次；否则它就是一个有权威感的猜测**」；
+⭐⭐ 判据「**两个工具给出不同的数，比两个工具给出相同的数更有信息量，因为前者会逼你去读代码**」；
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -31173,7 +31353,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=352, evidence=2543, claims=1831, claims_high=1484, claims_disputed=9, trace_events=774, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=355, evidence=2554, claims=1834, claims_high=1487, claims_disputed=9, trace_events=781, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行

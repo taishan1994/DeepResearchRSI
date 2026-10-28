@@ -1,5 +1,4 @@
 """审计：找出「主张已记录但正文没有引用标签」的条目。
-
 背景（第 112 轮）：
     校验器只能检查「正文引用的 id 是否存在」，无法检查
     「已记录的主张是否在正文中被引用」。
@@ -12,6 +11,16 @@
     本脚本只统计 `[c-xxx]` 形式的内联标签。
     正文中「内容已写但没打标签」与「内容根本没写」都会被计入，
     需要人工区分——所以它给出的是"待核实清单"，不是"错误清单"。
+
+    第 198 轮修正：
+    原来的字符类写成 r'[a-z0-9-]'，会漏掉含大写或下划线的 claim_id
+    （实测漏了 2 条：c-default-src1-is-q8_1、c-env-var-GGML_CUDA_MMQ_PREC），
+    于是把「已引用」误报成「未引用」。
+    现在改为 [A-Za-z0-9_-]，与 claims.csv 里实际出现的字符集一致。
+
+    ⚠️ 这个 bug 的形状值得记住：**一个检查器的字符类比它的数据窄**，
+    它的输出不是「错误的」，而是「偏向某一边的」——
+    而偏向「多报未引用」这一边特别隐蔽，因为它看起来只是「清单长了一点」。
 """
 
 import csv
@@ -19,6 +28,8 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+
+CLAIM_TAG = re.compile(r'\[(c-[A-Za-z0-9_\-]+)\]')
 
 
 def main(slug_dir: str) -> int:
@@ -32,7 +43,7 @@ def main(slug_dir: str) -> int:
     rep = rep_path.read_text(encoding='utf-8')
     claims = {r['claim_id']: r
               for r in csv.DictReader(claims_path.open(encoding='utf-8-sig'))}
-    cited = set(re.findall(r'\[(c-[a-z0-9\-]+)\]', rep))
+    cited = set(CLAIM_TAG.findall(rep))
     uncited = sorted(set(claims) - cited)
 
     total = len(claims)
