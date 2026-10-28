@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：456 ｜ **证据数**：2870 ｜ **主张数**：2064（高置信 1714，争议 9）
+> **来源数**：456 ｜ **证据数**：2870 ｜ **主张数**：2075（高置信 1725，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -34363,6 +34363,287 @@ exit 0
 > 不是「每个东西都有证据」，
 > 而是「每份资料都被读到了与它体量相称的深度」。**
 
+### 10.521 ⭐⭐⭐⭐⭐ 启动器用显式变量把 CUDA 后端**钉死**
+
+[c-the-launcher-pins-the-backend-path-explicitly]
+
+> **`launch/btl3-cuda-server`**：
+> ```sh
+> export LD_LIBRARY_PATH=$bundle_root/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+> export GGML_BACKEND_PATH=$bundle_root/lib/libggml-cuda.so
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个加载器同时支持「按名字搜索」与「按路径指定」时，
+> 选后者就是选「不依赖搜索顺序」——
+> 故这不是一个配置项，而是一个关于「谁会遮蔽谁」的判断。**
+>
+> ⚠️ **而这条对本报告的直接价值：
+> §10.36 记录的五类 SM12x 根因里，第一类就是「wheel 遮蔽」（错误的
+> `libggml-cuda.so` 抢在正确的那个之前被加载）；
+> 而 BTL-3 的启动器恰好把它防住了——
+> 故「wheel 遮蔽」在本仓库里不是未解决的问题，
+> 而是已被显式规避的问题。**
+> **⭐⭐ 这是本轮最重要的一次「已有结论被自己仓库里的另一份文件改写」。**
+
+### 10.522 ⚠️⚠️⚠️ `--no-warmup`：那 41.03 秒的分解**不可靠**
+
+[c-the-launcher-passes-no-warmup-so-first-request-includes-it]
+
+> **`launch/btl3-cuda-server`**：
+> ```
+> --cache-ram 0 --no-warmup --no-ui
+> ```
+> **而证据注记已标出「`--no-warmup` 关掉预热（故首次请求会包含预热开销）」。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个基准的总时长被分解成「prompt 速率 + gen 速率 + 一个常数」时，
+> 那个常数必须被证明是「模型加载」而不是「预热」——
+> 而启动器显式关掉了预热，
+> 故如果测量走的是这个启动器，
+> 首次请求里就一定含预热开销。**
+>
+> **⭐⭐ 判据：**
+> **故 §10 里那个「剩余 4.67 秒 = 模型加载」的分解，
+> 在 `--no-warmup` 的前提下是不可靠的——
+> 因为那 4.67 秒可能包含「第一轮的预热」。**
+>
+> ⚠️ **而这条给本报告一个新的可检验项：
+> 如果 `llama-bench -r 3` 取的是三轮的平均，
+> 而第一轮含预热，
+> 那三轮平均就被第一轮拖低了——
+> 故 43.16 tok/s 可能是一个被预热污染过的平均值。**
+
+### 10.523 ⭐⭐⭐⭐ 九个默认值一次看全，**而上下文不在其中**
+
+[c-nine-launcher-defaults-visible-at-once]
+
+> **`launch/btl3-cuda-server`**：
+> ```
+> BTL3_HOST=127.0.0.1、BTL3_PORT=8080、BTL3_PARALLEL=1、
+> BTL3_MODEL_ALIASES=BTL-3、BTL3_GPU_LAYERS=99、BTL3_MAX_TOKENS=2048、
+> BTL3_REPEAT_PENALTY=1.10、BTL3_REPEAT_LAST_N=512
+> ```
+> **而 `BTL3_CTX_SIZE` 的默认值是 `$(choose_context "$memory_mib")`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一张默认值表里只有一个值需要「算」时，
+> 那个值就是这个系统唯一真正的设计判断——
+> 其余九个都是抄来的行业惯例。**
+>
+> **⭐⭐ 判据：**
+> **故「上下文由显存决定」这句话的强度，
+> 等于「这张表里只有一个格子是活的」。**
+>
+> ⚠️ **而这条与 §10.203 那个「五份 chooseContext 实现」直接相连：
+> 本报告此前数出五份实现，
+> 而 shell 这份不是第六份——它是同一套阈值的实装，
+> 故「五份」应改读为「五份里有一份是真在跑的那一份」。**
+
+### 10.524 ⭐⭐⭐⭐ 四级回退，而第三级**只在仓库里成立**
+
+[c-the-model-search-has-four-fallbacks]
+
+> **`launch/btl3-cuda-server`**：
+> ```
+> BTL3_MODEL -> $bundle_root/model/ -> $bundle_root/../../artifacts/release/ -> $PWD
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个查找链里有一级是「相对于仓库」的路径时，
+> 它只在开发环境里成立——
+> 故「四级回退」在打包后的真实数量是三级。**
+>
+> **⭐⭐ 判据：**
+> **故一个回退链的长度不能按代码行数数，
+> 而要按「在目标部署形态下还有几级可达」数。**
+>
+> ⚠️ **而这条给本报告一个可借用的检验：
+> §10 里所有「支持 N 种路径」的说法，
+> 都应该问「在打包形态下还有几种」。**
+
+### 10.525 ⭐⭐⭐⭐⭐ 同一套阈值出现三次，**三次数值完全相同**
+
+[c-the-context-thresholds-appear-in-three-places-with-identical-numbers]
+
+> **`launch/btl3-cuda-server`**：
+> ```sh
+> if [ $memory -ge 96000 ]; then 131072
+> elif [ $memory -ge 48000 ]; then 98304
+> elif [ $memory -ge 28000 ]; then 65536
+> elif [ $memory -ge 20000 ]; then 32768
+> else 16384
+> ```
+> **证据注记：「这套阈值在本仓库里出现了三次
+> （文档、Python 死代码、shell 实装），三次数值完全相同。」**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个常量在多处出现且数值完全相同时，
+> 它说明的是「有人手工同步过」——
+> 而手工同步的成本会随份数线性增长。**
+>
+> **⭐⭐ 判据：**
+> **故「三份完全一致」不是「设计良好」的证据，
+> 而是「目前还没分叉」的证据——
+> 而这两者在下一个改动之后会立刻分开。**
+>
+> ⚠️ **而这条修正了本报告 §10.203 的说法：
+> 此前把「五份 chooseContext」当成「五份不一致」的证据，
+> 而实际测得的是「五份里至少三份完全一致」——
+> 故问题不是「它们互相矛盾」，而是「它们必须被同时修改」。**
+
+### 10.526 ⚠️⚠️⚠️ 一个布尔量靠**字符串比较**还原
+
+[c-the-print-command-path-reconstructs-a-boolean-by-string-compare]
+
+> **`launch/btl3-cuda-server`**：
+> ```sh
+> [ $chat_template_kwargs = {"enable_thinking":true} ] && printf true || printf false
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个由字符串比较还原的布尔量，
+> 是两处代码之间的隐式契约——
+> 而契约的一方是 `case` 分支的写法，另一方是这行比较；
+> 故改任意一方而不改另一方，都会让打印结果静默变错。**
+>
+> **⭐⭐ 判据：**
+> **故「打印出来的命令」不是事实，
+> 而是一份「我认为命令是什么」的转述——
+> 而它与真命令之间的唯一联系是一个字符串字面量。**
+>
+> ⚠️ **而这条与本报告 §10.491 那类「docstring vs 行内注释」是同一族：
+> 同一个事实有两份表示，而它们靠人工同步。**
+
+### 10.527 🔥🔥🔥🔥🔥 arm64 分支硬编码的是 `121-real`，**不是 `121a-real`**
+
+[c-arm64-build-uses-121-real-not-121a-real]
+
+> **`packaging/cuda/build-linux.sh`**：
+> ```sh
+> linux-arm64) platform=linux/arm64 architectures=121-real
+> ```
+> **而本报告 §10.45 已确立：`120-real` 要写成 `120a-real`，
+> `121-real` 要写成 `121a-real`，且两者互不向前兼容。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个仓库在两个平台上用同一个「后缀规则」的不同写法时，
+> 它必然有一个平台是对的、一个是错的——
+> 而错的那一个不会在 x86 机器上暴露。**
+>
+> **⭐⭐ 判据：**
+> **故「三个目标 = 两条代码路径」这个结构本身，
+> 就是「其中一条路径没被同一个规则覆盖」的成因。**
+>
+> ⚠️ **而这条给本报告一个可检验的预测：
+> 如果有人在 GB200/Grace 上按这个脚本构建，
+> `121-real` 会编出不带 `a` 的 SASS——
+> 而 §10.45 记录的症状（缺少 `sm121a_*` variant，
+> `hyperconnection.hpp:56` 报错）正好是这个结果。**
+> **⭐⭐ 故这不是「可能有问题」，
+> 而是「已经知道会怎样，只是还没在 arm64 上跑过」。**
+
+### 10.528 ⭐⭐⭐⭐⭐ 「三个目标」其实是**两条代码路径**
+
+[c-arch-targets-are-two-code-paths-not-a-table]
+
+> **`packaging/cuda/build-linux.sh`**：
+> ```sh
+> linux-x86_64) platform=linux/amd64 architectures=89-real;120-real
+> linux-arm64)  platform=linux/arm64 architectures=121-real
+> ```
+> **而 Windows 脚本里是字面量
+> `-DCMAKE_CUDA_ARCHITECTURES=89-real;120-real`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一张「目标架构表」用 `case` 语句而不是数组实现时，
+> 它就不是表，而是「两段各自写死的代码」——
+> 而表的性质是「加一行就多一个目标」，
+> `case` 的性质是「加一个分支就要同时想清楚其他分支」。**
+>
+> **⭐⭐ 判据：**
+> **故 x86 与 arm64 的差异（`89;120` 对 `121`）
+> 不是「配置不同」，而是「两条路径从未被同一个变量描述过」。**
+>
+> ⚠️ **而这条解释了 §10.527 那个 `121-real` 为什么能长期存在：
+> 因为没有任何一处代码同时看着这两个分支。**
+
+### 10.529 ⭐⭐⭐⭐ 两个构建脚本都拒绝覆盖，**但失败方式不同**
+
+[c-both-build-scripts-refuse-to-overwrite-but-differently]
+
+> **shell**：
+> ```sh
+> if [ -e "$output" ]; then echo "output already exists: $output" >&2; exit 2; fi
+> ```
+> **PowerShell**：
+> ```powershell
+> if (Test-Path $Output) { throw "Output already exists: $Output" }
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个前置条件在两个平台上一模一样，
+> 而它的失败表示不一样时，
+> 调用方的处理代码就必须分平台写——
+> 故「跨平台一致」在这里只对语义成立，对接口不成立。**
+>
+> **⭐⭐ 判据：**
+> **故 `exit 2` 与 `throw` 的差别不是风格，
+> 而是「CI 能不能用同一个判断捕获它」。**
+>
+> ⚠️ **而这条给本报告一个可借用的检验：
+> §10 里所有「Windows 与 Linux 行为一致」的说法，
+> 都应该问「一致的是语义还是退出码」。**
+
+### 10.530 ⭐⭐⭐⭐ Linux 构建**只暴露一个 build-arg**
+
+[c-linux-build-passes-only-one-build-arg]
+
+> **`packaging/cuda/build-linux.sh`**：
+> ```sh
+> docker buildx build --platform $platform >   --build-arg CUDA_ARCHITECTURES=$architectures >   --file $root/packaging/cuda/Dockerfile --target export >   --output type=local,dest=$stage $root/native/llama.cpp
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条命令行只允许外部改一个参数时，
+> 那其余所有编译开关都变成了「构建配方的一部分」，
+> 而不是「调用方的选择」——
+> 故要改 Linux 的编译选项，必须改 Dockerfile，而不是加 flag。**
+>
+> **⭐⭐ 判据：**
+> **故「可配置性」不是由参数个数决定的，
+> 而是由「参数之外的东西能不能被覆盖」决定的。**
+>
+> ⚠️ **而这条与 §10.198 那个 `Dockerfile` 第 20 行
+> `-DLLAMA_BUILD_TESTS=OFF` 直接相连：
+> 那行之所以能在 Linux 上「定死」，
+> 正是因为它是唯一没被 build-arg 暴露出来的那一类。**
+
+### 10.531 ⚠️⚠️⚠️ 桥接测试用**假 digest**，而从不校验它
+
+[c-the-bridge-test-uses-a-fake-digest-and-never-checks-it]
+
+> **`tests/test_ollama_bridge.py`**：
+> ```python
+> model.write_bytes(b"gguf")
+> gguf_sha256="abcd" * 16
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个测试的期望值是一个明显假的字符串时，
+> 它测的不是正确性，而是管道连通性——
+> 故 `abcd * 16` 能通过，说明「这个字符串被原样透传了」，
+> 而不说明「这个文件真的匹配这个 digest」。**
+>
+> **⭐⭐ 判据：**
+> **故这条测试与 §10 那个「`--gguf-sha256` 是 `required=True` 但从不计算」
+> 是同一个缺陷的两端：
+> 生产端不计算，测试端不校验，故两端都通过。**
+>
+> ⚠️ **而 `abcd * 16` 这个写法本身是判据：
+> 它必须是假值才能让测试不依赖真实模型——
+> 但这也意味着这条路径上「sha256 校验」从来没有真正执行过一次。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -40324,6 +40605,32 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据（本轮最重要）「**一个审计方向的缺席，往往不是因为它难，而是因为此前的问题都是「有没有」而不是「够不够」——「有没有」是布尔的，「够不够」是需要分母的。故一个只问「有没有」的审计体系，永远发现不了「有，但很浅」**」——**⚠️ 而这条解释了本报告为什么能连做 236 轮还有新发现：我一直在问「还缺什么」，而很少问「已经有的是不是够厚」。故「资料齐全」的下一层定义是：不是「每个东西都有证据」，而是「每份资料都被读到了与它体量相称的深度」**；
  — [src-this-report-density-audit]
 
+### 把「已摘未判」变成「已判」（第一百六十三轮补充）
+
+上一轮结尾说「把 19 个「已摘未判」来源逐条变成主张——先从 src-btl3-launch-cuda-server 的 7 条开始，因为「启动参数」正是 §10 里最常引用却最少核对的类别」。本轮做了，共 11 条主张，而**其中两条直接改写了本报告已有的结论**。
+
+1. ⭐⭐⭐⭐⭐ **启动器用显式变量把 CUDA 后端钉死**：
+`launch/btl3-cuda-server` 写「**export GGML_BACKEND_PATH=$bundle_root/lib/libggml-cuda.so**」——**而 §10.36 记录的五类 SM12x 根因里，第一类就是「wheel 遮蔽」；故「wheel 遮蔽」在本仓库里不是未解决的问题，而是已被显式规避的问题**；
+⭐⭐ 判据（本轮最重要）「**当一个加载器同时支持「按名字搜索」与「按路径指定」时，选后者就是选「不依赖搜索顺序」——故这不是一个配置项，而是一个关于「谁会遮蔽谁」的判断**」；
+2. ⚠️⚠️⚠️ **`--no-warmup` 让那 41.03 秒的分解不可靠**：
+同一脚本里写「**--cache-ram 0 --no-warmup --no-ui**」，而证据注记已标出「`--no-warmup` 关掉预热（故首次请求会包含预热开销）」；
+⭐⭐ 判据（本轮最重要）「**当一个基准的总时长被分解成「prompt 速率 + gen 速率 + 一个常数」时，那个常数必须被证明是「模型加载」而不是「预热」——而启动器显式关掉了预热，故如果测量走的是这个启动器，首次请求里就一定含预热开销。故 §10 那个「剩余 4.67 秒 = 模型加载」的分解，在 --no-warmup 的前提下是不可靠的**」——**⚠️ 而这条给本报告一个新的可检验项：如果 llama-bench -r 3 取三轮平均而第一轮含预热，那 43.16 tok/s 可能是一个被预热污染过的平均值**；
+3. ⭐⭐⭐⭐⭐ **同一套阈值出现三次，三次数值完全相同**：
+shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 48000 ]; then 98304 elif [ $memory -ge 28000 ]; then 65536 elif [ $memory -ge 20000 ]; then 32768 else 16384**」，而证据注记写「这套阈值在本仓库里出现了三次（文档、Python 死代码、shell 实装），三次数值完全相同」；
+
+⭐⭐ 判据（本轮最重要）「**当一个常量在多处出现且数值完全相同时，它说明的是「有人手工同步过」——而手工同步的成本会随份数线性增长。故「三份完全一致」不是「设计良好」的证据，而是「目前还没分叉」的证据**」——**⚠️ 而这条修正了 §10.203：此前把「五份 chooseContext」当成「五份不一致」的证据，而实际测得的是「五份里至少三份完全一致」——故问题不是「它们互相矛盾」，而是「它们必须被同时修改」**；
+4. 🔥🔥🔥🔥🔥 **arm64 分支硬编码 `121-real`，而不是 `121a-real`**：
+`packaging/cuda/build-linux.sh` 写「**linux-arm64) platform=linux/arm64 architectures=121-real**」，而 §10.45 已确立 `121-real` 要写成 `121a-real`，且两者互不向前兼容；
+
+⭐⭐ 判据（本轮最重要）「**当一个仓库在两个平台上用同一个「后缀规则」的不同写法时，它必然有一个平台是对的、一个是错的——而错的那一个不会在 x86 机器上暴露**」——**⚠️ 故这不是「可能有问题」，而是「已经知道会怎样，只是还没在 arm64 上跑过」：如果在 GB200/Grace 上按这个脚本构建，121-real 会编出不带 a 的 SASS，而 §10.45 记录的症状（缺少 sm121a_* variant）正好是这个结果**；
+5. ⭐⭐⭐⭐⭐ **「三个目标」其实是两条代码路径**：
+同一文件里 x86 分支是「**89-real;120-real**」，arm64 分支是「**121-real**」，而 Windows 脚本里是字面量「**-DCMAKE_CUDA_ARCHITECTURES=89-real;120-real**」；
+
+⭐⭐ 判据（本轮最重要）「**当一张「目标架构表」用 case 语句而不是数组实现时，它就不是表，而是「两段各自写死的代码」——而表的性质是「加一行就多一个目标」，case 的性质是「加一个分支就要同时想清楚其他分支」。故 x86 与 arm64 的差异不是「配置不同」，而是「两条路径从未被同一个变量描述过」**」——**⚠️ 而这条解释了 121-real 为什么能长期存在：因为没有任何一处代码同时看着这两个分支**；
+6. 其余六条（10.523-10.526、10.529-10.531）合起来是同一族：
+**「一个事实有两份表示，而它们靠人工同步」**——九个静态默认值加一个函数调用（「这张表里只有一个格子是活的」）、四级回退里有一级只在仓库里成立、一个布尔量靠字符串比较还原、两个平台退出码不同（exit 2 对 throw）、Linux 构建只暴露一个 build-arg、桥接测试用 `abcd * 16` 的假 digest 且从不校验；
+ — [src-btl3-launch-cuda-server] [src-btl3-packaging-build-linux] [src-btl3-test-ollama-bridge]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -40463,7 +40770,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=456, evidence=2870, claims=2064, claims_high=1714, claims_disputed=9, trace_events=983, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=456, evidence=2870, claims=2075, claims_high=1725, claims_disputed=9, trace_events=983, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
