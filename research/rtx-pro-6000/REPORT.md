@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：309 ｜ **证据数**：2307 ｜ **主张数**：1701（高置信 1357，争议 9）
+> **来源数**：312 ｜ **证据数**：2313 ｜ **主张数**：1706（高置信 1362，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -20373,6 +20373,246 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > 整机只有 2.483 tok/s（M2 / 16 GB / 128-token 上下文 / `--no-mmap`）——
 > 放置修正前是 0.178 tok/s，提升 13.9×。**
 
+### 10.155 ⚠️⚠️⚠️ **§10.150 被同一仓库的另一份文档否证**：四个算子都写了
+
+[c-cuda-ops-do-exist-contradiction]
+
+> `native/llama.cpp/docs/btl3-avq-cuda-validation.md`（4,116 字节）：
+> 「**The NVIDIA CUDA backend accepts four independently marked BTL-3 operations:
+> ① AVQ2 repeating-layer matmul … ② Affine INT4 matmul … ③ Vocabulary get-rows …
+> ④ Vocabulary-head matmul …**」
+>
+> 而三份 `.cu` 源码确实存在：
+> **`btl3-avq.cu` 7,070 B ｜ `btl3-int4.cu` 2,682 B ｜ `btl3-vocab.cu` 9,552 B**
+>
+> **⚠️ 两份文档是同一个 squash commit（2026-07-20T18:05:27Z）。**
+
+> **⚠️ 本条把上一轮的一个「结论」降级成了一个「矛盾」，
+> 而这是本轮唯一诚实的处理方式。**
+>
+> **⭐⭐⭐⭐ §10.150 我写「CUDA 侧根本还没实现 INT4 与压缩词表的算子」，
+> 而本轮读到的文档说「accepts four operations」，且源码就在那里——
+> ⚠️ 即我把「作者说了一句话」当成了「代码不存在」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个功能没被实现」这个断言，需要两种证据之一：
+> ① 代码里没有它；② 文档明说没有——
+> ⚠️ 而我在只有 ② 的情况下，
+> 把它写成了「根本还没实现」，这超出了 ② 的射程。**
+>
+> ⭐⭐ **而这两句话其实可以同时为真**，条件正是同一份文档写的：
+> **「this machine has neither NVCC nor an NVIDIA GPU.
+> CUDA compilation, device correctness and speed are therefore not claimed」——
+> ⚠️ 即「算子写了」与「算子被验证过」是两件事。**
+>
+> **⭐⭐ 判据：**
+> **「实现了」这个词在 GPU 生态里至少有三档：
+> ① 源码存在；② 能编译；③ 在真机上跑过并对得上参考值——**
+> **⚠️ 而 §10.150 我用的「根本没走自定义算子」暗含 ③，
+> 但证据只支持「③ 一定没有」。**
+>
+> ⭐⭐ **两份文档的措辞差异恰恰暴露了作者的自觉**：
+> **Metal 文档说「CUDA **currently** accelerates … **It does not yet implement**」；
+> CUDA 文档说「**accepts** four … operations」——
+> ⚠️ 一个在说「跑起来会怎样」，一个在说「代码里有什么」。**
+>
+> **⭐⭐ 判据：**
+> **当同一件事有两份描述时，
+> 「用现在时描述行为」的那份更接近实测结果，
+> 「用能力动词描述契约」的那份更接近源码状态——**
+> **⚠️ 而冲突时通常应以「行为」为准；
+> 但本例里「行为」那份自己也没说它测过 CUDA。**
+>
+> ⚠️ **边界**：**本报告无法判定哪一份是当前的真相。**
+
+### 10.156 🔥🔥🔥🔥🔥 **CUDA 代码从未被编译过，更没跑过**
+
+[c-cuda-code-never-compiled]
+
+> 「**These checks pass locally. The CUDA test sources also pass host C++ syntax
+> checking, but this machine has neither NVCC nor an NVIDIA GPU. CUDA compilation,
+> device correctness and speed are therefore not claimed.**」
+>
+> ⚠️ 而三个 CUDA 测试文件都在仓库里：
+> **`test-btl3-avq-cuda.cpp` 6,636 B ｜ `test-btl3-int4-cuda.cpp` 5,519 B ｜
+> `test-btl3-vocab-cuda.cpp` 7,338 B**
+
+> **⭐⭐⭐⭐⭐ 这是本报告 170 轮以来最重要的一条关于「证据强度」的发现**：
+> **这台开发机上「既没有 NVCC 也没有 NVIDIA GPU」——
+> ⚠️ 即所有 `.cu` 文件、所有 CUDA 测试，
+> 都只经过了「宿主 C++ 语法检查」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个 CUDA 算子能被写出」与「它能被编译」之间，
+> 隔着一个「NVCC 存不存在」——**
+> **⚠️ 而「能被编译」与「能算对」之间，又隔着一台真机。**
+>
+> ⭐⭐ **这与 §10.135 那份速度文档构成最尖锐的一组对照**：
+> **「`docs/rtx-pro-6000-speed-2026-07-19.md` 报告了 84.70 / 43.16 的实测数字，
+> 而 `docs/btl3-avq-cuda-validation.md` 说这台机器没有 GPU」——**
+> **⚠️ 两者不可能在同一台机器上产生。**
+>
+> **⭐⭐ 判据：**
+> **当两份同仓库、同一天提交的文档对「有没有 GPU」给出相反陈述时，
+> 至少有一份描述的不是「当前这台机器」——**
+> **⚠️ 而「不是这台机器」这个可能性，
+> 在 §10.136 那条「41.03 秒短跑」里就已经埋下了。**
+>
+> ⭐⭐ **作者的措辞纪律值得单独记**：
+> **「CUDA compilation, device correctness and speed are therefore not claimed」——
+> ⚠️ 一句话同时否掉了三样东西，
+> 而这三样恰好是「能跑」的三个层次。**
+>
+> **⭐⭐ 判据：**
+> **「不声称」比「声称没有」更精确——
+> ⚠️ 因为「没有」是一个关于世界的断言，
+> 而「不声称」是一个关于自己证据的断言。**
+>
+> ⭐⭐ **对本报告主题的直接后果**：
+> **本报告分析的那个 43.16 tok/s，
+> 来自一个「作者没有声称过 CUDA 速度」的项目——
+> ⚠️ 即它是「第三方测出来的数字」，不是「作者背书的结果」。**
+
+### 10.157 ⭐⭐⭐⭐ 三个内核**刻意不针对任何 SM 架构**
+
+[c-kernels-are-arch-agnostic]
+
+> 「**The kernels use portable CUDA C++ operations and do not hardcode an SM
+> architecture. The build selects the target architecture.**」
+>
+> 而验证指引只列 **RTX 4090（SM89）/ RTX 5090（SM120，"normalizes plain
+> `120` to the architecture-specific `120a` target"）/ DGX Spark（SM121）**
+> —— **没有 RTX PRO 6000**
+
+> **⭐⭐⭐⭐ 这条对本报告主题有一个正面推论**：
+> **「不 hardcode SM 架构」意味着「这三个内核在 RTX PRO 6000（SM120）上
+> 理论上可以直接编译通过，不需要任何 `#if __CUDA_ARCH__ >= 1200` 分支」——**
+> **⚠️ 而这回答了 §10.76 那条「`mmf` 没有架构分支」的困惑：
+> 它们不是「漏了分支」，而是「刻意不写分支」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「针对新架构优化」与「在新架构上能跑」是两件不同的事——
+> ⚠️ 前者需要分支与专用指令；
+> 后者只需要「可移植的 CUDA C++」。**
+>
+> ⭐⭐ **这也把 §10.155 那个矛盾解释得更清楚**：
+> **如果内核是架构无关的，
+> 那「CUDA 未实现 INT4」就不可能是「SM120 缺指令」——
+> ⚠️ 只可能是「代码路径没接上」或「文档没更新」。**
+>
+> **⭐⭐ 判据：**
+> **当一个算子被写成「架构无关」时，
+> 它的可用性就不再受 GPU 型号约束，
+> 而只受「有没有被注册、被编译、被调用」约束——**
+> **⚠️ 即问题从「硬件支不支持」变成了「软件接没接上」。**
+>
+> ⭐⭐ **「`120` → `120a`」那句值得单独记**：
+> **它与 §10.61 那条「CUDA arch 字符串是三段式」完全咬合——
+> ⚠️ 即 BTL-3 自己也在处理「`120` 与 `120a` 不是一回事」。**
+>
+> **⭐⭐ 判据：**
+> **当一份第三方文档独立地遇到了与你相同的坑，
+> 并给出了相同的解法时，
+> 那个坑就不是「你的误会」，而是「真实的接口缺陷」。**
+
+### 10.158 ⚠️⚠️⚠️ INT4 内核：**一个 block 只算一个输出元素**
+
+[c-int4-kernel-one-block-per-output]
+
+> ```cuda
+> int4_mul_mat<<<rows * tokens, group_size, 0, ctx.stream()>>>(...)
+> // group_size = 128，每个 (row, token) 一个 block
+> // block 内 128 线程各算一个 group 的部分和，再树形归约
+> ```
+
+> **⭐⭐⭐ 这个结构有一个可算的后果，而它正好接上 §10.151 那个 20.2%**：
+> **以 4,096×4,096 的一层为例，输出元素 = 4,096（单 token），
+> 故 grid = 4,096 个 block × 128 线程 = 524,288 线程——
+> ⚠️ 而 RTX PRO 6000 有 188 个 SM，每 SM 最多 2,048 线程
+> → 最多 385,024 线程常驻——**
+> **⚠️ 即这个 grid 连「填满机器一次」都差 27%。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个 kernel 能不能填满 GPU」可以用
+> 「总线程数 ÷ 可常驻线程数」粗算——**
+> **⚠️ 小于 1 就意味着「每个线程只跑一遍，机器从头到尾没被填满」。**
+>
+> ⭐⭐ **更严重的是每线程的工作量**：
+> **128 线程分摊 `columns = 4,096` 列 → 每线程 32 次迭代，
+> 每次一次 `fmaf` 加一次 `uint8` 读取——**
+> **⚠️ 即每线程只有 32 个 FMA，而启动它需要一次 block 调度。**
+>
+> **⭐⭐ 判据：**
+> **「每线程算术量」低于某个阈值时，
+> kernel 就变成了「调度开销主导」——
+> ⚠️ 而 32 个 FMA 显然在这个阈值之下。**
+>
+> ⭐⭐ **这个结构与 §10.152 那条是同一类错误的不同形态**：
+> **AVQ2 的错是「每个输出块重算一次输入变换」；
+> INT4 的错是「每个输出元素独占一个 block」——**
+> **⚠️ 两者都源于「一个输出元素 = 一个并行单元」这个隐含假设。**
+>
+> **⭐⭐ 判据：**
+> **当一个 kernel 的并行维度是「输出元素」而不是
+> 「输出元素 × 归约段」时，归约就成了瓶颈——**
+> **⚠️ 而正确的做法通常是「一个 block 算多个输出」，
+> 让归约的树被摊薄。**
+>
+> ⚠️ **边界**：**本报告没有实测这个 kernel 的占用率**，
+> 以上全部是从启动配置推出的结构性结论。
+
+### 10.159 🔥🔥🔥🔥 AVQ2 的真身：**4 维格点 + 仿射 + Hadamard 旋转**
+
+[c-avq2-uses-2bit-lattice]
+
+> ```cuda
+> constexpr float transform_scale = 0.08838834764831845F;  // = 1/(8*sqrt(2))
+> const float lattice = static_cast<float>((code >> shift) & 3U) - 1.5F;
+> // 格点 = {-1.5, -0.5, 0.5, 1.5}
+> // 每字节 4 个分量 × 每分量 2 bit = 8 bit
+> // 每组 16 个仿射 float + 4 个偏置 float
+> ```
+
+> **⭐⭐⭐⭐ 这条把 §10.122「十种混合表示」里最神秘的那一种解开了**：
+> **「AVQ2」不是「2 bit 标量量化」，
+> 而是「2 bit × 4 分量 + 仿射 + 旋转」——
+> ⚠️ 即它是一个「4 维格点向量量化器」，
+> 而 `2 bit` 是「每个分量的比特数」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个比特数」在不同量化方案里指的不是同一个东西：
+> 标量量化 → 每个权重 N bit；
+> 向量量化 → 每个分量 N bit，而一个码字覆盖 4 个权重——**
+> **⚠️ 两者在「每权重比特数」上相同，
+> 但在「表达力」上差一个维度。**
+>
+> ⭐⭐ **`{-1.5, -0.5, 0.5, 1.5}` 这个格点值得单独看**：
+> **四个值等距、关于 0 对称、且没有 0——
+> ⚠️ 即这个量化器在「零附近」是没有精度的。**
+>
+> **⭐⭐ 判据：**
+> **「一个没有零点的格点」意味着「它不能精确表示 0」——
+> ⚠️ 而这在权重里是一个大胆的选择：
+> 大多数权重确实接近 0。**
+>
+> ⭐⭐ **而解释它的正是那个 FWHT**：
+> **旋转把「集中在零附近」变成「分散在球面上」，
+> 故格点不需要零点——
+> ⚠️ 即「格点没有 0」与「用了 Hadamard 旋转」是同一个设计的两个部分，
+> 不能分开看。**
+>
+> **⭐⭐ 判据：**
+> **当两个设计选择「单独看都很奇怪、合起来看很自然」时，
+> 它们大概率来自同一个数学约束——**
+> **⚠️ 而找到那个约束，比分别解释两个选择更有价值。**
+>
+> ⭐⭐ **`0.08838834764831845` 也对上了**：
+> **`1/√128 = 0.08838834764831843`，只差最后一个 ulp——
+> ⚠️ 即它确实是「128 点 FWHT 的归一化」。**
+>
+> ⚠️ **边界**：**本报告只读了词表路径的 AVQ2 解码器；
+> 解码器主路径 `btl3-avq.cu`（7,070 字节）尚未读。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -23830,6 +24070,13 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 1. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-metal-runtime-2026-07-19.md`（2,601 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-metal-runtime-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它含一句足以改写本报告全部性能讨论的话**：(a) 🔥🔥🔥🔥🔥 **CUDA 侧根本还没实现 INT4 与压缩词表的自定义算子**：「**CUDA currently accelerates repeating AVQ2 decoder projections. It does not yet implement the INT4 or compressed vocabulary custom operations, so no end-to-end CUDA throughput claim should be made from the standalone CUDA projection benchmark.**」，而 Metal 侧四项全有（「**AVQ2 decoder projections; affine INT4 projections; compressed vocabulary output; compressed embedding lookup, including rescued rows**」）；⚠️ 未实现部分占权重 **744 MB（8.9%）+ 668 MB（8.0%）= 1,411 MB（16.9%）**；⭐⭐ 判据（本轮最重要）「**『慢』有三种完全不同的病因：① 算子写得差；② 算子没写（走通用路径）；③ 算子写对了但被调用太多次——而『优化一个算子』只对 ① 有效，对 ② 无效**」；(b) ⭐⭐⭐⭐ **两种「打包张量放置标记」**：「**Packed tensor placement uses two markers. Repeating AVQ2 tensors use the cross-backend marker supported by Metal and CUDA. INT4, rescued vocabulary, and non-repeating vocabulary AVQ tensors use a Metal-only marker. This keeps CUDA from accepting storage for custom operations it cannot execute.**」；⭐⭐ 判据「**『一个后端不支持的张量』有三种处理方式：回退 CPU / 加载时拒绝 / 用标记钉在另一个后端——而第三种在『只有 CUDA』时无解**」；(c) 🔥🔥🔥🔥🔥 **作者自己承认 AVQ2 内核重复计算输入变换**：「**AVQ2 remains the dominant custom operator and its current fused kernel repeats input transforms across output-row blocks. A future three-stage implementation can compute the input transform once, run a coalesced decoder matmul, and transform the output in place.**」；⭐⭐ 判据（本轮最重要）「**『一个融合内核』的常见错误，是把『本该只做一次的准备工作』放进『每个输出块都要做一次』的位置**」；⭐⭐ 判据「**『融合』的收益是『少一次往返』，代价是『把不同频率的操作绑在一起』——当两个操作的执行频率不同时，融合就变成了浪费**」；(d) ⭐⭐⭐ **四条逐算子相对误差门**：「**AVQ2 4096 x 4096 x 4: max relative error `3.66604e-05`；INT4: `2.15352e-06`；vocabulary head: `1.43051e-06`；embedding rows: `5.96046e-08`**」，测试机「**base Apple M2 with 16 GB unified memory**」，加载尺寸「**7.81 GiB**」；(e) ⚠️⚠️ **词表尺寸第一次出现确切数字：248,320 x 5,120**：「**full 248,320 x 5,120 vocabulary head: 22.15 ms**」，**= 1,271,398,400 参数，2.000 bpw 下 317,849,600 字节/张量，两份约 635.7 MB**，与 §10.125 的 `vocabulary` 667,713,856 字节同量级；⭐⭐ 判据「**『词表大小』直接决定了『每 token 要读多少固定开销』**」；(f) ⭐⭐⭐ **M2 放置修正前后的对比**：「**Prompt processing 0.609 -> 2.297 tok/s；Token generation 0.178 -> 2.483 tok/s**」，「**Generation improved by 13.9x**」；隔离测量「**AVQ2 4096 x 4096 x 4: 2.49 ms, 42.8x over the scalar CPU reference；weighted representative AVQ2 decoder suite: about 735.6 ms；INT4 decoder suite: about 70.4 ms**」 — [src-btl3-doc-metal-runtime]
 
 2. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/signs.py`（1,804 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/signs.py) —（2026-10 抓取）。🔥🔥🔥🔥 **为复现符号，作者用纯 Python 重写了一遍 MT19937**：首行「**Portable reproduction of Torch CPU seeded sign tensors**」；实现含 init（`1812433253`）、`_twist()`（`0x9908B0DF`）、tempering（`0x9D2C5680` / `0xEFC60000`）全流程；取符号「**values[index] = 1 if generator.next_u32() & 1 else -1**」；⭐⭐⭐⭐ 判据（本轮最重要）「**『消除一个依赖』的最彻底方式，不是『固定版本』，而是『重新实现那个依赖的最小必要部分』——而这里『最小必要部分』恰好是『MT19937 + 一次取低位』，约 40 行**」；⭐⭐ 判据「**MT19937 输出 32 位，取最低位得到 1 bit；而 2 整除 2^32，故这个映射无偏——即它恰好等价于 `torch.randint(0, 2)`，不需要拒绝采样**」；⭐⭐ 判据「**当一个格式的正确性依赖『某个 RNG 的具体实现』而不是『某个分布』时，它就不是『统计兼容』，而是『逐位兼容』**」；⚠️ 本报告未验证这份实现与 Torch 逐位一致 — [src-btl3-tools-signs-py]
+### 四个算子其实都写了、CUDA 从未编译、架构无关、2-bit 格点（第九十五轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/docs/btl3-avq-cuda-validation.md`（4,116 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/docs/btl3-avq-cuda-validation.md) —（2026-10 抓取）。⚠️⚠️⚠️ **它否证了 §10.150**：「**The NVIDIA CUDA backend accepts four independently marked BTL-3 operations: 1. AVQ2 repeating-layer matmul...; 2. Affine INT4 matmul...; 3. Vocabulary get-rows...; 4. Vocabulary-head matmul...**」，而同仓库 `docs/btl-3-compact-metal-runtime-2026-07-19.md` 说「**CUDA currently accelerates repeating AVQ2 decoder projections. It does not yet implement the INT4 or compressed vocabulary custom operations**」，**两份文档同属 2026-07-20T18:05:27Z 的同一个 squash commit**；⭐⭐⭐⭐ 判据（本轮最重要）「**『一个功能没被实现』这个断言，需要两种证据之一：① 代码里没有它；② 文档明说没有——而我在只有 ② 的情况下，把它写成了『根本还没实现』，这超出了 ② 的射程**」；⭐⭐ 判据「**『实现了』这个词在 GPU 生态里至少有三档：① 源码存在；② 能编译；③ 在真机上跑过并对得上参考值**」；(a) 🔥🔥🔥🔥🔥 **CUDA 代码从未被编译过**：「**These checks pass locally. The CUDA test sources also pass host C++ syntax checking, but this machine has neither NVCC nor an NVIDIA GPU. CUDA compilation, device correctness and speed are therefore not claimed.**」；⭐⭐⭐⭐⭐ 判据（本轮最重要）「**『一个 CUDA 算子能被写出』与『它能被编译』之间，隔着一个『NVCC 存不存在』——而『能被编译』与『能算对』之间，又隔着一台真机**」；⭐⭐ 与 §10.135 的对照：**速度文档报告了 84.70 / 43.16，而本文档说这台机器没有 GPU——两者不可能在同一台机器上产生**；⭐⭐ 判据「**『不声称』比『声称没有』更精确——因为『没有』是一个关于世界的断言，而『不声称』是一个关于自己证据的断言**」；(b) ⭐⭐⭐⭐ **三个内核刻意不针对任何 SM 架构**：「**The kernels use portable CUDA C++ operations and do not hardcode an SM architecture. The build selects the target architecture.**」，而验证指引只列 **RTX 4090（SM89）/ RTX 5090（SM120，「normalizes plain `120` to `120a`」）/ DGX Spark（SM121）**，**没有 RTX PRO 6000**；⭐⭐ 判据（本轮最重要）「**『针对新架构优化』与『在新架构上能跑』是两件不同的事——前者需要分支与专用指令；后者只需要『可移植的 CUDA C++』**」；⭐⭐ 判据「**当一个算子被写成『架构无关』时，它的可用性就不再受 GPU 型号约束，而只受『有没有被注册、被编译、被调用』约束**」；(c) ⭐⭐ **完整模型放置门（placement gate）**：确认「**no marked BTL-3 custom node falls back to CPU during prompt or decode**」，且「**Only then profile prompt and decode separately. Do not publish a throughput or latency claim from source inspection or unit tests.**」 — [src-btl3-doc-cuda-validation]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-int4.cu`（2,682 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-int4.cu) —（2026-10 抓取）。⚠️⚠️⚠️ **INT4 内核的并行结构是「一个 block 算一个输出元素」**：「**int4_mul_mat<<<rows * tokens, group_size, 0, ctx.stream()>>>(...)**」，`group_size = 128`，block 内 128 线程各算一个 group 的部分和再树形归约；⭐⭐⭐ 可算的后果：**4,096×4,096 单 token → grid = 4,096 block × 128 = 524,288 线程，而 RTX PRO 6000 的 188 SM × 2,048 = 385,024 可常驻线程，即这个 grid 连「填满机器一次」都差 27%**；⭐⭐ 判据（本轮最重要）「**『一个 kernel 能不能填满 GPU』可以用『总线程数 ÷ 可常驻线程数』粗算——小于 1 就意味着『每个线程只跑一遍，机器从头到尾没被填满』**」；⭐⭐ 判据「**当一个 kernel 的并行维度是『输出元素』而不是『输出元素 × 归约段』时，归约就成了瓶颈**」 — [src-btl3-cuda-int4-cu]
+
+3. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-vocab.cu`（9,552 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-vocab.cu) —（2026-10 抓取）。🔥🔥🔥🔥 **AVQ2 的内部结构第一次完整暴露**：「**constexpr int transform_block = 128; constexpr float transform_scale = 0.08838834764831845F**」（= `1/(8*sqrt(2))`）；「**const float lattice = static_cast<float>((code >> shift) & 3U) - 1.5F**」，即格点 = **`{-1.5, -0.5, 0.5, 1.5}`**；**每字节 4 个分量 × 每分量 2 bit**；**每组 16 个仿射 float + 4 个偏置 float**；⭐⭐⭐⭐ 判据（本轮最重要）「**『一个比特数』在不同量化方案里指的不是同一个东西：标量量化 → 每个权重 N bit；向量量化 → 每个分量 N bit，而一个码字覆盖 4 个权重——两者在『每权重比特数』上相同，但在『表达力』上差一个维度**」；⭐⭐ 判据「**『一个没有零点的格点』意味着『它不能精确表示 0』——而解释它的正是那个 FWHT：旋转把『集中在零附近』变成『分散在球面上』，故格点不需要零点**」；⭐⭐ 判据「**当两个设计选择『单独看都很奇怪、合起来看很自然』时，它们大概率来自同一个数学约束**」；⭐ 救助行格式：**2 bit 低位 + 6 bit 高位 = 8 bit**，「**Invalid token IDs explicitly produce zero rows**」 — [src-btl3-cuda-vocab-cu]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -23969,7 +24216,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=309, evidence=2307, claims=1701, claims_high=1357, claims_disputed=9, trace_events=687, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=312, evidence=2313, claims=1706, claims_high=1362, claims_disputed=9, trace_events=693, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
