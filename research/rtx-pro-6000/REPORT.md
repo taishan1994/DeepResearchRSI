@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：288 ｜ **证据数**：2238 ｜ **主张数**：1647（高置信 1307，争议 9）
+> **来源数**：290 ｜ **证据数**：2248 ｜ **主张数**：1652（高置信 1312，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -18273,6 +18273,196 @@ static ggml_prec ggml_cuda_mmq_get_prec_env() {
 > 合起来的意思是：一台机器上同时跑着两个后端，
 > 而 `-ngl` 只控制其中一个的层数。**
 
+### 10.101 🔥🔥🔥🔥🔥 第一份 RTX PRO 6000 + `llama.cpp` 的 `llama-bench` 记录
+
+**这是本报告连续 12 轮标注为「最大单一数据缺口」的那一项** [c-first-llamabench-on-rtxpro6000]。
+
+**硬件与参数**（`evidence/rtx-pro-6000-speed-2026-07-19.md`，2026-07-19 实测）：
+
+| 项 | 值 |
+|---|---|
+| GPU | **NVIDIA RTX PRO 6000 Blackwell Server Edition** |
+| 显存 | **97,887 MiB**（`nvidia-smi` 读数） |
+| CUDA arch | **`sm_120a`** |
+| 模型 | `BTL-3-Compact-AVQ2.gguf`，**8,392,369,600 字节** |
+| offload | **`-ngl 99`**（全部层） |
+| KV | **FP16** |
+
+```
+llama-bench -m BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json
+```
+
+| 工作负载 | 吞吐 | σ |
+|---|---:|---:|
+| **512-token prompt processing** | **84.70 tok/s** | 0.37 |
+| **128-token generation** | **43.16 tok/s** | 0.29 |
+
+> 三次采样：TG `42.83 / 43.35 / 43.30`；PP `84.28 / 84.91 / 84.91`。
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「填上一个数据缺口」不等于「解决了那个问题」——**
+> **因为一个数字只有在「它的口径已知」时才有意义，
+> ⚠️ 而这个数字的口径是完整的，它的数值却是不合理的。**
+>
+> **⭐⭐ 判据：**
+> **「一份实测报告的价值，不在于它的数字多漂亮，
+> 而在于它的数字能不能被反驳」——**
+> **⚠️ 而能被反驳的前提是「参数齐全」，不是「结论正确」。**
+>
+> ⭐⭐ **与 §10.44 的 DGX Spark 数字（约 44 tok/s）形成对照**：
+> **一张 96 GB 的卡跑 27B 2 比特得到 43.16，
+> 而一台 128 GB 的 Spark 跑更大的模型得到 44**——
+> **这两个数字太接近，说明它们分别受限于不同的东西。**
+
+### 10.102 ⚠️⚠️⚠️ 但 `pp512 = 84.70` 与 `tg128 = 43.16` 只差 **1.96×**
+
+[c-pp512-anomaly-is-physically-wrong]
+
+> **一个 8.39 GB、2 比特的 27B 模型，预填充通常是解码的 20–100 倍。**
+> **而这两个数字几乎同量级，而两者的瓶颈机制完全不同
+> （前者算力受限、后者带宽受限）。**
+
+> **⚠️ 这是本报告第一次「拿到数字之后立刻判定它不可信」——
+> 而它比「没有数字」更危险：**
+> **「没有数字」会让人继续找；「有一个数字」会让人停止找。**
+>
+> **⭐⭐ 判据（本轮最重要之一）：**
+> **当一份实测报告的两个数字之间的「比值」
+> 违背了这两个数字各自所属的物理机制时，
+> 错的不是「其中一个数字」，
+> 而是「至少其中一个的测量条件」——**
+> **⚠️ 而报告里通常只写数字，不写条件。**
+
+**三种可能，指向完全不同的结论**：
+
+| # | 假设 | 若成立的含义 |
+|---|---|---|
+| ① | `pp512` 被模型加载或 warmup 开销淹没 | 测量问题，数字作废 |
+| ② | **2 比特权重的去量化在大 batch 时极慢** | **反直觉但有机制的真发现** |
+| ③ | 数字写错或单位不对 | 记录问题 |
+
+> **⭐⭐ 第 ② 种最值得追**，因为它与 §10.62–§10.85 那十轮的主题直接相连：
+> **「2 比特量化在预填充上可能比解码更慢」——如果是这样，
+> 那它是一个「反直觉但有机制解释」的发现。**
+>
+> **⭐⭐ 判据：**
+> **「反直觉的数字」有两种：一种错在测量，一种错在直觉——**
+> **⚠️ 而区分它们的唯一方法是「看机制能不能解释它」，
+> 不是「看它像不像别人报的数」。**
+>
+> ⚠️ **本报告没有这个模型的权重，也没有在 RTX PRO 6000 上重跑，
+> 故「① ② ③ 哪一种」是未定的。**
+
+### 10.103 🔥🔥🔥 「约 46 t/s」是 DeepSeek-V4-Flash Q8 在 `llama.cpp` 上的基线
+
+[c-46-tps-is-the-ds4-baseline]
+
+> jhgoodwin：「**around 46 t/s for normal use not micro benchmarks**」
+> flipplefozz：「**Before using DSpark, I too was getting 46 t/s**」
+
+> ⚠️ **两台配置完全不同的机器给出同一个数字**（后者是 600W + Max-Q 300W、PCIe Gen4 x8、Ryzen 9 5950x、128 GB）。
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「同一数字在多个配置上复现」有两种解释：
+> ① 它是硬件的上限；② 它是软件的上限——**
+> **⚠️ 而区分方法是「换一个软件栈还是一样的数字吗」。**
+>
+> ⭐⭐ **这份讨论里正好有这个对照**：
+> **hassellof 说 sglang 上双卡报到 110–130，
+> 而 `llama.cpp` + ds4 是 46**——
+> **即 46 是这条栈的上限，不是卡的上限。**
+>
+> **⭐⭐ 判据：**
+> **「一个数字被多个用户复现」是「它是典型值」的证据，
+> 而不是「它是上限」的证据——**
+> **⚠️ 而这两者在报告里经常被写成同一句话。**
+>
+> ⭐ **实际含义**：**如果你在 `llama.cpp` 上跑 DeepSeek-V4-Flash Q8 得到 46 t/s，
+> 你没有配置错——但你也没有摸到这张卡。**
+
+### 10.104 🔥🔥🔥🔥 投机解码：**46 → 75–130 t/s**，代价是上下文减半
+
+[c-dspark-46-to-80]
+
+| 用户 | 无投机 | 有投机 | 配置 |
+|---|---:|---:|---|
+| flipplefozz | 46 | **75–85** | 双卡 600W + Max-Q，`ctx` **768000 → 370000** |
+| g0t4 | ~70 | **100–130** | 双卡，默认 3 draft token，`ctx 524288`，CUDA 13.3 |
+
+> ⚠️ **1.6–2.8× 的提升，而它来自「多生成几个 token 再验证」，不是「算得更快」。**
+>
+> **⭐⭐ 判据（本轮最重要之一）：**
+> **当一项优化的收益是「倍数」而代价是「能力」时，
+> 它们不在同一个量纲上，故不能相减——**
+> **⚠️ 而「2× 更快」与「上下文减半」在一个报告里必须并列，不能只写前者。**
+>
+> ⭐⭐ **机制**：**投机解码不改变单 token 的计算量，
+> 它改变的是「每次前向产出几个 token」——
+> 故它的加速比取决于「接受率」，而接受率取决于「任务的可预测性」。**
+>
+> **⭐⭐ 判据：**
+> **一个「取决于输入」的加速比，
+> 在「代码生成」与「自由写作」上会差很多——**
+> **⚠️ 而讨论里没有人分别报这两个场景。**
+>
+> ⭐ **g0t4 自己的保留**：
+> 「**`dmon` is not showing anything saturated**」——**即「更高的数字」在他看来仍有可能。**
+> ⚠️ **边界：这些全是「单流、正常使用」，不是 `llama-bench` 微基准。**
+
+### 10.105 🔥🔥🔥🔥🔥 一份完整、可用的双卡配方——而它验证了上一轮的两条**纯文档推断**
+
+[c-complete-dual-card-recipe]
+
+```bash
+cmake -B build -DGGML_CUDA=ON -DLLAMA_CURL=ON -DBUILD_SHARED_LIBS=OFF   -DGGML_CUDA_GRAPHS=ON -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128   -DCMAKE_CXX_FLAGS="-DGGML_SCHED_MAX_SPLIT_INPUTS=128"   -DGGML_CUDA_FA_ALL_QUANTS=ON   -DCMAKE_CUDA_ARCHITECTURES="120"
+```
+```ini
+Environment=CUDA_SCALE_LAUNCH_QUEUES=4x
+Environment=GGML_CUDA_PDL=1
+Environment=GGML_CUDA_P2P=1
+```
+```ini
+n-gpu-layers = 99
+split-mode   = layer
+tensor-split = 46,54
+cache-type-k = f16
+cache-type-v = f16
+batch-size   = 8192
+ubatch-size  = 4096
+flash-attn   = on
+```
+
+> ⭐⭐⭐ **它验证了本报告上一轮的两条纯文档推断**：
+> **§10.90 的 `CUDA_SCALE_LAUNCH_QUEUES=4x`**——文档说「对多卡流水并行有益」，
+> **而这里一个真实用户在多卡上启用了它**；
+> **§10.92 的 `GGML_CUDA_P2P=1`**——文档说它「可能崩溃或损坏输出」，
+> **而这里一个真实用户在多卡上启用了它并且报告了好数字。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「文档警告的风险」与「用户实际启用了它」并不矛盾——**
+> **因为风险是「可能」（`may`），
+> ⚠️ 而「我这次没出事」不是「风险不存在」的证据。**
+>
+> ⭐⭐ **这正是 §10.92 那条判据的兑现**：
+> **「一个已知会损坏数据的优化项」的第一步是「关掉它」**——
+> **而这位用户的做法是对的：他启用了、报告了数字，
+> 但没有说「我验证过输出正确」。**
+>
+> ⭐⭐ **另外两处值得单独指出**：
+> **① `-DCMAKE_CUDA_ARCHITECTURES="120"`——注意不是 `120a`**，
+> **这正好是 §10.69 记的那个「未桥接的缝」的一个真实样本**；
+> **② `GGML_CUDA_FA_ALL_QUANTS=ON`**——
+> **这正好绕开了 §10.93 记的那个「只编 4–5 种组合」的白名单。**
+>
+> **⭐⭐ 判据：**
+> **一份「能跑」的配方里，最有信息量的不是「设了什么」，
+> 而是「哪几个设置是在绕开已知的默认陷阱」——**
+> **⚠️ 而绕开的动作通常不会被写出来。**
+>
+> ⚠️ **而必须标注**：**`tensor-split=46,54` 与 `main-gpu=1`
+> 说明他把主卡设成了第二张（Max-Q 300W）——
+> 这是一个反直觉的选择，而作者没解释。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -21674,6 +21864,12 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 1. [ggml-org/llama.cpp — `docs/build.md` 的「CUDA / Compilation」（第 189–206 行）与「Notes about GPU-accelerated backends」（第 900–906 行）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/docs/build.md) —（2026-10 抓取）。(a) 🔥🔥🔥 **`-ngl 0` 不等于「关闭 GPU」**——「**The GPU may still be used to accelerate some parts of the computation even when using the `-ngl 0` option. You can fully disable GPU acceleration by using `--device none`.**」；⚠️ 即 **「GPU 层数设为 0」与「禁用 GPU」是两个不同的状态**；⭐⭐ 判据（本轮最重要）「**当一个人用『一个数字』来控制『一种能力』时，『数字为 0』与『能力关闭』在语义上并不等价——因为『0』通常表示『这一项不做』，而不是『相关的所有项都不做』**」；⭐⭐ 对基准测试方法学的影响是直接的：**一份「GPU vs CPU」的对比，如果 CPU 侧用的是 `-ngl 0`，那么它测的不是 CPU，而是「CPU + 一部分 GPU」**；⭐⭐ 判据「**『对照组没有真的被改成对照组』是 §10.55 记的那种失败，而它的变体是『对照组被改成了一个混合状态』——后者更危险，因为它给出的数字仍然合理**」；⭐ 这也解释了 §10.43 记录的现象：**有人报告「`-ngl 0` 下仍然看到显存占用」——这不是 bug，是文档写明的行为**。(b) ⭐⭐⭐ **官方对「便携二进制」的回答是 `GGML_BACKEND_DL`**——「**Backends can be built as dynamic libraries that can be loaded dynamically at runtime. This allows you to use the same llama.cpp binary on different machines with different GPUs. To enable this feature, use the `GGML_BACKEND_DL` option when building.**」；⚠️ 即 **每个后端一个 `.so`/`.dll`，主程序在运行时选**；⭐⭐ **这与 §10.59–§10.61 / §10.94 记录的「架构编译」问题形成一对完整的答案**：那个问题是「一个二进制不可能同时优化所有架构」，这个答案是「拆成一个主程序 + N 个后端库」；⭐⭐ 判据「**当一个『配置问题』反复出现在不同用户身上时，它往往已经有一个『结构性解法』存在，只是那个解法不在你遇到的问题的那个层面——而『编译参数』层面的问题，答案可能在『分发形态』层面**」；⭐⭐ 判据「**『同一个二进制在不同机器上跑』这个需求，在『静态链接』范式里是无解的，而在『插件』范式里是一行 CMake 选项——而范式切换的代价通常不是技术，是『人们已经习惯了旧范式』**」。(c) ⭐⭐ **第四处静默回退：`CUB DeviceTopK` 在旧 CCCL 上退回排序**——「**CUB DeviceTopK requires CCCL 3.4.3 or newer; older versions use the sort fallback.**」；ⓘ 四次分别是 **§10.62 MMQ 32 条 `CASE`、§10.81 `GGML_TYPE_COUNT` 哨兵、§10.93 FA 7 种组合、本条 `DeviceTopK`**；⭐⭐ **这条的独特性在于：它的开关是「依赖库版本」而不是「编译选项」——即用户即使什么都没改，换一个 CUDA Toolkit 版本就会改变 top-k 的实现路径**；⭐⭐ 判据「**当一条性能路径的选择依赖于『间接依赖的版本』时，它的可复现性低于依赖于『显式参数』的路径——而这正是『同一个模型在不同机器上快慢不同』这类报告的常见来源**」；⭐ 对 RTX PRO 6000：**top-k 采样在每个 token 上都要跑，故它属于「每 token 开销」而非「一次性开销」——如果它在慢路径上，tok/s 会被直接拉低，而没有任何报错**（⚠️ 「sort fallback」慢多少，文档没说）。(d) ⭐⭐ **多后端可同时编译，用 `--list-devices` 选择**——「**you can build llama.cpp with both CUDA and Vulkan support by using the `-DGGML_CUDA=ON -DGGML_VULKAN=ON` options with CMake. At runtime, you can specify which backend devices to use with the `--device` option. To see a list of available devices, use the `--list-devices` option.**」；⭐⭐ 这是「验证 §10.94 那条诊断链」的第一步：**如果 `--list-devices` 里能看到 RTX PRO 6000，说明后端加载成功；但如果产物里没有 `sm_120`，设备仍然会列出来，只是 FP4 走慢路径**；⭐⭐ 判据「**『设备被识别』与『设备被优化』是两个不同的检查，而工具通常只提供前者——因为前者是一个枚举，后者需要一个基准**」；⭐ 这正是 §10.82 那条「`GGML_CUDA_MMQ_PREC=q4` 强制一次」为什么重要。(e) ⭐⭐ **CUDA 构建同时产出 CPU 后端**——「**Note that this also builds the CPU backend by default.**」，而 WoA 上「**MSVC's support for the ARM NEON intrinsics used by the CPU backend may be incomplete, so a CUDA build produced entirely with MSVC might have a slower CPU backend**」（⚠️ 具体内容与目标平台不直接相关，故 medium；结构性含义通用）；⭐⭐ 判据「**当一次『构建』同时产出多个组件时，『为 A 选的编译器』会静默地成为『B 的编译器』——而用户只会为 A 检查结果**」；⭐⭐ 这给了 §10.44「GPU 很快但整体 tok/s 不高」另一种解释：**CPU 后端参与了采样/tokenize，或 `-ngl` 不到全部层时，CPU 侧速度就在总延迟里**；⭐⭐ 判据「**『我优化了 GPU』与『我优化了瓶颈』之间，隔着一个『瓶颈在不在 GPU』的测量——而这个测量需要 `--device none` 与默认配置的对比**」 — [src-llamacpp-docs-build-dl]
 
+### 第一份 llama-bench 数字，与它那个「不合物理」的 pp/tg 比值（第八十四轮补充）
+
+1. [HuggingFace / badtheorylabs — `evidence/rtx-pro-6000-speed-2026-07-19.md`（1,958 字节，2026-07-19 实测）](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告连续 12 轮标注为「最大单一数据缺口」的那一项，终于被填上**：**`llama-bench -m BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json`**，**pp512 = 84.70 tok/s（σ 0.37）**、**tg128 = 43.16 tok/s（σ 0.29）**，三次采样 TG `42.83/43.35/43.30`、PP `84.28/84.91/84.91`；硬件 **NVIDIA RTX PRO 6000 Blackwell Server Edition，97,887 MiB，`sm_120a`，KV FP16，模型 8,392,369,600 字节**；⭐⭐ 判据「**『填上一个数据缺口』不等于『解决了那个问题』——因为一个数字只有在『它的口径已知』时才有意义，而这个数字的口径是完整的，它的数值却是不合理的**」+「**一份实测报告的价值，不在于它的数字多漂亮，而在于它的数字能不能被反驳——而能被反驳的前提是『参数齐全』，不是『结论正确』**」；⭐ 与 §10.44 的 DGX Spark（约 44 tok/s）对照：**两个数字太接近，说明它们分别受限于不同的东西**。⚠️⚠️⚠️ **但 `pp512 = 84.70` 与 `tg128 = 43.16` 只差 1.96×，而一个 8.39 GB、2 比特的 27B 模型预填充通常是解码的 20–100 倍**；**这是本报告第一次「拿到数字之后立刻判定它不可信」，而它比「没有数字」更危险：「没有数字」会让人继续找，「有一个数字」会让人停止找**；⭐⭐ 判据（本轮最重要之一）「**当一份实测报告的两个数字之间的『比值』违背了这两个数字各自所属的物理机制时，错的不是『其中一个数字』，而是『至少其中一个的测量条件』——而报告里通常只写数字，不写条件**」；ⓘ 三种可能：**① pp 被模型加载/warmup 淹没 ② 2 比特权重去量化在大 batch 时极慢（反直觉但有机制的真发现）③ 数字写错**；⭐⭐ 第 ② 种最值得追，因为它与 §10.62–§10.85 十轮的主题直接相连；⭐⭐ 判据「**『反直觉的数字』有两种：一种错在测量，一种错在直觉——而区分它们的唯一方法是『看机制能不能解释它』，不是『看它像不像别人报的数』**」 — [src-hf-btl3-rtxpro6000-speed]
+
+2. [HuggingFace / unsloth — DeepSeek-V4-Flash-0731-GGUF 讨论 #18「Best way to run on Dual RTX 6000 Pro Blackwell?」（10 条事件，2026-08-02 至 2026-08-08）](https://huggingface.co/api/models/unsloth/DeepSeek-V4-Flash-0731-GGUF/discussions/18) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **五个独立用户在同一讨论里报告了 RTX PRO 6000 的实测吞吐**，是本报告见到的密度最高的数字聚集地。(a) 🔥🔥🔥 **「约 46 t/s」在至少两台不同配置的双卡机器上复现**——jhgoodwin「**around 46 t/s for normal use not micro benchmarks**」、flipplefozz「**Before using DSpark, I too was getting 46 t/s**」（后者 **600W + Max-Q 300W、PCIe Gen4 x8、Ryzen 9 5950x、128 GB**）；⭐⭐ 判据（本轮最重要）「**『同一数字在多个配置上复现』有两种解释：① 它是硬件的上限；② 它是软件的上限——而区分方法是『换一个软件栈还是一样的数字吗』**」；⭐ 讨论里正好有对照：**hassellof 说 sglang 上双卡报到 110–130，而 `llama.cpp` + ds4 是 46 —— 即 46 是这条栈的上限，不是卡的上限**；⭐⭐ 判据「**『一个数字被多个用户复现』是『它是典型值』的证据，而不是『它是上限』的证据——而这两者在报告里经常被写成同一句话**」。(b) 🔥🔥🔥🔥 **投机解码（DSpark / MTP）：46 → 75–130 t/s**——flipplefozz **46 → 75–85**（但 `ctx` **768000 → 370000**）、g0t4 **~70 → 100–130**（默认 3 draft token，`ctx 524288`，CUDA 13.3、llama-server 10290）；⭐⭐ 判据（本轮最重要之一）「**当一项优化的收益是『倍数』而代价是『能力』时，它们不在同一个量纲上，故不能相减——而『2× 更快』与『上下文减半』在一个报告里必须并列，不能只写前者**」；⭐⭐ 机制：**投机解码不改变单 token 的计算量，它改变的是「每次前向产出几个 token」——故加速比取决于接受率，而接受率取决于任务的可预测性**；⭐⭐ 判据「**一个『取决于输入』的加速比，在『代码生成』与『自由写作』上会差很多——而讨论里没有人分别报这两个场景**」。(c) 🔥🔥🔥🔥🔥 **一份完整、已确认可用的双卡配方**——构建 `-DGGML_CUDA=ON -DGGML_CUDA_GRAPHS=ON -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES="120"`，环境 **`CUDA_SCALE_LAUNCH_QUEUES=4x`、`GGML_CUDA_PDL=1`、`GGML_CUDA_P2P=1`**，preset `n-gpu-layers=99`、`split-mode=layer`、`tensor-split=46,54`、`cache-type-k/v=f16`、`batch-size=8192`、`ubatch-size=4096`；⭐⭐⭐ **它验证了上一轮的两条纯文档推断**：**§10.90 的 `CUDA_SCALE_LAUNCH_QUEUES=4x` 与 §10.92 的 `GGML_CUDA_P2P=1` 都被真实用户在多卡上启用了**；⭐⭐ 判据（本轮最重要）「**『文档警告的风险』与『用户实际启用了它』并不矛盾——因为风险是『可能』（`may`），而『我这次没出事』不是『风险不存在』的证据**」；⭐ **两处细节**：**`-DCMAKE_CUDA_ARCHITECTURES="120"` 不是 `120a`（§10.69 那个「未桥接的缝」的真实样本）**、**`GGML_CUDA_FA_ALL_QUANTS=ON` 正好绕开 §10.93 的白名单**；⭐⭐ 判据「**一份『能跑』的配方里，最有信息量的不是『设了什么』，而是『哪几个设置是在绕开已知的默认陷阱』——而绕开的动作通常不会被写出来**」。(d) 🔥🔥🔥 **neptronix 的诊断建议直指 CPU 溢出**：**RTX PRO 6000 + 5090，IQ3_S 77 tok/s**，并说「**If you are getting much below this speed, you probably have some spillover to CPU / CPU RAM happening**」，具体建议「**Make sure to set parallel context windows to 1, otherwise by default you are probably offloading to CPU**」。(e) 🔥🔥🔥 **hassellof（4 卡）78–87 t/s，双卡 110–130，并给出两个 vLLM DSpark 阻塞项**：**① boot crash class（fixed in flashinfer#4309 / sglang#33407）② depth floor 固定在 checkpoint 默认值 5，而那是唯一被测到「损坏输出」的 draft depth（sglang#33800）**，建议 **`--speculative-dspark-block-size 4`** — [src-hf-unsloth-dsv4-disc18]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -21813,7 +22009,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=288, evidence=2238, claims=1647, claims_high=1307, claims_disputed=9, trace_events=645, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=290, evidence=2248, claims=1652, claims_high=1312, claims_disputed=9, trace_events=649, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
