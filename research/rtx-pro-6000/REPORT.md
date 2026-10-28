@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：447 ｜ **证据数**：2834 ｜ **主张数**：2028（高置信 1679，争议 9）
+> **来源数**：447 ｜ **证据数**：2840 ｜ **主张数**：2034（高置信 1685，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -33237,6 +33237,210 @@ exit 0
 > 而 `evidence_ids` 里混着「补充证据」。**
 > **故两者需要一个字段来区分，而本报告目前没有。**
 
+### 10.485 🔥🔥🔥🔥🔥 一半的「期望文件」会被**普通英文**命中
+
+[c-half-the-expected-files-false-hit-plain-prose]
+
+> **本仓库 `scripts/_zz32a.py` 在 2026-10-28 的实测**：
+> ```
+> EXPECTED_FILES 里的文件总数: 19
+> 在「不含任何文件名的普通计划文本」里被误判为命中的: 10
+>
+> task                       path                 stem         误命中的 term
+> inventory_transfer         inventory.py         inventory    ['inventory']
+> rate_limit                 limits.py            limits       ['limits']
+> clamp_edges                bounds.py            bounds       ['bounds']
+> expiry_boundary            tokens.py            tokens       ['tokens']
+> moving_average_window      series.py            series       ['series']
+> paginate_one_based         pages.py             pages        ['pages']
+> retry_backoff_cap          retry.py             retry        ['retry']
+> noisy_discount_context     billing/rules.py     rules        ['rules']
+> impl_add                   calc.py              calc         ['calc']
+> cart_totals                cart.py              cart         ['cart']
+> ```
+> **即 10 / 19 = 52.6%。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个精确率指标如果它的分子可以由「不含任何正确答案的输入」产生，
+> 那它量的是「文本里出现了几个词」，而不是「检索对了没有」。**
+>
+> **⭐⭐ 判据：**
+> **故「52.6%」这个数不是 Prism 的缺陷率，
+> 而是这个度量的误差面——两者要分开说。**
+>
+> ⚠️ **而这条对本报告是一个直接的检验：
+> 我一直在引用「Prism 有多严格」，
+> 而它的 reasoning 一档的度量分母里有一半是噪声。**
+> **⭐⭐ 故正确的表述不是「Prism 的基准不可信」，
+> 而是「Prism 的 reasoning 一档只对 9 个任务有判别力」——
+> 而那 9 个里还有 3 个（`mathx` / `auth` / `slug`）是生造词，
+> 故真正有判别力的是它们。**
+
+### 10.486 🔥🔥🔥🔥🔥 `term in text` 是**子串**，不是**路径**
+
+[c-the-file-hit-test-is-a-substring-not-a-path]
+
+> **`Prism/benchmarks/layer_bench.py` 第 88-106 行**：
+> ```python
+> def _file_terms(path: str) -> set[str]:
+>     base = os.path.basename(path)
+>     stem = os.path.splitext(base)[0]
+>     return {path.lower(), base.lower(), stem.lower()}
+>
+>
+> def _plan_file_hits(plan: Plan, expected: set[str]) -> set[str]:
+>     text = _plan_text(plan)
+>     hits: set[str] = set()
+>     for path in expected:
+>         if any(term and term in text for term in _file_terms(path)):
+>             hits.add(path)
+>     return hits
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「检索对了没有」的判定，
+> 如果它的判据是「文本里出现过这个词」，
+> 那它测的是词汇重叠，而不是定位。**
+>
+> **⭐⭐ 判据：**
+> **故正确形式应该是「计划里出现了这个路径」，
+> 而不是「计划里出现了这个文件名的一部分」。**
+> **而三个候选 term 里最松的是 `stem`——它连扩展名和目录都没有。**
+>
+> ⚠️ **而这条对本报告是一个可借用的检验：
+> 本报告的 `citation_closure_rate = 1.0` 也是「出现即算」，
+> 它只检查 `[c-*]` 这个字符串在正文里出现过，
+> 不检查它出现在哪个句子、支撑的是不是那句话。**
+> **⭐⭐ 故本报告的 1.0 与 Prism 的 `score` 有同一个病：
+> 它们都是「存在性检查」被当成「正确性检查」。**
+
+### 10.487 ⭐⭐⭐⭐⭐ 覆盖率分数有一个**实测的地板**
+
+[c-coverage-score-has-a-measured-floor]
+
+> **`Prism/benchmarks/layer_bench.py` 第 80-85 行**：
+> ```python
+> def _coverage(expected: set[str], found: set[str]) -> tuple[float, str]:
+>     hits = sorted(expected & found)
+>     missing = sorted(expected - found)
+>     score = len(hits) / max(1, len(expected))
+>     note = f"hit={hits or '-'} missing={missing or '-'}"
+>     return score, note
+> ```
+> **而 `bench_context`（122 行）与 `bench_reasoning`（162 行）
+> 都用 `score == 1.0` 作为 ok。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个覆盖率分数如果它的分子可以由误报填充，
+> 那它的 `1.0` 不等于「全对」，而只等于「全被提到过」。**
+>
+> **⭐⭐ 判据：**
+> **故 `score == 1.0` 这个 ok 判据，
+> 在一半任务上是「只要计划写得像样就能拿到」。**
+>
+> ⚠️ **而这条与 §10.483 的 `confidence` 是同一类：
+> 两者都是「指标存在」与「指标有判别力」被混同。**
+> **⭐ 而区别在于，Prism 的这个问题可以被一个测试抓住：
+> 把一段随机英文喂给 `_plan_file_hits`，断言返回空集。
+> 这个测试不存在。**
+
+### 10.488 🔥🔥🔥🔥🔥 「至少一条」的第二次出现——这次在**工具基准**里
+
+[c-tool-bench-uses-any-not-all]
+
+> **`Prism/benchmarks/layer_bench.py` 第 214-222 行**：
+> ```python
+> trace = run_tools(root, probe.prompt, client, max_steps=3, structured=structured)
+> called = [s.tool for s in trace.steps]
+> ok_steps = [s for s in trace.steps if s.ok]
+> used = any(t in probe.allowed_tools for t in called)
+> ok = used and bool(ok_steps)
+> score = 1.0 if ok else 0.0
+> note = f"called={called or '-'} stopped={trace.stopped}"
+> ```
+> **而 docstring 第 9 行写的是**：
+> ```
+> tools: did structured tool scaffolding improve valid/appropriate tool use?
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **这与 §10.484 那个 C1 校验器是同一条错误的第二次出现——
+> 「至少一条」被当成「全部都合规」。**
+>
+> **⭐⭐ 判据：**
+> **故这不是一个人的疏忽，而是一种默认的写法：
+> 当判定写成 `any(...)` 时，
+> 它的严格程度取决于「集合有多大」，而不是「要求有多高」。**
+>
+> ⚠️ **而这里 `allowed_tools` 是 2 到 3 个，`max_steps` 是 3——
+> 故随机调用命中的概率约 2/3 到 3/4 之间。**
+> **⭐⭐ 故 `structured` vs `loose` 这个对比，
+> 在一个命中率本来就有 2/3 的判据上，
+> 能测出的差异必然很小——而它没有被报告过。**
+
+### 10.489 ⭐⭐⭐⭐⭐ 「关掉思考」有两个理由，而第二个是**可行性**
+
+[c-thinking-is-off-for-both-variants]
+
+> **`Prism/benchmarks/layer_bench.py` 第 133-135 行**：
+> ```
+> # Reasoning bench holds THINKING OFF for both variants: thinking is the model's
+> # contribution, not Prism's. Disabling it isolates Prism's grounding as the delta
+> # and keeps calls fast/scorable on slow local hardware (base M2 ~8 tok/s).
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「关掉某个能力」的决定同时有「公平」与「可运行」两个理由时，
+> 它就不再是一个可商量的设置，而是一个约束。**
+>
+> **⭐⭐ 判据：**
+> **故「公平比较」在这里不是伦理声明，而是可行性声明。**
+>
+> ⭐⭐ **而它比 §10.4xx 那个 DSpark 实例更强，
+> 因为这里写了第二个理由：「base M2 ~8 tok/s」。**
+>
+> ⚠️ **而这条对本报告是一个对照：
+> 本报告在比较 BTL-3 与 Bonsai 时，
+> 从未写下「双方关掉了什么共同项」——
+> 因为两边用的根本不是同一套基准（`llama-bench` vs `EvalScope`）。**
+> **⭐⭐ 故本报告的三源对账在这一点上比 Prism 弱一档：
+> 它做了单位与作用域的归一，但没有做「共同项」的归一。**
+
+### 10.490 ⭐⭐⭐⭐⭐ 对照组拿到**全部源码**，实验组只拿 6000 token
+
+[c-bare-variant-gets-the-whole-visible-source]
+
+> **`Prism/benchmarks/layer_bench.py` 第 136-140 行（`_bare_plan`）**：
+> ```python
+> def _bare_plan(root: str, prompt: str, client) -> Plan:
+>     user = f"Task: {prompt}\n\nRepository:\n{_visible_source(root)}"
+>     # Same output bounding as the Prism variant, so the comparison stays fair.
+>     raw = call_chat(client, BARE_PLAN_SYSTEM, user, think=False, format="json",
+>                     num_predict=512)
+> ```
+> **而 153 行（Prism 变体）**：
+> ```python
+> ("prism_plan", lambda: make_plan(root, task.prompt, token_budget=6000,
+>                                  client=client, think=False))
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个对照组的输入严格多于实验组时，
+> 实验组赢了才说明「预算内的选择」优于「预算外的堆料」——
+> 而实验组输了则不说明 Prism 有害，
+> 只说明「信息量差距压过了选择质量」。**
+>
+> **⭐⭐ 判据：**
+> **故这个设计是反对自己的：
+> 它让 Prism 更难赢，而赢了更可信。**
+>
+> ⚠️ **而这条也是本报告最缺的那种设计：
+> 本报告的三源对账里，「谁的输入更多」这个变量从未被控制过——
+> Bonsai 的 whitepaper 用的是自家 `EvalScope`，
+> BTL-3 用的是 `llama-bench`。**
+> **⭐⭐ 故 Prism 在这里给出的不是结论，而是一个可以借用的实验形状：
+> 让对手拿到更多，然后看自己还能不能赢。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -39036,6 +39240,34 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个写着「hard」的上限，如果它没有被任何测试断言过，那它就是一个意图，而不是一个保证。故「hard」这个词的使用成本，应该与「有没有对应测试」成正比**」——**⚠️ 而本报告 §10 里用了大量「必须」「必然」「无例外」，而对应的测试是零——因为本报告没有测试，只有 validate_research.py 那几条不变量。故本报告里所有「必须」都应该被读成「我据此推理」，而不是「已被断言」**；
  — [src-prism-agent-py] [src-prism-context-py]
 
+### 一半的期望文件会被普通英文命中（第一百五十七轮补充）
+
+上一轮欠着两件事：给 `evidence_ids` 加一个「补充证据」的概念，以及读被自己跳过了三整轮的 `layer_bench.py` 143-227 行。本轮先做后者——**结果是那个「欠账」本身被证明是有意义的**：那 93 行里藏着一个可量化的度量缺陷。
+
+1. 🔥🔥🔥🔥🔥 **实测：19 个期望文件里有 10 个（52.6%）会被一段完全不含文件名的普通英文命中**：
+**本仓库 `scripts/_zz32a.py` 把 `EXPECTED_FILES` 里 19 个 stem与一段只含普通英文、不含任何文件名的计划文本做子串测试，误命中的 stem 是 `inventory` / `limits` / `bounds` / `tokens` / `series` / `pages` / `retry` / `rules` / `calc` / `cart`**；
+⭐⭐ 判据（本轮最重要）「**一个精确率指标如果它的分子可以由「不含任何正确答案的输入」产生，那它量的是「文本里出现了几个词」，而不是「检索对了没有**」——**故「52.6%」这个数不是 Prism 的缺陷率，而是这个度量的误差面——两者要分开说**；
+⚠️ **而正确的表述不是「Prism 的基准不可信」，而是「Prism 的 reasoning 一档只对 9 个任务有判别力」——而那 9 个里还有 3 个（`mathx` / `auth` / `slug`）是生造词，故真正有判别力的是它们**；
+2. 🔥🔥🔥🔥🔥 **`term in text` 是子串，不是路径**：
+`Prism/benchmarks/layer_bench.py` 第 88-106 行写「**def _file_terms(path: str) -> set[str]:    base = os.path.basename(path)    stem = os.path.splitext(base)[0]    return {path.lower(), base.lower(), stem.lower()}**」，而 `_plan_file_hits` 的判据是 `any(term and term in text ...)`；
+⭐⭐ 判据（本轮最重要）「**一个「检索对了没有」的判定，如果它的判据是「文本里出现过这个词」，那它测的是词汇重叠，而不是定位**」——**而三个候选 term 里最松的是 `stem`，它连扩展名和目录都没有；故正确形式应该是「计划里出现了这个路径」，而不是「计划里出现了这个文件名的一部分」**；
+⚠️ **而这条对本报告是一个可借用的检验：本报告的 `citation_closure_rate = 1.0` 也是「出现即算」，它只检查 `[c-*]` 这个字符串在正文里出现过，不检查它出现在哪个句子、支撑的是不是那句话。故本报告的 1.0 与 Prism 的 `score` 有同一个病：它们都是「存在性检查」被当成「正确性检查」**；
+3. ⭐⭐⭐⭐⭐ **覆盖率分数有一个实测的地板**：
+`layer_bench.py` 第 80-85 行 `_coverage` 的分母是「期望文件数」，分子是 `expected & found`，而 `bench_context`（122 行）与 `bench_reasoning`（162 行）都用 `score == 1.0` 作为 ok；
+⭐⭐ 判据「**一个覆盖率分数如果它的分子可以由误报填充，那它的 `1.0` 不等于「全对」，而只等于「全被提到过」**」——**故 `score == 1.0` 这个 ok 判据，在一半任务上是「只要计划写得像样就能拿到」**；
+⚠️ **而这条与 10.483 的 `confidence` 是同一类：两者都是「指标存在」与「指标有判别力」被混同。⭐ 而区别在于，Prism 的这个问题可以被一个测试抓住：把一段随机英文喂给 `_plan_file_hits`，断言返回空集——这个测试不存在**；
+4. 🔥🔥🔥🔥🔥 **「至少一条」的第二次出现——这次在工具基准里**：
+`layer_bench.py` 第 214-222 行写「**used = any(t in probe.allowed_tools for t in called)                    ok = used and bool(ok_steps)**」，而 docstring 第 9 行写的是「**tools: did structured tool scaffolding improve valid/appropriate tool use?**」；
+⭐⭐ 判据（本轮最重要）「**这与 10.484 那个 C1 校验器是同一条错误的第二次出现——「至少一条」被当成「全部都合规」。故这不是一个人的疏忽，而是一种默认的写法：当判定写成 `any(...)` 时，它的严格程度取决于「集合有多大」，而不是「要求有多高」**」；
+⚠️ **而这里 `allowed_tools` 是 2 到 3 个，`max_steps` 是 3——故随机调用命中的概率约 2/3 到 3/4 之间；故 `structured` vs `loose` 这个对比，在一个命中率本来就有 2/3 的判据上，能测出的差异必然很小——而它没有被报告过**；
+5. ⭐⭐⭐⭐⭐ **「关掉思考」有两个理由，而第二个是可行性**：
+`layer_bench.py` 第 133-135 行写「**Reasoning bench holds THINKING OFF for both variants: thinking is the model's contribution, not Prism's. Disabling it isolates Prism's grounding as the delta and keeps calls fast/scorable on slow local hardware (base M2 ~8 tok/s).**」；
+⭐⭐ 判据「**当一个「关掉某个能力」的决定同时有「公平」与「可运行」两个理由时，它就不再是一个可商量的设置，而是一个约束。故「公平比较」在这里不是伦理声明，而是可行性声明**」——**⚠️ 而本报告在比较 BTL-3 与 Bonsai 时，从未写下「双方关掉了什么共同项」——因为两边用的根本不是同一套基准（`llama-bench` vs `EvalScope`）。故本报告的三源对账做了单位与作用域的归一，但没有做「共同项」的归一**；
+6. ⭐⭐⭐⭐⭐ **对照组拿到全部源码，实验组只拿 6000 token**：
+`layer_bench.py` 第 136-140 行 `_bare_plan` 的输入是「**user = f"Task: {prompt} Repository: {_visible_source(root)}"**」，而 153 行 Prism 变体是「**make_plan(root, task.prompt, token_budget=6000, client=client, think=False)**」；
+⭐⭐ 判据「**当一个对照组的输入严格多于实验组时，实验组赢了才说明「预算内的选择」优于「预算外的堆料」——而实验组输了则不说明 Prism 有害，只说明「信息量差距压过了选择质量」。故这个设计是反对自己的：它让 Prism 更难赢，而赢了更可信**」——**⚠️ 而这条也是本报告最缺的那种设计：三源对账里「谁的输入更多」这个变量从未被控制过。故 Prism 在这里给出的不是结论，而是一个可以借用的实验形状：让对手拿到更多，然后看自己还能不能赢**；
+ — [src-prism-layer-bench] [src-prism-verifier-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -39175,7 +39407,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=447, evidence=2834, claims=2028, claims_high=1679, claims_disputed=9, trace_events=965, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=447, evidence=2840, claims=2034, claims_high=1685, claims_disputed=9, trace_events=965, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
