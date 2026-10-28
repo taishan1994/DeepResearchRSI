@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：336 ｜ **证据数**：2441 ｜ **主张数**：1789（高置信 1442，争议 9）
+> **来源数**：336 ｜ **证据数**：2451 ｜ **主张数**：1794（高置信 1447，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -24736,6 +24736,273 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **⚠️ 而我上一轮写那条时没有标注，
 > 故它是一条范围过宽的结论。**
 
+### 10.243 🔥🔥🔥🔥🔥 撤回 §10.185：十个 magic 是**互补并集**，不是三个独立名单
+
+[c-ten-magics-are-complementary-union]
+
+> 契约头 10 个 ｜ CUDA 8 个 ｜ Metal 6 个
+> CUDA 缺的 2 个（`BTL3PROB`、`BTL3MPRB`）**正是 Metal 独有的**；
+> Metal 缺的 4 个（`BTL3CAVQ`、`BTL3CINT`、`BTL3CVRW`、`BTL3CVHD`）**正是 CUDA 独有的**。
+
+> **⭐⭐⭐⭐⭐ 这条彻底解决了 §10.185 那个「命名空洞」**：
+> **当时我只看到 CUDA 的八个，故 `BTL3PROB` 与 `BTL3MPRB` 像是凭空消失——
+> ⚠️ 而真相是它们在 Metal 侧，只是 CUDA 用不到。**
+>
+> **⭐⭐ 而整体结构比我想的整齐得多**：
+> **契约头 10 个等于 CUDA 8 个与 Metal 6 个的并集，
+> ⚠️ 且交集恰好是 4 个（`AVQ2` / `INT4` / `VGRW` / `VHED`）——
+> 故四类算子的本体 magic 是三方共有的，
+> 而 probe magic 是逐后端的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个 magic 体系的空洞，往往不是缺失，而是另一个后端的私有项」——**
+> **⚠️ 而我上一轮把它读成了「这个后端不认识它」——
+> 那个结论对行为是对的，但对原因是错的。**
+>
+> ⭐⭐ **这条推翻 §10.185 的一个措辞**：
+> **上一轮我写「CUDA 不接受 `PROB`，因为它从不声明该常数」——
+> ⚠️ 而更准确的说法是「CUDA 不需要 `PROB`，因为它是 Metal 的探针」——
+> 故那不是一个缺陷，而是一个分工。**
+>
+> **⭐⭐ 判据：**
+> **「一个常数在某处不存在」有两种解释：遗忘与分工——**
+> **⚠️ 而区分它们的办法是「去别处找一找它存在吗」——
+> 若存在，则大概率是分工；若处处都不存在，才是遗忘。**
+>
+> ⭐⭐ **而这条给「跨后端一致性」一个新的判据**：
+> **不要问「两个后端声明的 magic 集合是否相同」，
+> ⚠️ 要问「它们的并集是否等于契约头」——**
+> **前者要求相同（而这是错的），后者要求覆盖（而这是对的）。**
+>
+> **⭐⭐ 判据：**
+> **「一组实现是否完整」的正确判据是覆盖，不是相等——**
+> **⚠️ 因为相等的判据会把合法的分工读成缺陷，
+> 而覆盖的判据只看「契约里有没有哪个值没人实现」。**
+>
+> ⭐⭐ **而按这个判据，本项目的 magic 体系是完整的**：
+> **10 个值，每一个都至少有一个后端实现——
+> ⚠️ 而 CUDA 侧那 2 个空洞由 Metal 填上，
+> Metal 侧那 4 个空洞由 CUDA 填上。**
+>
+> **⭐⭐ 这是本报告第一次能给出一个完整的跨后端覆盖表，
+> ⚠️ 而它恰好也是最后一次——因为 btl3 的源文件到这里全部读完了。**
+
+### 10.244 🔥🔥🔥🔥 probe 逐后端私有，本体三方共有
+
+[c-probe-magic-is-per-backend-private]
+
+> `BTL3AVQ2` / `BTL3INT4` / `BTL3VGRW` / `BTL3VHED` —— 三处值完全相同
+> `BTL3CAVQ` / `BTL3CINT` / `BTL3CVRW` / `BTL3CVHD` —— 只有 CUDA
+> `BTL3PROB` / `BTL3MPRB` —— 只有 Metal
+
+> **⭐⭐⭐⭐ 这条的判据是一个命名规律，而它解释了为什么是这 4 个共有的**：
+> **四个共有的 magic 都以 `BTL3` 加算子名结尾，
+> ⚠️ 而六个不共有的，都在算子名前面插了一个字母：
+> `C`（CUDA）或 `M`／`P`（Metal）。**
+>
+> **⭐⭐ 故命名规律是**：
+> **本体的 magic 没有后端标识，探针的 magic 有——**
+> **⚠️ 而这不是巧合，是语义：
+> 本体 magic 表示「这个张量是一个 AVQ2 算子」，这是跨后端都成立的事实；
+> 而探针 magic 表示「请在这个特定后端上验证一下」——
+> 故它天然是后端私有的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个标识符里有没有后端前缀」暴露了「它是不是跨后端的」——**
+> **⚠️ 而这是一个无需读文档就能得到的判断，
+> 因为命名本身已经编码了这个信息。**
+>
+> ⭐⭐ **这条还给 §10.171 那条「把 magic 按 ASCII 读一遍」一个升级**：
+> **那一轮我只读了前四个（`BTL3`），
+> ⚠️ 而这一轮我读的是后四个，并发现它们分成两组。**
+>
+> **⭐⭐ 判据：**
+> **「一个命名体系的规律」往往藏在后缀里，而不是前缀里——**
+> **⚠️ 因为前缀（`BTL3`）是品牌，而后缀才是分类。**
+>
+> ⭐⭐ **而这条有一个实际用途**：
+> **若将来有人要加第五类算子，他只需要遵循这个规律——
+> ⚠️ 本体用 `BTL3XXXX`，探针用 `BTL3CXXXX` 或 `BTL3MXXXX`——**
+> **故「读懂了命名」的标志是「我能预测下一个名字长什么样」。**
+>
+> **⭐⭐ 判据：**
+> **「一个约定」的检验方式不是「数一数出现几次」，
+> ⚠️ 而是「下一个会长什么样」——**
+> **而这正是 §10.185 那条的第二次应用。**
+>
+> ⭐⭐ **而 Metal 侧把两个 probe 放在同一个守卫里，也符合这个规律**：
+> **`ggml_metal_is_btl3_packed_probe` 同时接受 `BTL3PROB` 与 `BTL3MPRB`——
+> ⚠️ 故 Metal 有两个探针 magic，但只有一个探针函数。**
+
+### 10.245 🔥🔥🔥🔥🔥 反转：在**输出形状**上 CUDA 比 Metal 严格
+
+[c-cuda-stricter-on-output-shape]
+
+> CUDA `ggml_cuda_is_btl3_int4` 多出五条：
+> `op->ne[0] == rows`、`op->ne[1..3] == input->ne[1..3]`、`ggml_is_contiguous(op)`
+> Metal 侧**全部没有**。
+
+> **⭐⭐⭐⭐⭐ 这条推翻了「CUDA 总是更严格」这个我在前几轮建立的印象**：
+> **§10.229 我发现 CUDA 多了 `codebook_rows % 128 == 0`，
+> ⚠️ 而本轮发现 Metal 也有这一条——**
+> **故那条不是 CUDA 独有，而是两个 GPU 后端共有、只有 CPU 缺。**
+>
+> **⭐⭐ 而本轮的方向反转了**：
+> **CUDA 在 `op->ne[]` 与 `is_contiguous(op)` 上比 Metal 严格五条——
+> 故「谁更严格」的答案是逐字段的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「A 比 B 严格」这个断言必须逐字段给出，而不能整体给出——**
+> **⚠️ 因为我上一轮的整体印象（CUDA 更严）在多数字段上成立，
+> 而在 `op->ne[]` 上恰好相反。**
+>
+> ⭐⭐ **而这条的成因值得说清**：
+> **Metal 的守卫是「我能不能处理这个张量」，
+> ⚠️ 而 CUDA 的守卫多问了一句「输出张量对不对」——**
+> **这两个问题属于不同的层：前者是输入契约，后者是输出契约。**
+>
+> **⭐⭐ 判据：**
+> **「一个校验器检查输入还是输出」是一个比「它检查几条」更本质的分类——**
+> **⚠️ 而 Metal 侧所有四个守卫都只检查输入，
+> CUDA 侧则对 INT4 检查了输出（`op->ne[]`），
+> 而对 AVQ2 与 VOCAB 都不检查。**
+>
+> ⭐⭐ **故连「CUDA 检查输出」这件事本身也是逐算子的**：
+> **`ggml_cuda_is_btl3_int4` 有 `op->ne[]`，
+> ⚠️ 而 `ggml_cuda_is_btl3_avq2` 与 `ggml_cuda_is_btl3_vocab_base` 都没有。**
+>
+> **⭐⭐ 判据：**
+> **「同一个文件里的三个校验器，只有其中一个检查了输出」——**
+> **⚠️ 这是一个不一致，而不是一个设计——
+> 因为若「检查输出」是对的，另外两个就该补上；
+> 若它是多余的，INT4 那个就该删掉。**
+>
+> ⭐⭐ **而它的后果是可判定的**：
+> **若 AVQ2 的输出形状错了（例如 `op->ne[0]` 不等于 `rows`），
+> ⚠️ 则 CUDA 侧不会拒绝，而是写越界——**
+> **因为 `output[token * args.columns + column]` 的索引是按输入的 `columns` 算的，
+> 而不是按输出的 `ne[0]`。**
+>
+> **⭐⭐ 判据：**
+> **「一个校验器漏掉的那一项」的危害，等于「它保护的那个写操作会越界多远」——**
+> **⚠️ 而这里漏掉的是输出行数，故越界的量级是整个张量。**
+
+### 10.246 🔥🔥🔥🔥🔥 「归一化几次」在三个后端上是**三个不同的数**
+
+[c-metal-normalizes-32-times-not-twice]
+
+> CPU `mul_mat_vec`：**2 次**（每方向一次）
+> CUDA `vocab`：**1 次**
+> Metal `avq2`：**32 次内层 + 1 次外层**
+> ```cpp
+> accumulator += dot(codebook[code], values) * inverse_sqrt_128;   // 32 次
+> output[...] = ping[tid] * inverse_sqrt_128 * float(output_signs[row]); // 1 次
+> ```
+
+> **⭐⭐⭐⭐⭐ 这是「归一化几次」这个问题的第三个答案**：
+> **CPU `mul_mat_vec` 是 2 次（每方向一次）；
+> ⚠️ CUDA `vocab` 是 1 次；
+> 而 Metal `avq2` 是 32 加 1 次。**
+>
+> **⭐⭐ 而这三者给出的放大量却不完全相同**：
+> **CPU：`1/sqrt(128)` 乘两次等于 `1/128`；
+> ⚠️ CUDA vocab：`1/sqrt(128)`；
+> Metal：`1/sqrt(128)` 乘两次，但内层那次乘在每个 dot 项上。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「乘了几次」与「放大了多少」是两个不同的问题——**
+> **⚠️ 因为乘法可以分配到加法的每一项上，而总和不变。**
+>
+> ⭐⭐ **故 Metal 的 32 次内层乘在数学上等价于 1 次外层乘**：
+> **`sum_i (dot_i * c) = (sum_i dot_i) * c`——**
+> **⚠️ 而它在浮点上不等价：
+> 因为 32 次单独的舍入会累积误差。**
+>
+> **⭐⭐ 判据：**
+> **「数学等价」与「数值等价」之间的差距，恰好是两次运算的舍入次数之差——**
+> **⚠️ 而这里是 32 次对 1 次，故 Metal 的误差预算是 CPU 的 32 倍。**
+>
+> ⭐⭐ **这条与 §10.226 那条形成第二次实例**：
+> **那次的差距是「两次运算的舍入误差之差」，
+> ⚠️ 而这次的差距是「32 次对 1 次」。**
+>
+> ⭐⭐ **而作者选 32 次内层，其理由需要排除**：
+> **因为 `accumulator` 是逐步累加的，
+> ⚠️ 若把 `inverse_sqrt_128` 留到最后，则中间累加值会大 `sqrt(128)` 倍，
+> 而浮点在数值较大时尾数精度不变（浮点是相对的），
+> 故两种做法的精度其实相同——
+> 故这个选择是风格，而不是精度考量。**
+>
+> ⚠️ **但必须标清一个反例**：
+> **若 `accumulator` 会溢出（`float` 上限 3.4e38），
+> ⚠️ 则先乘 scale 能推迟溢出——
+> 而 `sqrt(128)` 等于 11.3 这个因子，对 32 项累加来说不足以造成溢出。**
+>
+> **⭐⭐ 判据：**
+> **「一个数学上等价的改写」是否值得，取决于「它防不防溢出」——**
+> **⚠️ 而若不防，则它只是风格。**
+>
+> ⭐⭐ **而这条给 §10.239 那条一个修正**：
+> **那个判据（归一化次数取决于变换方向数）在 CPU 与 CUDA 上成立，
+> ⚠️ 而 Metal 的 32 次内层乘不遵循它——**
+> **故正确说法是「归一化次数取决于实现者的选择」，
+> 而「变换方向数」只是其中一种常见的选择依据。**
+
+### 10.247 ⭐⭐⭐⭐⭐ INT4 在**三个后端**上都不做 FWHT
+
+[c-int4-has-no-fwht-on-any-backend]
+
+> Metal `kernel_btl3_int4` 没有 `inverse_sqrt_128`；
+> CUDA 侧无 `hadamard`；
+> CPU 侧是纯 `(code - zero) * scale * input`。
+
+> **⭐⭐⭐⭐⭐ 这是本报告第一次能把 INT4 与 AVQ2 的差别完整说清**：
+> **AVQ2 等于 4 比特 lattice 码加 affine 仿射加 FWHT 正交变换；
+> ⚠️ INT4 等于 4 比特量化码加逐组 scale／zero 加没有变换。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个量化格式的品质」不只取决于比特数，
+> ⚠️ 还取决于「它有没有一个把误差分散到全维度的变换」——**
+> **而 FWHT 正是那个变换。**
+>
+> ⭐⭐ **这解释了一个此前无法解释的现象**：
+> **AVQ2 只有 4 比特每权重，而它能在 2.9 bpw 下有竞争力——
+> ⚠️ 而现在我知道为什么：因为 FWHT 把每个权重的误差摊到了 128 个维度上，
+> 故单点误差被 `1/sqrt(128)` 压掉了。**
+>
+> **⭐⭐ 判据：**
+> **「一个 4 比特格式能不能打」取决于「它有没有把误差摊开」——**
+> **⚠️ 而摊开的手段只有两种：旋转（Hadamard）或分组补偿（scale／zero）。
+> 而 AVQ2 两者都有，INT4 只有后者。**
+>
+> ⭐⭐ **而这条给 §10.170 那条「INT4 是列方向分块」一个更深的解释**：
+> **INT4 的 `scales` 是每 128 列一个，
+> ⚠️ 而这正是分组补偿的粒度——
+> 因为 128 个值的误差可以共用一个 scale 来摊平。**
+>
+> **⭐⭐ 判据：**
+> **「一个分块粒度」往往等于「一个误差补偿的粒度」——**
+> **⚠️ 而 128 这个数在 AVQ2 里是变换块长，在 INT4 里是补偿块长——
+> 同一个数，两种用途。**
+>
+> ⭐⭐ **这条还给 §10.242 那条「rescue 绕过变换」一个对照**：
+> **rescue 行是完全没有变换、只有 8 位码与一个 fp16 scale——
+> ⚠️ 故它其实是一个 INT4 式的重建方式，只是比特数更高。**
+>
+> **⭐⭐ 判据：**
+> **「项目里的某条特殊路径」往往与「另一个格式的主路径」同构——**
+> **⚠️ 而这给了它一个合法性：它不是随便写的，而是已有方案的复用。**
+>
+> ⚠️ **而这条也暴露了一个不该忽略的空白**：
+> **三个后端都不做 FWHT 在 INT4 上——
+> 故「INT4 与 AVQ2 的 perplexity 差距」完全由变换造成，
+> ⚠️ 而本报告没有 AVQ2 与 INT4 在同一模型上的 KLD 对比——
+> 故这个因果结论只能定性，不能定量。**
+>
+> **⭐⭐ 判据：**
+> **「三个后端一致」能证明「这是设计」，但不能证明「这个设计有效」——**
+> **⚠️ 而后者需要跨格式的质量数据，本报告仍缺。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -28791,6 +29058,49 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (f) ⭐⭐⭐⭐ **`vocab_get_rows` 的 blockIdx 解码顺序**：「**const int64_t blocks = columns / transform_block; const int64_t token_index = blockIdx.x / blocks; const int64_t column_block = blockIdx.x % blocks;**」——**同一个 token 的所有列块在 grid 里相邻**；
 ⭐⭐ 判据「**「一个 block 处理多少数据」暴露了「作者认为什么粒度最自然」——而 128 个 float 的粒度，说明这个 kernel 是**以变换块为中心**设计的**」 — [src-btl3-cuda-vocab-cu]
 
+### BTL-3 的 Metal 头与 Metal 内核（第一百一十三轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.h`（6,989 字节，173 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.h)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **Metal 头只声明**六个** magic，而其中两个正是 CUDA 侧缺失的那两个**：
+「**#define GGML_METAL_BTL3_AVQ2_MAGIC UINT64_C(0x42544c3341565132) #define GGML_METAL_BTL3_INT4_MAGIC UINT64_C(0x42544c33494e5434) #define GGML_METAL_BTL3_VOCAB_ROWS_MAGIC UINT64_C(0x42544c3356475257) #define GGML_METAL_BTL3_VOCAB_HEAD_MAGIC UINT64_C(0x42544c3356484544) #define GGML_METAL_BTL3_PACKED_PROBE_MAGIC UINT64_C(0x42544c3350524f42) #define GGML_METAL_BTL3_METAL_PROBE_MAGIC UINT64_C(0x42544c334d505242)**」——**ASCII 解出 `BTL3PROB` 与 `BTL3MPRB`**；
+⭐⭐⭐⭐⭐ **十个 magic 构成一个**互补并集**：契约头 10 个、CUDA 8 个、Metal 6 个，**CUDA 缺的 2 个正是 Metal 独有的，Metal 缺的 4 个正是 CUDA 独有的**；
+⭐⭐ 判据（本轮最重要）「**「一个 magic 体系的空洞，往往不是缺失，而是**另一个后端的私有项**」——而上一轮把它读成了「这个后端不认识它」——**那个结论对**行为**是对的，但对**原因**是错的****」；
+⭐⭐ 判据「**「一组实现是否完整」的正确判据是**覆盖**，不是**相等**——因为相等的判据会把**合法的分工**读成**缺陷****」；
+(a) 🔥🔥🔥🔥 **probe magic 是**逐后端私有**的，而本体 magic 是**三方共有**的**：
+「**if (magic != GGML_METAL_BTL3_PACKED_PROBE_MAGIC && magic != GGML_METAL_BTL3_METAL_PROBE_MAGIC) { return false; }**」；
+⭐⭐⭐⭐ **而判据是一个命名规律**：**四个共有的 magic 都以 `BTL3` 加**算子名**结尾（AVQ2 / INT4 / VGRW / VHED），而六个不共有的都在算子名**前面**插了一个字母：`C`（CUDA）或 `M`／`P`（Metal）**；
+⭐⭐ 判据（本轮最重要）「**「一个标识符里有没有后端前缀」暴露了「它是不是跨后端的」——而这是一个**无需读文档**就能得到的判断，因为**命名本身已经编码了这个信息****」；
+⭐⭐ 判据「**「一个命名体系的规律」往往藏在**后缀**里，而不是前缀里——因为前缀（`BTL3`）是**品牌**，而后缀才是**分类****」；
+⭐⭐ 判据「**「读懂了命名」的标志是「我能**预测下一个名字**长什么样」**」；
+(b) 🔥🔥🔥🔥🔥 **反转：在**输出形状**上 CUDA 比 Metal **严格****：
+「**op->ne[0] == rows && op->ne[1] == input->ne[1] && op->ne[2] == input->ne[2] && op->ne[3] == input->ne[3] && ggml_is_contiguous(op)**」（CUDA，`ggml_cuda_is_btl3_int4`）——**Metal 侧这五条**全部没有****；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「A 比 B 严格」这个断言必须**逐字段**给出，而不能**整体**给出——而上一轮的整体印象（CUDA 更严）在**多数**字段上成立，而在 `op->ne[]` 上**恰好相反****」；
+⭐⭐ 而这条同时**推翻**了 §10.229 的一个措辞：**Metal **也有** `codebook_rows % 128 == 0`——故那条不是 CUDA 独有，而是**两个 GPU 后端共有、只有 CPU 缺****；
+⭐⭐ 判据「**「一个校验器检查**输入**还是**输出**」是一个比「它检查几条」更**本质**的分类**」；
+⭐⭐ 而后果是可判定的：**若 AVQ2 的输出形状错了，CUDA 侧**不会**拒绝，而是**写越界**——**因为索引是按输入的 `columns` 算的，而不是按输出的 `ne[0]`****；
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.metal`（13,359 字节，339 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-metal/ggml-metal-btl3.metal) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **Metal 的归一化乘在**内层 32 次循环里**，再加外层一次**：
+「**for (int code_index = 0; code_index < 32; ++code_index) { ... accumulator += dot(codebook[code], values) * inverse_sqrt_128; }**」然后「**output[token * args.rows + row] = ping[tid] * inverse_sqrt_128 * float(output_signs[row]);**」；
+⭐⭐⭐⭐⭐ **这是「归一化几次」这个问题的**第三个**答案**：**CPU `mul_mat_vec` 是 **2 次**、CUDA `vocab` 是 **1 次**、Metal `avq2` 是 **32 + 1 次****；
+⭐⭐ 判据（本轮最重要）「**「乘了几次」与「放大了多少」是**两个不同**的问题——因为乘法可以**分配到加法的每一项**上，而总和不变****」；
+⭐⭐ 而它在浮点上**不**等价：**`sum_i (dot_i * c) = (sum_i dot_i) * c` 在数学上成立，而 **32 次单独的舍入**会累积误差——故 Metal 的误差预算是 CPU 的 **32 倍****；
+⭐⭐ 判据「**「数学等价」与「数值等价」之间的差距，恰好是**两次运算的舍入次数之差****」（§10.226 那条的**第二次**实例）；
+⭐⭐ 而这条给 §10.239 一个**修正**：**「归一化次数取决于变换方向数」在 CPU 与 CUDA 上成立，而 **Metal 的 32 次内层乘不遵循它****；
+(c) ⭐⭐⭐⭐⭐ **INT4 在**三个后端**上都不做 FWHT**：
+「**const int groups_per_row = args.columns / 128; float accumulator = 0.0f; for (int group = 0; group < groups_per_row; ++group) { ... accumulator += weight * input[...]; }**」——**`kernel_btl3_int4` 没有 `inverse_sqrt_128`**；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个量化格式的品质」不只取决于**比特数**，还取决于「它有没有一个把误差**分散到全维度**的变换」——**而 FWHT 正是那个变换****」；
+⭐⭐ 而摊开的手段只有两种：**旋转（Hadamard）或分组补偿（scale／zero）——**而 AVQ2 **两者都有**，INT4 **只有后者****；
+⭐⭐ 判据「**「一个分块粒度」往往等于「一个**误差补偿**的粒度」——而 **128 这个数在 AVQ2 里是**变换块长**，在 INT4 里是**补偿块长**——同一个数，两种用途****」；
+⚠️ **仍缺的**：**三个后端都不做 FWHT 在 INT4 上，故「两者的质量差距」**完全**由变换造成——而**本报告没有 AVQ2 与 INT4 在同一模型上的 KLD 对比**，**故这个因果只能定性，不能定量**；
+(d) 🔥🔥🔥🔥 **Metal 的 `vocab_rows` 越界 token **写 0**，与 CUDA 一致、与 CPU 相反**：
+「**if (token < 0 || token >= args.vocabulary) { output[token_index * args.columns + column] = 0.0f; return; }**」；
+⭐⭐ 故「写 0」是**两个 GPU 后端共有**的行为，而 CPU 侧是 `continue;`（不写）——**故 §10.242 那条的「CUDA 与 CPU 不同」应升级为「GPU 与 CPU 不同」**；
+(e) ⭐⭐⭐⭐ **Metal 的 probe 类型集是**五种**，而 CUDA 侧没有 `I16`**：
+「**packed->type == GGML_TYPE_I8 || packed->type == GGML_TYPE_I16 || packed->type == GGML_TYPE_I32 || packed->type == GGML_TYPE_F16 || packed->type == GGML_TYPE_F32**」——**而 CUDA 侧四个 probe 的类型集是 2/2/4/2 种**；
+(f) ⭐⭐⭐⭐ **`vocab_base` 的 Metal 与 CUDA 版本**逐字段相同**（十个条件全对得上）**，**而两者**都不**检查 `op->ne[]` 与 `is_contiguous(op)`**；
+⭐⭐ 而 `vocab_head` 用**相等**校验 input 维度、`vocab_rows` 用**比例**（`columns * 3 / 4`）——**两种不同的校验风格** — [src-btl3-metal-btl3-h]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -28930,7 +29240,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=336, evidence=2441, claims=1789, claims_high=1442, claims_disputed=9, trace_events=740, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=336, evidence=2451, claims=1794, claims_high=1447, claims_disputed=9, trace_events=740, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
