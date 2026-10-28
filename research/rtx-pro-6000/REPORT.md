@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：307 ｜ **证据数**：2301 ｜ **主张数**：1696（高置信 1352，争议 9）
+> **来源数**：309 ｜ **证据数**：2307 ｜ **主张数**：1701（高置信 1357，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -20139,6 +20139,240 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **不是「它为什么慢」，而是「它在什么条件下能达到作者认可的速度」——
 > ⚠️ 而作者认可的唯一速度标准是「能生成」（`executes`）。**
 
+### 10.150 🔥🔥🔥🔥🔥 **CUDA 侧根本还没实现 INT4 与压缩词表的算子**
+
+[c-cuda-lacks-int4-and-vocab-ops]
+
+> 「**CUDA currently accelerates repeating AVQ2 decoder projections.
+> It does not yet implement the INT4 or compressed vocabulary custom
+> operations, so no end-to-end CUDA throughput claim should be made from
+> the standalone CUDA projection benchmark.**」
+>
+> —— `docs/btl-3-compact-metal-runtime-2026-07-19.md · Boundaries`
+
+> **⚠️ 而未实现部分占权重
+> 744 MB（8.9%）+ 668 MB（8.0%）= 1,411 MB（16.9%）。**
+>
+> **⭐⭐⭐⭐⭐ 这是本报告 169 轮以来关于「RTX PRO 6000 上这个模型为什么慢」
+> 最硬的一条证据，而它完全不是本报告猜的方向**：
+> **§10.129 我猜「两个低利用率开销叠在一起」
+> （AVQ2 matvec 无 batch + LoRA 瘦矩阵）——
+> ⚠️ 而真相是「有两个组件根本没走自定义算子」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「慢」有三种完全不同的病因：
+> ① 算子写得差（低利用率）；② 算子没写（走通用路径）；
+> ③ 算子写对了但被调用次数太多——**
+> **⚠️ 而「优化一个算子」只对 ① 有效，
+> 对 ② 无效，因为那里根本没有算子可优化。**
+>
+> ⭐⭐ **与「两种放置标记」的设计完全咬合**：
+> **「This keeps CUDA from accepting storage for custom operations it
+> cannot execute」——
+> ⚠️ 即作者知道 CUDA 不完整，
+> 并且主动用标记阻止 CUDA 接手那些张量。**
+>
+> **⭐⭐ 判据：**
+> **「一个后端不支持的张量」有两种处理方式：
+> ① 让它回退到 CPU（慢但正确）；② 在模型加载时就拒绝——
+> ⚠️ 而作者选了第三种：用标记把它钉在另一个后端上。
+> 这在「同一台机器上有两个后端」时有效，在「只有 CUDA」时无解。**
+>
+> ⭐⭐ **这解释了一个本报告一直觉得奇怪的现象**：
+> **§10.101 的 `43.16 tok/s` 是在「纯 CUDA」机器上测的——
+> ⚠️ 如果 CUDA 缺两个算子，
+> 那 43.16 里必然包含「走通用路径」的代价。**
+>
+> **⭐⭐ 判据：**
+> **「一个基准数字」的可比性，取决于
+> 「它跑的是不是同一个后端实现」——**
+> **⚠️ 而「同一个模型、同一张卡、同一个引擎」不足以保证这一点，
+> 因为后端内部还有「哪些算子被实现了」这个维度。**
+>
+> ⭐⭐ **故「CUDA 上的 43.16 tok/s」不能与「Metal 上的 2.483 tok/s」直接比**，
+> 也不能与「未来的完整 CUDA」比——
+> **⚠️ 因为前者是两个不同完整度的实现。**
+>
+> **⭐⭐ 判据：**
+> **当一个数字旁边写着「standalone benchmark」时，
+> 要问的是「standalone 相对于什么」——**
+> **⚠️ 这里的答案是「相对于完整模型」，
+> 而作者明确禁止从它推出端到端结论。**
+
+### 10.151 ⚠️⚠️⚠️ 算一下：有效带宽只有峰值的 **20.2%**
+
+[c-effective-bandwidth-is-20-percent]
+
+> **每 token 需读 8.39 GB → `1000/43.16 = 23.17 ms` →
+> `8,392,369,600 / 23.17 ms = 362.2 GB/s`**
+> **而 §10.137 记录的标称带宽是 1,792 GB/s →
+> `362.2 / 1792 = 20.2%`**
+
+> **⭐⭐⭐⭐ 这是本报告第一次把「tok/s」换算成「带宽效率」，
+> 而它把整个讨论的口径换掉了**：
+> **在此之前，本报告一直在问「43.16 tok/s 是快还是慢」——
+> ⚠️ 而 20.2% 说明：它与「显存带宽受限」这个假设相差 5 倍。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个 decode 速度」只有在「接近带宽上限」时才可以用带宽解释——**
+> **⚠️ 而 20.2% 意味着：瓶颈不在 DRAM，在别处。**
+>
+> ⭐⭐ **而「别处」在哪，本轮恰好有了答案的一半**：
+> **① 16.9% 的权重走的是「没有自定义算子」的路径（§10.150）；
+> ② AVQ2 内核「在输出行块之间重复了输入变换」（作者自述，§10.152）——**
+> **⚠️ 两者都是「算得慢」，不是「读得慢」。**
+>
+> **⭐⭐ 判据：**
+> **「算得慢」与「读得慢」的判据不同：
+> 读得慢 → 提高带宽或用更低比特；
+> 算得慢 → 提高占用率或减少冗余计算——**
+> **⚠️ 而 20.2% 恰恰说明「提高带宽」这条路已经走到头了。**
+>
+> ⭐⭐ **一个反直觉的推论**：
+> **RTX PRO 6000 的 1,792 GB/s 在这条路径上没有被用满——
+> ⚠️ 故「换一张带宽更高的卡」不会让它线性变快。**
+>
+> **⭐⭐ 判据：**
+> **「一个 workload 是带宽受限还是算力受限」这个问题，
+> 可以用「实测有效带宽 ÷ 标称带宽」回答——**
+> **⚠️ 接近 100% → 带宽受限；远低于 → 算力/占用率受限。**
+>
+> ⚠️ **边界**：**这个 20.2% 假设「每生成一个 token 要读一遍全部权重」。
+> 若存在 L2 常驻等复用，真实带宽需求更低、效率更低；
+> 反之若权重被重复读，效率更高。本报告未验证。**
+
+### 10.152 🔥🔥🔥🔥🔥 作者自己承认 AVQ2 内核**重复计算输入变换**
+
+[c-avq2-kernel-known-inefficiency]
+
+> 「**AVQ2 remains the dominant custom operator and its current fused kernel
+> repeats input transforms across output-row blocks. A future three-stage
+> implementation can compute the input transform once, run a coalesced
+> decoder matmul, and transform the output in place.**」
+
+> **⭐⭐⭐⭐⭐ 这条把 §10.129 的「推断」变成了「作者的已知项」**：
+> **§10.129 我推断「AVQ2 的 matvec 没有 batch 维度，故占用率低」；
+> 本条说「fused kernel 在每个输出行块里都重算一遍输入变换」——
+> ⚠️ 即真正的浪费不是「占用率」，而是「同一个输入变换被算了 N 次」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个融合内核」的常见错误，
+> 是把「本该只做一次的准备工作」放进了
+> 「每个输出块都要做一次」的位置——**
+> **⚠️ 因为融合的目的本来是「少一次内存往返」，
+> 而它顺手把「只做一次的事」也搬进了循环。**
+>
+> ⭐⭐ **作者给的三段式方案正好是这个错误的解药**：
+> **① 输入变换只算一次；② 合并访存的 decoder matmul；③ 输出原地变换——**
+> **⚠️ 即「融合」被拆回三段，
+> 而拆开的理由不是「融合不好」，
+> 而是「融合的粒度错了」。**
+>
+> **⭐⭐ 判据：**
+> **「融合」的收益是「少一次往返」，
+> 代价是「把不同频率的操作绑在一起」——**
+> **⚠️ 当两个操作的执行频率不同（一个每次、一个每块）时，
+> 融合就变成了浪费。**
+>
+> ⭐⭐ **推论**：
+> **如果 AVQ2 占了 65.6% 的字节（§10.125），
+> 而它的内核又有这个已知冗余，
+> 那「20.2% 的带宽效率」里有一部分是「重复计算挤掉了访存」——**
+> **⚠️ 即修掉这个冗余，可能同时提高计算效率与有效带宽。**
+>
+> **⭐⭐ 判据：**
+> **「一个优化能不能同时改善两个指标」是一个强信号——
+> ⚠️ 因为它说明那个冗余同时浪费了两种资源。**
+>
+> ⭐ **时间线**：**作者用「a future three-stage implementation」描述它——
+> ⚠️ 即在本报告所读的所有文档里，这个修复尚未实现。**
+
+### 10.153 🔥🔥🔥🔥 为复现符号，作者**用纯 Python 重写了一遍 MT19937**
+
+[c-pure-python-mt19937]
+
+> `tools/btl3_gguf/signs.py`（1,804 字节）首行：
+> 「**Portable reproduction of Torch CPU seeded sign tensors**」
+>
+> 实现含 init（`1812433253`）、`_twist()`（`0x9908B0DF`）、
+> tempering（`0x9D2C5680` / `0xEFC60000`）全流程；
+> 取符号：**`values[index] = 1 if generator.next_u32() & 1 else -1`**
+
+> **⭐⭐⭐⭐ 这条闭合了 §10.145 那个「用种子代替数据」的代价问题，
+> 而答案比本报告预期的更彻底**：
+> **§10.145 我说「复现 → 依赖 Torch 的 RNG 实现，
+> 而它在不同版本 / 设备上是否逐位一致是个坑」；
+> 本条说「他们没有依赖 Torch——他们自己写了一个 MT19937」——**
+> **⚠️ 即那个「环境依赖」被换成了一份 1,804 字节的源码。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「消除一个依赖」的最彻底方式，不是「固定版本」，
+> 而是「重新实现那个依赖的最小必要部分」——**
+> **⚠️ 而这里「最小必要部分」恰好是「MT19937 + 一次取低位」，约 40 行。**
+>
+> ⭐⭐ **`& 1` 这个选择尤其值得记**：
+> **MT19937 输出 32 位，取最低位得到 1 bit；
+> ⚠️ 而 2 整除 2³²，故这个映射无偏——
+> 即它恰好等价于 `torch.randint(0, 2)`，不需要拒绝采样。**
+>
+> **⭐⭐ 判据：**
+> **「一个随机位」可以从「一个随机字」里取任意一位——
+> ⚠️ 但只有当「模数整除字长」时，取低位才无偏。**
+>
+> ⭐⭐ **更深的含义**：
+> **「可移植的复现」这件事，
+> 最终落到了「一个 1997 年的算法 + 一个 C 常量」上——
+> ⚠️ 即整个 AVQ2 格式的可读性，悬在 `1812433253` 这个数上。**
+>
+> **⭐⭐ 判据：**
+> **当一个格式的正确性依赖「某个 RNG 的具体实现」而不是「某个分布」时，
+> 它就不是「统计兼容」，而是「逐位兼容」——**
+> **⚠️ 而逐位兼容要求「连 tempering 的掩码都不能变」。**
+>
+> ⚠️ **边界**：**本报告没有验证这份 Python 实现与 Torch 的输出逐位一致**，
+> 只能说「按代码看，常量与流程都是标准 MT19937」。
+
+### 10.154 ⚠️⚠️ 词表尺寸：**248,320 × 5,120**
+
+[c-vocab-is-248320x5120]
+
+> 「**full 248,320 x 5,120 vocabulary head: 22.15 ms**」
+>
+> **248,320 × 5,120 = 1,271,398,400 参数；
+> 2.000 bpw 下 = 317,849,600 字节/张量，
+> 嵌入 + 输出两份 ≈ 635.7 MB**，与 §10.125 的
+> `vocabulary` 667,713,856 字节（13 张量）同量级。
+
+> **⭐⭐ 这个尺寸值得单独记，因为它是「大词表」这条线的第一个硬数字**：
+> **Qwen 系的词表在 15 万量级，而这里 248,320 明显更大——
+> ⚠️ 即这个模型要么用了扩展词表，要么用了多语言扩充。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「词表大小」不是一个小参数，
+> 它直接决定了「每 token 要读多少固定开销」——**
+> **⚠️ 在 2 bpw 下，光嵌入 + 输出就是 635.7 MB，即 8.39 GB 的 7.6%。**
+>
+> ⭐⭐ **与 §10.150 直接相乘**：
+> **这 635.7 MB 所在的算子，在 CUDA 上没有自定义实现——
+> ⚠️ 即每生成一个 token，都有约 7.6% 的字节走通用路径。**
+>
+> **⭐⭐ 判据：**
+> **「一个组件的字节占比」与「它有没有被优化」是两个独立的乘数——**
+> **⚠️ 而「占比大」且「没优化」的组件，
+> 是性能分析里最该先看的地方。**
+>
+> ⭐⭐ **另一组数字**：**Metal 上词表头 22.15 ms，
+> 而整个 AVQ2 解码套件 735.6 ms——即词表只占 3%。**
+>
+> **⭐⭐ 判据：**
+> **「一个组件的字节占比」与「它的时间占比」可以差一个数量级——**
+> **⚠️ 而差异的原因是「每字节需要多少次运算」。**
+>
+> ⚠️ **另一条 Metal 侧的对照数字**：
+> **AVQ2 4096×4096×4 = 2.49 ms，比标量 CPU 参考快 42.8×；
+> 整机只有 2.483 tok/s（M2 / 16 GB / 128-token 上下文 / `--no-mmap`）——
+> 放置修正前是 0.178 tok/s，提升 13.9×。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -23591,6 +23825,11 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 1. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-gguf-exporter.md`（2,464 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-gguf-exporter.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥 **符号向量是用种子重新生成的**：「**AVQ2 codes, affines, and exact Torch-seeded sign vectors**」，而五条校验之一是「**exact regeneration of seeded signs**」；⭐⭐⭐⭐ 判据（本轮最重要）「**『一个模型文件是不是自足的』取决于『它有没有隐藏的随机状态』——而『用种子生成』意味着：文件 + 种子才等于权重**」；⭐⭐ 判据「**当『随机性』进入一个确定性管线的中间步骤时，它就从『噪声』变成了『参数』——而『参数』必须被存储或被复现**」；⭐⭐ 判据「**『用种子代替数据』把『文件大小』换成了『环境依赖』——而这笔交易在『同一个人同一台机器』上几乎免费，在『别人复现』时可能非常昂贵**」；(b) 🔥🔥🔥 **导出器从不重建稠密解码器**：「**It never reconstructs a dense decoder. Safetensors are mmap-backed and materialized one tensor at a time.**」，且「**Every one of the 158 source files is size- and SHA-256-checked against the frozen package manifest before planning or writing.**」；⭐⭐⭐ 判据（本轮最重要）「**『能不能在一张卡上做出一个比它显存更大的模型』——答案是能，只要你不把模型整体读进来**」；⭐⭐ 对 RTX PRO 6000 的推论：**96 GB 显存是「能推理多大的模型」的上界，不是「能生产多大的模型」的上界**；⭐⭐ 判据「**『显存』这个约束在『推理』与『生产』两个阶段是不同量级的**」；(c) ⚠️⚠️ **基座是 Qwen3.6**：「**the custom Qwen3.6 llama.cpp backend**」；⭐⭐ 判据（本轮最重要）「**『一个模型的名字』在被写作『XX-class』时，它是一个规格；在被写作『Qwen3.6』时，它是一个可查的对象**」；⭐⭐ 判据「**『补上一个模型名』的价值，不在于名字本身，而在于『它让一堆孤立数字有了一个可以对照的结构』**」；(d) ⭐⭐⭐ **170,510,920 字节的差额有解释**：「**The 170,510,920-byte reduction from the source package is expected: the package retains two superseded BF16 island files for provenance, while the export emits only their final INT4 demotions.**」；⭐⭐ 判据（本轮最重要）「**『一个源的字节数』可以大于『一个模型的字节数』，因为它可能包含『为了可追溯性而保留的历史』**」；⭐⭐ 判据「**『一个可复现的产物』与『一个可审计的产物』的差别在于：前者只需要『最终状态』，后者还需要『被舍弃的分支』**」；(e) ⭐⭐⭐ **五条逐张量校验**：「**canonical-name equality; source-shape equality; exact GGUF storage-type equality; exact raw payload-byte equality after required Qwen transformations; exact regeneration of seeded signs**」，三层抽样 **L13 28 张量 / 322,295,104 B；L40 44 / 98,427,808 B；L47 35 / 122,932,064 B** — [src-btl3-doc-gguf-exporter]
 
 2. [GitHub / Badtheorylabs — BTL-3 `artifacts/release/BTL-3-Compact-AVQ2.report.json`（1,058 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/artifacts/release/BTL-3-Compact-AVQ2.report.json) —（2026-10 抓取）。⚠️⚠️⚠️ **本报告预期它含 kernel 开销分解——但它没有**：全部字段只有「**字节账本 + `exporter_unsupported: []` + `native_runtime_gaps: []` + `output_bytes: 8392369600` + `output_sha256: 2ddf9527...dc30c` + `verified_tensor_count: 2416` + `verified_payload_count: 2416`**」；⭐⭐ 判据（本轮最重要）「**『一个发布报告里有什么字段』反映了『发布者认为什么是需要证明的』——这份报告证明的是『字节对、校验和对』，不是『跑得快』**」；⭐⭐ 判据「**当一份产物有两份独立文档都省略了同一个维度时，那个维度的缺失是设计，不是疏漏**」；⭐⭐ 判据（本轮最重要）「**『一个问题在源材料里找不到答案』有两种情况：① 材料不全；② 那个问题不在材料的问题空间里——而区分它们的方法是：看材料有没有在别处讨论这件事。这里证明是 ②**」；⭐ 故本报告必须换问题：**不是「它为什么慢」，而是「它在什么条件下能达到作者认可的速度」——而作者认可的唯一速度标准是「能生成」** — [src-btl3-release-report]
+### CUDA 缺两个算子、20.2% 带宽效率、纯 Python MT19937、248K 词表（第九十四轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-metal-runtime-2026-07-19.md`（2,601 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-metal-runtime-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它含一句足以改写本报告全部性能讨论的话**：(a) 🔥🔥🔥🔥🔥 **CUDA 侧根本还没实现 INT4 与压缩词表的自定义算子**：「**CUDA currently accelerates repeating AVQ2 decoder projections. It does not yet implement the INT4 or compressed vocabulary custom operations, so no end-to-end CUDA throughput claim should be made from the standalone CUDA projection benchmark.**」，而 Metal 侧四项全有（「**AVQ2 decoder projections; affine INT4 projections; compressed vocabulary output; compressed embedding lookup, including rescued rows**」）；⚠️ 未实现部分占权重 **744 MB（8.9%）+ 668 MB（8.0%）= 1,411 MB（16.9%）**；⭐⭐ 判据（本轮最重要）「**『慢』有三种完全不同的病因：① 算子写得差；② 算子没写（走通用路径）；③ 算子写对了但被调用太多次——而『优化一个算子』只对 ① 有效，对 ② 无效**」；(b) ⭐⭐⭐⭐ **两种「打包张量放置标记」**：「**Packed tensor placement uses two markers. Repeating AVQ2 tensors use the cross-backend marker supported by Metal and CUDA. INT4, rescued vocabulary, and non-repeating vocabulary AVQ tensors use a Metal-only marker. This keeps CUDA from accepting storage for custom operations it cannot execute.**」；⭐⭐ 判据「**『一个后端不支持的张量』有三种处理方式：回退 CPU / 加载时拒绝 / 用标记钉在另一个后端——而第三种在『只有 CUDA』时无解**」；(c) 🔥🔥🔥🔥🔥 **作者自己承认 AVQ2 内核重复计算输入变换**：「**AVQ2 remains the dominant custom operator and its current fused kernel repeats input transforms across output-row blocks. A future three-stage implementation can compute the input transform once, run a coalesced decoder matmul, and transform the output in place.**」；⭐⭐ 判据（本轮最重要）「**『一个融合内核』的常见错误，是把『本该只做一次的准备工作』放进『每个输出块都要做一次』的位置**」；⭐⭐ 判据「**『融合』的收益是『少一次往返』，代价是『把不同频率的操作绑在一起』——当两个操作的执行频率不同时，融合就变成了浪费**」；(d) ⭐⭐⭐ **四条逐算子相对误差门**：「**AVQ2 4096 x 4096 x 4: max relative error `3.66604e-05`；INT4: `2.15352e-06`；vocabulary head: `1.43051e-06`；embedding rows: `5.96046e-08`**」，测试机「**base Apple M2 with 16 GB unified memory**」，加载尺寸「**7.81 GiB**」；(e) ⚠️⚠️ **词表尺寸第一次出现确切数字：248,320 x 5,120**：「**full 248,320 x 5,120 vocabulary head: 22.15 ms**」，**= 1,271,398,400 参数，2.000 bpw 下 317,849,600 字节/张量，两份约 635.7 MB**，与 §10.125 的 `vocabulary` 667,713,856 字节同量级；⭐⭐ 判据「**『词表大小』直接决定了『每 token 要读多少固定开销』**」；(f) ⭐⭐⭐ **M2 放置修正前后的对比**：「**Prompt processing 0.609 -> 2.297 tok/s；Token generation 0.178 -> 2.483 tok/s**」，「**Generation improved by 13.9x**」；隔离测量「**AVQ2 4096 x 4096 x 4: 2.49 ms, 42.8x over the scalar CPU reference；weighted representative AVQ2 decoder suite: about 735.6 ms；INT4 decoder suite: about 70.4 ms**」 — [src-btl3-doc-metal-runtime]
+
+2. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/signs.py`（1,804 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/signs.py) —（2026-10 抓取）。🔥🔥🔥🔥 **为复现符号，作者用纯 Python 重写了一遍 MT19937**：首行「**Portable reproduction of Torch CPU seeded sign tensors**」；实现含 init（`1812433253`）、`_twist()`（`0x9908B0DF`）、tempering（`0x9D2C5680` / `0xEFC60000`）全流程；取符号「**values[index] = 1 if generator.next_u32() & 1 else -1**」；⭐⭐⭐⭐ 判据（本轮最重要）「**『消除一个依赖』的最彻底方式，不是『固定版本』，而是『重新实现那个依赖的最小必要部分』——而这里『最小必要部分』恰好是『MT19937 + 一次取低位』，约 40 行**」；⭐⭐ 判据「**MT19937 输出 32 位，取最低位得到 1 bit；而 2 整除 2^32，故这个映射无偏——即它恰好等价于 `torch.randint(0, 2)`，不需要拒绝采样**」；⭐⭐ 判据「**当一个格式的正确性依赖『某个 RNG 的具体实现』而不是『某个分布』时，它就不是『统计兼容』，而是『逐位兼容』**」；⚠️ 本报告未验证这份实现与 Torch 逐位一致 — [src-btl3-tools-signs-py]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -23730,7 +23969,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=307, evidence=2301, claims=1696, claims_high=1352, claims_disputed=9, trace_events=683, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=309, evidence=2307, claims=1701, claims_high=1357, claims_disputed=9, trace_events=687, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
