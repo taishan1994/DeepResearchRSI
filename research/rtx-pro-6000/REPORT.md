@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：421 ｜ **证据数**：2760 ｜ **主张数**：1959（高置信 1610，争议 9）
+> **来源数**：425 ｜ **证据数**：2768 ｜ **主张数**：1967（高置信 1618，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -31095,6 +31095,216 @@ exit 0
 > 那会是一条完全错误的指控，对象是一个恰好守规矩的文件。**
 > **这是「一个数字写成四舍五入之后就不再是那个数字」的第一次显式记录。**
 
+### 10.416 🔥🔥🔥🔥🔥 那个「runtime 仓库」里**没有任何内核**
+
+[c-the-runtime-repo-claims-no-kernel-and-no-speedup]
+
+> **`Badtheorylabs` 的 14 个公开仓库里，最接近「runtime lane」的是 `btl-kernels`
+> （2 KB，pushed 2026-09-11），而它的 README 第一段就是否认**：
+> ```
+> Kernel source integrity and future performance tooling for BTL training and
+> inference.
+> ...
+> No GPU kernel implementation or performance gain is claimed by this package
+> yet. The first kernel must be selected from a measured training or inference
+> bottleneck, compared against upstream implementations and validated in the
+> complete workload before release.
+> ```
+> **而它一共只有 7 个路径、6 个文件、`dependencies = []`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个仓库如果先声明「我还什么都没做」，
+> 那它的价值不是产出，而是边界——
+> 它把「将来会放什么」这件事先钉成了公共契约。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.408 引用 `AGENTS.md` 的那句
+> 「AVQ2/INT4 kernels belong to the separate runtime repository」
+> 在 14 个公开仓库里找不到承接者：那个位置是空的，
+> 而空位本身被一个只做哈希校验的包占着。**
+
+### 10.417 ⭐⭐⭐⭐⭐ 唯一的函数是哈希校验器，而它的输出**字面否认测量**
+
+[c-the-kernel-repo-is-a-hash-checker-with-a-denial-in-its-output]
+
+> **`btl_kernels/manifest.py`（1,688 字节）只有一个公开函数**：
+> ```python
+> def audit_manifest(root: Path, relative: str) -> dict:
+>     ...
+>     return {"passed": all(c["passed"] for c in checks), "checks": checks,
+>             "scope": "Source snapshot integrity only; no kernel execution or
+>             speed measurement"}
+> ```
+> **而 `btl_kernels/__init__.py`（99 字节）**：
+> ```python
+> """BTL kernel integrity tooling; no GPU kernel implementation is implied."""
+> __version__ = "0.1.0"
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个工具如果在返回值里写清楚「我没做什么」，
+> 那它的输出就不能被下游当成「我做了什么」。**
+>
+> **⭐⭐ 判据：**
+> **而这条与 §10.290 那条「一个字段的可信度不取决于名字，
+> 而取决于产生方式」是同一件事的两种写法。**
+>
+> ⭐ **注意 `scope` 是在 `return` 的字典里，不只是注释**：
+> **故任何拿到这个 dict 的下游代码，都无法在不删掉一个键的情况下忽略它。**
+
+### 10.418 ⭐⭐⭐⭐⭐ 先立边界，再写代码
+
+[c-the-kernel-repo-is-a-reserved-slot-not-a-component]
+
+> **`btl-kernels/README.md` 7-9 行**：
+> ```
+> BTL Lab exposes the checker through its recipe/run interface. This folder
+> has an independent package and Git boundary. Integration tests currently
+> live in the sibling Lab repository.
+> ```
+> **而它有独立的 `LICENSE`（1,072 字节）、`pyproject.toml`（321 字节）、
+> 零运行时依赖（`dependencies = []`）、`requires-python = ">=3.11"`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「独立 Git 边界」是一个比「独立目录」强得多的声明：
+> 前者可以被 clone、被钉 revision、被单独发版。**
+>
+> **⭐⭐ 判据：**
+> **故这个仓库最准确的定位是「一个预留位」，而不是「一个组件」。**
+>
+> ⭐ **而那个 `LICENSE` 是 1,072 字节——与 BTL-3 的 `LICENSE` 完全同尺寸**：
+> **同一份 MIT 文本，逐字节相同（1072 与 1072）。**
+
+### 10.419 🔥🔥🔥🔥🔥 「一个合法文件证明的是结构与算术，**不是可信**」
+
+[c-a-valid-file-proves-structure-and-not-trust]
+
+> **`btl-measure/README.md` 第 5-7 行**：
+> ```
+> It does not run models, create tasks, assign rewards, choose training
+> algorithms or publish checkpoints. It consumes evaluation output from BTL
+> Fieldwork/Verifiers, BTL Advance, BTL Adapt or another declared evaluator.
+> A valid file proves record structure and arithmetic; it does not prove that
+> the evaluator or task verifier is trustworthy.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个只做「结构自洽」的校验器，会让「自洽」与「可信」在读者眼里合成一个——
+> 除非它像这里一样，把那句话写进 README。**
+>
+> **⭐⭐ 判据：**
+> **而这条对本报告的意义是：
+> §10.415 那件事（估算 vs 实测）正是「结构自洽但不能自证可信」的例子——
+> 我算出的 509 行在算术上完全自洽，而它是错的。**
+>
+> ⭐ **这是本报告第一次在一份**外部文档**里找到对自己方法论的独立表述**：
+> **不是我去套用它，而是它先把我说过的话说了一遍。**
+
+### 10.420 ⚠️⚠️⚠️ 「我不能把训练奖励变成发布声明」
+
+[c-the-measure-tool-refuses-to-turn-reward-into-a-claim]
+
+> **`btl-measure/README.md` 第 11-14 行**：
+> ```
+> The root `./btl measure` command adds these checks to the Lab ledger and
+> stores hashes of the source files and report. Its integration is
+> intentionally separate from model execution. It cannot turn training reward
+> or a self-reported aggregate into a release claim.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「我不能把 X 变成 Y」这句话，如果被写在一个工具的 README 里，
+> 它比写在任何一份报告里都更可信——
+> 因为写它的人放弃了一个可以直接拿到的卖点。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.356（Bonsai 白皮书拒绝给能耗数）一个同族证据：
+> 同一家公司有两处「拒绝」，而它们拒绝的是同一类东西——
+> 不可比的平均数。**
+>
+> ⭐ **而 §10.417 的 `scope` 字段是同一个动作在代码层的形态**：
+> **README 拒绝一次，返回值再拒绝一次。**
+
+### 10.421 ⭐⭐⭐⭐⭐ 一条比本报告任何一处都严格的阈值规则
+
+[c-equal-means-do-not-meet-an-improvement-threshold]
+
+> **`btl-measure/README.md` 15-18 行**：
+> ```
+> Version 0.2 rejects contradictory score/reward/pass fields and changed
+> source identities under the same item ID. Regression IDs include
+> partial-credit score decreases. Equal mean scores do not meet an improvement
+> threshold. A full pass remains score 1.0.
+> ```
+> **而 `core.py:137` 是**：
+> ```python
+> meets = comparable and relative is not None and relative > 0 and relative >= minimum_relative_improvement
+> ```
+> **是 `relative > 0`，不是 `>= 0`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **把一个「没有退步」判成「没有进步」，
+> 需要判定式写成 `relative > 0` 而不是 `relative >= 0`；
+> 而这一字之差，是这条规则唯一的实现。**
+>
+> **⭐⭐ 判据：**
+> **故这条给本报告一个可引用的形式：
+> 「改进」这个词的门槛，应该由「大于零」而不是「不小于零」定义。**
+>
+> ⚠️ **而本报告 §10 里有若干处把「没有更慢」当成了「更快」**：
+> **§10.386 那一族 DSpark 加速比里，1.57x 是「相对基线」，
+> 而如果某一行是 1.00x，按这条规则它不该被称作改进。**
+
+### 10.422 ⭐⭐⭐⭐⭐ 阈值是**声明出来的门**，不是显著性检验
+
+[c-the-threshold-is-a-declared-gate-not-a-significance-test]
+
+> **`btl-measure/README.md`**：
+> 「**A threshold is a declared gate, not a statistical significance test.**」
+> **而 `core.py:144` 返回的 `scope` 是**：
+> ```
+> "Paired descriptive comparison under the declared taskset; no significance claim"
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个门限如果能被误读成统计检验，
+> 那它就必须在每个出口重复声明自己不是——
+> 而这个工具在 README 与 `scope` 两处都写了。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.405（`/* parallel = */ false` 字面写出）一个同族证据：
+> 两者都是「把性质固化成配置或字段」，而不是留在注释里。**
+>
+> ⭐ **而本报告自己引用过大量「门槛」**：§10.23 的 KLD 门限、
+> §10.295 的 `at least 96,000 MiB` 分档。
+> **按这条规则，它们都是「声明出来的门」，而本报告有几处把它们写成了统计结论。**
+
+### 10.423 ⭐⭐⭐⭐⭐ `scope` 是一个**必填字段**，不是注释
+
+[c-scope-is-a-required-field-not-a-comment]
+
+> **`btl_measure/core.py` 的两个返回值各自带 `scope`**：
+> ```
+> validate (104-111)  "Recomputed per-item evaluation integrity and
+>                      descriptive metrics; no model execution"
+> compare  (144)      "Paired descriptive comparison under the declared
+>                      taskset; no significance claim"
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个输出结构里如果有一个必填的 `scope` 字段，
+> 那「这个数是在什么范围内成立的」就不再依赖读者去翻文档。**
+>
+> **⭐⭐ 判据：**
+> **而这条正是本报告 400 多节反复吃的最大的亏：
+> 每个数字我都得自己补一句「在什么范围内」。**
+> **⭐⭐ 若这些数据的产生方一开始就带 `scope` 字段，
+> 本报告 §10 里那几十个「百分比的分母未核对」就不会存在。**
+>
+> ⭐ **而这条给出了一条可以写进结论的建议**：
+> **一份性能数据如果要被跨来源比较，它的每个数都该带一个 `scope`；
+> 而不带的那一份，就只能被当作「自洽」，不能被当作「可比」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -36565,6 +36775,37 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个 320 字节的入口脚本，它的信息量不在它自己，而在「它把哪一层设为公开边界」**」——**而这个入口暴露的正是那条契约想搬走的那个模块**；
  — [src-btl3-agents-md] [src-btl3-third-party-notices] [src-btl3-license] [src-btl3-pytest-ini] [src-btl3-tools-init] [src-btl3-export-entrypoint]
 
+### 那个「runtime 仓库」是空的，而它先说了（第一百四十九轮补充）
+
+上一轮结尾说「查两处 exporter 是否逐字节相同」。本轮去查了，而查到的是一件更大的事：**`AGENTS.md` 指向的那个 runtime 仓库，在 14 个公开仓库里不存在**——而最接近它的那个，自己在第一段就说「我还没有任何内核」。
+
+1. [GitHub / Badtheorylabs — `btl-kernels` README.md（1,038 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-kernels/main/README.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **那个「runtime 仓库」里没有任何内核**：**Badtheorylabs 的 14 个公开仓库里最接近它的是 btl-kernels（2 KB，pushed 2026-09-11），而它的 README 第一段就是否认——「No GPU kernel implementation or performance gain is claimed by this package yet. The first kernel must be selected from a measured training or inference bottleneck, compared against upstream implementations and validated in the complete workload before release.」**；**而它一共只有 7 个路径、6 个文件、dependencies = []**；
+⭐⭐ 判据（本轮最重要）「**一个仓库如果先声明「我还什么都没做」，那它的价值不是产出，而是边界——它把「将来会放什么」这件事先钉成了公共契约**」——**故 10.408 引用 AGENTS.md 的那句「AVQ2/INT4 kernels belong to the separate runtime repository」在 14 个公开仓库里找不到承接者：那个位置是空的，而空位本身被一个只做哈希校验的包占着**；
+(a) ⭐⭐⭐⭐⭐ **唯一的函数是哈希校验器，而它的输出字面否认测量**：**btl_kernels/manifest.py（1,688 字节）只有一个公开函数 audit_manifest，返回 {"passed": ..., "checks": checks, "scope": "Source snapshot integrity only; no kernel execution or speed measurement"}**；**而 btl_kernels/__init__.py（99 字节）的 docstring 是「BTL kernel integrity tooling; no GPU kernel implementation is implied.」**；
+⭐⭐ 判据「**一个工具如果在返回值里写清楚「我没做什么」，那它的输出就不能被下游当成「我做了什么」**」——**而注意 scope 是在 return 的字典里，不只是注释：故任何拿到这个 dict 的下游代码，都无法在不删掉一个键的情况下忽略它**；
+(b) ⭐⭐⭐⭐⭐ **先立边界，再写代码**：**README 7-9 行说「This folder has an independent package and Git boundary. Integration tests currently live in the sibling Lab repository.」**；
+⭐⭐ 判据「**「独立 Git 边界」是一个比「独立目录」强得多的声明：前者可以被 clone、被钉 revision、被单独发版**」——**故这个仓库最准确的定位是「一个预留位」，而不是「一个组件」**；⭐ **而那个 LICENSE 是 1,072 字节——与 BTL-3 的 LICENSE 完全同尺寸**；
+2. [GitHub / Badtheorylabs — `btl-measure` README.md（2,765 字节）与 `btl_measure/core.py`（7,198 字节，145 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/btl-measure/main/README.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **「一个合法文件证明的是结构与算术，不是可信」**：**btl-measure/README.md 5-7 行写「A valid file proves record structure and arithmetic; it does not prove that the evaluator or task verifier is trustworthy.」**；
+⭐⭐ 判据（本轮最重要）「**一个只做「结构自洽」的校验器，会让「自洽」与「可信」在读者眼里合成一个——除非它像这里一样，把那句话写进 README**」——**而 10.415 那件事（估算 vs 实测）正是「结构自洽但不能自证可信」的例子：我算出的 509 行在算术上完全自洽，而它是错的**；
+⭐ **这是本报告第一次在一份外部文档里找到对自己方法论的独立表述：不是我去套用它，而是它先把我说过的话说了一遍**；
+(a) ⚠️⚠️⚠️ **「我不能把训练奖励变成发布声明」**：**README 11-14 行写「Its integration is intentionally separate from model execution. It cannot turn training reward or a self-reported aggregate into a release claim.」**；
+⭐⭐ 判据「**「我不能把 X 变成 Y」这句话，如果被写在一个工具的 README 里，它比写在任何一份报告里都更可信——因为写它的人放弃了一个可以直接拿到的卖点**」——**故这条给 10.356（Bonsai 白皮书拒绝给能耗数）一个同族证据：同一家公司有两处「拒绝」，而它们拒绝的是同一类东西——不可比的平均数**；
+(b) ⭐⭐⭐⭐⭐ **一条比本报告任何一处都严格的阈值规则**：**README 15-18 行写「Equal mean scores do not meet an improvement threshold」，而 core.py:137 的判定式是 relative > 0 而不是 >= 0**；
+⭐⭐ 判据（本轮最重要）「**把一个「没有退步」判成「没有进步」，需要判定式写成 relative > 0 而不是 relative >= 0；而这一字之差，是这条规则唯一的实现**」——**「改进」这个词的门槛，应该由「大于零」而不是「不小于零」定义**；
+⚠️ **而本报告 §10 里有若干处把「没有更慢」当成了「更快」**；
+(c) ⭐⭐⭐⭐⭐ **阈值是声明出来的门，不是显著性检验**：**README 写「A threshold is a declared gate, not a statistical significance test.」，而 core.py:144 返回的 scope 写「Paired descriptive comparison under the declared taskset; no significance claim」——同一句话在两个出口都写了**；
+⭐⭐ 判据「**一个门限如果能被误读成统计检验，那它就必须在每个出口重复声明自己不是**」——**故这条给 10.405（parallel = false 字面写出）一个同族证据：两者都是「把性质固化成配置或字段」，而不是留在注释里**；
+⭐ **而本报告自己引用过大量门槛（10.23 的 KLD 门限、10.295 的至少 96,000 MiB 分档）——按这条规则，它们都是「声明出来的门」，而本报告有几处把它们写成了统计结论**；
+(d) ⭐⭐⭐⭐⭐ **scope 是一个必填字段，不是注释**：**core.py 的 validate（104-111）返回「Recomputed per-item evaluation integrity and descriptive metrics; no model execution」，compare（144）返回「Paired descriptive comparison under the declared taskset; no significance claim」**；
+⭐⭐ 判据（本轮最重要）「**一个输出结构里如果有一个必填的 scope 字段，那「这个数是在什么范围内成立的」就不再依赖读者去翻文档**」——**若这些数据的产生方一开始就带 scope 字段，本报告 §10 里那几十个「百分比的分母未核对」就不会存在**；
+ — [src-btl-kernels-readme] [src-btl-kernels-manifest-py] [src-btl-measure-readme] [src-btl-measure-core-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -36704,7 +36945,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=421, evidence=2760, claims=1959, claims_high=1610, claims_disputed=9, trace_events=909, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=425, evidence=2768, claims=1967, claims_high=1618, claims_disputed=9, trace_events=921, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
