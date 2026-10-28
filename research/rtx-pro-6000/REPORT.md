@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：325 ｜ **证据数**：2369 ｜ **主张数**：1744（高置信 1398，争议 9）
+> **来源数**：328 ｜ **证据数**：2377 ｜ **主张数**：1749（高置信 1403，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -22334,6 +22334,269 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > 故「BTL-3 到底有没有 CI」仍是未知的——
 > 本条只能证明「`tests/` 这一层没有 CI 专用分支」。
 
+### 10.198 🔥🔥🔥🔥🔥 `GGML_CUDA` 默认 `OFF`——一个默认构建**没有 CUDA**
+
+[c-ggml-cuda-default-off]
+
+> ```cmake
+> option(GGML_CUDA "ggml: use CUDA" OFF)          # 字面量 OFF，无平台例外
+> if (APPLE)   set(GGML_METAL_DEFAULT ON)
+> else()       set(GGML_METAL_DEFAULT OFF) endif()
+> option(GGML_METAL "ggml: use Metal" ${GGML_METAL_DEFAULT})
+> ```
+
+> **⭐⭐⭐⭐⭐ 这条回答了一个本报告从未明确问过的问题：
+> 「一个 RTX PRO 6000 用户按默认参数构建 `llama.cpp`，会得到什么」——
+> 答案是「一个完全没有 CUDA 的 llama.cpp」**：
+> **因为 `option(GGML_CUDA ... OFF)` 里那个 `OFF` 是字面量，
+> ⚠️ 不是 `${SOMETHING_DEFAULT}`。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个默认值是字面量还是变量」决定了它会不会随平台变化——**
+> **⚠️ 而 CUDA 用字面量、Metal 用变量，
+> 这个差别本身就是一条设计声明。**
+>
+> ⭐⭐ **这与 §10.195 构成一个三分法**：
+> **`LLAMA_BUILD_TESTS` 默认 `${LLAMA_STANDALONE}`（用法的函数）；
+> `GGML_METAL` 默认 `${GGML_METAL_DEFAULT}`（平台的函数）；
+> `GGML_CUDA` 默认 `OFF`（常量）——
+> ⚠️ 三种默认值策略在同一个项目里并存。**
+>
+> **⭐⭐ 判据：**
+> **「默认值的来源」比「默认值本身」更能说明作者对那个选项的定位——**
+> **⚠️ 常量默认意味着「作者认为它永远需要显式开启」。**
+>
+> ⭐⭐ **可判定的推论**：
+> **若默认构建不含 CUDA，则 §10.193 那三个 `-cuda` 测试
+> 根本不会被创建（`if (TARGET ggml-cuda)` 为假）——
+> ⚠️ 即「BTL-3 的 CUDA 测试」只存在于一个显式开了 CUDA 的构建里。**
+>
+> **⭐⭐ 判据：**
+> **「一个测试需不需要显式开启才能存在」，
+> 与「它会不会通过」是两个完全不同的问题——**
+> **⚠️ 而前者决定了「有多少人跑过它」，
+> 后者决定了「它有没有用」。**
+>
+> ⭐⭐ **这给 §10.192 那个 `throw` 一个新的解释**：
+> **作者之所以敢 `throw`，可能正是因为
+> 「不开 CUDA 的人根本不会建这个测试」——
+> ⚠️ 即 `throw` 与「默认 OFF」是一对互补的设计：
+> 默认 OFF 保证只有 CUDA 用户会遇到它，
+> `throw` 保证遇到它的 CUDA 用户不会静默拿到错结果。**
+>
+> **⭐⭐ 判据：**
+> **「一个硬失败」只有在「它的触发条件已被前置开关收窄」时才是好设计——**
+> **⚠️ 否则它就只是一个噪音源。**
+
+### 10.199 🔥🔥🔥🔥🔥 「后端名 → 选项名」是一个**纯字符串变换**
+
+[c-backend-name-is-string-transform]
+
+> ```cmake
+> function(ggml_add_backend backend)
+>     string(TOUPPER "GGML_${backend}" backend_id)
+>     if (${backend_id})
+>         string(TOLOWER "ggml-${backend}" backend_target)
+>         add_subdirectory(${backend_target})
+> ```
+> 十六个调用平铺成一列：`CPU` `BLAS` `CANN` `CUDA` `HIP` `METAL` `MUSA`
+> `RPC` `VirtGPU` `SYCL` `Vulkan` `WebGPU` `zDNN` `OpenCL` `Hexagon`
+> `ZenDNN` `OPENVINO`。
+
+> **⭐⭐⭐⭐⭐ 这条给出一条可复用的「查任何后端默认值」的方法**：
+> **看到 `ggml_add_backend(Foo)`，就去 `ggml/CMakeLists.txt` 找
+> `option(GGML_FOO ...)`——
+> ⚠️ 因为中间的映射是纯字符串，没有任何例外表。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个命名约定被实现成字符串变换」时，
+> 它的可预测性远高于「一张手写映射表」——**
+> **⚠️ 因为后者会漏项，前者不会。**
+>
+> ⭐⭐ **这正好解释了 §10.172 那个「grep 零命中但文件被编译」为什么不是悖论**：
+> **`file(GLOB GGML_SOURCES_CUDA "*.cu")` 与
+> `string(TOUPPER "GGML_${backend}")` 是同一类设计：
+> 「按位置/按命名自动收录」——
+> ⚠️ 故在这个项目里 grep 具体文件名，天然会漏。**
+>
+> **⭐⭐ 判据：**
+> **「一个构建系统越依赖自动收录，grep 具体名字的假阴性率越高」——**
+> **⚠️ 而这条是「零命中是伪反证」的第三次应验
+> （前两次见 §10.166、§10.172）。**
+>
+> ⭐⭐ **后端列表的长度是一个可量化的代理**：
+> **`CANN`、`VirtGPU`、`zDNN`、`OpenVINO` 这些冷门后端的存在，
+> 说明这个 fork 跟得相当紧——
+> ⚠️ 因为每加一个后端都要跟一次上游的 `add_subdirectory` 改动。**
+>
+> **⭐⭐ 判据：**
+> **「一个后端列表的长度」是「这个 fork 与上游的距离」的可量化代理。**
+>
+> ⭐⭐ **`if (NOT GGML_BACKEND_DL)` 那个分支值得单独记**：
+> **动态加载模式下不 `target_compile_definitions(ggml PUBLIC GGML_USE_...)`——
+> ⚠️ 即「后端存在」与「后端被编译进主库」是两件事。**
+>
+> **⭐⭐ 判据：**
+> **「一个后端被构建」与「它被链接进主目标」是两个独立的开关——
+> ⚠️ 而 `GGML_BACKEND_DL` 正是把这两件事分开的那个开关。**
+
+### 10.200 🔥🔥🔥🔥🔥 缺工具链是 **`FATAL_ERROR`**，不是静默跳过
+
+[c-cuda-toolkit-fatal-not-skip]
+
+> ```cmake
+> if (CUDAToolkit_FOUND)
+>     message(STATUS "CUDA Toolkit found")
+>     ...
+>     ggml_add_backend_library(ggml-cuda ${GGML_HEADERS_CUDA} ${GGML_SOURCES_CUDA})
+>     ...
+> else()
+>     message(FATAL_ERROR "CUDA Toolkit not found")
+> endif()
+> ```
+
+> **⭐⭐⭐⭐⭐ 这条彻底消灭了 §10.194 那个「选项开着但后端没装」的隐患**：
+> **§10.194 我说 `if (TARGET ggml-cuda)` 更严格，
+> 因为它排除了「选项开着但后端因故没被加进来」——
+> ⚠️ 而本轮看到：那种情况在这个项目里不可能发生，
+> 因为它会 `FATAL_ERROR` 而不是静默跳过。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个 `else` 分支是 `FATAL_ERROR` 还是 `message(STATUS ...)`，
+> 决定了那个 `if` 是不是一个真正的守卫——**
+> **⚠️ 只有前者保证「条件为假时不会产生半个构建」。**
+>
+> ⭐⭐ **这个选择的后果可算**：
+> **`GGML_CUDA=ON` + 无工具链 ⇒ 配置阶段就失败，
+> ⚠️ 故不存在「编译过了但没有 CUDA 内核」这种状态——
+> 而这正是 §10.145 那条「SM120 内核改动零 CI 覆盖」里
+> 最危险的那种状态。**
+>
+> **⭐⭐ 判据：**
+> **「半个构建」是 CI 里最难发现的失效模式——**
+> **⚠️ 因为它能编译、能链接、能启动，只是慢或错。**
+>
+> ⭐⭐ **通用建议**：
+> **任何「缺了它就会静默降级」的依赖，都应该在配置阶段硬失败——
+> ⚠️ 因为降级的代价总是晚于构建才显现。**
+>
+> **⭐⭐ 这与 §10.151 那条「`blackwell_mma_available(cc)`
+> 检查的是二进制不是 GPU」恰好相反**：
+> **`blackwell_mma_available` 是运行时判据，降级到 cuBLAS；
+> `CUDAToolkit_FOUND` 是配置期判据，硬失败——
+> ⚠️ 两者的分界线是「降级后还能不能算对」：
+> 能算对（只是慢）→ 运行时降级；
+> 不能算对 → 配置期硬失败。**
+>
+> **⭐⭐ 判据：**
+> **「一个降级路径是否可接受」取决于「降级后结果对不对」，
+> 而不是「降级后快多少」——**
+> **⚠️ 而这条判据能解释本项目里几乎所有的 fallback 设计。**
+>
+> ⭐⭐ **`message(STATUS ...)` 那一行也值得记**：
+> **它在真分支里打一条 STATUS——
+> ⚠️ 即「成功」是静默的（只有一行状态），「失败」是响亮的。**
+>
+> 判据：
+> 「成功静默、失败响亮」是构建脚本的正确姿势——
+> ⚠️ 而反过来（成功响亮、失败静默）是 CI 噪音的主要来源。
+
+### 10.201 ⭐⭐⭐⭐ `TARGET ggml-cuda` 为真 ⇔ **两个条件的合取**
+
+[c-target-cuda-implies-two-conditions]
+
+> `TARGET ggml-cuda` 为真 ⇔ `GGML_CUDA=ON` **且** `CUDAToolkit` 找到。
+> 前者由 `ggml_add_backend(CUDA)` 检查，后者由 `if (CUDAToolkit_FOUND)` 检查。
+
+> **⭐⭐⭐⭐ 这条修正了 §10.193 的措辞**：
+> **§10.193 我说「三个 `-cuda` 测试由 `TARGET ggml-cuda` 控制」——
+> ⚠️ 那句话没错，但把「一个判据」说成了「一个开关」，
+> 而它其实是「两个条件的合取」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「把 `if (TARGET X)` 读成『X 开关』是一个常见的简化，
+> 而它掩盖了『X 什么时候被创建』这个更关键的问题」——**
+> **⚠️ 因为开关是给人看的，创建条件是给构建系统看的。**
+>
+> ⭐⭐ **可执行的检查法**：
+> **看到 `if (TARGET foo)` 时，去搜 `add_library(foo` 或
+> `add_executable(foo`，再往上读两层 `if`——
+> ⚠️ 那个最终的合取式才是真正的条件。**
+>
+> **⭐⭐ 判据：**
+> **「一个 `TARGET` 判据的真实复杂度，等于它上游 `if` 嵌套的层数」——**
+> **⚠️ 而 `tests/CMakeLists.txt:200` 那一行看起来像「一个开关」，
+> 实际是「两个平台条件的合取」。**
+>
+> ⭐⭐ **这给 §10.194 那个 CUDA/Metal 不对称一个新的评价**：
+> **`if (TARGET ggml-cuda)` 与 `if (GGML_METAL)` 的差别不只是
+> 「产物 vs 变量」，还有「合取 vs 单条件」——
+> ⚠️ 但 `GGML_METAL` 那边也有第二层：
+> `GGML_METAL_DEFAULT` 由 `if (APPLE)` 决定，
+> 故它的默认值是平台函数，而判据本身仍是单变量。**
+>
+> **⭐⭐ 判据：**
+> **「判据的复杂度」与「默认值的复杂度」可以分别设计——**
+> **⚠️ 而这个项目在 CUDA 上把复杂度放在判据里，
+> 在 Metal 上把复杂度放在默认值里。**
+>
+> ⭐⭐ **两种放法的后果**：
+> **判据复杂 ⇒ 条件为假时静默（目标不存在）；
+> 默认值复杂 ⇒ 条件为假时静默（变量为 OFF）——
+> ⚠️ 两者最终都是「不建」，故对 `tests/` 而言等价。**
+>
+> 判据：
+> 「复杂度放在哪一层」通常不影响结果，只影响
+> 「读代码的人在哪一层被绊住」——
+> ⚠️ 而这正是 §10.194 那条「时间差」判据的另一种表现。
+
+### 10.202 ⭐⭐⭐ `${GGML_STANDALONE}` 模式在**两层构建文件**里独立出现
+
+[c-ggml-standalone-same-pattern]
+
+> `llama.cpp/CMakeLists.txt`：`LLAMA_BUILD_TESTS` 默认 `${LLAMA_STANDALONE}`
+> `ggml/CMakeLists.txt`：`GGML_BUILD_TESTS` / `GGML_BUILD_EXAMPLES`
+> 默认 `${GGML_STANDALONE}`
+
+> **⭐⭐⭐ 这是同一个模式在两层构建文件里的「独立出现」**：
+> **两个文件、两个变量名、同一个模式。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「同一个模式在两层独立出现」比「在一个文件里出现两次」
+> 证据力更强——**
+> **⚠️ 因为它排除了「同一个人在同一次编辑里复制粘贴」这个解释。**
+>
+> ⭐⭐ **这修正了 §10.176 那条被撤回的「这是项目风格」**：
+> **当时我说「一个模式出现两次不够下结论」，
+> ⚠️ 而本轮的模式出现了三层，且跨两个文件。**
+>
+> **⭐⭐ 判据：**
+> **「模式出现几次」不如「模式跨了几个文件」有判定力——**
+> **⚠️ 因为同一个文件里的重复可能是一次编辑，
+> 跨文件的重复必须是有意的。**
+>
+> ⭐⭐ **合并 §10.195 后可以说得更强**：
+> **「用 standalone 决定子项目默认值」是这个项目的一条结构性约定，
+> ⚠️ 而它的功能是「让嵌入者默认少建东西」。**
+>
+> **⭐⭐ 判据：**
+> **「一个默认值约定」的功能往往能用一句话说清——
+> ⚠️ 而说不清的那种，通常是意外而不是约定。**
+>
+> ⭐⭐ **`GGML_NATIVE` 是这个约定的一个例外**：
+> **它的默认值不是 `${GGML_STANDALONE}`，而是
+> `if (CMAKE_CROSSCOMPILING OR DEFINED ENV{SOURCE_DATE_EPOCH})`——
+> ⚠️ 即「能不能在本机跑」比「是不是 standalone」更优先。**
+>
+> **⭐⭐ 判据：**
+> **「默认值链的优先级」暴露了作者认为哪个条件更根本——**
+> **⚠️ 而这里显然是「本机可执行性」压过「嵌入友好性」。**
+>
+> ⭐⭐ **这与 §10.167 那个 `set(CMAKE_CUDA_ARCHITECTURES "native")`
+> 直接相关**：
+> **`GGML_NATIVE` 为假时那条分支不会走，
+> ⚠️ 故架构列表退回 §10.59 那套逐项枚举。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -26046,6 +26309,50 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 ⭐⭐ 判据（本轮最重要）「**「一个项目有没有 CI 专用分支」决定了「它的测试在 CI 上的行为能否与本地不同」——而没有分支意味着「CI 上跑的就是本地那一套」**」；
 ⭐⭐ 判据「**「CI 覆盖为零」要分两处查：「构建脚本里有没有 gate」与「工作流文件里有没有 job」——而只看其中一处会得出相反的结论**」 — [src-btl3-root-cmakelists]
 
+### ggml 的 CUDA 默认值、后端映射、与 FATAL_ERROR（第一百零四轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/CMakeLists.txt`（21,778 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/CMakeLists.txt)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **`GGML_CUDA` 默认 `OFF`，字面量，无平台例外**：
+「**option(GGML_CUDA "ggml: use CUDA" OFF)**」；
+⚠️ 对照「**if (APPLE) set(GGML_METAL_DEFAULT ON) ... else() set(GGML_METAL_DEFAULT OFF) endif()**」与「**option(GGML_METAL "ggml: use Metal" ${GGML_METAL_DEFAULT})**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个默认值是字面量还是变量」决定了它会不会随平台变化——而 CUDA 用字面量、Metal 用变量，这个差别本身就是一条设计声明**」；
+⭐⭐ 判据「**「默认值的来源」比「默认值本身」更能说明作者对那个选项的定位——常量默认意味着「作者认为它永远需要显式开启」**」；
+⭐⭐ 可判定的推论：**默认构建不含 CUDA，故 §10.193 那三个 `-cuda` 测试根本不会被创建**；
+⭐⭐ 判据「**「一个测试需不需要显式开启才能存在」，与「它会不会通过」是两个完全不同的问题——而前者决定了「有多少人跑过它」，后者决定了「它有没有用」**」；
+⭐⭐ 判据「**「一个硬失败」只有在「它的触发条件已被前置开关收窄」时才是好设计——否则它就只是一个噪音源**」；
+(a) ⭐⭐⭐ **`GGML_BUILD_TESTS` / `GGML_BUILD_EXAMPLES` 也用 `${GGML_STANDALONE}`**：「**option(GGML_BUILD_TESTS "ggml: build tests" ${GGML_STANDALONE})**」「**option(GGML_BUILD_EXAMPLES "ggml: build examples" ${GGML_STANDALONE})**」；
+⭐⭐ 判据「**「同一个模式在两层独立出现」比「在一个文件里出现两次」证据力更强——因为它排除了「同一个人在同一次编辑里复制粘贴」这个解释**」；
+⭐⭐ 判据「**「模式出现几次」不如「模式跨了几个文件」有判定力**」；
+(b) ⚠️⚠️ **`GGML_NATIVE` 在交叉编译或定义了 `SOURCE_DATE_EPOCH` 时被强制关掉**：「**if (CMAKE_CROSSCOMPILING OR DEFINED ENV{SOURCE_DATE_EPOCH}) message(STATUS "Setting GGML_NATIVE_DEFAULT to OFF") set(GGML_NATIVE_DEFAULT OFF) else() set(GGML_NATIVE_DEFAULT ON) endif()**」；
+⭐⭐ 判据「**「默认值链的优先级」暴露了作者认为哪个条件更根本——而这里显然是「本机可执行性」压过「嵌入友好性」**」 — [src-btl3-ggml-cmakelists]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/CMakeLists.txt`（20,026 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/CMakeLists.txt)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **「后端名 → 选项名」是纯字符串变换**：
+「**function(ggml_add_backend backend) string(TOUPPER "GGML_${backend}" backend_id) if (${backend_id}) string(TOLOWER "ggml-${backend}" backend_target) add_subdirectory(${backend_target}) message(STATUS "Including ${backend} backend") if (NOT GGML_BACKEND_DL) string(TOUPPER "GGML_USE_${backend}" backend_use) target_compile_definitions(ggml PUBLIC ${backend_use}) endif() endif() endfunction()**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个命名约定被实现成字符串变换」时，它的可预测性远高于「一张手写映射表」——因为后者会漏项，前者不会**」；
+⭐⭐ 这解释了 §10.172 那个「grep 零命中但文件被编译」：**`file(GLOB GGML_SOURCES_CUDA "*.cu")` 与 `string(TOUPPER "GGML_${backend}")` 是同一类设计**；
+⭐⭐ 判据「**「一个构建系统越依赖自动收录，grep 具体名字的假阴性率越高」——而这条是「零命中是伪反证」的第三次应验**」；
+(a) ⭐⭐⭐⭐ **十六个 `ggml_add_backend(...)` 调用平铺成一列**：「**CPU BLAS CANN CUDA HIP METAL MUSA RPC VirtGPU SYCL Vulkan WebGPU zDNN OpenCL Hexagon ZenDNN OPENVINO**」；
+⭐⭐ 判据「**「一个后端列表的长度」是「这个 fork 与上游的距离」的可量化代理**」；
+(b) ⭐⭐ **`if (NOT GGML_BACKEND_DL)` 把「构建」与「链接进主库」分开**；
+⭐⭐ 判据「**「一个后端被构建」与「它被链接进主目标」是两个独立的开关**」 — [src-btl3-ggml-src-cmakelists]
+
+3. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt`（11,878 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **缺工具链是 `FATAL_ERROR`，不是静默跳过**：
+「**if (CUDAToolkit_FOUND) message(STATUS "CUDA Toolkit found") ... ggml_add_backend_library(ggml-cuda ${GGML_HEADERS_CUDA} ${GGML_SOURCES_CUDA}) ... else() message(FATAL_ERROR "CUDA Toolkit not found") endif()**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个 `else` 分支是 `FATAL_ERROR` 还是 `message(STATUS ...)`，决定了那个 `if` 是不是一个真正的守卫——只有前者保证「条件为假时不会产生半个构建」**」；
+⭐⭐ 可算：**`GGML_CUDA=ON` + 无工具链 ⇒ 配置阶段就失败，故不存在「编译过了但没有 CUDA 内核」这种状态**；
+⭐⭐ 判据「**「半个构建」是 CI 里最难发现的失效模式——因为它能编译、能链接、能启动，只是慢或错**」；
+⭐⭐ 与 §10.151 那条「`blackwell_mma_available` 检查的是二进制」恰好相反：**前者是配置期硬失败，后者是运行时降级——分界线是「降级后还能不能算对」**；
+⭐⭐ 判据「**「一个降级路径是否可接受」取决于「降级后结果对不对」，而不是「降级后快多少」——而这条判据能解释本项目里几乎所有的 fallback 设计**」；
+(a) ⭐⭐⭐⭐ **`TARGET ggml-cuda` 为真 ⇔ 两个条件的合取**：「**ggml_add_backend(CUDA)**」检查 `GGML_CUDA`，「**if (CUDAToolkit_FOUND)**」检查工具链；
+⭐⭐ 判据「**「把 `if (TARGET X)` 读成『X 开关』是一个常见的简化，而它掩盖了『X 什么时候被创建』这个更关键的问题」**」；
+⭐⭐ 判据「**「一个 `TARGET` 判据的真实复杂度，等于它上游 `if` 嵌套的层数」**」；
+⭐⭐ 判据「**「判据的复杂度」与「默认值的复杂度」可以分别设计——而这个项目在 CUDA 上把复杂度放在判据里，在 Metal 上把复杂度放在默认值里**」 — [src-btl3-ggml-cuda-cmakelists]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -26185,7 +26492,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=325, evidence=2369, claims=1744, claims_high=1398, claims_disputed=9, trace_events=718, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=328, evidence=2377, claims=1749, claims_high=1403, claims_disputed=9, trace_events=724, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
