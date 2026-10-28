@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：414 ｜ **证据数**：2740 ｜ **主张数**：1943（高置信 1595，争议 9）
+> **来源数**：415 ｜ **证据数**：2748 ｜ **主张数**：1951（高置信 1603，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -30651,6 +30651,237 @@ exit 0
 > ```
 > **前者说「它算了也没用」，后者说「它根本没算」。**
 
+### 10.400 ⭐⭐⭐⭐⭐ 「捕获几层」与「要不要捕获」是**同一个开关**
+
+[c-n-capture-layers-and-embeddings-capture-are-one-switch]
+
+> **`src/llama-context.cpp` 1244-1248 行**：
+> ```cpp
+> cparams.n_capture_layers   = n;
+> cparams.embeddings_capture = n > 0;
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当两个字段总被同一行代码按同一个条件写时，
+> 它们不是两个开关，而是一个开关的两个视图；
+> 而把其中一个当成可独立调的，是读这类代码最常见的错。**
+>
+> **⭐⭐ 判据：**
+> **故 `n_layers == 0` 不是「捕获 0 层」，而是「关掉捕获」——
+> 而这两种说法在数值上相同、在含义上不同。**
+>
+> ⭐ **而 0 的语义由 `llama-ext.h:112` 给出**：
+> 「**Pass `n_layers == 0` to disable.**」
+
+### 10.401 ⚠️⚠️⚠️ 「空上下文」是被**显式支持**的初始状态
+
+[c-empty-dspark-ctx-is-the-supported-initial-state]
+
+> **`src/llama-context.cpp` 1254-1262 行**：
+> ```cpp
+> if (n_ctx_rows <= 0 || n_embd_cap <= 0 || feat == nullptr) {
+>     // reset: no staged context (e.g. before the very first drafter round,
+>     // where the whole prompt still needs to go through as context on the
+>     // first call, or between unrelated decodes).
+>     dspark_ctx.n_ctx_rows = 0;
+>     dspark_ctx.n_embd_cap = 0;
+>     dspark_ctx.v_ctx_feat.clear();
+>     return;
+> }
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个函数的第一条分支如果是「清空」，
+> 说明作者认为「空」是最常见的初始状态，而不是异常。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.385 那条「`n_ctx_rows` 是唯一成本量」要补一句：
+> 它也可以是 `0`，而 `0` 时那次「算一整宽再切掉」的浪费最小。**
+>
+> **⭐⭐ 两条合起来：浪费随 `n_ctx_rows` 从 `0` 到 `block_size` 变化。**
+> **即 §10.388 那个「不值」的判定，在最坏情况下才最不成立。**
+
+### 10.402 🔥🔥🔥🔥🔥 那条断言**写出了它防的 bug 长什么样**
+
+[c-the-dense-capture-assert-names-the-bug-it-prevents]
+
+> **`src/llama-context.cpp` 2123-2134 行**：
+> ```
+> // Dense (unmasked) rows are stored and later indexed in raw ubatch-token
+> // order (get_embeddings_capture_ith(i) reads row i directly), and
+> // output_reorder()'s swap list is built to fix up *output-row* order --
+> // neither accounts for split_equal()'s per-sequence interleaving of a
+> // multi-sequence ubatch (llama-batch.cpp), so a dense capture row for
+> // token i could come from the wrong sequence, or get scrambled by an
+> // output-row swap meant for a different token. Every current dense
+> // capture consumer (dspark) is single-sequence; fail loudly rather than
+> // silently return another sequence's capture if that ever changes.
+> GGML_ASSERT((cap_masked || ubatch.n_seqs_unq <= 1) &&
+>             "dense (unmasked) capture is only validated for single-sequence ubatches; "
+>             "multi-sequence interleaving is not accounted for in its row ordering");
+> ```
+> **它命名了两个函数**（`get_embeddings_capture_ith`、`output_reorder`）、
+> **一个文件**（`llama-batch.cpp` 的 `split_equal`）、
+> **一个失败形态**（另一条序列的捕获，或错位）。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个断言的信息量，取决于它是否写出了「它防的那个 bug 长什么样」。
+> 只写「条件不满足」的断言只防一半；
+> 写出了「会取到另一条序列」「会被错的 swap 打乱」的断言，
+> 才能让下一个想放宽它的人知道该验什么。**
+>
+> **⭐⭐ 判据：**
+> **故这条与 §10.392 那条「失败要响亮」是同一个原则的两个层次：
+> 一个管运行时是否报错，一个管报错时说不说清为什么。**
+>
+> ⭐ **而这条给 §10.382 加了一个对照**：
+> **合成门禁 bypass 了捕获路径（`speculative.h:80-89`），
+> 而这里把「多序列会取错」直接钉成了断言——
+> 同一位作者在一个地方绕开这段代码，在另一个地方把它的边界写死。**
+
+### 10.403 ⭐⭐⭐⭐⭐ 那个信息串写的是 **validated**（已验），不是 supported（支持）
+
+[c-the-assert-says-validated-not-supported]
+
+> **信息串原文**：
+> ```
+> "dense (unmasked) capture is only validated for single-sequence ubatches;
+>  multi-sequence interleaving is not accounted for in its row ordering"
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个限制如果被写成 only validated for，
+> 那它承认了「可能有别的可行范围，只是我没验」；
+> 而被写成 only supported for，它就在宣称那是硬边界。**
+>
+> **⭐⭐ 判据：**
+> **「已验范围」与「支持范围」是两个不同的集合。**
+>
+> ⭐ **而这条给本报告反复引用的「一个判据的适用范围，
+> 等于它所有前提被写下来的程度」补了一个可操作的形式**：
+> **看那个限制句用的动词是 validate 还是 support。**
+
+### 10.404 🔥🔥🔥🔥🔥 **14 条失败路径，一条都不会说话**
+
+[c-markov-resample-silently-refuses-in-fourteen-places]
+
+> **`src/llama-context.cpp` 2595-2740 行区间内的 14 处 `return false`**：
+> ```
+> 2600   2606   2615   2623   2628   2633   2640
+> 2660   2693   2699   2706   2714   2722   2738
+> ```
+> **而同一区间内**：
+> ```
+> LLAMA_LOG    0 次
+> fprintf      0 次
+> printf       0 次
+> throw        0 次
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个函数如果有 14 条失败路径而没有一条会说话，
+> 那调用方看到的不是「14 种失败」，而是「一种：什么都没发生」。**
+>
+> **⭐⭐ 判据：**
+> **故它把「为什么 markov 没生效」这个问题变成了一个只能靠二分法回答的问题：
+> 改一个条件，看结果变不变。**
+>
+> **⭐⭐ 而 §10.362 记的三条静默回退都在 `speculative.cpp` 的日志层；
+> 这一条在调度层，且规模大一个数量级。**
+> ```
+> speculative.cpp   3 条静默回退，每条先 LOG_WRN 或 LOG_INF
+> llama-context.cpp 14 条静默回退，零日志
+> ```
+> **故「静默」有两档：吵着降级，与完全不出声。**
+
+### 10.405 🔥🔥🔥🔥🔥 `/* parallel = */ false` 是**字面写出**的
+
+[c-the-markov-scheduler-is-constructed-not-parallel]
+
+> **`src/llama-context.cpp` 2636-2638 行**：
+> ```cpp
+> dspark_markov_sched.reset(ggml_backend_sched_new(
+>         backend_ptrs.data(), backend_buft.data(), (int) backend_ptrs.size(),
+>         /* graph_size = */ 64, /* parallel = */ false, cparams.op_offload));
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「并行度上限为 1」的结论，
+> 最硬的证据不是「链上有依赖」，
+> 而是「调度器被构造为不并行」——
+> 因为前者是算法属性，后者是把算法属性固化成配置。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.349 现在有三层证据**：
+> ```
+> 算法层    逐位置依赖，位置 k 读位置 k-1 写进设备内存的 argmax
+> CUDA 层   partial <<<1024,256>>> 对 final <<<1,256>>>，1024:1
+> 调度层   /* parallel = */ false
+> ```
+> **三层互相独立，且都指向同一个上限。**
+
+### 10.406 🔥🔥🔥🔥🔥 「一次提交 + 逐位置串行」靠的是**张量当索引**
+
+[c-the-chain-runs-in-one-submission-with-a-tensor-edge]
+
+> **`src/llama-context.cpp` 2648-2651 行**：
+> ```
+> // Build one graph covering rows [k0, k0 + n_chain). Each step consumes the
+> // previous step's GPU argmax tensor as the row id for head_a, so the
+> // sequential Markov dependency remains exact while Metal executes the
+> // whole chain in one scheduler submission.
+> ```
+> **而 2685 行是那个依赖的实现**：
+> ```cpp
+> prev_ids = sampled;
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「串行」有两种：
+> 一种要靠主机往返（读回 argmax 再发下一次），
+> 一种只靠图内的边（张量当索引）。
+> 前者的代价是每次一个 PCIe 往返，后者是零。**
+>
+> **⭐⭐ 判据：**
+> **故这里的串行是本报告希望的那种：
+> 依赖是真的，往返是假的。**
+>
+> **⭐⭐ 这也解释了 §10.349 说的「与卡的宽度无关」——
+> 因为瓶颈不是带宽也不是算力，而是链长。**
+> **而链长 = `n_use`，而 `n_use` 的上界是 `block_size = 7`（§10.359）。**
+
+### 10.407 ⭐⭐⭐⭐⭐ 不要用 `ggml_view_1d` 切 logits 的行
+
+[c-logits-rows-are-aliased-not-viewed]
+
+> **`src/llama-context.cpp` 2666-2668 行**：
+> ```
+> // Do not use ggml_view_1d on t_logits: its parent edge would recursively
+> // pull the completed decode graph into this tiny graph. Each base tensor
+> // is a detached, read-only alias of one already-computed logits row.
+> ```
+> **而实现是手动接管 `buffer` 与 `data`（2674-2676 行）**：
+> ```cpp
+> ggml_tensor * base = ggml_new_tensor_1d(ctx.get(), GGML_TYPE_F32, n_vocab);
+> base->buffer = t_logits->buffer;
+> base->data   = (char *) t_logits->data + (size_t) k * (size_t) n_vocab * sizeof(float);
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **在按图执行的后端里，「视图」不是一个零成本别名，
+> 而是一条会把父图拖进来的边；
+> 故想「只看一行」时，正确的做法是造一个没有父边的新张量
+> 并手动接管它的 `buffer` 与 `data`。**
+>
+> **⭐⭐ 判据：**
+> **而这也是一个「正确性与性能由同一个结构决定」的例子：
+> 用 view 会正确但慢（整张解码图重算），
+> 用裸指针会快但要求调用方保证生命周期——
+> 而 2646 行的 `synchronize()` 就是那个保证。**
+>
+> ⭐ **而这条是本报告里第一条「元数据型 API 的语义与直觉不同」的证据**：
+> **`ggml_view_*` 在名字上像 `numpy` 的切片，在实现上是图的边。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -36047,6 +36278,38 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ **这条让 10.374 从「数值上无影响」升级为「结构上无实现」：数值路径说「它算了也没用」，结构路径说「它根本没算」**；
  — [src-btl3-speculative-cpp] [src-btl3-arg-cpp] [src-btl3-graph-cpp]
 
+### 十四处 return false，与一条写出了 bug 的断言（第一百四十七轮补充）
+
+上一轮结尾说读 `llama-context.cpp` 的 27 处 dspark。本轮读完了，而它给出了一件比预期更重的事：**那个 markov 重采样函数有 14 条失败路径，而一条都不会说话**。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/src/llama-context.cpp`（162,633 字节，4,475 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/llama-context.cpp)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **「捕获几层」与「要不要捕获」是同一个开关**：1244-1248 行是「**cparams.n_capture_layers = n; cparams.embeddings_capture = n > 0;**」——**即 embeddings_capture 完全由 n_capture_layers > 0 决定**；
+⭐⭐ 判据（本轮最重要）「**当两个字段总被同一行代码按同一个条件写时，它们不是两个开关，而是一个开关的两个视图；而把其中一个当成可独立调的，是读这类代码最常见的错**」——**故 n_layers == 0 不是「捕获 0 层」，而是「关掉捕获」**；
+(a) ⚠️⚠️⚠️ **「空上下文」是被显式支持的初始状态**：1254-1262 行的第一条分支就是清空，而注释说它发生在「before the very first drafter round, where the whole prompt still needs to go through as context on the first call, or between unrelated decodes」；
+⭐⭐ 判据「**一个函数的第一条分支如果是「清空」，说明作者认为「空」是最常见的初始状态，而不是异常**」——**故 n_ctx_rows 也可以是 0，而 0 时那次「算一整宽再切掉」的浪费最小：浪费随 n_ctx_rows 从 0 到 block_size 变化，即 10.388 那个「不值」的判定在最坏情况下才最不成立**；
+(b) 🔥🔥🔥🔥🔥 **那条断言写出了它防的 bug 长什么样**：2123-2134 行的注释命名了两个函数（get_embeddings_capture_ith、output_reorder）、一个文件（llama-batch.cpp 的 split_equal）、一个失败形态（「a dense capture row for token i could come from the wrong sequence, or get scrambled by an output-row swap meant for a different token」），然后才写 GGML_ASSERT；
+⭐⭐ 判据（本轮最重要）「**一个断言的信息量，取决于它是否写出了「它防的那个 bug 长什么样」。只写「条件不满足」的断言只防一半；写出了「会取到另一条序列」「会被错的 swap 打乱」的断言，才能让下一个想放宽它的人知道该验什么**」；
+⭐⭐ **这条与 10.392 那条「失败要响亮」是同一个原则的两个层次：一个管运行时是否报错，一个管报错时说不说清为什么**；
+⭐⭐ **而它给 10.382 加了一个对照：合成门禁 bypass 了捕获路径，而这里把「多序列会取错」直接钉成断言——同一位作者在一个地方绕开这段代码，在另一个地方把它的边界写死**；
+(c) ⭐⭐⭐⭐⭐ **那个信息串写的是 validated（已验），不是 supported（支持）**：原文是「**dense (unmasked) capture is only validated for single-sequence ubatches; multi-sequence interleaving is not accounted for in its row ordering**」；
+⭐⭐ 判据（本轮最重要）「**一个限制如果被写成 only validated for，那它承认了「可能有别的可行范围，只是我没验」；而被写成 only supported for，它就在宣称那是硬边界**」——**「已验范围」与「支持范围」是两个不同的集合**；
+(d) 🔥🔥🔥🔥🔥 **14 条失败路径，一条都不会说话**：2595-2740 区间内的 14 处 return false 在 2600、2606、2615、2623、2628、2633、2640、2660、2693、2699、2706、2714、2722、2738，**而同一区间内 LLAMA_LOG 0 次、fprintf 0 次、printf 0 次、throw 0 次**；
+⭐⭐ 判据（本轮最重要）「**一个函数如果有 14 条失败路径而没有一条会说话，那调用方看到的不是「14 种失败」，而是「一种：什么都没发生」**」——**故它把「为什么 markov 没生效」变成了一个只能靠二分法回答的问题**；
+⭐⭐ **而 10.362 记的三条静默回退都在 speculative.cpp 的日志层，这一条在调度层且规模大一个数量级：「静默」有两档——吵着降级，与完全不出声**；
+(e) 🔥🔥🔥🔥🔥 **/* parallel = */ false 是字面写出的**：2636-2638 行的 ggml_backend_sched_new 调用里，**parallel 被显式传成 false**；
+⭐⭐ 判据（本轮最重要）「**一个「并行度上限为 1」的结论，最硬的证据不是「链上有依赖」，而是「调度器被构造为不并行」——因为前者是算法属性，后者是把算法属性固化成配置**」——
+⭐⭐ **故 10.349 现在有三层证据：算法层（逐位置依赖）、CUDA 层（partial 对 final 网格 1024:1）、调度层（parallel = false）——三层互相独立，且都指向同一个上限**；
+(f) 🔥🔥🔥🔥🔥 **「一次提交 + 逐位置串行」靠的是张量当索引**：2648-2651 行的注释说「**Each step consumes the previous step's GPU argmax tensor as the row id for head_a, so the sequential Markov dependency remains exact while Metal executes the whole chain in one scheduler submission**」，而 2685 行是实现：prev_ids = sampled；
+⭐⭐ 判据（本轮最重要）「**「串行」有两种：一种要靠主机往返（读回 argmax 再发下一次），一种只靠图内的边（张量当索引）。前者的代价是每次一个 PCIe 往返，后者是零**」——**故这里的串行是「依赖是真的，往返是假的」**；
+⭐⭐ **这也解释了 10.349 说的「与卡的宽度无关」：瓶颈不是带宽也不是算力，而是链长；而链长 = n_use，其上界是 block_size = 7**；
+(g) ⭐⭐⭐⭐⭐ **不要用 ggml_view_1d 切 logits 的行**：2666-2668 行的注释说「**Do not use ggml_view_1d on t_logits: its parent edge would recursively pull the completed decode graph into this tiny graph. Each base tensor is a detached, read-only alias of one already-computed logits row**」，**而实现是手动接管 buffer 与 data（2674-2676 行）**；
+⭐⭐ 判据（本轮最重要）「**在按图执行的后端里，「视图」不是一个零成本别名，而是一条会把父图拖进来的边；故想「只看一行」时，正确的做法是造一个没有父边的新张量并手动接管它的 buffer 与 data**」——
+⭐⭐ **而这也是一个「正确性与性能由同一个结构决定」的例子：用 view 会正确但慢（整张解码图重算），用裸指针会快但要求调用方保证生命周期——而 2646 行的 synchronize() 就是那个保证**；
+⭐ **这是本报告里第一条「元数据型 API 的语义与直觉不同」的证据：ggml_view_* 在名字上像 numpy 的切片，在实现上是图的边**；
+ — [src-btl3-context-cpp]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -36186,7 +36449,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=414, evidence=2740, claims=1943, claims_high=1595, claims_disputed=9, trace_events=899, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=415, evidence=2748, claims=1951, claims_high=1603, claims_disputed=9, trace_events=901, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
