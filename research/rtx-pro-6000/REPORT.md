@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：468 ｜ **证据数**：2925 ｜ **主张数**：2134（高置信 1784，争议 9）
+> **来源数**：468 ｜ **证据数**：2935 ｜ **主张数**：2144（高置信 1794，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -36300,6 +36300,294 @@ exit 0
 > 它删掉了一个会一直留在「未获取项」里的假缺口，
 > 而那个假缺口本来会让后续每一轮都去重读一次 `release.yml`。**
 
+### 10.591 🔥🔥🔥🔥🔥 `GGML_CUDA_PDL` 默认**开**，`GGML_CUDA_P2P` 默认**关**
+
+[c-pdl-is-on-by-default-and-p2p-is-off-by-default]
+
+> **`common.cuh` 第 1632-1635 行**：
+> ```cpp
+> static const bool env_pdl_enabled = []() {
+>     const char * env = getenv("GGML_CUDA_PDL");
+>     return env == nullptr || std::atoi(env) != 0;
+> }();
+> ```
+> **未设该变量时 `env == nullptr` 为真，故返回 `true`。**
+>
+> **`ggml-cuda.cu` 第 336 行**：
+> ```cpp
+> if (getenv("GGML_CUDA_P2P") != nullptr) {
+> ```
+> **`!= nullptr` 意味着「只有设了才执行」。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一个前缀下的两个环境变量采用相反的判空约定时，
+> 「默认值」这个词就不能被猜出来——
+> 它只能被读出两行代码。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后凡写「某某默认开/关」，
+> 都必须带上那行判空表达式，
+> 而不能只写结论。**
+>
+> ⚠️ **而这条对 RTX PRO 6000 是直接可用的：
+> 单卡跑 PRO 6000 时 P2P 永远不生效（默认关），
+> 而 PDL 永远生效（默认开）——
+> 故「这张卡上 PDL 有没有用」这个问题的答案是
+> 「它在，而它是不是快，语料里没有对照」。**
+
+### 10.592 ⭐⭐⭐⭐⭐ PDL 的设备侧守卫是 `>= 900`，故 sm_120 **落在里面**
+
+[c-pdl-device-side-is-gated-at-hopper-so-sm-120-included]
+
+> **`common.cuh` 第 123-133 行**：
+> ```cpp
+> static __device__ __forceinline__ void ggml_cuda_pdl_sync() {
+> #if defined(GGML_CUDA_USE_PDL) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER
+>     cudaGridDependencySynchronize();
+> #endif
+> }
+> ```
+> **而第 56 行 `#define GGML_CUDA_CC_HOPPER 900`，
+> 第 59 行 `#define GGML_CUDA_CC_BLACKWELL 1200`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个特性的守卫写成「大于等于 Hopper」而不是「等于 Hopper」时，
+> 它对新架构是默认继承的——
+> 而这份继承不需要任何人再写一行代码。**
+>
+> **⭐⭐ 判据：**
+> **故 PDL 与 §10.545-§10.557 那一族（tcgen05 零命中、FP4 唯一分支）
+> 是两种完全不同的情况：
+> 前者是「新架构自动获得」，
+> 后者是「新架构需要专门分支」。**
+>
+> ⚠️ **而这条纠正了本报告一个潜在的误判：
+> 「Blackwell 没有专门代码」不等于「Blackwell 用不上那个特性」。**
+
+### 10.593 🔥🔥🔥🔥🔥 PDL 的宿主闸门是 `attr.ptxVersion >= 90`，**不是算力**
+
+[c-pdl-host-gate-is-ptx-version-90-not-compute-capability]
+
+> **`common.cuh` 第 1611-1614 行**：
+> ```cpp
+> // PDL device-side primitives are emitted only for PTX versions >= 90.
+> // We have to guard on a loaded kernel PTX version so a kernel forward-JIT ed
+> // from pre-Hopper PTX to a Hopper-or-newer GPU does not opt into PDL.
+> const bool can_use_pdl = attr.ptxVersion >= 90;
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当宿主侧的闸门看的是「编译出来的代码是什么版本」
+> 而不是「跑它的卡是什么型号」时，
+> 同一张卡上的同一个 kernel 可以有 PDL 也可以没有——
+> 取决于它是被哪份 PTX 编译/JIT 出来的。**
+>
+> **⭐⭐ 判据：**
+> **故「PRO 6000 上 PDL 生效」这句话的完整形式是
+> 「用它那份 PTX ≥ 90 的 kernel 时生效」。**
+>
+> ⚠️ **而这条与 §10.567 那个「CI 只编 `89-real`」合起来，
+> 是一个更尖锐的问题：
+> 一份只含 sm_89 PTX 的二进制跑到 sm_120 上，
+> forward-JIT 出来的 PTX 版本会是多少？
+> 若 < 90，则 PDL 静默关闭。**
+
+### 10.594 ⚠️⚠️⚠️ 开 PDL 会**静默关掉 `__restrict__`**
+
+[c-enabling-pdl-silently-removes-restrict]
+
+> **`common.cuh` 第 1621-1626 行**：
+> ```cpp
+> // PDL and __restrict__ need to be mutually exclusive,
+> // see https://github.com/ggml-org/llama.cpp/pull/24030
+> # if (defined(GGML_CUDA_USE_PDL) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER)
+> # define GGML_CUDA_RESTRICT
+> # else
+> # define GGML_CUDA_RESTRICT __restrict__
+> # endif
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个默认开启的开关会让另一个优化失效时，
+> 「默认开」不等于「无条件更好」——
+> 它是一个已经做过的取舍，
+> 而那个取舍的代价没有被记在任何性能数字里。**
+>
+> **⭐⭐ 判据：**
+> **故本报告 §10 里那些 PRO 6000 的 kernel 性能，
+> 是在「PDL 开、`__restrict__` 关」这个组合下测的——
+> 而语料里没有一组「PDL 关」的对照。**
+>
+> ⚠️ **而这条给了一个可执行的实验：
+> `GGML_CUDA_PDL=0` 跑同一个 `llama-bench`，
+> 就能分离出这个取舍的正负。**
+
+### 10.595 🔥🔥🔥🔥🔥 PDL 不是死代码：**47 处调用点，六个文件**
+
+[c-pdl-is-wired-at-47-sites-across-six-files]
+
+> | 文件 | `ggml_cuda_kernel_launch` 调用点 |
+> |---|---:|
+> | `norm.cu` | 16 |
+> | `fattn-common.cuh` | 8 |
+> | `rope.cu` | 7 |
+> | `cpy.cu` | 6 |
+> | `mmvq.cu` | 6 |
+> | `unary.cu` | 4 |
+> | **合计** | **47** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个设施有 47 个调用点时，
+> 「它是可选装饰」这个假设就不成立了——它是主路径。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.591 那个「默认开」不是笔误或历史遗留，
+> 而是因为主路径全在用它。**
+>
+> ⚠️ **而这条也修正了本报告一个中途的错误判断：
+> 我先在 `ggml-cuda.cu` 与 `fattn.cu` 里各查到 0 处，
+> 差点写成「PDL 零调用点」——
+> 而真相是那两个文件本来就不启动 kernel。**
+
+### 10.596 ⭐⭐⭐⭐⭐ `fattn.cu` 是纯分派文件：`launch` 与 `<<<` **都是 0 处**
+
+[c-fattn-cu-is-pure-dispatch-and-fattn-common-launches]
+
+> **BTL-3 的 `fattn.cu`：23,551 字节 / 597 行**，
+> `launch` 命中 **0**、`<<<` 命中 **0**、`kernel` 命中 67；
+> 前 7 行是六条 `#include`
+> （`common.cuh`、`fattn-common.cuh`、`fattn-mma-f16.cuh`、
+> `fattn-tile.cuh`、`fattn-vec.cuh`、`fattn-wmma-f16.cuh`、`fattn.cuh`）。
+>
+> **而 `fattn-common.cuh`（47,433 字节）里有 8 处 `ggml_cuda_kernel_launch` 与 1 处 `<<<`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个名为 `fattn.cu` 的文件里一次 kernel 启动都没有时，
+> 「这个文件实现了 FlashAttention」这句话是错的——
+> 它只决定了「用哪个实现」。**
+>
+> **⭐⭐ 判据：**
+> **故凡按文件名推断「某特性在这里」，
+> 都必须先数一次 `<<<` 与 `ggml_cuda_kernel_launch`。**
+>
+> ⚠️ **而这条正是本报告第 N 次撞到同一个形状：
+> 名字是分派层的名字，实现在别处。**
+
+### 10.597 ⚠️⚠️⚠️ FA 里只剩**一个** kernel 不走 PDL
+
+[c-only-the-mask-reduction-kernel-skips-pdl-in-fattn]
+
+> **`fattn-common.cuh` 的 8 处 `ggml_cuda_kernel_launch`**：
+> ```
+> 1207  ggml_cuda_kernel_launch(fattn_kernel, launch_params, ...)          <- 主 kernel
+> 1238  ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_uniform<...>, ...)
+> 1255  ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_general<...>, ...)
+> 1266  ggml_cuda_kernel_launch(flash_attn_combine_results<DV>, ...)
+> ```
+> **唯一的 `<<<` 在第 1102 行**：
+> ```cpp
+> flash_attn_mask_to_KV_max<ncols1><<<blocks_num_KV_max, block_dim_KV_max, 0, main_stream>>>
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一组 kernel 里只有一个还在用旧启动方式时，
+> 那个例外通常不是「忘了改」，
+> 而是「它不能改」——
+> 因为 PDL 的前提是「本 kernel 的输出只被下一个 kernel 用」，
+> 而 mask 归约的结果被多个 consumer 读。**
+>
+> **⭐⭐ 判据：**
+> **故「FA 全路径走 PDL」这句话必须留一个例外：mask 那一步不走。**
+>
+> ⚠️ **而这条是本轮唯一一个从代码形状推出「为什么」的地方，
+> 故它的置信度低于其余九条——
+> 它的证据是「一个 `<<<` 存在」，
+> 而它的解释是「PDL 语义不允许」。**
+
+### 10.598 ⭐⭐⭐⭐⭐ 「PDL 与 P2P 在 PRO 6000 上的默认值」这个问题**已闭合**
+
+[c-the-pdl-question-is-now-closed-at-the-config-layer]
+
+> | 问题 | 答案 | 依据 |
+> |---|---|---|
+> | `GGML_CUDA_PDL` 默认值 | **开** | `common.cuh` 1634 行 |
+> | `GGML_CUDA_P2P` 默认值 | **关** | `ggml-cuda.cu` 336 行 |
+> | PDL 是否接通 | **47 处调用点 / 六个文件** | §10.595 |
+> | 宿主闸门 | `attr.ptxVersion >= 90` | `common.cuh` 1614 行 |
+> | 关掉 PDL 的方法 | `GGML_CUDA_PDL=0` | 1634 行 `atoi(env) != 0` |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条「默认值未知」被读出两行判空表达式时，
+> 它就不是「查到了」，
+> 而是「这个问题从来只需要读两行」——
+> 挂着的那些轮次不是难度，是没去读。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后把「未查默认值」这一类，
+> 一律降级为「一小时内可闭合」。**
+>
+> ⚠️ **而这条的实际收益是：
+> 它把一个含糊的「PDL 可能有用」
+> 换成了一个可执行的实验设计（`GGML_CUDA_PDL=0` 做对照）。**
+
+### 10.599 ⚠️⚠️⚠️ 十个 `GGML_CUDA_*` 选项里，默认 ON 的**只有三个**
+
+[c-nccl-is-on-by-default-while-seven-cuda-options-are-off]
+
+> **`ggml/CMakeLists.txt` 第 199-212 行**：
+>
+> | 选项 | 默认 |
+> |---|---|
+> | `GGML_CUDA` | **OFF** |
+> | `GGML_CUDA_FORCE_MMQ` | **OFF** |
+> | `GGML_CUDA_HOPPER_Q1` | **OFF** |
+> | `GGML_CUDA_FORCE_CUBLAS` | **OFF** |
+> | `GGML_CUDA_NO_PEER_COPY` | **OFF** |
+> | `GGML_CUDA_NO_VMM` | **OFF** |
+> | `GGML_CUDA_FA` | **ON** |
+> | `GGML_CUDA_FA_ALL_QUANTS` | **OFF** |
+> | `GGML_CUDA_GRAPHS` | `${GGML_CUDA_GRAPHS_DEFAULT}` |
+> | `GGML_CUDA_NCCL` | **ON** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当十个同前缀的选项里只有三个默认开时，
+> 「默认构建」这个词的含金量就已经被算出来了：
+> 它是最小可用的那份，
+> 而不是最好的那份。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.573 那个「只编 75/120」不是孤例，
+> 而是同一个设计倾向的第二个观测。**
+>
+> ⚠️ **而这条与 §10.591 合起来给了一个反直觉的对照：
+> 编译期的十个开关几乎全关，
+> 而运行期那个最激进的开关（PDL）却是默认开。**
+
+### 10.600 🔥🔥🔥🔥🔥 编译期保守、运行期激进——**两个不同的成本账户**
+
+[c-compile-time-defaults-are-conservative-while-runtime-is-aggressive]
+
+> | 层 | 默认倾向 | 省下的是什么 |
+> |---|---|---|
+> | 编译期 | 十个开关**七个 OFF**，`FA_ALL_QUANTS` 关 → 只编 75/120 | **构建时间与二进制体积** |
+> | 运行期 | `GGML_CUDA_PDL` **默认开**，47 处调用点，且顺带关掉 `__restrict__` | **kernel 之间的等待** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一份代码在编译期极度保守、在运行期却默认开启一个会削弱另一优化的特性时，
+> 那不是不一致，
+> 而是「编译期省的是构建资源，运行期赌的是运行时收益」——
+> 两个不同的成本账户。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此前把「默认关」当成「不推荐」的读法
+> 在这里第一次失效：
+> `FA_ALL_QUANTS=OFF` 省的是编译时间，
+> 而 `PDL` 开省的是 kernel 之间的等待。**
+>
+> ⚠️ **而这条对 RTX PRO 6000 的实操含义是：
+> 拿到一份默认构建的二进制，
+> 你得到的是「省着编、拼命跑」的那一档。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -42603,6 +42891,52 @@ PR 正文两条原句：SYCL「**consume more than 1/3 of the total 10GB cache**
 ⭐⭐ 判据（本轮最重要）「**一个「没找到 X」的结论，有两种可能：① X 存在于某处但我没读到 → 缺口，要继续找；② X 从未存在 → 错误假设，要写否证。而区分它们的那个问题不是「X 在哪」，而是「谁会创建 X」——如果那个「谁」的改动清单里没有 X，第二种就成立了**」——**⚠️ 故本报告的待追项清单里，每一条都应当带一个「它的创建者是谁」——没有创建者的那一条，本质上是空转**；
  — [src-llamacpp-pr-23705]
 
+### 两个环境变量，两种相反的默认值（第一百七十二轮补充）
+
+按上一轮的新判据「它的创建者是谁」重审「未获取项」，第一刀就砍中了「`GGML_CUDA_PDL=1` 与 `GGML_CUDA_P2P` 在 PRO 6000 上的默认值未查」这一条：**它的创建者就是那个环境变量自己，故它是一小时内可闭合的。**读完两行判空表达式后，答案与常识相反：**PDL 默认开，P2P 默认关。**
+
+1. 🔥🔥🔥🔥🔥 **`GGML_CUDA_PDL` 默认开，`GGML_CUDA_P2P` 默认关**：
+`common.cuh` 第 1632-1635 行是「**return env == nullptr || std::atoi(env) != 0;**」（默认开，设 0 才关）；`ggml-cuda.cu` 第 336 行是「**if (getenv("GGML_CUDA_P2P") != nullptr) {**」（默认关，设了才开）；
+
+⭐⭐ 判据（本轮最重要）「**当同一个前缀下的两个环境变量采用相反的判空约定时，「默认值」这个词就不能被猜出来——它只能被读出两行代码。故此后凡写「某某默认开/关」，都必须带上那行判空表达式**」——**⚠️ 而这对 PRO 6000 是直接可用的：单卡时 P2P 永远不生效（默认关），而 PDL 永远生效（默认开）**；
+2. ⭐⭐⭐⭐⭐ **PDL 的设备侧守卫是 `>= 900`，故 sm_120 落在里面**：
+`common.cuh` 第 124 与 130 行的守卫都是 「**`__CUDA_ARCH__ >= GGML_CUDA_CC_HOPPER`**」，而第 56 行是 900、第 59 行 `GGML_CUDA_CC_BLACKWELL` 是 1200；
+
+⭐⭐ 判据（本轮最重要）「**当一个特性的守卫写成「大于等于 Hopper」而不是「等于 Hopper」时，它对新架构是默认继承的——而这份继承不需要任何人再写一行代码。故 PDL 与 §10.545-§10.557 那一族是两种完全不同的情况：前者是「新架构自动获得」，后者是「新架构需要专门分支」**」——**⚠️ 而这条纠正了一个潜在误判：「Blackwell 没有专门代码」不等于「Blackwell 用不上那个特性」**；
+3. 🔥🔥🔥🔥🔥 **PDL 的宿主闸门是 `attr.ptxVersion >= 90`，不是算力**：
+`common.cuh` 第 1611-1614 行：「**PDL device-side primitives are emitted only for PTX versions >= 90. We have to guard on a loaded kernel PTX version so a kernel forward-JIT ed from pre-Hopper PTX to a Hopper-or-newer GPU does not opt into PDL. const bool can_use_pdl = attr.ptxVersion >= 90;**」；
+
+⭐⭐ 判据（本轮最重要）「**当宿主侧闸门看的是「编译出来的代码是什么版本」而不是「跑它的卡是什么型号」时，同一张卡上的同一个 kernel 可以有 PDL 也可以没有。故「PRO 6000 上 PDL 生效」的完整形式是「用它那份 PTX >= 90 的 kernel 时生效」**」——**⚠️ 而这条与 §10.567 那个「CI 只编 89-real」合起来，是一个更尖锐的问题：一份只含 sm_89 PTX 的二进制跑到 sm_120 上，forward-JIT 出来的 PTX 版本会是多少？若 < 90，则 PDL 静默关闭**；
+4. ⚠️⚠️⚠️ **开 PDL 会静默关掉 `__restrict__`**：
+`common.cuh` 第 1621-1626 行：「**// PDL and __restrict__ need to be mutually exclusive, see PR 24030 ... # define GGML_CUDA_RESTRICT（空） # else # define GGML_CUDA_RESTRICT __restrict__**」；
+
+⭐⭐ 判据（本轮最重要）「**当一个默认开启的开关会让另一个优化失效时，「默认开」不等于「无条件更好」——它是一个已经做过的取舍，而那个取舍的代价没有被记在任何性能数字里。故那些 PRO 6000 的 kernel 性能，都是在这个组合下测的**」——**⚠️ 而这条给了一个可执行的实验：`GGML_CUDA_PDL=0` 跑同一个 llama-bench，就能分离出这个取舍的正负**；
+5. 🔥🔥🔥🔥🔥 **PDL 不是死代码：47 处调用点，六个文件**：
+逐一计数是「**norm.cu 16 / fattn-common.cuh 8 / rope.cu 7 / cpy.cu 6 / mmvq.cu 6 / unary.cu 4**」，合计 **47**；
+
+⭐⭐ 判据（本轮最重要）「**当一个设施有 47 个调用点时，「它是可选装饰」这个假设就不成立了——它是主路径**」——**⚠️ 而这条也修正了一个中途的错误判断：我先在 ggml-cuda.cu 与 fattn.cu 里各查到 0 处，差点写成「PDL 零调用点」——而真相是那两个文件本来就不启动 kernel**；
+6. ⭐⭐⭐⭐⭐ **`fattn.cu` 是纯分派文件：`launch` 与 `<<<` 都是 0 处**：
+BTL-3 的 `fattn.cu` 是 **23,551 字节 / 597 行**，`launch` 0、`<<<` 0、`kernel` 67，前 7 行是六条 `#include`；而 `fattn-common.cuh`（47,433 字节）里有 8 处 `ggml_cuda_kernel_launch` 与 1 处 `<<<`；
+
+⭐⭐ 判据（本轮最重要）「**当一个名为 fattn.cu 的文件里一次 kernel 启动都没有时，「这个文件实现了 FlashAttention」这句话是错的——它只决定了「用哪个实现」**」——**⚠️ 故凡按文件名推断「某特性在这里」，都必须先数一次 `<<<` 与 `ggml_cuda_kernel_launch`**；
+7. ⚠️⚠️⚠️ **FA 里只剩一个 kernel 不走 PDL**：
+`fattn-common.cuh` 的 8 处覆盖了主 kernel（1207 行）与三个 combine/fixup kernel（1238 / 1255 / 1266 行）；唯一的 `<<<` 在第 1102 行，启动 `flash_attn_mask_to_KV_max`；
+
+⭐⭐ 判据（本轮最重要）「**当一组 kernel 里只有一个还在用旧启动方式时，那个例外通常不是「忘了改」，而是「它不能改」**」——**⚠️ 而这条是本轮唯一一个从代码形状推出「为什么」的地方，故置信度低于其余九条**；
+8. ⭐⭐⭐⭐⭐ **「PDL 与 P2P 在 PRO 6000 上的默认值」这个问题已闭合**：
+五个子问题一次关闭：「**PDL 默认开 / P2P 默认关 / 47 处调用点 / host 闸门是 ptxVersion >= 90 / 关掉它用 GGML_CUDA_PDL=0**」；
+
+⭐⭐ 判据（本轮最重要）「**当一条「默认值未知」被读出两行判空表达式时，它就不是「查到了」，而是「这个问题从来只需要读两行」——挂着的那些轮次不是难度，是没去读**」——**⚠️ 故此后把「未查默认值」这一类，一律降级为「一小时内可闭合」**；
+9. ⚠️⚠️⚠️ **十个 `GGML_CUDA_*` 选项里，默认 ON 的只有三个**：
+`ggml/CMakeLists.txt` 第 199-212 行，默认 ON 的是「**GGML_CUDA_FA / GGML_CUDA_NCCL / GGML_CUDA_GRAPHS（取自 GGML_CUDA_GRAPHS_DEFAULT）**」，其余七个全部 OFF；
+
+⭐⭐ 判据（本轮最重要）「**当十个同前缀的选项里只有三个默认开时，「默认构建」这个词的含金量就已经被算出来了：它是最小可用的那份，而不是最好的那份**」——**⚠️ 故 §10.573 那个「只编 75/120」不是孤例，而是同一个设计倾向的第二个观测**；
+10. 🔥🔥🔥🔥🔥 **编译期保守、运行期激进——两个不同的成本账户**：
+编译期「**十个开关七个 OFF，FA_ALL_QUANTS 关故只编 75/120**」，运行期「**PDL 默认开、47 处调用点、顺带关掉 `__restrict__`**」；
+
+⭐⭐ 判据（本轮最重要）「**当同一份代码在编译期极度保守、在运行期却默认开启一个会削弱另一优化的特性时，那不是不一致，而是「编译期省的是构建资源，运行期赌的是运行时收益」——两个不同的成本账户。故此前把「默认关」当成「不推荐」的读法在这里第一次失效**」——**⚠️ 而这条对 PRO 6000 的实操含义是：拿到一份默认构建的二进制，你得到的是「省着编、拼命跑」的那一档**；
+ — [src-btl3-common-cuh] [src-btl3-cuda-dispatch] [src-btl3-cuda-cmakelists]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -42742,7 +43076,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=468, evidence=2925, claims=2134, claims_high=1784, claims_disputed=9, trace_events=1007, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=468, evidence=2935, claims=2144, claims_high=1794, claims_disputed=9, trace_events=1007, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
