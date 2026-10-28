@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：286 ｜ **证据数**：2228 ｜ **主张数**：1637（高置信 1298，争议 9）
+> **来源数**：287 ｜ **证据数**：2233 ｜ **主张数**：1642（高置信 1303，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -17977,6 +17977,159 @@ static ggml_prec ggml_cuda_mmq_get_prec_env() {
 > ⭐ **它与 §10.40 记的「NCCL 2.30.4 消除卡死」是不同的层**：
 > **一个是通信库版本，一个是命令缓冲区深度。**
 
+### 10.91 🔥🔥🔥🔥🔥 作者自述：**MMQ 内核主要针对 RTX 3000/4000 调优**
+
+**这条来自 `GGML_CUDA_FORCE_CUBLAS` 说明里的一句括号补充** [c-mmq-tuned-for-rtx3000-4000]：
+
+> 「**Prompt processing may become faster on recent datacenter GPUs
+> (the custom kernels were tuned primarily for RTX 3000/4000).**」
+
+> ⚠️ 即 **「自研量化内核」并不是「对所有卡都快」——它在数据中心卡上可能不如 cuBLAS。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「自研内核」与「更快的内核」是两个不同的问题——**
+> **自研内核的目标可能是「省显存」「避开 cuBLAS 的精度问题」或「在消费级卡上更快」，
+> ⚠️ 而这三者都不蕴含「在数据中心卡上更快」。**
+>
+> ⭐⭐ **对 RTX PRO 6000 的含义非常具体**：
+> **它是「工作站卡」而不是「RTX 3000/4000 消费卡」——
+> 故「MMQ 内核为它调优过」这个假设不成立。**
+>
+> ⭐⭐ **这与 §10.62 / §10.64 那两轮记的「Blackwell 表只有 Ampere 表的 1/10」互相印证**：
+> **不是「Blackwell 被忽略了」，而是「整个 MMQ 内核的调优目标就不是数据中心/工作站卡」。**
+>
+> **⭐⭐ 判据：**
+> **当一个内核的调优目标是「某几代消费卡」时，
+> 「新一代卡上没优化」不是遗漏，而是设计的自然结果——**
+> **⚠️ 而这与「有没有为此写代码」是两个独立的问题。**
+>
+> ⭐⭐ **一个可立刻执行的 A/B**：
+> **在 RTX PRO 6000 上对比 `GGML_CUDA_FORCE_CUBLAS=1` 与默认**——
+> **如果 cuBLAS 更快，说明这条括号注释对 12.0 也成立。**
+> ⚠️ **但必须标注：文档没说 Blackwell，也没说 RTX PRO 6000——
+> 「tuned primarily for RTX 3000/4000」是一个更早的表述。**
+
+### 10.92 🔥🔥🔥 `GGML_CUDA_P2P`：**官方承认「可能崩溃或损坏输出」**
+
+[c-p2p-may-corrupt-output]
+
+> 「**The environment variable `GGML_CUDA_P2P` can be set to enable peer-to-peer
+> access between multiple GPUs… Requires driver support
+> (usually restricted to workstation/datacenter GPUs).
+> May cause crashes or corrupted outputs for some motherboards
+> and BIOS settings (e.g. IOMMU).**」
+
+> ⚠️ **RTX PRO 6000 正好落在「工作站卡」这一类，即它是 P2P 的目标平台，
+> 也是这个风险的目标平台。**
+>
+> **⭐⭐ 判据（本轮最重要之一）：**
+> **当一份文档把一个开关描述为「可能更快」同时「可能损坏输出」时，
+> 它就是一条「需要用正确性检查来验证的性能建议」——**
+> **⚠️ 而多数基准测试不做正确性检查。**
+>
+> ⭐⭐ **这与 §10.46 那条判据完全同构**：
+> **「slow 会被基准测试发现，wrong 只有正确性检查能发现」。**
+>
+> ⭐⭐ **「IOMMU」这个具体原因是可操作的**：
+> **如果一台多卡机器出现「偶发乱码」或「偶发崩溃」而它开了 P2P，
+> 那么关掉 P2P 或关掉 IOMMU 是一个可试的分离实验。**
+>
+> **⭐⭐ 判据：**
+> **「一个已知会损坏数据的优化项」比「一个未知的 bug」更容易处理——**
+> **⚠️ 因为前者的第一步是「关掉它」，后者的第一步是「找到它」。**
+
+### 10.93 ⭐⭐⭐ **第三次**「编译期白名单 + 运行时静默回退」
+
+[c-fa-quants-silent-fallback]
+
+> `GGML_CUDA_FA_QUANTS` 默认只编 `q4_0-q4_0;q8_0-q8_0;f16-f16;bf16-bf16`；
+> 关键句：「**Combinations that were not compiled fall back to `f16-f16` kernel
+> with a warning.**」
+> 合法类型只有 7 种：`f16, bf16, q4_0, q4_1, q5_0, q5_1, q8_0`。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一个代码库里出现第三次「白名单 + 静默回退」时，
+> 它就不再是「某个模块的写法」，而是「这个项目的默认设计哲学」——**
+> **⚠️ 而这个哲学的直接后果是：「我编译了它」不等于「我用上了它」。**
+>
+> ⭐⭐ **三次分别是**：
+> **§10.62 MMQ 的 32 条 `CASE` 表、§10.81 的 `GGML_TYPE_COUNT` 哨兵、
+> 本条 FA 的 7 种组合白名单。**
+>
+> ⭐⭐ **具体风险是「警告容易被日志淹没」**：
+> **`with a warning` 意味着它会打印，
+> 但在长上下文推理里，一行启动警告很容易被后续输出冲掉。**
+>
+> ⭐⭐ **对 RTX PRO 6000 的直接含义**：
+> **如果你用 `q4_1` 或 `q5_1` 的 KV cache，它不会报错，只会退回 `f16-f16`——
+> 即「显存省不下来」而「速度也没变快」，而你可能以为它在用 4 比特。**
+>
+> **⭐⭐ 判据：**
+> **一个「有警告的静默回退」在工程上等价于「静默回退」，
+> 除非警告被计数或被断言——**
+> **⚠️ 而「启动时打印一次」是所有警告形式里最弱的一种。**
+
+### 10.94 ⭐⭐⭐ `GGML_NATIVE=OFF` 是官方推荐的架构覆盖手段
+
+[c-native-off-is-official-workaround]
+
+> 「**By default llama.cpp will be built for the hardware that is
+> connected to the system at that time. For a build covering all CUDA GPUs,
+> disable `GGML_NATIVE`**」
+> 官方警告原文：「**nvcc warning : Cannot find valid GPU for '-arch=native',
+> default arch is used**」
+> 代价：「**this will result in a large binary that takes a long time to compile**」
+
+> **⭐⭐⭐ 这条把 §10.60 记的「native 构建陷阱」从「我的推断」变成「官方承认」。**
+>
+> **⭐⭐ 判据：**
+> **当一份报告的一条推断被官方文档以不同措辞确认时，
+> 那条推断的置信度应该升级，
+> 而升级的理由不是「我说对了」，而是「两个独立来源说同一件事」——**
+> **⚠️ 而这两个来源的独立性，取决于它们是否抄了同一份内容。**
+>
+> ⭐⭐ **具体诊断步骤是可执行的**：
+> **如果你在 RTX PRO 6000 上编译 `llama.cpp`，而编译机上插的是别的卡（或没插卡），
+> 那么产物里没有 `sm_120`——**
+> **此时 `blackwell_mma_available` 返回假（§10.66），
+> `can_use_q4` 为假（§10.78），FP4 静默退回 `Q8`（§10.84）。**
+>
+> **⭐⭐ 判据：**
+> **当一条「构建配置」的后果要在「三层运行时判断」之后才显现时，
+> 它的可诊断性几乎为零——**
+> **⚠️ 而这正是 §10.82 那条「`GGML_CUDA_MMQ_PREC=q4` 强制一次」存在的意义。**
+>
+> ⭐ 手动写法的正确形式：`-DCMAKE_CUDA_ARCHITECTURES="120a"`（§10.61 的三段式）。
+
+### 10.95 ⭐⭐ MMQ 与 cuBLAS 是一条**三元权衡**，不是「哪个更快」
+
+[c-mmq-vs-cublas-is-a-real-choice]
+
+| 开关 | 收益 | 代价 |
+|---|---|---|
+| `GGML_CUDA_FORCE_MMQ` | **显存占用更低** | 「**speed for large batch sizes will be worse**」 |
+| `GGML_CUDA_FORCE_CUBLAS` | 大 batch 可能更快 | 「**numerical overflows**」+「**memory use will be higher**」 |
+
+> ⚠️ 即 **这是一条「速度 / 显存 / 数值安全」的三元权衡，而不是「哪个更快」的一元问题。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当你在深挖一个组件的实现细节时，
+> 最该先问的问题是「这个组件是不是唯一的选择」——**
+> **⚠️ 而这个问题通常不在这份源码里，而在它的上一层的文档里。**
+>
+> ⭐⭐ **可执行的建议**：
+> **在 RTX PRO 6000 上跑量化模型，先做两组基线：默认（MMQ）与
+> `GGML_CUDA_FORCE_CUBLAS=1`——**
+> **如果后者更快，那么前面十轮读的 `mmq.cu` / `mmf.cuh` / `mma.cuh`
+> 全都不在你这条路径上。**
+>
+> **⭐⭐ 判据：**
+> **「我读的代码不在我的执行路径上」是性能分析里最昂贵的一种错误——**
+> **⚠️ 而它无法通过「读得更细」来发现，只能通过「问一句还有没有别的路径」来发现。**
+>
+> ⭐ **`numerical overflows` 与 §10.46 记的「greedy 解码乱码」形成对照**：
+> **一个是量化误差，一个是数值溢出——两者都表现为「输出不对」，而诊断路径完全不同。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -21370,6 +21523,10 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 1. [ggml-org/llama.cpp — `docs/build.md`（master 原始文档，46,343 字节 / 907 行）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/docs/build.md) —（2026-10 抓取）。(a) 🔥🔥🔥 **更正 §10.85：`GGML_CUDA_MMQ_PREC` 是有文档的**——`docs/build.md` 第 309 行附近有完整一节：「**Override the activation precision that the model requests for NVFP4 and MXFP4 matrix multiplications. Currently supported values: `auto`, `q8`, `q4`.**」；⚠️ **上一轮记的「285 个来源里只出现在源码中」是错的**——**而错的原因很具体：我在读源码之前没有先读 `docs/`**；⭐⭐ 判据（本轮最重要）「**『我没找到』与『不存在』之间，还有一个中间态你没写出来：『我没有在我可能会找的地方找』——而后者是一个可以立刻消除的不确定性**」；⭐⭐ **更尖锐的是：我上一轮已经写下了「去 `docs/` 里搜这个变量名是唯一能把『我没找到』变成『它不在那里』的动作」——然后我没有做**；⭐⭐ 判据（这条是对我自己的）「**当你在报告里写下『下一步应该做 X』时，如果 X 只要一次抓取就能做，那么『没做 X 就写结论』是一种自我欺骗——因为那句话本身证明了你知道怎么做**」；⭐ 这与 §10.48「引用链会成为『我读过了』的错觉来源」是同一族错误：**「我写下了要做」会成为「我做过了」的错觉来源**。(b) 🔥🔥🔥🔥🔥 **一个此前完全不知道的机制：层标记决定走 W4A4 还是 W4A8**——「**NVFP4 and MXFP4 layers marked as `W4A16` request 8-bit activations, so on Blackwell those layers run through the `W4A8` path instead of the native `W4A4` path.**」；⚠️ 即 **同一个权重格式，可以因为「层被标记为 `W4A16`」而在 Blackwell 上走 `W4A8`——这不是硬件限制，是模型侧的元数据**；⭐⭐ 判据（本轮最重要）「**当一个『能力』有四个开关，而其中一个是『模型自己说自己要什么』时，『换一张更快的卡』就不再是提升性能的主要手段——因为瓶颈可能在『模型请求了什么』**」；ⓘ 于是 §10.85 那张表从三个条件变成四个：**① 权重格式（文件属性）② 二进制能力（安装属性）③ 环境变量（运行属性）④ 层标记 `W4A16` vs `W4A4`（模型元数据）**；⭐ 这解释了 §10.47「NVFP4 在 SM12x 上崩」与 §10.30「dense 不受影响、MoE 崩」为何难以归类：**两种报告的「NVFP4」可能对应不同的层标记**；⭐⭐ 判据「**『同一份权重』这句话，在量化生态里几乎总是不完整的——因为『权重』之外还有『每层的精度元数据』，而后者不在权重文件的主张量里**」。(c) ⭐⭐⭐ **`q4` 的收益只在预填充，代价是精度**——「**Set `q4` to keep the native `W4A4` path for faster prompt processing at the cost of accuracy, or `q8` to use the `W4A8` path for every layer**」；⚠️ 即 **收益在 `prompt processing`，代价是 `accuracy`——文档没有说 decode 会变快**；⭐⭐ 判据「**『预填充受益』与『解码受益』是两个完全不同的产品结论——预填充决定『TTFT』，解码决定『tok/s』——而多数『这卡快不快』的讨论默认在说解码**」+「**一个『加速项』如果不说明它加速的是哪个阶段，它的收益数字就无法被应用到任何具体场景——而这正是 §10.54 记的『TensorFold 解码快、预填充慢』那个矛盾的根源**」；⭐ 对 RTX PRO 6000：**长上下文短输出（文档问答）时 `W4A4` 价值高；短输入长输出（代码生成）时价值可能很小**；⚠️ 边界：**「文档没提 decode」不等于「decode 没受益」**。(d) ⭐⭐ **`auto` 是逐张量的，不是全局的**——「**`auto` uses per-tensor prec metadata (this is the same behavior as when the environment variable is not set)**」，⚠️ 即 **默认不是「全局 Q8」，而是「每个张量自己说自己要几位」，故一个模型里可以同时有 `W4A4` 层与 `W4A8` 层**；⭐⭐ 判据「**当一份文档说『默认是 X』时，要追问『X 是全局的，还是逐项的默认值』——因为后者意味着『同一个进程里可以同时存在两种行为』，而这会让『平均性能』变成一个没有意义的数**」+「**一个『混合配置下的平均性能』数字，只有在混合比例固定时才可比——而混合比例是模型属性，不是硬件属性**」；⭐⭐ 这解释了 §10.53 记的「2.1–2.3× 是跨精度比较」为何难以纠正：**因为「精度」本身就不是一个单值，而是一个分布**。(e) ⭐⭐ **`CUDA_SCALE_LAUNCH_QUEUES`：一个本报告从没试过的维度**——「**Consider setting `CUDA_SCALE_LAUNCH_QUEUES=4x`, which increases the CUDA command buffer to 4 times its default size. This optimization is particularly beneficial for Multi-GPU setups with pipeline parallelism, where it significantly improves prompt processing throughput by allowing more operations to be enqueued across GPUs.**」（同一份文档还列了 `GGML_CUDA_CUBLAS_COMPUTE_TYPE`，合法值 `auto`/`f16`/`fp16`/`bf16`/`f32`/`fp32`）；⭐⭐ 判据（本轮最需自我约束的一条）「**『一个参数出现在相关场景的文档里』不等于『它能解决那个场景的问题』——而把前者写成后者，是 §10.50『归因一致 ≠ 结论一致』的又一次风险**」；⭐ 故准确写法只能是：**文档推荐多卡流水并行下设 `4x` 以提升预填充吞吐；本报告的多卡卡死是否与命令缓冲区深度有关，未验证**——**而 §10.41 那张 7 行控制矩阵里没有一行是「改命令缓冲区大小」，这是一个此前不知道存在的维度**；⭐⭐ 判据「**一份好的控制矩阵，最缺的往往不是『更多数据点』，而是『一个没人想到的维度』——而新维度通常藏在你没读的文档里，不在你读过的 issue 里**」 — [src-llamacpp-docs-build-md]
 
+### MMQ 内核主要针对 RTX 3000/4000 调优，与 P2P 可能损坏输出（第八十二轮补充）
+
+1. [ggml-org/llama.cpp — `docs/build.md` 的「Non-Native Builds」/「Override Compute Capability」/「Unified Memory」/「Peer Access」/「Performance Tuning」五节（第 206–336 行）](https://raw.githubusercontent.com/ggml-org/llama.cpp/master/docs/build.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **作者自述：MMQ 内核主要针对 RTX 3000/4000 调优**——`GGML_CUDA_FORCE_CUBLAS` 说明里的一句括号补充：「**Prompt processing may become faster on recent datacenter GPUs (the custom kernels were tuned primarily for RTX 3000/4000).**」；⭐⭐ 判据（本轮最重要）「**『自研内核』与『更快的内核』是两个不同的问题——自研内核的目标可能是『省显存』『避开 cuBLAS 的精度问题』或『在消费级卡上更快』，而这三者都不蕴含『在数据中心卡上更快』**」；⭐ 对 RTX PRO 6000：**它是「工作站卡」而非「RTX 3000/4000 消费卡」，故「MMQ 为它调优过」这个假设不成立**；⭐⭐ **这与 §10.62/§10.64「Blackwell 表只有 Ampere 表的 1/10」互相印证：不是「Blackwell 被忽略了」，而是「整个 MMQ 内核的调优目标就不是数据中心/工作站卡」**；⭐⭐ 判据「**当一个内核的调优目标是『某几代消费卡』时，『新一代卡上没优化』不是遗漏，而是设计的自然结果——而这与『有没有为此写代码』是两个独立的问题**」；⭐ 可立刻执行的 A/B：**对比 `GGML_CUDA_FORCE_CUBLAS=1` 与默认**；⚠️ 边界：**文档没说 Blackwell，也没说 RTX PRO 6000**。(b) 🔥🔥🔥 **`GGML_CUDA_P2P`：官方承认「可能崩溃或损坏输出」**——「**Requires driver support (usually restricted to workstation/datacenter GPUs). May cause crashes or corrupted outputs for some motherboards and BIOS settings (e.g. IOMMU).**」；⚠️ **RTX PRO 6000 正好落在「工作站卡」这一类，即它是 P2P 的目标平台，也是这个风险的目标平台**；⭐⭐ 判据（本轮最重要之一）「**当一份文档把一个开关描述为『可能更快』同时『可能损坏输出』时，它就是一条『需要用正确性检查来验证的性能建议』——而多数基准测试不做正确性检查**」；⭐⭐ 这与 §10.46「slow 会被基准测试发现，wrong 只有正确性检查能发现」完全同构；⭐⭐ 「IOMMU」这个原因是可操作的：**多卡机器出现偶发乱码/崩溃且开了 P2P 时，关掉 P2P 或关掉 IOMMU 是可试的分离实验**；⭐⭐ 判据「**『一个已知会损坏数据的优化项』比『一个未知的 bug』更容易处理——因为前者的第一步是『关掉它』，后者的第一步是『找到它』**」。(c) ⭐⭐⭐ **第三次「编译期白名单 + 运行时静默回退」**——`GGML_CUDA_FA_QUANTS` 默认只编 `q4_0-q4_0;q8_0-q8_0;f16-f16;bf16-bf16`，关键句「**Combinations that were not compiled fall back to `f16-f16` kernel with a warning.**」，合法类型只有 `f16/bf16/q4_0/q4_1/q5_0/q5_1/q8_0` 七种；⭐⭐ 判据（本轮最重要）「**当同一个代码库里出现第三次『白名单 + 静默回退』时，它就不再是『某个模块的写法』，而是『这个项目的默认设计哲学』——而这个哲学的直接后果是：『我编译了它』不等于『我用上了它』**」；ⓘ 三次分别是 **§10.62 MMQ 的 32 条 `CASE` 表、§10.81 的 `GGML_TYPE_COUNT` 哨兵、本条 FA 的 7 种组合白名单**；⭐⭐ 对 RTX PRO 6000 的直接含义：**用 `q4_1`/`q5_1` 的 KV cache 不会报错，只会退回 `f16-f16`——即「显存省不下来」而「速度也没变快」，而你可能以为它在用 4 比特**；⭐⭐ 判据「**一个『有警告的静默回退』在工程上等价于『静默回退』，除非警告被计数或被断言——而『启动时打印一次』是所有警告形式里最弱的一种**」。(d) ⭐⭐⭐ **`GGML_NATIVE=OFF` 是官方推荐的架构覆盖手段**——「**By default llama.cpp will be built for the hardware that is connected to the system at that time. For a build covering all CUDA GPUs, disable `GGML_NATIVE`**」，官方警告「**nvcc warning : Cannot find valid GPU for '-arch=native', default arch is used**」，代价「**a large binary that takes a long time to compile**」；⭐⭐⭐ **这把 §10.60 记的「native 构建陷阱」从「我的推断」变成「官方承认」**；⭐⭐ 判据「**当一份报告的一条推断被官方文档以不同措辞确认时，那条推断的置信度应该升级，而升级的理由不是『我说对了』，而是『两个独立来源说同一件事』——而这两个来源的独立性，取决于它们是否抄了同一份内容**」；⭐ 具体诊断：**编译机上插的不是 RTX PRO 6000 时产物里没有 `sm_120`，于是 `blackwell_mma_available` 假 → `can_use_q4` 假 → FP4 静默退回 `Q8`**；⭐⭐ 判据「**当一条『构建配置』的后果要在『三层运行时判断』之后才显现时，它的可诊断性几乎为零——而这正是 §10.82 那条「`GGML_CUDA_MMQ_PREC=q4` 强制一次」存在的意义**」。(e) ⭐⭐ **MMQ 与 cuBLAS 是一条三元权衡，不是「哪个更快」**——`GGML_CUDA_FORCE_MMQ`：「**speed for large batch sizes will be worse but VRAM consumption will be lower**」；`GGML_CUDA_FORCE_CUBLAS`：「**There may be issues with numerical overflows … and memory use will be higher**」；⭐⭐ 判据（本轮最重要）「**当你在深挖一个组件的实现细节时，最该先问的问题是『这个组件是不是唯一的选择』——而这个问题通常不在这份源码里，而在它的上一层的文档里**」；⭐⭐ 判据「**『我读的代码不在我的执行路径上』是性能分析里最昂贵的一种错误——而它无法通过『读得更细』来发现，只能通过『问一句还有没有别的路径』来发现**」 — [src-llamacpp-docs-build-perf]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -21509,7 +21666,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=286, evidence=2228, claims=1637, claims_high=1298, claims_disputed=9, trace_events=641, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=287, evidence=2233, claims=1642, claims_high=1303, claims_disputed=9, trace_events=643, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
