@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：449 ｜ **证据数**：2846 ｜ **主张数**：2040（高置信 1691，争议 9）
+> **来源数**：451 ｜ **证据数**：2852 ｜ **主张数**：2046（高置信 1697，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -33639,6 +33639,203 @@ exit 0
 > **⭐⭐ 故「本报告有工具链」这句话应该被读成
 > 「本报告有可复现的检查」，而不是「本报告能自动研究」。**
 
+### 10.497 🔥🔥🔥🔥🔥 「Every capability layer plugs into this」——而三层都没插
+
+[c-no-capability-layer-plugs-into-the-trace-spine]
+
+> **`Prism/src/prism/trace.py` 第 3 行 docstring**：
+> ```
+> Every capability layer plugs into this.
+> ```
+> **而本仓库实测（对三个主要能力模块全文扫描 `tracer`）**：
+> ```
+> === _q_tools.py : 0 tracer 命中 ===
+>
+> === _q_planner.py : 0 tracer 命中 ===
+>
+> === _q_agent.py : 0 tracer 命中 ===
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「每个 X 都插进来」的声明，
+> 如果任何一个 X 的代码里都没有那个插头，
+> 那它不是集成，而是一个预先留好的接口。**
+>
+> **⭐⭐ 判据：**
+> **故「spine」这个词在这里的正确读法是「一个为将来准备的骨架」，
+> 而不是「当前的运行时记忆」。**
+>
+> ⚠️ **而这条对本报告是一个直接的对照：
+> 本报告的 `run.json` 有 969 个 trace 事件，
+> 而它们是每轮**由一个脚本重新生成**的——
+> 不是被记录下来的，而是被重建的。**
+> **⭐⭐ 故本报告与 Prism 在这一点上是镜像：
+> Prism 有真的 `tracer` 但没人调用，
+> 本报告有真的 `trace` 但没有记录过程。**
+
+### 10.498 🔥🔥🔥🔥🔥 trace 记的名字与执行的名字**是两个变量**
+
+[c-toolstep-records-the-original-name-not-the-resolved-one]
+
+> **`Prism/src/prism/tools.py` 第 356-362 行**：
+> ```python
+> try:
+>     result = reg.call(call["tool"], call["args"])
+>     ok = True
+> except ToolError as e:
+>     result = {"error": str(e)}
+>     ok = False
+> trace.steps.append(ToolStep(call["tool"], call["args"], ok, result))
+> ```
+> **而 `reg.call`（107-114 行）内部第一步就是**
+> ```python
+> resolved = self.resolve_name(name)
+> ```
+> **故 `ToolStep.tool` 是原始的 `call["tool"]`，
+> 而真正被调用的工具是 `resolved`——两者只在「名字完全正确」时相等。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 trace 如果记的是「输入」而执行的是「输入的解析结果」，
+> 那这个 trace 能证明「模型写了什么」，
+> 但不能证明「系统做了什么」。**
+>
+> **⭐⭐ 判据：**
+> **故「可回放」这个属性需要两个名字都在，而不是只留一个。**
+>
+> ⚠️ **而这里有一次对 §10.493 的自我修正：
+> `bench_tools` 的 `called = [s.tool for s in trace.steps]` 拿到的其实是
+> **原始名**，不是修复后的名字。
+> 故 `any(t in probe.allowed_tools for t in called)` **确实**在检查
+> 「模型有没有写对工具名」——而 §10.493 说的
+> 「名字被修复后必然合法」是错的。**
+> **⭐⭐ 这是本报告第 N 次撤回自己上一轮的推论：
+> 方向对，依据搞反了。**
+
+### 10.499 ⭐⭐⭐⭐⭐ 一个 `**data` 通配的接口，**能力永远为真、永远无用**
+
+[c-the-tracer-api-has-an-unused-catchall]
+
+> **`Prism/src/prism/trace.py` 第 87-92 行**：
+> ```python
+> def action(self, *, tool: str, ok: bool, **data) -> None:
+>     self.event("action", tool=tool, ok=ok, **data)
+>
+> def check(self, *, kind: str, ok: bool, signal: float = 0.0, **data) -> None:
+>     """Domain-agnostic verifier event. kind: tests|schema|citation|reconcile|..."""
+>     self.event("check", check_kind=kind, ok=ok, signal=signal, **data)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 `**data` 通配的接口，
+> 它的「能记录什么」不由签名决定，而由调用方决定——
+> 故「这个 API 支持记录 X」这句话永远为真，也永远无用。**
+>
+> **⭐⭐ 判据：**
+> **故一个通配参数的存在，不能作为「这个系统记录了 X」的证据；
+> 只有调用点能。**
+>
+> ⚠️ **而这条与 §10.481（`repo_root` 被存被读但不参与判断）构成一对：
+> 那一条是「字段存在但不用」，这一条是「参数存在但没人传」。**
+> **⭐⭐ 共同判据：「存在」是一份声明，「使用」是一份证据，
+> 而两者必须分别检查。**
+
+### 10.500 ⭐⭐⭐⭐⭐ 七类事件，每一类对应一个**疑问句**
+
+[c-the-trace-declares-seven-event-kinds-and-what-each-answers]
+
+> **`Prism/src/prism/trace.py` 第 3-13 行**：
+> ```
+> Every capability layer plugs into this. It records, per run, the full loop:
+>   - what CONTEXT the harness gave the model,
+>   - each MODEL_CALL (role, think mode, latency, output size),
+>   - each ACTION (tool/command) and its observation,
+>   - each CHECK (the verifier — tests for code, schema/citations/reconciliation
+>     for other domains) with its signal,
+>   - each REPAIR (what feedback drove the retry),
+>   - the OUTCOME (resolved?, which attempt/layer won).
+>
+> Deliberately domain-agnostic: `check(kind=...)` is "tests" for coding today and
+> "schema"/"citation"/"reconcile" for future domain packs — same spine.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份事件分类里的每一项都对应一个疑问句时，
+> 这份分类就是一张「这个系统打算回答哪些问题」的清单——
+> 而它比任何架构图都更能说明设计者的意图。**
+>
+> **⭐⭐ 判据：**
+> **故检查一个 trace 系统的最快方法，
+> 是问「它有哪些字段没有对应的问题」。**
+>
+> ⚠️ **而这条对本报告是一个直接的检验：
+> `run.json` 的 trace 有 969 个事件，而它们只有四个 kind
+> （`fetch` / `extract` / `claim_added` / `validate`），
+> **没有 `context`、没有 `model_call`、没有 `repair`**。**
+> **⭐⭐ 故本报告的 trace 回答不了「我给模型看了什么」——
+> 因为本报告的「模型」就是我自己。**
+
+### 10.501 ⭐⭐⭐⭐⭐ 「追加写 + 单调 `seq`」是**唯一能在崩溃后仍然可信的结构**
+
+[c-trace-jsonl-is-append-only-per-event]
+
+> **`Prism/src/prism/trace.py` 第 64-72 行**：
+> ```python
+> def event(self, kind: str, **data) -> None:
+>     if not self.enabled:
+>         return
+>     self._seq += 1
+>     ev = Event(seq=self._seq, t=round(time.time() - self._t0, 3), kind=kind, data=data)
+>     self.events.append(ev)
+>     if self.run_dir is not None:
+>         with open(os.path.join(self.run_dir, "trace.jsonl"), "a", encoding="utf-8") as fh:
+>             fh.write(json.dumps(asdict(ev)) + "\n")
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「追加写 + 单调 `seq`」是唯一能让一份日志在崩溃后仍然可信的结构——
+> 因为任何删除都会在 `seq` 上留下一个洞。**
+>
+> **⭐⭐ 判据：**
+> **故一份日志的可信度不取决于它记了多少，
+> 而取决于它能不能证明「没有东西被删掉」。**
+>
+> ⚠️ **而这条与本报告的 `run.json` 相反：
+> 本报告的 trace 是每轮**整体重写**的，
+> 故 `seq` 连续但历史被覆盖——
+> 这正是 §10.480 说的「内容失效没有判据」的另一面。**
+> **⭐⭐ 故本报告在这一点上比 Prism 弱：它有 `append-only`，我有 `rewrite-all`。**
+
+### 10.502 ⭐⭐⭐⭐⭐ 「编译器是一个**免费的大模型**」
+
+[c-the-compiler-is-called-a-free-big-model]
+
+> **`Prism/src/prism/verify.py` 第 1-7 行**：
+> ```
+> """Verify hook: run cheap deterministic checks on an edit and return structured
+> errors the agent loop can feed back to a small model.
+>
+> The compiler/test runner is a free "big model": it catches what a small model
+> misses. v1 supports Python compile-checking (always available) and pytest
+> (if installed / requested).
+> """
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个系统把编译器称为「大模型」时，
+> 它其实在说：我需要的不是更强的生成，
+> 而是一个不与我共享偏见的裁判。**
+>
+> **⭐⭐ 判据：**
+> **故这个类比的落脚点不在「大」，而在「免费」与「不共享偏见」。**
+>
+> ⚠️ **而这条给本报告一个可借用的说法：
+> 本报告的「免费大模型」是 `validate_research.py` 与十一个 audit 脚本——
+> 它们不会替我写 §10，但会告诉我哪条引用悬空。**
+> **⭐⭐ 故本报告真正的「外部信号」只有两类：
+> 校验器的不变量，与原文的逐字引用。
+> 而第二类没有自动化——
+> 这正是 §10.485 说「存在性检查不等于正确性检查」的地方。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -39496,6 +39693,35 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个「四级降级」如果只捕获一种异常，那它降级的是「这个客户端不支持这个参数」，而不是「这个模型生成了不合法的 JSON」——而后者才是 `TOOL_CALL_FORMAT` 想解决的问题。故「structured=True」这个开关的真实含义是「试一试，不行就算了」，而不是「强制」**」——**⚠️ 而这条让 10.488 的 `structured` vs `loose` 对比又多了一层不确定性：两组的差别不只是有没有约束解码，还包括「约束解码有没有被这个客户端接受」。而 trace 里不记录降级发生在第几级**；
  — [src-prism-planner-py] [src-prism-tools-py]
 
+### 「每层都插进来」——而三层都没插（第一百五十九轮补充）
+
+上一轮结尾说「读 `trace.py`，因为 10.493 说修复不留痕，而它是那个该留痕的地方」。本轮读完 `trace.py`（6,189 字节 / 154 行）与 `verify.py`（4,070 字节 / 120 行），**结果是 10.493 被自己推翻了。**
+
+1. 🔥🔥🔥🔥🔥 **「Every capability layer plugs into this」与 0 命中**：
+`Prism/src/prism/trace.py` 第 3 行 docstring 写「**Every capability layer plugs into this**」，而实测三个主要能力模块里 `tracer` 出现 0 次（`tools.py` / `planner.py` / `agent.py`）；
+⭐⭐ 判据（本轮最重要）「**一个「每个 X 都插进来」的声明，如果任何一个 X 的代码里都没有那个插头，那它不是集成，而是一个预先留好的接口。故「spine」这个词在这里的正确读法是「一个为将来准备的骨架」，而不是「当前的运行时记忆**」；
+⚠️ **而这条对本报告是一个直接的对照：`run.json` 有 969 个 trace 事件，而它们是每轮由一个脚本重新生成的——不是被记录下来的，而是被重建的。故本报告与 Prism 在这一点上是镜像：Prism 有真的 `tracer` 但没人调用，本报告有真的 trace 但没有记录过程**；
+2. 🔥🔥🔥🔥🔥 **trace 记的名字与执行的名字是两个变量——这是对本报告上一轮的自我修正**：
+`tools.py` 第 362 行写「**trace.steps.append(ToolStep(call["tool"], call["args"], ok, result))**」，而第 357 行 `reg.call(call["tool"], ...)` 内部第一步是`resolved = self.resolve_name(name)`（108 行）——故 `ToolStep.tool` 是**原始名**，而真正被调用的是 `resolved`；
+⭐⭐ 判据（本轮最重要）「**一个 trace 如果记的是「输入」而执行的是「输入的解析结果」，那这个 trace 能证明「模型写了什么」，但不能证明「系统做了什么**」——**故「可回放」这个属性需要两个名字都在，而不是只留一个**；
+⚠️ **而这里有一次对 10.493 的自我修正：`bench_tools` 的 `called = [s.tool for s in trace.steps]` 拿到的是原始名、不是修复后的名字，故 `any(t in probe.allowed_tools for t in called)` **确实**在检查「模型有没有写对工具名」——而 10.493 说的「名字被修复后必然合法」是错的。这是本报告又一次撤回自己上一轮的推论：方向对，依据搞反了**；
+3. ⭐⭐⭐⭐⭐ **一个 `**data` 通配的接口，能力永远为真、永远无用**：
+`trace.py` 第 87-92 行写「**def action(self, *, tool: str, ok: bool, **data) -> None:        self.event("action", tool=tool, ok=ok, **data)**」，`check` / `repair` / `outcome` / `note` 同；
+⭐⭐ 判据「**一个 `**data` 通配的接口，它的「能记录什么」不由签名决定，而由调用方决定——故「这个 API 支持记录 X」这句话永远为真，也永远无用。故一个通配参数的存在，不能作为「这个系统记录了 X」的证据；只有调用点能**」——**⚠️ 而这条与 10.481（`repo_root` 被存被读但不参与判断）构成一对：那一条是「字段存在但不用」，这一条是「参数存在但没人传」。共同判据：「存在」是一份声明，「使用」是一份证据，而两者必须分别检查**；
+4. ⭐⭐⭐⭐⭐ **七类事件，每一类对应一个疑问句**：
+`trace.py` 第 3-13 行把每一类写成「**what CONTEXT the harness gave the model**」/「**each MODEL_CALL (role, think mode, latency, output size)**」/「**each ACTION (tool/command) and its observation**」/「**each CHECK ... with its signal**」/「**each REPAIR (what feedback drove the retry)**」/「**the OUTCOME (resolved?, which attempt/layer won)**」；
+⭐⭐ 判据「**当一份事件分类里的每一项都对应一个疑问句时，这份分类就是一张「这个系统打算回答哪些问题」的清单——而它比任何架构图都更能说明设计者的意图。故检查一个 trace 系统的最快方法，是问「它有哪些字段没有对应的问题」**」——**⚠️ 而 `run.json` 的 969 个事件只有四个 kind（`fetch` / `extract` / `claim_added` / `validate`），**没有 `context`、没有 `model_call`、没有 `repair`**——故本报告的 trace 回答不了「我给模型看了什么」，因为本报告的「模型」就是我自己**；
+5. ⭐⭐⭐⭐⭐ **「追加写加单调 `seq`」是唯一能在崩溃后仍然可信的结构**：
+`trace.py` 第 64-72 行写「**with open(os.path.join(self.run_dir, "trace.jsonl"), "a", encoding="utf-8") as fh:                fh.write(json.dumps(asdict(ev)) + "\n")**」，即一行一事件、追加写、`self._seq += 1` 单调；
+⭐⭐ 判据「**「追加写加单调 `seq`」是唯一能让一份日志在崩溃后仍然可信的结构——因为任何删除都会在 `seq` 上留下一个洞。故一份日志的可信度不取决于它记了多少，而取决于它能不能证明「没有东西被删掉」**」——**⚠️ 而这条与本报告的 `run.json` 相反：本报告的 trace 是每轮整体重写的，故 `seq` 连续但历史被覆盖——这正是 10.480 说的「内容失效没有判据」的另一面。故本报告在这一点上比 Prism 弱：它有 append-only，我有 rewrite-all**；
+6. [GitHub / Badtheorylabs — `Prism/src/prism/verify.py`（4,070 字节，120 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/Prism/main/src/prism/verify.py)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **「编译器是一个免费的大模型」**：**docstring 第 4-5 行写「The compiler/test runner is a free "big model": it catches what a small model misses.」**；
+⭐⭐ 判据（本轮最重要）「**当一个系统把编译器称为「大模型」时，它其实在说：我需要的不是更强的生成，而是一个不与我共享偏见的裁判。故这个类比的落脚点不在「大」，而在「免费」与「不共享偏见**」——
+⚠️ **而这条给本报告一个可借用的说法：本报告的「免费大模型」是 `validate_research.py` 与十一个 audit 脚本——它们不会替我写 §10，但会告诉我哪条引用悬空。故本报告真正的「外部信号」只有两类：校验器的不变量，与原文的逐字引用。而第二类没有自动化——这正是 10.485 说「存在性检查不等于正确性检查」的地方**；
+ — [src-prism-trace-py] [src-prism-verify-py]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -39635,7 +39861,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=449, evidence=2846, claims=2040, claims_high=1691, claims_disputed=9, trace_events=969, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=451, evidence=2852, claims=2046, claims_high=1697, claims_disputed=9, trace_events=973, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
