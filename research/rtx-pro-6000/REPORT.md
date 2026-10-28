@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：315 ｜ **证据数**：2329 ｜ **主张数**：1719（高置信 1374，争议 9）
+> **来源数**：317 ｜ **证据数**：2337 ｜ **主张数**：1724（高置信 1379，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -21202,6 +21202,255 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⚠️ **边界**：**本报告没有编译或运行过这段代码**（§10.156），
 > 故只能断言「数学等价」，不能断言「无 UB」。
 
+### 10.173 🔥🔥🔥🔥🔥 **我的独立推导与源码逐字对上**
+
+[c-workspace-formula-matched]
+
+> ```cpp
+> const std::size_t values_per_token = shape.columns + shape.rows;
+> if (token_count > limit / values_per_token) { return 0; }
+> return token_count * values_per_token * sizeof(float);
+> ```
+
+> **⭐⭐⭐⭐⭐ 这是本报告第一次「我的独立推导与源码逐项对上」**：
+> **§10.168 我从三个 kernel 的启动参数推出
+> 「两块临时缓冲 = `tokens × (columns + rows) × 4` 字节，约 67 MB」，
+> 而 `avq2_workspace_bytes()` 的原文是
+> `token_count * (shape.columns + shape.rows) * sizeof(float)`——
+> ⚠️ 一字不差，连括号的位置都对。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「独立推导」与「读源码确认」是两种不同的验证，
+> 而它们对上时的信息量远大于任何一种单独使用——**
+> **⚠️ 因为前者证明「我理解了机制」，
+> 后者证明「我没记错参数」。**
+>
+> ⭐⭐ **而这次对上有一个可复制的原因**：
+> **§10.168 我不是「读公式」，而是「数启动参数」——
+> `transform_input` 写 `tokens * columns` 个、
+> `transform_output` 写 `tokens * rows` 个——
+> ⚠️ 而这两个数字就是公式的全部输入。**
+>
+> **⭐⭐ 判据：**
+> **「一个显存估算公式」往往可以从「它要装哪几块缓冲」直接拼出来，
+> 而不需要读公式本身——**
+> **⚠️ 而拼出来之后再对照源码，是一次成本极低的交叉验证。**
+>
+> ⭐⭐ **而源码比我的推导多做了两件事**：
+> **① 两道溢出检查；② 在越界时返回 `0` 而不是抛异常——
+> ⚠️ 即它把「估算失败」与「估算结果为零」合并成了同一个返回值。**
+>
+> **⭐⭐ 判据：**
+> **`0` 作为一个「哨兵值」是危险的，
+> 因为「合法的零」与「失败」无法区分——**
+> **⚠️ 而这里 `token_count == 0` 也返回 `0`，
+> 故调用方无法分辨「没有 token」与「尺寸溢出」。**
+>
+> ⭐⭐ **这是一个真实的可判定缺陷**：
+> **「溢出」与「空输入」被映射到同一个返回值 `0`——
+> ⚠️ 而两者的正确处理方式完全不同（前者应报错，后者应跳过）。**
+>
+> ⚠️ **边界**：**本报告没有读调用方，故不知道它是否真的无法分辨。**
+
+### 10.174 🔥🔥🔥🔥🔥 十个 magic，**probe 是按后端命名的**
+
+[c-ten-magics-per-backend]
+
+> | 类 | magic | 解码 |
+> |---|---|---|
+> | 算子 ×4 | `0x42544c3341565132` … | **`BTL3AVQ2` / `BTL3INT4` / `BTL3VGRW` / `BTL3VHED`** |
+> | **通用 probe** | `0x42544c3350524f42` | **`BTL3PROB`** |
+> | **Metal probe** | `0x42544c334d505242` | **`BTL3MPRB`** |
+> | CUDA probe ×4 | `0x42544c3343…` | **`BTL3CAVQ` / `BTL3CINT` / `BTL3CVRW` / `BTL3CVHD`** |
+
+> **⭐⭐⭐⭐⭐ 这条给 §10.162 那个「probe 只声明我要」补上了缺失的第三维**：
+> **§10.162 我只看到四个 CUDA probe，
+> 故以为「probe = 一个 CUDA 专属概念」——
+> ⚠️ 而 `BTL3PROB` 与 `BTL3MPRB` 说明 probe 是每个后端各一套的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一组命名」里的空缺，往往不是不存在，
+> 而是「另一个后端已经有一个了」——**
+> **⚠️ 而 `BTL3PROB` 这个名字（没有后端字母）
+> 恰好是「通用回退」的位置。**
+>
+> ⭐⭐ **八个字母的结构非常整齐**：
+> **`BTL3` + `[C|M]`（可选后端）+ 四字母角色——
+> ⚠️ 即 `BTL3CAVQ` 与 `BTL3MPRB` 用的是同一个编码规则。**
+>
+> **⭐⭐ 判据：**
+> **当一个命名规则能被「拆成固定前缀 + 可选段 + 角色」时，
+> 它就能容纳任意多个后端，而不需要改规则——**
+> **⚠️ 而 `BTL3PROB` 那个缺省段就是「不指定后端」。**
+>
+> ⭐⭐ **而这对 §10.155/§10.162 那个矛盾的最终含义是**：
+> **「CUDA 支持四个算子」与「Metal 说 CUDA 还没实现」这两句话，
+> 在「probe 是分后端声明的」这个结构下完全不冲突——
+> ⚠️ 因为 probe 声明的是「我想要」，而实现声明的是「我能做」，
+> 而这两件事在任何后端上都可以不同步。**
+>
+> **⭐⭐ 判据：**
+> **「一个系统里有几层声明」决定了「支持」这个词能有多少种含义——**
+> **⚠️ 而 BTL-3 至少有四层：算子 magic、后端 probe、kernel 源码、被编译。**
+>
+> ⭐⭐ **这四层恰好对应本报告四轮的工作**：
+> **§10.160（算子 magic）、§10.162（CUDA probe）、
+> §10.155（kernel 源码）、§10.165（被编译）——**
+> **⚠️ 四层各有一个独立的「是/否」，而它们没有一层能单独回答「能不能用」。**
+>
+> **⭐⭐ 判据：**
+> **「能不能用」只有在四层全部为「是」时才成立，
+> 而任何一层为「否」时，症状都不同——**
+> **⚠️ 这就是为什么「CUDA 到底支不支持 INT4」这个问题，
+> 用一个是/否回答一定是错的。**
+
+### 10.175 ⭐⭐⭐⭐ 同一个归一化，**CPU 与 CUDA 用两种方式生成**
+
+[c-cpu-cuda-normalization-differs]
+
+> CPU：`const float inverse_scale = 1.0F / std::sqrt(static_cast<float>(block_size));`
+> CUDA：`constexpr float transform_scale = 0.08838834764831845F;`
+
+> **⭐⭐⭐⭐ 这是一个「两个实现必须逐位一致、却用不同方式计算同一个常数」的经典风险**：
+> **CPU 侧每次调用都算一次 `1.0F / sqrt(128.0F)`；
+> CUDA 侧用编译期常量——
+> ⚠️ 而这两个值在 float32 下是否逐位相同，取决于编译器的舍入。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「同一个数学常数用两种方式生成」时，
+> 一致性只能靠「舍入恰好相同」，而不能靠「公式相同」——**
+> **⚠️ 而 `1.0F / sqrtf(128.0F)` 与字面量 `0.08838834764831845F`
+> 在 IEEE-754 下通常相同，但这不是标准保证的。**
+>
+> ⭐⭐ **对本报告的实际意义**：
+> **§10.156 说「CUDA 代码从未被编译过」，
+> 故「CPU 与 CUDA 是否逐位一致」从未被验证——
+> ⚠️ 而它正是 `test-btl3-avq-cuda` 那个测试要做的事。**
+>
+> **⭐⭐ 判据：**
+> **「一个测试存在」与「这个测试跑过」之间的差别，
+> 在「数值一致性」这类问题上特别致命——**
+> **⚠️ 因为它的一致性不是「大体相等」，而是「逐位相等」。**
+>
+> ⭐⭐ **而 CUDA 文档自己承认了这一点**（§10.156）：
+> **「do not publish a throughput or latency claim from
+> source inspection or unit tests」——
+> ⚠️ 它只禁止了「性能声明」，而没有禁止「正确性声明」，
+> 而正确性同样没被验证。**
+>
+> **⭐⭐ 判据：**
+> **「一份文档明确禁止 X」会让人忽略「它也没验证 Y」——**
+> **⚠️ 因为「明确禁止」比「默默省略」更容易被记住。**
+>
+> ⭐⭐ **这条也解释了为什么 §10.169 那个「输入变换提到循环外」是安全的**：
+> **CUDA 侧算一次复用，CPU 侧每 token 重算一次——
+> ⚠️ 两者在数学上等价，但 CUDA 省了 `(tokens-1)` 次 FWHT。**
+>
+> **⭐⭐ 判据：**
+> **「一个优化是否安全」取决于「它有没有改变数学」，
+> 而「算一次」与「算 N 次」在纯函数下永远等价——**
+> **⚠️ 故 FWHT 的可复用性来自「它不依赖 token」。**
+
+### 10.176 ⚠️⚠️⚠️ CPU 参考实现：**每 token 两次堆分配**，且 token 内串行
+
+[c-cpu-per-token-heap-alloc]
+
+> ```cpp
+> std::vector<float> transformed_input(matrix.columns);
+> ...
+> std::vector<float> transformed_output(matrix.rows, 0.0F);
+> ```
+> 且并行粒度是「一个 token」（`ith / nth` 切片），token 内部完全串行。
+
+> **⚠️⚠️⚠️ 这条与 §10.168 那个「67 MB 临时缓冲」形成尖锐对照**：
+> **CUDA 侧一次性分配两块大缓冲，
+> CPU 侧每个 token 分配两块小缓冲——
+> ⚠️ 两边都「分配了同样的东西」，
+> 但一个在 kernel 外、一个在循环内。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「同一份算法在两端的实现」最能暴露
+> 「哪部分是本质、哪部分是选择」——**
+> **⚠️ 而这里两端都选择了「用临时缓冲」，说明这是算法本质；
+> 而「分配几次」则是实现选择。**
+>
+> ⭐⭐ **CPU 侧那个选择的代价是可算的**：
+> **以 `columns = rows = 4,096`、`tokens = 2,048` 计，
+> 就是 2,048 × 2 = **4,096 次堆分配**——
+> ⚠️ 每次约 16 KB，而 `std::vector` 的默认初始化还会把它清零。**
+>
+> **⭐⭐ 判据：**
+> **「在热循环里分配内存」的代价不在分配本身，而在
+> 「分配器锁 + 清零 + 缺页」三件事叠加——**
+> **⚠️ 而这三件事都不会出现在 profiler 的「算法」那一栏里。**
+>
+> ⭐⭐ **这也解释了 CPU 侧的并行选择**：
+> **它把 `token` 分给 `nth` 个线程（`GGML_N_TASKS_MAX`），
+> 而每个 token 内部串行——
+> ⚠️ 即「并行度 = token 数」，而 `token = 1`（对话解码）时完全串行。**
+>
+> **⭐⭐ 判据：**
+> **「并行维度选 token」在 prompt 处理（`tokens` 大）时是好的，
+> 在逐 token 解码（`tokens = 1`）时是零并行——**
+> **⚠️ 而解码恰恰是延迟敏感的那一半。**
+>
+> ⭐⭐ **这正是 CPU 参考实现「只配做参考」的原因**：
+> **它的设计目标是「可读、可验证」，而不是「快」——
+> ⚠️ 而 §10.172 那条「不要从代码形状推缺陷」在这里同样适用：
+> 这三个选择都不是错误，而是角色决定的。**
+>
+> ⚠️ **边界**：**本报告没有实测 CPU 侧的吞吐**，故「慢多少」是未知的。**
+
+### 10.177 ⭐⭐⭐ **五种错误码，在消费点被压扁成一个布尔**
+
+[c-shape-error-collapsed-to-bool]
+
+> ```cpp
+> enum class avq2_shape_error { none, empty, packed_columns,
+>                               codebook_rows, transform_block };
+> ...
+> if (validate_avq2_shape(shape) != avq2_shape_error::none)
+>     throw std::invalid_argument("AVQ2 matrix shape is invalid");
+> ```
+
+> **⭐⭐⭐ 这是一个「信息在层与层之间丢失」的干净例子**：
+> **契约层精心区分了五种失败原因，
+> 而消费层只保留了「失败」这一个比特——
+> ⚠️ 即下游只能知道「形状不对」，而不知道「哪里不对」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个错误码枚举」的价值，完全取决于
+> 「有没有人把它的分支真的用起来」——**
+> **⚠️ 而这里五分支枚举被用成了一个布尔。**
+>
+> ⭐⭐ **而这不是一个「错误」，而是一个权衡**：
+> **抛出带原因的异常会把契约层的枚举泄漏到 API 表面，
+> 而压扁成一句 `throw` 保持了接口简洁——
+> ⚠️ 代价是「调试时少了一条信息」。**
+>
+> **⭐⭐ 判据：**
+> **「一个错误码是否值得保留分支」取决于
+> 「它的各个分支是否需要不同的修复动作」——**
+> **⚠️ 而这里五种原因确实需要五种不同的修复。**
+>
+> ⭐⭐ **这个模式在本报告里出现过**：
+> **§10.166 那条「`grep` 零命中被当反证」也是同一种病——
+> ⚠️ 一个信息量足够的信号，在传递链上被降维成了一个布尔。**
+>
+> **⭐⭐ 判据：**
+> **「信息降维」最常发生在「异常 / 日志 / 返回值」这三处，
+> 而它们恰好是「平时没人读，出事时唯一能读」的地方——**
+> **⚠️ 故在这三处降维，是在给未来的自己挖坑。**
+>
+> ⭐⭐ **而 `avq2_workspace_bytes()` 那个「返回 0」是同一个病的另一面**：
+> **它把「溢出」与「空输入」也降维成了同一个 0（§10.173）——
+> ⚠️ 即同一个文件里有两处独立的信息降维。**
+>
+> **⭐⭐ 判据：**
+> **「同一个模块里出现两处同类的信息降维」，
+> 说明这不是疏忽，而是风格——**
+> **⚠️ 而风格比疏忽更难改，因为它在每一处都看起来「很简洁」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -24746,6 +24995,39 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
  —（2026-10 抓取）。只声明入口函数，无逻辑：
 「**void ggml_cuda_op_btl3_avq2(ggml_backend_cuda_context & ctx, ggml_tensor * dst);**」 — [src-btl3-cuda-avq-cuh]
 
+### 推导对上源码、十个 magic、CPU 与 CUDA 的归一化差异（第九十九轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/src/btl3-avq.cpp`（11,368 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/btl3-avq.cpp)
+ —（2026-10 抓取）。🔥🔥🔥 **「magic 被当作指针」在 CPU 侧是原文可见的**：
+「**return ggml_custom_4d(ctx, GGML_TYPE_F32, rows, input->ne[1], input->ne[2], input->ne[3], args, 6, compute_mul_mat, GGML_N_TASKS_MAX, reinterpret_cast<void *>(avq2_custom_magic));**」；
+(a) ⭐⭐⭐⭐ **同一个归一化，CPU 与 CUDA 用两种方式生成**：CPU「**const float inverse_scale = 1.0F / std::sqrt(static_cast<float>(block_size));**」，CUDA「**constexpr float transform_scale = 0.08838834764831845F;**」；
+⭐⭐ 判据（本轮最重要）「**「同一个数学常数用两种方式生成」时，一致性只能靠「舍入恰好相同」，而不能靠「公式相同」**」；
+⭐⭐ 判据「**「一个测试存在」与「这个测试跑过」之间的差别，在「数值一致性」这类问题上特别致命——因为它的一致性不是「大体相等」，而是「逐位相等」**」；
+⭐⭐ 判据「**「一份文档明确禁止 X」会让人忽略「它也没验证 Y」——因为「明确禁止」比「默默省略」更容易被记住**」；
+(b) ⚠️⚠️⚠️ **CPU 参考实现每 token 两次堆分配，且 token 内串行**：「**std::vector<float> transformed_input(matrix.columns);** … **std::vector<float> transformed_output(matrix.rows, 0.0F);**」，并行粒度「**for (std::size_t token = static_cast<std::size_t>(ith); token < token_count; token += static_cast<std::size_t>(nth))**」；
+⭐⭐ 判据（本轮最重要）「**「同一份算法在两端的实现」最能暴露「哪部分是本质、哪部分是选择」——这里两端都选择了「用临时缓冲」，说明这是算法本质；而「分配几次」则是实现选择**」；
+⭐⭐ 可算的代价：**以 `columns = rows = 4,096`、`tokens = 2,048` 计，就是 2,048 × 2 = 4,096 次堆分配，每次约 16 KB**；
+⭐⭐ 判据「**「并行维度选 token」在 prompt 处理（`tokens` 大）时是好的，在逐 token 解码（`tokens = 1`）时是零并行——而解码恰恰是延迟敏感的那一半**」 — [src-btl3-src-avq-cpp]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/src/btl3-avq-contract.h`（2,627 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/btl3-avq-contract.h)
+ —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **十个 magic，probe 是按后端命名的**：
+算子 `BTL3AVQ2` / `BTL3INT4` / `BTL3VGRW` / `BTL3VHED`；**通用 probe `BTL3PROB`（0x42544c3350524f42）**；**Metal probe `BTL3MPRB`（0x42544c334d505242）**；CUDA probe `BTL3CAVQ` / `BTL3CINT` / `BTL3CVRW` / `BTL3CVHD`；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一组命名」里的空缺，往往不是不存在，而是「另一个后端已经有一个了」——而 `BTL3PROB` 这个名字（没有后端字母）恰好是「通用回退」的位置**」；
+⭐⭐ 判据「**当一个命名规则能被「拆成固定前缀 + 可选段 + 角色」时，它就能容纳任意多个后端，而不需要改规则**」；
+⭐⭐ **对 §10.155/§10.162 那个矛盾的最终含义**：**probe 声明的是「我想要」，而实现声明的是「我能做」，而这两件事在任何后端上都可以不同步**；
+⭐⭐ 判据「**「能不能用」只有在四层全部为「是」时才成立（算子 magic、后端 probe、kernel 源码、被编译）——这就是为什么「CUDA 到底支不支持 INT4」这个问题，用一个是/否回答一定是错的**」；
+(b) 🔥🔥🔥🔥🔥 **源码里的显存估算公式与我在 §10.168 独立推出的完全一致**：
+「**const std::size_t values_per_token = shape.columns + shape.rows; if (shape.columns > limit - shape.rows) { return 0; } if (token_count > limit / values_per_token) { return 0; } return token_count * values_per_token * sizeof(float);**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「独立推导」与「读源码确认」是两种不同的验证，而它们对上时的信息量远大于任何一种单独使用——因为前者证明「我理解了机制」，后者证明「我没记错参数」**」；
+⭐⭐ 判据「**「一个显存估算公式」往往可以从「它要装哪几块缓冲」直接拼出来，而不需要读公式本身**」；
+⚠️ **一个可判定的缺陷**：**「溢出」与「空输入」被映射到同一个返回值 `0`——而两者的正确处理方式完全不同（前者应报错，后者应跳过）**；
+(c) ⭐⭐⭐ **五种错误码，在消费点被压扁成一个布尔**：「**enum class avq2_shape_error { none, empty, packed_columns, codebook_rows, transform_block, };**」→「**if (validate_avq2_shape(shape) != avq2_shape_error::none) { throw std::invalid_argument("AVQ2 matrix shape is invalid"); }**」；
+⭐⭐ 判据（本轮最重要）「**「一个错误码枚举」的价值，完全取决于「有没有人把它的分支真的用起来」——而这里五分支枚举被用成了一个布尔**」；
+⭐⭐ 判据「**「信息降维」最常发生在「异常 / 日志 / 返回值」这三处，而它们恰好是「平时没人读，出事时唯一能读」的地方**」；
+⭐⭐ 判据「**「同一个模块里出现两处同类的信息降维」，说明这不是疏忽，而是风格——而风格比疏忽更难改，因为它在每一处都看起来「很简洁」**」 — [src-btl3-avq-contract-h]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -24885,7 +25167,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=315, evidence=2329, claims=1719, claims_high=1374, claims_disputed=9, trace_events=698, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=317, evidence=2337, claims=1724, claims_high=1379, claims_disputed=9, trace_events=702, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
