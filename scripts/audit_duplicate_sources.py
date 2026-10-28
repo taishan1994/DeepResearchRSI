@@ -34,7 +34,16 @@ def norm(url: str) -> str:
     return url.strip().rstrip('/').lower()
 
 
-def build_plan(src, ev):
+def build_plan(src, ev, keep_rule='first'):
+    """keep_rule:
+        'first'  —— 登记最早的那个（第 198 轮的原始规则）
+        'ev'     —— 证据最多的那个（第 251 轮起推荐）
+
+    为什么改成 ev：
+        'first' 与证据量无关，于是它会把 132 条证据的合集
+        并进只有 13 条证据的同名行里。合并的目的不是「少一行」，
+        而是「留下信息最多的那行」。
+    """
     ev_count = Counter()
     first_seen = {}
     for i, e in enumerate(ev):
@@ -48,9 +57,12 @@ def build_plan(src, ev):
 
     plan = []
     for u, v in dup.items():
-        # KEEP 规则：登记最早的那个。
-        # 理由：行序是真实的登记顺序，后登记的重复 id 应当被吸收。
-        v_ord = sorted(v, key=lambda s: first_seen.get(s['source_id'], 10 ** 9))
+        if keep_rule == 'ev':
+            # 证据最多者胜；并列时退回登记最早。
+            v_ord = sorted(v, key=lambda s: (-ev_count.get(s['source_id'], 0),
+                                             first_seen.get(s['source_id'], 10 ** 9)))
+        else:
+            v_ord = sorted(v, key=lambda s: first_seen.get(s['source_id'], 10 ** 9))
         keep, drop = v_ord[0], v_ord[1:]
 
         tier = min((s['trust_tier'] for s in v), key=lambda x: TIER_ORDER.get(x, 0))
@@ -90,10 +102,12 @@ def main(argv) -> int:
 
     src = list(csv.DictReader(src_p.open(encoding='utf-8-sig')))
     ev = list(csv.DictReader(ev_p.open(encoding='utf-8-sig')))
-    plan, ev_count = build_plan(src, ev)
+    keep_rule = 'ev' if '--keep-ev' in argv else 'first'
+    plan, ev_count = build_plan(src, ev, keep_rule=keep_rule)
 
     print(f'source 总数: {len(src)}')
     print(f'evidence 总数: {len(ev)}')
+    print(f'KEEP 规则: {keep_rule}')
     print(f'URL 重复组数: {len(plan)}')
     if not plan:
         print('\n[OK] 无重复来源')

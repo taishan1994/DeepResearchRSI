@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：468 ｜ **证据数**：2952 ｜ **主张数**：2171（高置信 1821，争议 9）
+> **来源数**：444 ｜ **证据数**：2957 ｜ **主张数**：2180（高置信 1830，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -37248,6 +37248,225 @@ exit 0
 > 这一轮补上后半句：
 > 「记完之后还要问 X 是不是我能补的」。**
 
+### 10.628 🔥🔥🔥🔥🔥 那个审计脚本存在了 53 轮，而它的 **KEEP 规则会选错行**
+
+[c-the-merge-audits-own-keep-rule-was-wrong]
+
+> **`audit_duplicate_sources.py` 第 51-54 行**：
+> ```python
+> # KEEP 规则：登记最早的那个。
+> # 理由：行序是真实的登记顺序，后登记的重复 id 应当被吸收。
+> v_ord = sorted(v, key=lambda s: first_seen.get(s['source_id'], 10 ** 9))
+> keep, drop = v_ord[0], v_ord[1:]
+> ```
+> **于是 `src-rtx6kpro-daily`（13 条证据）
+> 会吸收 `src-rtx6kpro-daily-full`（132 条证据）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个检查工具自己带一个「怎么选」的裁决时，
+> 那个裁决的正确性从来不被它的输出检查——
+> 因为它只报「有几组」，不报「选对了吗」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后凡用工具产出的结论，
+> 都必须问一句「这个工具在替我做什么决定」。**
+>
+> ⚠️ **而这条正是「读检查器然后对自己跑一遍」的加强版：
+> 读检查器之后，还要读它的裁决逻辑。**
+
+### 10.629 ⭐⭐⭐⭐⭐ 「登记最早」与「信息最全」是**两个无关的排序**
+
+[c-first-registered-is-not-the-same-as-most-informative]
+
+> 加 `--keep-ev`（证据最多者胜）重跑后，
+> **22 组的 KEEP 全部落到更全的那一行**；
+> 而两种规则下「需迁移的 evidence 行」从 r198 记的 **271** 变为本轮的 **124**。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「行序」被当成「权威序」时，
+> 合并的净效果可能恰好相反——
+> 它会把信息多的并进信息少的。**
+>
+> **⭐⭐ 判据：**
+> **故任何「去重」动作都必须先回答：保留哪一个，以及凭什么。**
+>
+> ⚠️ **而 r198 那个 271 与现在的 124 的差，
+> 是因为这 53 轮里新增的证据挂在了不同的行上，
+> 故那个 271 早已过期。**
+
+### 10.630 🔥🔥🔥🔥🔥 合并已执行：**468 → 444**，证据一行不少
+
+[c-the-merge-was-executed-and-24-rows-removed]
+
+> | 指标 | 结果 |
+> |---|---|
+> | sources | **468 → 444**（删 24 行） |
+> | evidence | **2952 → 2952**（迁 124 行） |
+> | REPORT 引用改写 | **32 处** |
+> | `evidence_id` 集合 | **完全相同** |
+> | `document_id` 逐行比对 | **全部未变** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一次「删除」操作之后 evidence 行数不变时，
+> 那次删除删的是「目录」，不是「内容」——
+> 而这正是去重该有的样子。**
+>
+> **⭐⭐ 判据：**
+> **故去重的正确性判据不是「少了多少行」，
+> 而是「有没有任何一条内容失去归属」。**
+>
+> ⚠️ **而 `document_id` 一行未动这一点很重要：
+> 它是另一根轴，合并来源不应该动它。**
+
+### 10.631 ⚠️⚠️⚠️ 24 组里只有 **1 个 KEEP 行**的字段被改，方向是更保守
+
+[c-only-one-field-changed-and-it-went-conservative]
+
+> `src-dropandrender-ws` 的 `source_type` 从 **`review` 改成 `vendor`**
+> （组内另一行 `src-dnr-gpu-bench` 是 `vendor`）；
+> 其余 **23 个** KEEP 行的 `trust_tier` 与 `source_type` **一字未动**。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一次批量改写的净改动只有 1 处时，
+> 要么是这个批处理写得极稳，
+> 要么是它根本没做事——
+> 而区分这两者的方法是对比输入与输出。**
+>
+> **⭐⭐ 判据：**
+> **故合并同一 URL 的两个登记时，
+> 凡冲突的字段一律取更保守的那个。**
+>
+> ⚠️ **而这条对那 12 条证据有直接影响：
+> `src-dropandrender-ws` 支撑 23 条主张（其中 6 条 high），
+> 把它的 type 从 review 改成 vendor
+> 会让那些主张的来源看上去更弱。**
+
+### 10.632 ⭐⭐⭐⭐⭐ 那两个「冲突」在合并**之前**就存在
+
+[c-the-two-conflict-groups-were-pre-existing]
+
+> 合并前 `src-tpu-eol` 就是 **`tertiary` / `press`**，
+> 而 `src-tpu-gb202` 与 `src-tpu-5090-silicon` 是同 URL 的 **`secondary` / `press`**；
+> `src-proxpc-md` 与 `src-proxpc-md2` 都已是 **`tertiary`**。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「合并引起的问题」在备份里被证明早就存在时，
+> 它就不是问题的原因，而是问题的证据——
+> 它证明这条 URL 被登记过两次，而两次给了不同的强度。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后凡处理重复源，
+> 都必须先看冲突是不是历史遗留，
+> 否则会把旧账记在新账上。**
+>
+> ⚠️ **而这条也解释了一个反常：
+> `src-tpu-eol` 是三行里被选为 KEEP 的那个，
+> 却是 tier 最低的——
+> 因为 tier 取决于当时读的人怎么判，
+> 而 id 取决于谁先起名。**
+
+### 10.633 🔥🔥🔥🔥🔥 我自己的改写**不是幂等的**，产生了三个坏 id
+
+[c-the-trace-rewrite-was-not-idempotent]
+
+> 按 remap 顺序替换时：
+> ```
+> src-proxpc-md  → src-proxpc-md2
+> src-proxpc-md2 → src-proxpc-md22        <- 替换了自己的结果
+> ```
+> 同形还有 `src-rtx6kpro-daily-full-full`、
+> `src-btl3-doc-gguf-exporter-md-md`。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一批替换里存在「A → B」且「B → C」这样的链时，
+> 顺序执行会得到 C，而正确结果是 B——
+> 故批量改写必须先做一次「谁会被谁命中」的拓扑排序。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后凡批量改 id，
+> 一律用「一次性映射表 + 单遍正则」而不是循环 `replace`。**
+>
+> ⚠️ **而这条是本轮自己造的 bug，
+> 且是被校验器抓到的——
+> 这说明那个校验器值它的维护成本。**
+
+### 10.634 ⭐⭐⭐⭐⭐ 校验器在 4 处抓到了**我自己**的 bug
+
+[c-the-validator-caught-the-bug-i-made]
+
+> ```
+> run.json[trace seq=135]: 引用了不存在的 source src-proxpc-md22
+> run.json[trace seq=185]: 引用了不存在的 source src-rtx6kpro-daily-full-full
+> run.json[trace seq=349]: 引用了不存在的 source src-btl3-doc-gguf-exporter-md-md
+> run.json[trace seq=555]: 引用了不存在的 source src-btl3-doc-gguf-exporter-md-md
+> ```
+> 修好后通过：**444 来源 / 2957 证据 / 2180 主张**。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当校验器抓到的是「我这一轮刚写的东西」时，
+> 它证明的不是我的谨慎，
+> 而是「那一类错误可以被机械检出」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告应当把「引用了不存在的 id」
+> 列为最高优先的自动检查——
+> 因为它抓的正是最容易被手写漏掉的那一类。**
+>
+> ⚠️ **而这条给本报告一个反直觉的结论：
+> 一份报告的可信度，
+> 有一半来自它会失败的那些检查。**
+
+### 10.635 🔥🔥🔥🔥🔥 重复源 **22 → 0**，而孤儿源**仍是 2 个**
+
+[c-duplicate-sources-are-now-zero-but-orphans-remain-two]
+
+> `audit_duplicate_sources.py --keep-ev` 输出：
+> ```
+> URL 重复组数: 0
+> [OK] 无重复来源
+> ```
+> 而真实孤儿仍是 `src-janction` 与 `src-stfc-namd`
+> （有 source 行、无 evidence 行）。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个「重复」问题被彻底清零、
+> 而一个「孤儿」问题一动不动时，
+> 它们不是同一类问题——
+> 重复是「同一件事被记了两次」，
+> 孤儿是「记了一件事，而它没有内容」。**
+>
+> **⭐⭐ 判据：**
+> **故这两条待办不能用同一种方法解决：
+> 重复可以机械合并，
+> 孤儿只能要么补证据、要么删行。**
+>
+> ⚠️ **而那两个孤儿已经挂了很久，
+> 本轮明确它们属于 `recoverable`（我能补）而非不可约。**
+
+### 10.636 ⭐⭐⭐⭐⭐ 444 个来源**全部**被正文引用，一个不缺
+
+[c-all-444-sources-are-cited-in-the-report]
+
+> | 项 | 值 |
+> |---|---:|
+> | `sources.csv` 行数 | **444** |
+> | `REPORT.md` 里来源标签去重集合 | **444** |
+> | 引用了但不存在的来源 | **0** |
+> | 存在但未被引用的来源 | **0** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「来源数」与「被引用来源数」相等时，
+> 那个数才是一个可核对的说法——
+> 否则它只是一个库存数。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后报来源数，
+> 都应同时报「其中被正文引用的有多少」。**
+>
+> ⚠️ **而这条是本轮唯一一个「双向闭合」的指标：
+> 它同时对得上 CSV 与正文，
+> 故它比任何一个单向计数都强。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -39755,7 +39974,7 @@ sudo nvidia-bug-report.sh
 
 ### 独立评测与实测
 
-7. [StorageReview：RTX PRO 6000 Workstation GPU Review](https://www.storagereview.com/review/nvidia-rtx-pro-6000-workstation-gpu-review-blackwell-architecture-and-96-gb-for-pro-workflows)（2025-10-07） — [src-storagereview-review]
+7. [StorageReview：RTX PRO 6000 Workstation GPU Review](https://www.storagereview.com/review/nvidia-rtx-pro-6000-workstation-gpu-review-blackwell-architecture-and-96-gb-for-pro-workflows)（2025-10-07） — [src-storagereview]
 8. [HOSTKEY：Server Edition Tests & Benchmarks](https://huggingface.co/blog/HOSTKEY/nvidia-rtx-6000-blackwell-server-edition-tests-ben)（2025-08-30） — [src-hostkey-bench]
 9. [TechnoLynx LynxBenchAI：Server Edition vs RTX 5090](https://www.technolynx.com/lynxbench-ai/compare/rtx-pro-6000-blackwell-server-edition-vs-rtx-5090/) — [src-technolynx]
 10. [EcoHash：What 96 GB on one card actually buys you](https://huggingface.co/blog/ecohash-ai/what-96-gb-on-one-card-actually-buys-you)（2026-09-14） — [src-ecohash-96gb]
@@ -39830,7 +40049,7 @@ sudo nvidia-bug-report.sh
 - [NVIDIA Developer Forums：RTX PRO 6000 Blackwell Max-Q hardware problem? Multitude of MMU errors in dmesg](https://forums.developer.nvidia.com/t/rtx-pro-6000-blackwell-max-q-hardware-problem-multitude-of-mmu-errors-in-dmesg/381310)（2026-08-26） — [src-forum-mmufault]
 - [Hugging Face (badtheorylabs)：BTL-3 Compact — RTX PRO 6000 speed](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md)（2026-07-19） — [src-btl-llamacpp]
 - [GitHub (Osmantic)：Gemma 4 31B QAT Q4_0 on Tower2: verified results](https://raw.githubusercontent.com/Osmantic/MMBT-Messy-Model-Bench-Tests/refs/heads/main/benchmarks/gemma4-31b-q4/GEMMA4_31B_Q4_VERIFIED_RESULTS.md)（2026-10-27） — [src-osmantic-tower2]
-- [local-inference-lab：RTX PRO 6000 Blackwell LLM Wiki — Running Large LLMs on PCIe GPUs without NVLink](https://github.com/local-inference-lab/rtx6kpro) — [src-rtx6kpro-wiki]
+- [local-inference-lab：RTX PRO 6000 Blackwell LLM Wiki — Running Large LLMs on PCIe GPUs without NVLink](https://github.com/local-inference-lab/rtx6kpro) — [src-rtx6kpro-readme]
 - [local-inference-lab：Benchmark Results -- RTX 6000 Pro Blackwell](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/benchmarks/results.md) — [src-rtx6kpro-bench]
 - [local-inference-lab：PCIe Topology & GPU Interconnect](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/hardware/topology.md) — [src-rtx6kpro-topo]
 - [local-inference-lab：Troubleshooting -- Common Issues on RTX 6000 Pro Blackwell](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/troubleshooting/common-issues.md) — [src-rtx6kpro-issues]
@@ -39877,7 +40096,7 @@ sudo nvidia-bug-report.sh
 - [NVIDIA：NVIDIA Virtual GPU Software — Validated Platforms（VMware vSphere 发布说明）](https://docs.nvidia.com/vgpu/latest/grid-vgpu-release-notes-vmware-vsphere/validated-platforms.html) — [src-vgpu-validated]
 - [Dassault Systèmes：Dassault Systèmes: Windows 11 64-bit Certified Workstation List（含 RTX PRO 6000 Blackwell WS / Max-Q 认证状态）](https://media.3ds.com/support/certified_hardware/Windows_11_64-bit.html) — [src-ds-cert]
 - [Ansys / Synopsys：Ansys GPU Compute Capabilities — Release 2026 R1（官方 GPU 求解器支持矩阵）](https://www.ansys.com/content/dam/it-solutions/platform-support/2026-r1/ansys-2026-r1-gpu-compute-capabilities.pdf) — [src-ansys-gpu]
-- [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — Lenovo ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-p8-4k]
+- [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — Lenovo ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-vp15-p8]
 - [SPEC.org：SPECviewperf 15.0 官方结果 — Lenovo ThinkStation P3 Tower Gen2 / RTX PRO 6000 / FHD](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P3_TWR_G2_Ultra_9_285K_RTX_PRO_6000_FHD/results.html) — [src-spec-p3-fhd]
 - [Microsoft Learn：Run Siemens NX using NVIDIA RTX PRO 6000 Blackwell GPUs on Azure Virtual Desktop（官方参考架构与完整 ATS 结果）](https://learn.microsoft.com/en-us/industry/manufacturing/architecture/siemens-azure-blackwell) — [src-ms-learn-nx]
 - [NVIDIA：List of NVIDIA-Certified Systems（官方认证系统完整清单，含 RTX PRO 6000 Server Edition 条目）](https://docs.nvidia.com/certification-programs/latest/nvidia-certified-systems.html) — [src-nv-cert]
@@ -39888,7 +40107,7 @@ sudo nvidia-bug-report.sh
 - [CSDN（AI让世界更懂你）：【全网首份】价值百元的RTX 6000D与RTX Pro 6000实测对比](https://fjiang.blog.csdn.net/article/details/162849417)（2026-07-14） — [src-cn-6000d]
 - [Exxact + DRD：Ansys Fluent GPU Benchmark with DRD & Exxact](https://www.exxactcorp.com/blog/benchmarks/ansys-fluent-gpu-benchmark-with-drd-exxact) — [src-exxact-fluent]
 - [Exxact：LoRA Fine Tuning Benchmark on NVIDIA RTX PRO Blackwell GPUs](https://www.exxactcorp.com/blog/benchmark/lora-fine-tuning-benchmark-on-nvidia-gpus) — [src-exxact-lora]
-- [Drop & Render：RTX PRO 6000 Blackwell Server Edition rendering benchmarks](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition) — [src-dnr-server]
+- [Drop & Render：RTX PRO 6000 Blackwell Server Edition rendering benchmarks](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition) — [src-dropandrender-se]
 - [ArchVizDaily：Best GPU for architectural visualization in 2026: real numbers from a working studio](https://archvizdaily.com/posts/best-gpu-for-archviz-2026)（2026-07-11） — [src-archviz]
 - [Joshua Odmark：I Bought an RTX Pro 6000 from Provantage. Here's What Was Actually Inside.](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-provantage-fake]
 - [Joshua8.AI：Running LLMs on NVIDIA Blackwell: vLLM, SGLang, and NVFP4](https://joshua8.ai/blackwell-inference/) — [src-j8-guide]
@@ -39900,7 +40119,7 @@ sudo nvidia-bug-report.sh
 - [Joshua8.AI：Do LLM Inference Engines Actually Get Faster With Updates?](https://joshua8.ai/llm-inference-benchmark-update/)（2026-02-15） — [src-j8-update]
 - [magik.net：The Gen1 Revelation: A Single Diagnostic Command That Exposed the Full Scope of Virtualization Overhead](https://magik.net/blog/llmopt/seg_3/chunk_2/the_gen1_revelation.html) — [src-magik-gen1]
 - [HelixML：GLM-5.3-Flash on RTX PRO 6000: TP2 Benchmarks on 2, 4 or 8 GPUs](https://helixml.tech/blog/glm53-flash-tp2-rtx-pro-6000)（2026-09-14） — [src-helix-tp2]
-- [Joshua Odmark：I Bought an RTX Pro 6000 from Provantage. Here's What Was Actually Inside.](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-odmark]
+- [Joshua Odmark：I Bought an RTX Pro 6000 from Provantage. Here's What Was Actually Inside.](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-provantage-fake]
 - [Jared Frost：TRT-LLM vs vLLM vs llama.cpp on Blackwell（RTX PRO 6000 上的四引擎同条件对比）](https://jared-hpc.com/posts/four-inference-engines-blackwell-qwen3-moe/)（2026-06-28） — [src-jf-4eng]
 - [HPC Technologies：LAMMPS Benchmark（LJ liquid，RTX PRO 6000 SE 单卡）](https://pub.hpc-technologies.co.jp/hpc-benchmark/lammps-benchmark/)（2025-09-18） — [src-hpct-lammps]
 - [HPC Technologies：GROMACS Benchmark（Server / Max-Q / RTX 5090 三平台对照）](https://pub.hpc-technologies.co.jp/hpc-benchmark/gromacs-benchmark/)（2025-12-19） — [src-hpct-gromacs]
@@ -39939,10 +40158,10 @@ sudo nvidia-bug-report.sh
 - [Cadence — Cadence Unveils Millennium M2000 Supercomputer with NVIDIA Blackwell Systems（新闻稿 PDF 原文，2025-05-07）](https://www.semiconductorpackagingnews.com/uploads/2/Millennium_Press_Release_5_7_25_FINAL.pdf) — [src-cadence-millennium-pr]
 - [NVIDIA Blog — Cadence Taps NVIDIA Blackwell to Accelerate AI-Driven Engineering Design and Scientific Simulation（2025-05-07）](https://blogs.nvidia.com/blog/cadence-millennium-nvidia-blackwell/) — [src-nvblog-cadence]
 - [llama.cpp Discussion #15396 — gpt-oss guide（含 RTX PRO 6000 Max-Q 与 Workstation 两臂原始 llama-bench 日志）](https://github.com/ggml-org/llama.cpp/discussions/15396) — [src-llamacpp-15396]
-- [local-inference-lab/rtx6kpro — Daily Summaries（2026-09 与 2026-10，50 篇 RTX6kPRO Discord 自动汇总）](https://github.com/local-inference-lab/rtx6kpro/tree/master/daily-summaries) — [src-rtx6kpro-daily]
+- [local-inference-lab/rtx6kpro — Daily Summaries（2026-09 与 2026-10，50 篇 RTX6kPRO Discord 自动汇总）](https://github.com/local-inference-lab/rtx6kpro/tree/master/daily-summaries) — [src-rtx6kpro-daily-full]
 - [local-inference-lab/rtx6kpro — Daily Summaries 全量（2026-02 至 2026-10，共 246 篇）](https://github.com/local-inference-lab/rtx6kpro/tree/master/daily-summaries) — [src-rtx6kpro-daily-full]
 - [TechPowerUp：NVIDIA Has January Discontinuation Dates Set for RTX 5090 and RTX 5080 16 GB, Claims Leaker（含 NVIDIA 官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
-- [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
+- [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-eol]
 - [电子工程专辑（芯智讯）：美国出台新规：禁止向中企境外子公司出口AI芯片！（BIS 2026-05-31 指引解读）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
 - [not an architect（转述 Microsoft Tech Community 原文）：Azure Virtual Desktop with RTX PRO 6000: Validation shows up to 30 Siemens NX users per GPU](https://notanarchitect.io/azure-virtual-desktop-with-rtx-pro-6000-validation-shows-up-to-30-siemens-nx-users-per-gpu/)（2025-10-26） — [src-avd-nx]
 - [CIMdata（转述 Synopsys 官方新闻稿）：Synopsys Embraces NVIDIA RTX PRO Servers to Accelerate Compute-Heavy Simulation Workloads](https://www.cimdata.com/en/industry-summary-articles/item/28273-synopsys-embraces-nvidia-rtx-pro-servers-to-accelerate-compute-heavy-simulation-workloads)（2025-08-28） — [src-synopsys-rtxpro]
@@ -39953,7 +40172,7 @@ sudo nvidia-bug-report.sh
 - [NODEMALL (노드몰)：RTX PRO 6000 Blackwell 종합 가이드, Workstation·Max-Q·Server 정리](https://nodemall.co.kr/article/nodetalk/12/281/)（2026-05-15） — [src-nodemall]
 - [GDEP Advance (NVIDIA Elite Partner)：NVIDIA RTX PRO 6000 Blackwell シリーズ製品比較ベンチマークレポート](https://www.gdep.co.jp/information/news/nvidia-rtx-pro-6000-blackwell_benchmark_report/) — [src-gdep-report]
 - [Akash Network：RTX PRO 6000 Blackwell vs H100 vs H200: Which GPU Do You Actually Need? (2026)](https://akash.network/the-bid/rtx-pro-6000-blackwell-vs-h100-vs-h200-2026/)（2026-08-25） — [src-akash]
-- [ProX PC：The Biggest Molecular Dynamics Hardware Comparison: 5090 vs Pro 6000 vs H100/H200（AMBER 24 STMV）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md]
+- [ProX PC：The Biggest Molecular Dynamics Hardware Comparison: 5090 vs Pro 6000 vs H100/H200（AMBER 24 STMV）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md2]
 - [CompareAIHardware：BOXX APEXX 8R (1x RTX PRO 6000 Blackwell) — 整机规格与起价](https://compareaihardware.com/ai-workstation/boxx-apexx-8r-1x-rtx-pro-6000-blackwell) — [src-caih-boxx]
 
 ### 媒体评测（补充）
@@ -39962,8 +40181,8 @@ sudo nvidia-bug-report.sh
 
 ### 学术论文与预印本（补充）
 
-- [arXiv (Luo, Li, Wang, Chen)：Where Does the Energy Go? Profiling LLM Agent Inference on Blackwell GPUs](https://arxiv.org/abs/2609.29707)（2026-08-31） — [src-arx-energy]
-- [arXiv (Yin, Wang)：The Serialized Bridge: Understanding and Recovering LLM Serving Performance under Blackwell GPU Confidential Computing](https://arxiv.org/abs/2606.23969)（2026-06-22） — [src-arx-cc]
+- [arXiv (Luo, Li, Wang, Chen)：Where Does the Energy Go? Profiling LLM Agent Inference on Blackwell GPUs](https://arxiv.org/abs/2609.29707)（2026-08-31） — [src-arxiv-energy]
+- [arXiv (Yin, Wang)：The Serialized Bridge: Understanding and Recovering LLM Serving Performance under Blackwell GPU Confidential Computing](https://arxiv.org/abs/2606.23969)（2026-06-22） — [src-arxiv-cc]
 - [LLM Energy Benchmark：RTX PRO 6000 Blackwell FP16 End-to-End Baseline（2026-06-08）](https://hongping-zh.github.io/updates/2026-06-08-rtx-pro6000-fp16-e2e/)（2026-06-08） — [src-energy-e2e]
 - [LLM Energy Benchmark：RTX PRO 6000 Blackwell: Phase-Separated Energy Profiling（2026-06-03）](https://hongping-zh.github.io/updates/2026-06-03-rtx-pro6000-blackwell-phase/)（2026-06-03） — [src-energy-phase]
 - [STFC ePubs：NAMD 3.0.2 - GPU-offload Performance: stmv benchmark（两次下载超时，PDF 0 页）](https://epubs.stfc.ac.uk/manifestation/64246471/STFC-CONF-2026-003.pdf) — [src-stfc-namd]
@@ -40028,7 +40247,7 @@ sudo nvidia-bug-report.sh
 - [Blender Foundation — 官方 issue #147954（Cycles 基准场景 GPU 占用率，open）与 #150282（5.0 重型场景翻倍，closed）](https://projects.blender.org/blender/blender/issues/147954)（2025-10-13 / 2025-11-20） — [src-blender-issues]
 - [JANCTION Render — Blender on an RTX PRO 6000 (96 GB), paid by the second：实测每帧 GPU 秒与价格](https://render.janction.jp/rtx-pro-6000-blender-rendering)（2026-10-26） — [src-janction]
 - [JANCTION Render — Benchmarks：按分辨率/帧数/采样数的 GPU 秒矩阵（含 CSV 原始数据与可复现场景 zip + sha256）](https://render.janction.jp/benchmarks)（2026-10-01） — [src-janction-bench]
-- [Drop & Render（blendercloudrender.com）— RTX PRO 6000 Blackwell Workstation Edition 渲染基准页，含 Methodology 段（自建测试 + 机器学习推算 + 公开数据三类混合）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-workstation-edition)（2026-10-26） — [src-dnr-gpu-bench]
+- [Drop & Render（blendercloudrender.com）— RTX PRO 6000 Blackwell Workstation Edition 渲染基准页，含 Methodology 段（自建测试 + 机器学习推算 + 公开数据三类混合）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-workstation-edition)（2026-10-26） — [src-dropandrender-ws]
 - [OTOY — OctaneBench 2025.2 Results（官方结果数据库，含 2x–8x 多 GPU 配置）](https://render.otoy.com/octanebench/results.php)（2026-10-27） — [src-octanebench]
 - [local-inference-lab / rtx6kpro — PCIe Bandwidth & P2P Performance（RTX PRO 6000 多卡 P2P / NCCL 实测汇总）](https://github.com/local-inference-lab/rtx6kpro/blob/main/hardware/pcie-bandwidth.md)（2026-10-27） — [src-rtx6kpro-pcie]
 - [local-inference-lab / rtx6kpro — Collapse Report：PCIe 交换机拓扑下跨交换机 P2P 写带宽塌陷 75–93% 的复现](https://github.com/local-inference-lab/rtx6kpro/blob/master/hardware/collapse-report.md)（2026-10-27） — [src-6kpro-collapse]
@@ -40116,7 +40335,7 @@ sudo nvidia-bug-report.sh
 
 ### 驱动分支适用范围（第二十四轮补充）
 
-1. [Driver Lifecycle — NVIDIA Data Center Drivers](https://docs.nvidia.com/datacenter/tesla/drivers/latest/driver-lifecycle.html) — NVIDIA 官方文档（更新 2026-09-09）。驱动分支完整对照表：NFB 至少每 3 个月主版本、无支持承诺；PB 每年两次、支持 1 年；LTSB 每个硬件架构至少一次、支持 3 年；并明确该文档适用于 data center GPU，不覆盖工作站卡的 Studio / Game Ready 分支 — [src-nv-drv-life2]
+1. [Driver Lifecycle — NVIDIA Data Center Drivers](https://docs.nvidia.com/datacenter/tesla/drivers/latest/driver-lifecycle.html) — NVIDIA 官方文档（更新 2026-09-09）。驱动分支完整对照表：NFB 至少每 3 个月主版本、无支持承诺；PB 每年两次、支持 1 年；LTSB 每个硬件架构至少一次、支持 3 年；并明确该文档适用于 data center GPU，不覆盖工作站卡的 Studio / Game Ready 分支 — [src-nv-drv-life]
 
 ### vGPU 许可定价（第二十五轮补充）
 
@@ -40143,7 +40362,7 @@ sudo nvidia-bug-report.sh
 
 ### 供应链与涨价机制（第三十轮补充）
 
-1. [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus) — 转述爆料者 MEGAsizeGPU 与 hongxing2020（2026-10-10）。⭐⭐ 本报告此前完全缺失的供应链结构性事实：GB202 晶圆据报已停止分配给 GeForce RTX 5090，「未来所有 GB202 供给均为 RTX Pro 独占」；另有疑似工厂通知称 NVIDIA 将不再销售任何 RTX 5090（含中国 D 变体）。⭐ 关键芯片事实：GB202 是最大 Blackwell 图形芯片而 RTX 5090 并未用满它，同一颗 die 既驱动 24,064 核的 RTX PRO 6000（96 GB）也驱动 21,760 核的 RTX PRO 5500（84 GB）。⭐ 文章动机解释：「NVIDIA 显然更愿意把它拿到的每一颗 GB202 都装进那些贵得多的工作站卡里」。⚠️ 文章明确写着 NVIDIA 未确认上述任何一点；本报告按爆料级材料处理，只用于「等不等」的判断，不用于采购时间表 — [src-tpu-gb202]
+1. [TechPowerUp：NVIDIA Reportedly Ending the RTX 5090, Reserves GB202 Silicon for Workstation GPUs](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus) — 转述爆料者 MEGAsizeGPU 与 hongxing2020（2026-10-10）。⭐⭐ 本报告此前完全缺失的供应链结构性事实：GB202 晶圆据报已停止分配给 GeForce RTX 5090，「未来所有 GB202 供给均为 RTX Pro 独占」；另有疑似工厂通知称 NVIDIA 将不再销售任何 RTX 5090（含中国 D 变体）。⭐ 关键芯片事实：GB202 是最大 Blackwell 图形芯片而 RTX 5090 并未用满它，同一颗 die 既驱动 24,064 核的 RTX PRO 6000（96 GB）也驱动 21,760 核的 RTX PRO 5500（84 GB）。⭐ 文章动机解释：「NVIDIA 显然更愿意把它拿到的每一颗 GB202 都装进那些贵得多的工作站卡里」。⚠️ 文章明确写着 NVIDIA 未确认上述任何一点；本报告按爆料级材料处理，只用于「等不等」的判断，不用于采购时间表 — [src-tpu-eol]
 
 ### 显存短缺与官方定价（第三十一轮补充）
 
@@ -40651,7 +40870,7 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 ### 第一份 llama-bench 数字，与它那个「不合物理」的 pp/tg 比值（第八十四轮补充）
 
-1. [HuggingFace / badtheorylabs — `evidence/rtx-pro-6000-speed-2026-07-19.md`（1,958 字节，2026-07-19 实测）](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告连续 12 轮标注为「最大单一数据缺口」的那一项，终于被填上**：**`llama-bench -m BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json`**，**pp512 = 84.70 tok/s（σ 0.37）**、**tg128 = 43.16 tok/s（σ 0.29）**，三次采样 TG `42.83/43.35/43.30`、PP `84.28/84.91/84.91`；硬件 **NVIDIA RTX PRO 6000 Blackwell Server Edition，97,887 MiB，`sm_120a`，KV FP16，模型 8,392,369,600 字节**；⭐⭐ 判据「**『填上一个数据缺口』不等于『解决了那个问题』——因为一个数字只有在『它的口径已知』时才有意义，而这个数字的口径是完整的，它的数值却是不合理的**」+「**一份实测报告的价值，不在于它的数字多漂亮，而在于它的数字能不能被反驳——而能被反驳的前提是『参数齐全』，不是『结论正确』**」；⭐ 与 §10.44 的 DGX Spark（约 44 tok/s）对照：**两个数字太接近，说明它们分别受限于不同的东西**。⚠️⚠️⚠️ **但 `pp512 = 84.70` 与 `tg128 = 43.16` 只差 1.96×，而一个 8.39 GB、2 比特的 27B 模型预填充通常是解码的 20–100 倍**；**这是本报告第一次「拿到数字之后立刻判定它不可信」，而它比「没有数字」更危险：「没有数字」会让人继续找，「有一个数字」会让人停止找**；⭐⭐ 判据（本轮最重要之一）「**当一份实测报告的两个数字之间的『比值』违背了这两个数字各自所属的物理机制时，错的不是『其中一个数字』，而是『至少其中一个的测量条件』——而报告里通常只写数字，不写条件**」；ⓘ 三种可能：**① pp 被模型加载/warmup 淹没 ② 2 比特权重去量化在大 batch 时极慢（反直觉但有机制的真发现）③ 数字写错**；⭐⭐ 第 ② 种最值得追，因为它与 §10.62–§10.85 十轮的主题直接相连；⭐⭐ 判据「**『反直觉的数字』有两种：一种错在测量，一种错在直觉——而区分它们的唯一方法是『看机制能不能解释它』，不是『看它像不像别人报的数』**」 — [src-hf-btl3-rtxpro6000-speed]
+1. [HuggingFace / badtheorylabs — `evidence/rtx-pro-6000-speed-2026-07-19.md`（1,958 字节，2026-07-19 实测）](https://huggingface.co/badtheorylabs/BTL-3-Compact/raw/7c48bf621a46be433032106ca888f02711d2530b/evidence/rtx-pro-6000-speed-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告连续 12 轮标注为「最大单一数据缺口」的那一项，终于被填上**：**`llama-bench -m BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json`**，**pp512 = 84.70 tok/s（σ 0.37）**、**tg128 = 43.16 tok/s（σ 0.29）**，三次采样 TG `42.83/43.35/43.30`、PP `84.28/84.91/84.91`；硬件 **NVIDIA RTX PRO 6000 Blackwell Server Edition，97,887 MiB，`sm_120a`，KV FP16，模型 8,392,369,600 字节**；⭐⭐ 判据「**『填上一个数据缺口』不等于『解决了那个问题』——因为一个数字只有在『它的口径已知』时才有意义，而这个数字的口径是完整的，它的数值却是不合理的**」+「**一份实测报告的价值，不在于它的数字多漂亮，而在于它的数字能不能被反驳——而能被反驳的前提是『参数齐全』，不是『结论正确』**」；⭐ 与 §10.44 的 DGX Spark（约 44 tok/s）对照：**两个数字太接近，说明它们分别受限于不同的东西**。⚠️⚠️⚠️ **但 `pp512 = 84.70` 与 `tg128 = 43.16` 只差 1.96×，而一个 8.39 GB、2 比特的 27B 模型预填充通常是解码的 20–100 倍**；**这是本报告第一次「拿到数字之后立刻判定它不可信」，而它比「没有数字」更危险：「没有数字」会让人继续找，「有一个数字」会让人停止找**；⭐⭐ 判据（本轮最重要之一）「**当一份实测报告的两个数字之间的『比值』违背了这两个数字各自所属的物理机制时，错的不是『其中一个数字』，而是『至少其中一个的测量条件』——而报告里通常只写数字，不写条件**」；ⓘ 三种可能：**① pp 被模型加载/warmup 淹没 ② 2 比特权重去量化在大 batch 时极慢（反直觉但有机制的真发现）③ 数字写错**；⭐⭐ 第 ② 种最值得追，因为它与 §10.62–§10.85 十轮的主题直接相连；⭐⭐ 判据「**『反直觉的数字』有两种：一种错在测量，一种错在直觉——而区分它们的唯一方法是『看机制能不能解释它』，不是『看它像不像别人报的数』**」 — [src-btl-llamacpp]
 
 2. [HuggingFace / unsloth — DeepSeek-V4-Flash-0731-GGUF 讨论 #18「Best way to run on Dual RTX 6000 Pro Blackwell?」（10 条事件，2026-08-02 至 2026-08-08）](https://huggingface.co/api/models/unsloth/DeepSeek-V4-Flash-0731-GGUF/discussions/18) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **五个独立用户在同一讨论里报告了 RTX PRO 6000 的实测吞吐**，是本报告见到的密度最高的数字聚集地。(a) 🔥🔥🔥 **「约 46 t/s」在至少两台不同配置的双卡机器上复现**——jhgoodwin「**around 46 t/s for normal use not micro benchmarks**」、flipplefozz「**Before using DSpark, I too was getting 46 t/s**」（后者 **600W + Max-Q 300W、PCIe Gen4 x8、Ryzen 9 5950x、128 GB**）；⭐⭐ 判据（本轮最重要）「**『同一数字在多个配置上复现』有两种解释：① 它是硬件的上限；② 它是软件的上限——而区分方法是『换一个软件栈还是一样的数字吗』**」；⭐ 讨论里正好有对照：**hassellof 说 sglang 上双卡报到 110–130，而 `llama.cpp` + ds4 是 46 —— 即 46 是这条栈的上限，不是卡的上限**；⭐⭐ 判据「**『一个数字被多个用户复现』是『它是典型值』的证据，而不是『它是上限』的证据——而这两者在报告里经常被写成同一句话**」。(b) 🔥🔥🔥🔥 **投机解码（DSpark / MTP）：46 → 75–130 t/s**——flipplefozz **46 → 75–85**（但 `ctx` **768000 → 370000**）、g0t4 **~70 → 100–130**（默认 3 draft token，`ctx 524288`，CUDA 13.3、llama-server 10290）；⭐⭐ 判据（本轮最重要之一）「**当一项优化的收益是『倍数』而代价是『能力』时，它们不在同一个量纲上，故不能相减——而『2× 更快』与『上下文减半』在一个报告里必须并列，不能只写前者**」；⭐⭐ 机制：**投机解码不改变单 token 的计算量，它改变的是「每次前向产出几个 token」——故加速比取决于接受率，而接受率取决于任务的可预测性**；⭐⭐ 判据「**一个『取决于输入』的加速比，在『代码生成』与『自由写作』上会差很多——而讨论里没有人分别报这两个场景**」。(c) 🔥🔥🔥🔥🔥 **一份完整、已确认可用的双卡配方**——构建 `-DGGML_CUDA=ON -DGGML_CUDA_GRAPHS=ON -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_CUDA_ARCHITECTURES="120"`，环境 **`CUDA_SCALE_LAUNCH_QUEUES=4x`、`GGML_CUDA_PDL=1`、`GGML_CUDA_P2P=1`**，preset `n-gpu-layers=99`、`split-mode=layer`、`tensor-split=46,54`、`cache-type-k/v=f16`、`batch-size=8192`、`ubatch-size=4096`；⭐⭐⭐ **它验证了上一轮的两条纯文档推断**：**§10.90 的 `CUDA_SCALE_LAUNCH_QUEUES=4x` 与 §10.92 的 `GGML_CUDA_P2P=1` 都被真实用户在多卡上启用了**；⭐⭐ 判据（本轮最重要）「**『文档警告的风险』与『用户实际启用了它』并不矛盾——因为风险是『可能』（`may`），而『我这次没出事』不是『风险不存在』的证据**」；⭐ **两处细节**：**`-DCMAKE_CUDA_ARCHITECTURES="120"` 不是 `120a`（§10.69 那个「未桥接的缝」的真实样本）**、**`GGML_CUDA_FA_ALL_QUANTS=ON` 正好绕开 §10.93 的白名单**；⭐⭐ 判据「**一份『能跑』的配方里，最有信息量的不是『设了什么』，而是『哪几个设置是在绕开已知的默认陷阱』——而绕开的动作通常不会被写出来**」。(d) 🔥🔥🔥 **neptronix 的诊断建议直指 CPU 溢出**：**RTX PRO 6000 + 5090，IQ3_S 77 tok/s**，并说「**If you are getting much below this speed, you probably have some spillover to CPU / CPU RAM happening**」，具体建议「**Make sure to set parallel context windows to 1, otherwise by default you are probably offloading to CPU**」。(e) 🔥🔥🔥 **hassellof（4 卡）78–87 t/s，双卡 110–130，并给出两个 vLLM DSpark 阻塞项**：**① boot crash class（fixed in flashinfer#4309 / sglang#33407）② depth floor 固定在 checkpoint 默认值 5，而那是唯一被测到「损坏输出」的 draft depth（sglang#33800）**，建议 **`--speculative-dspark-block-size 4`** — [src-hf-unsloth-dsv4-disc18]
 
@@ -40663,9 +40882,9 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 ### AVQ2 的源码：一条机制从「推断」升级为「观察」，与第二次自我更正（第八十六轮补充）
 
-1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/src/btl3-avq.cpp`（11,368 字节）与 `btl3-avq-contract.h`（2,627 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/btl3-avq.cpp) —（2026-10 抓取）。(a) ⚠️⚠️⚠️ **二次更正：`native/llama.cpp/` 是一个完整的 `llama.cpp` 树**——顶层含 **`ggml/`、`src/`、`tools/`、`examples/`、`gguf-py/`、`CMakeLists.txt`、`convert_hf_to_gguf.py`、`AUTHORS`（65,818 字节）**，故 **上一轮「它不是 `llama.cpp`」这句话也错了一半**；⭐⭐ 判据（本轮最重要）「**两次错误都源于同一个动作：『用一层目录的结构去判断整个项目的性质』——第一次用了 model card 的字面，第二次用了仓库根目录的列表，两次都没有再往下看一层**」；⭐⭐ 判据「**『它不是 X』这个结论的风险，比『它是 X』更高——因为『是』只需要一个证据，而『不是』需要对所有可能的位置做穷举，而我两次都只查了一个位置**」；⭐ 正确答案是三段式：**① 它是 `llama.cpp` 的 fork ② 它加了私有算子（`ggml_custom_4d` + magic `0x42544c3341565132` = `BTL3AVQ2`）③ 故「标准 `llama.cpp` 读不了 AVQ2」仍成立——但理由不是「它不是 llama.cpp」而是「它的 llama.cpp 被改了」**；⭐⭐ 判据「**当一个结论在修正之后仍然成立、但理由完全变了时，必须把理由也改掉——因为『结论对』会掩盖『理由是错的』，而错误的理由会在下一个场合给出错误的预测**」。(b) 🔥🔥🔥🔥🔥 **解码结构四步**：`decode_avq2_code` 把一个字节解成 **4 个 2 比特值 `((code >> 6) & 3) - 1.5` 等**；`hadamard_blocks` 对输入做**分块（`avq2_transform_block = 128`）Hadamard 变换**、缩放 `1/sqrt(128)`；逐行累加 **`weight = group_bias[c] + Σ lattice[i] * group_weight[c*4+i]`**（**`group_weight` 只有 16 个 float、`group_bias` 只有 4 个**）；再对输出做一次 Hadamard 并乘 `output_signs`；⭐⭐⭐ 判据（本轮最重要）「**当一种量化把『权重』变成『权重的生成规则』时，它就必须在每个 token 上重新执行那条规则——而这正是『2 比特』这个名字完全不表达的东西**」；⭐⭐⭐⭐ 判据「**『量化』这个词隐含了『值还在，只是精度低了』——而当存储的是『码 + 变换 + 仿射参数』时，『精度』这个词本身就不再适用，因为『一个码解出来的值』不是『某个原始值的近似』，而是『由码和参数共同定义的一个新值』**」；⭐⭐ 实际后果：**无法把 AVQ2 的一个张量「转回」BF16 再喂给别的引擎——不是「转回去会损失精度」，而是「转回去得到的是一个不同的模型」**；⭐⭐ 判据「**当一份权重的『格式』包含了一个变换（这里是 Hadamard）时，它的『可移植性』就归零了——因为变换必须由同一个 runtime 施加，而『同一个』意味着『不能换实现』**」。(c) 🔥🔥🔥🔥🔥 **决定性的一句：解码路径是 `mul_mat_vec`，不是 `mul_mat`**——`compute_mul_mat` 是逐 token 循环 `for (token = ith; token < token_count; token += nth) mul_mat_vec(...)`；⚠️ 即 **预填充时它仍然一个 token 一个 token 地做「矩阵-向量乘」**；⭐⭐ 判据（本轮最重要）「**『推断』与『观察』之间的差距，不是『可信度』，而是『能不能定位到那一行』——因为只有定位到那一行，才知道『这个特性是设计选择还是实现遗漏』**」。(d) 🔥🔥🔥🔥🔥 **合同头里有一行直接给出「随 token 线性增长」**：`values_per_token = shape.columns + shape.rows; return token_count * values_per_token * sizeof(float);`——**工作区 = `token_count × (columns + rows) × 4 字节`，没有一项是「大矩阵乘」** — [src-btl3-avq2-src]
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/src/btl3-avq.cpp`（11,368 字节）与 `btl3-avq-contract.h`（2,627 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/btl3-avq.cpp) —（2026-10 抓取）。(a) ⚠️⚠️⚠️ **二次更正：`native/llama.cpp/` 是一个完整的 `llama.cpp` 树**——顶层含 **`ggml/`、`src/`、`tools/`、`examples/`、`gguf-py/`、`CMakeLists.txt`、`convert_hf_to_gguf.py`、`AUTHORS`（65,818 字节）**，故 **上一轮「它不是 `llama.cpp`」这句话也错了一半**；⭐⭐ 判据（本轮最重要）「**两次错误都源于同一个动作：『用一层目录的结构去判断整个项目的性质』——第一次用了 model card 的字面，第二次用了仓库根目录的列表，两次都没有再往下看一层**」；⭐⭐ 判据「**『它不是 X』这个结论的风险，比『它是 X』更高——因为『是』只需要一个证据，而『不是』需要对所有可能的位置做穷举，而我两次都只查了一个位置**」；⭐ 正确答案是三段式：**① 它是 `llama.cpp` 的 fork ② 它加了私有算子（`ggml_custom_4d` + magic `0x42544c3341565132` = `BTL3AVQ2`）③ 故「标准 `llama.cpp` 读不了 AVQ2」仍成立——但理由不是「它不是 llama.cpp」而是「它的 llama.cpp 被改了」**；⭐⭐ 判据「**当一个结论在修正之后仍然成立、但理由完全变了时，必须把理由也改掉——因为『结论对』会掩盖『理由是错的』，而错误的理由会在下一个场合给出错误的预测**」。(b) 🔥🔥🔥🔥🔥 **解码结构四步**：`decode_avq2_code` 把一个字节解成 **4 个 2 比特值 `((code >> 6) & 3) - 1.5` 等**；`hadamard_blocks` 对输入做**分块（`avq2_transform_block = 128`）Hadamard 变换**、缩放 `1/sqrt(128)`；逐行累加 **`weight = group_bias[c] + Σ lattice[i] * group_weight[c*4+i]`**（**`group_weight` 只有 16 个 float、`group_bias` 只有 4 个**）；再对输出做一次 Hadamard 并乘 `output_signs`；⭐⭐⭐ 判据（本轮最重要）「**当一种量化把『权重』变成『权重的生成规则』时，它就必须在每个 token 上重新执行那条规则——而这正是『2 比特』这个名字完全不表达的东西**」；⭐⭐⭐⭐ 判据「**『量化』这个词隐含了『值还在，只是精度低了』——而当存储的是『码 + 变换 + 仿射参数』时，『精度』这个词本身就不再适用，因为『一个码解出来的值』不是『某个原始值的近似』，而是『由码和参数共同定义的一个新值』**」；⭐⭐ 实际后果：**无法把 AVQ2 的一个张量「转回」BF16 再喂给别的引擎——不是「转回去会损失精度」，而是「转回去得到的是一个不同的模型」**；⭐⭐ 判据「**当一份权重的『格式』包含了一个变换（这里是 Hadamard）时，它的『可移植性』就归零了——因为变换必须由同一个 runtime 施加，而『同一个』意味着『不能换实现』**」。(c) 🔥🔥🔥🔥🔥 **决定性的一句：解码路径是 `mul_mat_vec`，不是 `mul_mat`**——`compute_mul_mat` 是逐 token 循环 `for (token = ith; token < token_count; token += nth) mul_mat_vec(...)`；⚠️ 即 **预填充时它仍然一个 token 一个 token 地做「矩阵-向量乘」**；⭐⭐ 判据（本轮最重要）「**『推断』与『观察』之间的差距，不是『可信度』，而是『能不能定位到那一行』——因为只有定位到那一行，才知道『这个特性是设计选择还是实现遗漏』**」。(d) 🔥🔥🔥🔥🔥 **合同头里有一行直接给出「随 token 线性增长」**：`values_per_token = shape.columns + shape.rows; return token_count * values_per_token * sizeof(float);`——**工作区 = `token_count × (columns + rows) × 4 字节`，没有一项是「大矩阵乘」** — [src-btl3-src-avq-cpp]
 
-2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu`（7,070 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **CUDA 侧的 grid 形状坐实了同一件事**：**`decode_mul_mat<<<rows * tokens, matvec_threads, 0, stream>>>`**，**`matvec_threads = 256`**，kernel 内 **`row = blockIdx.x % rows; token = blockIdx.x / rows;`**，并用 `warp_sum` 在 block 内归约；⚠️ 即 **一个 block 只负责「一个 token 的一行」，而这是 `matvec`（矩阵-向量）不是 `gemm`（矩阵-矩阵）——故 `tokens` 增加时只是 block 数增加，每个 block 的工作量不变**；⭐⭐ 判据「**『预填充比解码快』这条经验，依赖于『矩阵乘能被大 batch 摊薄』这个前提——而当量化把矩阵乘换成『逐元素解码』时，这个前提就消失了，而没有任何报错**」；⭐ 结论：**§10.101 那个 `84.70 / 43.16` 的比值 1.96 不是因为「卡不行」，而是因为「这个算子没有 batch 维度」** — [src-btl3-avq2-cuda]
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu`（7,070 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **CUDA 侧的 grid 形状坐实了同一件事**：**`decode_mul_mat<<<rows * tokens, matvec_threads, 0, stream>>>`**，**`matvec_threads = 256`**，kernel 内 **`row = blockIdx.x % rows; token = blockIdx.x / rows;`**，并用 `warp_sum` 在 block 内归约；⚠️ 即 **一个 block 只负责「一个 token 的一行」，而这是 `matvec`（矩阵-向量）不是 `gemm`（矩阵-矩阵）——故 `tokens` 增加时只是 block 数增加，每个 block 的工作量不变**；⭐⭐ 判据「**『预填充比解码快』这条经验，依赖于『矩阵乘能被大 batch 摊薄』这个前提——而当量化把矩阵乘换成『逐元素解码』时，这个前提就消失了，而没有任何报错**」；⭐ 结论：**§10.101 那个 `84.70 / 43.16` 的比值 1.96 不是因为「卡不行」，而是因为「这个算子没有 batch 维度」** — [src-btl3-cuda-avq-cu]
 
 ### 第五处白名单：`GGML_OP_CUSTOM` 只认 8 个 magic（第八十七轮补充）
 
@@ -40687,7 +40906,7 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 1. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/ARTICLE-IMPLEMENTATION-APPENDIX.md`（7,918 字节，节 13-19）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/ARTICLE-IMPLEMENTATION-APPENDIX.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **§19「The honest launch sentence」全文里没有速度**：「**BTL-3 Compact is a complete 8.39 GB text-only native GGUF for a 27B-class agentic model. On a fresh 100-turn private tool-contract gate, it retained 83 of 90 teacher-correct turns (92.2% conditional retention), with perfect measured retention on single, parallel, sequential, and abstention cases, but only 30% on parallel-multiple. Its custom packed backend executes on CUDA and Metal without loading the BF16 source checkpoint.**」；⭐⭐⭐⭐ 判据（本轮最重要）「**一个人写『诚实的一句话』时，会把『自己最不确定的东西』全部剔除——而速度被剔除了**」；⭐⭐ 判据「**『一句话总结』是检验『作者自己认为什么最重要』的最好工具——因为总结必然要丢东西，而『丢掉哪些』比『留下哪些』更能说明问题**」；⭐⭐ 判据「**『未证实』与『不值得一提』是两个不同的信号——而区分它们的唯一方法是看『总结里有没有它』**」；(b) 🔥🔥🔥🔥🔥 **作者用的动词是 `adds`**：「**The release backend adds native packed CUDA and Metal operators to llama.cpp, an OpenAI-compatible server, and launch bridges.**」——⭐⭐⭐⭐ 这给 §10.111 那场「是不是 llama.cpp」的三轮更正画上了句号；⭐⭐ 判据（本轮最重要）「**`adds operators to X` 这个措辞本身就把答案说完了——它不是『重写』，不是『替代』，而是『在 X 上加』——而我用了两轮去推断这件事，答案在一个动词里**」；⭐⭐ 判据「**当一句话里有一个精确的动词（`adds` / `replaces` / `wraps` / `embeds`）时，它对『这是什么关系』的判定力，强于整段架构描述**」；(c) 🔥🔥🔥🔥 **最初的目标是 3.9 GB**：「**Stop pure one-bit work sooner. A rigid 3.9 GB target forced the project into the representation regime most hostile to tool behavior.**」；⭐⭐ 判据（本轮最重要）「**『一个数字是目标还是结果』决定了它能不能被当作『最优』来引用**」；⭐⭐ 判据「**『一个失败的目标』是一份比『一个成功的结果』更有信息量的材料——因为前者告诉你『边界在哪』，后者只告诉你『边界内有什么』**」；(d) ⭐⭐⭐⭐ **「总体通过、分项失败」被写成两条并列结论**：「**The package passes the overall 90% rule and fails the per-category 90% rule. Both statements belong in the release.**」，分项表 **Single 20/20、Parallel 20/20、Sequential 20/20、Parallel-multiple 10/3 (30%)、Abstention 20/20、Overall 90/83 (92.2%)**；⭐⭐ 判据（本轮最重要）「**『一个聚合分数是否可信』取决于『它的分母里最小的那一格有多大』**」；⭐⭐ 作者第 7 条教训：「**Report category denominators. An aggregate can hide a completely dead action family or reward a model that always abstains.**」；(e) ⭐⭐⭐ **「干跑投影」：算不平就不开始打包**：「**The package builder has a dry-run projection. It refuses to begin the expensive pack unless the projected candidate, required reserve, and selected demotions fit under the declared limit.**」，投影 8,551,634,944 逻辑权重字节，预留 25,000,000 字节；⭐⭐ 判据（本轮最重要）「**预检的输出必须是『可行 / 不可行』，不是『大概行』**」；⭐⭐ 判据「**『一个可执行的预算』不是『一个数字』，而是『一个能在花钱之前回答是/否的函数』**」；(f) ⭐⭐⭐ **七条「What we would do differently」，每条都是一次失败**：「**1. Design the behavior gate before the first quantizer. 2. Use balanced tool structures from the start. 3. Budget the vocabulary on day one. 4. Separate the development and release gates earlier. 5. Build the native runtime earlier. 6. Stop pure one-bit work sooner. 7. Report category denominators.**」，其中第 4 条附注「**Once a gate guides a repair, it is no longer untouched.**」 — [src-btl3-impl-appendix]
 ### 原始出处文档、Server Edition、41 秒短跑、与不存在的三个目录（第九十一轮补充）
 
-1. [GitHub / Badtheorylabs — BTL-3 `docs/rtx-pro-6000-speed-2026-07-19.md`（1,957 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/rtx-pro-6000-speed-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告 §10.101 那组数字的原始出处文档**。(a) ⚠️⚠️⚠️ **GPU 的完整 SKU**：「**GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition**」、「**GPU memory: 97,887 MiB reported by `nvidia-smi`**」、「**CUDA architecture: `sm_120a`；KV types: FP16**」；⭐⭐ 判据（本轮最重要）「**『型号』与『SKU』是两个不同的粒度——而『RTX PRO 6000』这个名字下面至少有 Server Edition 与 Workstation Edition 两款**」；⭐⭐ 判据「**当两个 SKU 的『标称参数完全相同』时，它们的差异不在参数表里，而在『持续负载』里——而『持续负载』恰恰是 `llama-bench -r 3` 测不到的东西**」；(b) 🔥🔥🔥 **完整命令**：「**llama-bench -m /vol/release/compact/BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json**」；(c) ⚠️⚠️⚠️ **整个基准只跑 41.03 秒**：「**The measured benchmark body, including model load, completed in 41.03 seconds.**」，单次采样「**Generation samples: `42.83`, `43.35`, and `43.30` tok/s. Prompt-processing samples: `84.28`, `84.91`, and `84.91` tok/s**」；⭐⭐ 判据（本轮最重要）「**『σ 小』在短跑里有两种可能：① 系统真的稳；② 三次跑的是同一个热状态——而 41 秒的总时长让 ② 变得非常可能**」；⭐⭐ 判据「**当你要用『σ』来论证『稳定』时，必须先回答『我的采样窗口有多长，而系统的热时间常数有多长』——如果前者远小于后者，那个 σ 只证明了『我测了三次』**」；(d) 🔥🔥🔥🔥🔥 **一张明示为投影的消费级表**：「**These are projections, not measurements. Single-stream decode is scaled primarily from memory bandwidth, then widened to account for architecture, clock, power, kernel occupancy, and driver differences.**」，「**RTX 5090 32GB | 39-44 tok/s | 75-88 tok/s | Fit: Yes；RTX 4090 24GB | 22-28 tok/s | 45-60 tok/s | Fit: Yes；RTX 4050 Laptop 6GB | No credible full-GPU estimate | 同 | Fit: No**」；⭐⭐ 判据（本轮最重要）「**一个『投影区间』比一个『投影点』更诚实，而『区间只往下不往上』更诚实——因为『按带宽缩放』得到的是理论上限**」；⭐⭐ 可检验：**`43.16 × 0.5625 = 24.28 tok/s` 落在作者给的 22-28 区间内且偏上**；⭐⭐ 判据「**『装不下』与『跑得慢』是两个不同类别的问题，而把它们混为一谈会让读者以为『优化一下就能跑』**」 — [src-btl3-doc-rtxpro6000-speed]
+1. [GitHub / Badtheorylabs — BTL-3 `docs/rtx-pro-6000-speed-2026-07-19.md`（1,957 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/rtx-pro-6000-speed-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告 §10.101 那组数字的原始出处文档**。(a) ⚠️⚠️⚠️ **GPU 的完整 SKU**：「**GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition**」、「**GPU memory: 97,887 MiB reported by `nvidia-smi`**」、「**CUDA architecture: `sm_120a`；KV types: FP16**」；⭐⭐ 判据（本轮最重要）「**『型号』与『SKU』是两个不同的粒度——而『RTX PRO 6000』这个名字下面至少有 Server Edition 与 Workstation Edition 两款**」；⭐⭐ 判据「**当两个 SKU 的『标称参数完全相同』时，它们的差异不在参数表里，而在『持续负载』里——而『持续负载』恰恰是 `llama-bench -r 3` 测不到的东西**」；(b) 🔥🔥🔥 **完整命令**：「**llama-bench -m /vol/release/compact/BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json**」；(c) ⚠️⚠️⚠️ **整个基准只跑 41.03 秒**：「**The measured benchmark body, including model load, completed in 41.03 seconds.**」，单次采样「**Generation samples: `42.83`, `43.35`, and `43.30` tok/s. Prompt-processing samples: `84.28`, `84.91`, and `84.91` tok/s**」；⭐⭐ 判据（本轮最重要）「**『σ 小』在短跑里有两种可能：① 系统真的稳；② 三次跑的是同一个热状态——而 41 秒的总时长让 ② 变得非常可能**」；⭐⭐ 判据「**当你要用『σ』来论证『稳定』时，必须先回答『我的采样窗口有多长，而系统的热时间常数有多长』——如果前者远小于后者，那个 σ 只证明了『我测了三次』**」；(d) 🔥🔥🔥🔥🔥 **一张明示为投影的消费级表**：「**These are projections, not measurements. Single-stream decode is scaled primarily from memory bandwidth, then widened to account for architecture, clock, power, kernel occupancy, and driver differences.**」，「**RTX 5090 32GB | 39-44 tok/s | 75-88 tok/s | Fit: Yes；RTX 4090 24GB | 22-28 tok/s | 45-60 tok/s | Fit: Yes；RTX 4050 Laptop 6GB | No credible full-GPU estimate | 同 | Fit: No**」；⭐⭐ 判据（本轮最重要）「**一个『投影区间』比一个『投影点』更诚实，而『区间只往下不往上』更诚实——因为『按带宽缩放』得到的是理论上限**」；⭐⭐ 可检验：**`43.16 × 0.5625 = 24.28 tok/s` 落在作者给的 22-28 区间内且偏上**；⭐⭐ 判据「**『装不下』与『跑得慢』是两个不同类别的问题，而把它们混为一谈会让读者以为『优化一下就能跑』**」 — [src-btl3-doc-rtx-pro-speed]
 
 2. [GitHub / Badtheorylabs — BTL-3 `artifacts/btl3-compact-gguf-dry-run.json`（910 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/artifacts/btl3-compact-gguf-dry-run.json) —（2026-10 抓取）。⚠️⚠️⚠️ **`source_weight_bytes: 8551772952` 是一个口径陷阱**：「**source_weight_bytes: 8551772952 | source_checksums_verified: 158 | tensor_count: 2416 | projected_tensor_bytes: 8381262032 | exporter_unsupported: [] | native_runtime_gaps: []**」；⚠️ **若它是 BF16 的 27B 权重，则参数量 = 4.28 B——故据此算出的「压缩比 1.019×」是错的**；⭐⭐ 判据（本轮最重要）「**当一个字段的名字里出现『source』时，要问的不是『它是什么』，而是『它是哪一步的 source』**」；⭐⭐ 正确口径：**27B 在 BF16 下约 54 GB，最终 8.39 GB，压缩比约 6.4×，等效 2.48 bpw**——与「Under 2.5 effective bits per parameter」一致；⭐⭐ 判据「**当一个『官方数字』算出来与『官方宣称』矛盾时，先怀疑那个数字的口径，而不是先怀疑那个宣称**」；⚠️ 分项与 `PAPER.tex` 的 `tab:bytes` 完全一致 — [src-btl3-artifact-dry-run]
 
@@ -40697,7 +40916,7 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 1. [GitHub / Badtheorylabs — BTL-3 `docs/patched-ollama-and-lmstudio.md`（10,347 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/patched-ollama-and-lmstudio.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **它是 §10.106 那场「stock engine 不兼容」误读的物理对象的说明书**，开篇即「**separates three products that must not be conflated**」。(a) 🔥🔥🔥🔥🔥 **决定性的一句**：「**The GGUF stores BTL's packed representation in ordinary I8/F32/BF16 tensors with custom names, so no new GGUF tensor-type enum is required.**」——⚠️ **即这个 GGUF 文件本身是合法的，只是张量名字是自定义的**；⭐⭐ 判据（本轮最重要）「**『兼容性』这个判断被拆成了两层：第一层『文件格式（GGUF 容器 + 张量类型枚举）』是标准的；第二层『语义（哪个张量名对应哪个权重）』是私有的——即『stock Ollama 读不了』不是因为『文件格式不对』，而是因为『它不知道叫这个名字的张量该怎么算』**」；⭐⭐ 与 §10.116 是同一设计的两面：**magic 用「假指针」传递类型标签，张量名用「自定义字符串」传递语义，两者都不改枚举**；⭐⭐ 判据（本轮最重要）「**在不改标准的前提下扩展有两种做法：① 塞进未使用的字段；② 用标准类型 + 私有命名——两种做法的共同代价是『标准工具能打开文件，但读不懂内容』**」；⭐⭐ 判据「**『格式合规』与『语义可读』是两个独立的性质，而『合规但不语义可读』是最难诊断的一种状态**」；(b) ⭐⭐⭐ **开篇一张「三个产品不可混淆」的表**：「**Stock Ollama | Stock runner | Does not execute AVQ2；BTL-3 Patched Ollama | Ollama directly spawns BTL's native `llama-server` | Packaging scaffold complete; target packages pending；LM Studio | Official generator plugin calls BTL's native local endpoint | Development preview; plugin unpublished and Windows validation pending**」；⭐⭐ 判据（本轮最重要）「**『一个产品有几种用法』的最佳答案形式是一张表，而表里必须有一列叫『当前状态』——因为『支持 X』这句话在没有状态列时，会被读成『X 已经完全可用』**」；⚠️ **RTX PRO 6000 在这张表里完全没有出现**；(c) ⭐⭐⭐ **Ollama 本身就是一个「壳」**：「**At official Ollama commit `573386c35eac76124ffce571f4b0fefa0a7fe13c`, `llm.NewLlamaServer` delegates every GGUF model to a `llama-server` subprocess. Ollama locates that executable under `lib/ollama`, starts it on an ephemeral loopback port, and speaks its native `/health`, `/completion`, `/v1/chat/completions`, tokenization, and embedding endpoints.**」、「**The patched distribution replaces Ollama's runtime payload, not its public API, scheduler, CLI, model store, or UI.**」；⭐⭐ 判据（本轮最重要）「**『一个中间层能不能被替换』取决于『它有没有把自己做成一个协议边界』——而 Ollama 做对了这件事：它和 runner 之间是 HTTP，不是链接**」；⭐⭐ 判据「**『一个系统的可扩展性』不取决于『它有没有插件机制』，而取决于『它的边界是不是进程边界』**」；(d) ⭐⭐⭐ **「没有 HTTP 翻译层」在进程维度对、在协议维度错**：「**No HTTP translation bridge sits between patched Ollama and the runner.**」，而 LM Studio 插件「**calls the native runner's OpenAI-compatible endpoint**」；⭐⭐ 判据「**当作者说『没有 X』时，要问的是『X 是按什么粒度定义的』——因为『进程』『协议』『数据格式』三个粒度下，同一个句子会给出不同答案**」；⚠️ 本条置信度 `medium`；(e) ⭐⭐⭐ **构建用 `-DCMAKE_CUDA_ARCHITECTURES=native`，且必须在本机**：「**Build on the target machine so CMake selects the target GPU**」，命令含 **`-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CUDA=ON -DLLAMA_CURL=OFF`**；⚠️ 硬件目标表只有 **RTX 4090 / RTX 5090 / Windows 4090-5090 / DGX Spark**（「**Current DGX Spark software is ARM64 and ships CUDA 13; do not reuse an x86_64 payload**」），**没有 RTX PRO 6000**；⭐⭐ 与 §10.94 对照：**同一个 `native` 选项，在「发行二进制」场景下是坑，在「本机构建」场景下是正解**；⭐⭐ 判据（本轮最重要）「**『一个选项是好是坏』取决于『谁在什么机器上跑它』**」；(f) ⭐⭐⭐ **六条 release gate，且明说「这是打包候选，不是兼容发布」**：「**Until those checks pass on a real CUDA executable, the output is a packaging candidate - not an Ollama-compatible release.**」，适用对象只有「**each 4090, 5090, and DGX Spark artifact**」，含 SHA-256 `2ddf9527620a17a2a6739d184a7096c45712092e6589128792ec6254e94dc30c` — [src-btl3-doc-patched-integrations]
 ### 种子符号、无稠密导出、Qwen3.6、归档包、与完全没有 kernel 计时（第九十三轮补充）
 
-1. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-gguf-exporter.md`（2,464 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-gguf-exporter.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥 **符号向量是用种子重新生成的**：「**AVQ2 codes, affines, and exact Torch-seeded sign vectors**」，而五条校验之一是「**exact regeneration of seeded signs**」；⭐⭐⭐⭐ 判据（本轮最重要）「**『一个模型文件是不是自足的』取决于『它有没有隐藏的随机状态』——而『用种子生成』意味着：文件 + 种子才等于权重**」；⭐⭐ 判据「**当『随机性』进入一个确定性管线的中间步骤时，它就从『噪声』变成了『参数』——而『参数』必须被存储或被复现**」；⭐⭐ 判据「**『用种子代替数据』把『文件大小』换成了『环境依赖』——而这笔交易在『同一个人同一台机器』上几乎免费，在『别人复现』时可能非常昂贵**」；(b) 🔥🔥🔥 **导出器从不重建稠密解码器**：「**It never reconstructs a dense decoder. Safetensors are mmap-backed and materialized one tensor at a time.**」，且「**Every one of the 158 source files is size- and SHA-256-checked against the frozen package manifest before planning or writing.**」；⭐⭐⭐ 判据（本轮最重要）「**『能不能在一张卡上做出一个比它显存更大的模型』——答案是能，只要你不把模型整体读进来**」；⭐⭐ 对 RTX PRO 6000 的推论：**96 GB 显存是「能推理多大的模型」的上界，不是「能生产多大的模型」的上界**；⭐⭐ 判据「**『显存』这个约束在『推理』与『生产』两个阶段是不同量级的**」；(c) ⚠️⚠️ **基座是 Qwen3.6**：「**the custom Qwen3.6 llama.cpp backend**」；⭐⭐ 判据（本轮最重要）「**『一个模型的名字』在被写作『XX-class』时，它是一个规格；在被写作『Qwen3.6』时，它是一个可查的对象**」；⭐⭐ 判据「**『补上一个模型名』的价值，不在于名字本身，而在于『它让一堆孤立数字有了一个可以对照的结构』**」；(d) ⭐⭐⭐ **170,510,920 字节的差额有解释**：「**The 170,510,920-byte reduction from the source package is expected: the package retains two superseded BF16 island files for provenance, while the export emits only their final INT4 demotions.**」；⭐⭐ 判据（本轮最重要）「**『一个源的字节数』可以大于『一个模型的字节数』，因为它可能包含『为了可追溯性而保留的历史』**」；⭐⭐ 判据「**『一个可复现的产物』与『一个可审计的产物』的差别在于：前者只需要『最终状态』，后者还需要『被舍弃的分支』**」；(e) ⭐⭐⭐ **五条逐张量校验**：「**canonical-name equality; source-shape equality; exact GGUF storage-type equality; exact raw payload-byte equality after required Qwen transformations; exact regeneration of seeded signs**」，三层抽样 **L13 28 张量 / 322,295,104 B；L40 44 / 98,427,808 B；L47 35 / 122,932,064 B** — [src-btl3-doc-gguf-exporter]
+1. [GitHub / Badtheorylabs — BTL-3 `docs/btl-3-compact-gguf-exporter.md`（2,464 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/btl-3-compact-gguf-exporter.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥 **符号向量是用种子重新生成的**：「**AVQ2 codes, affines, and exact Torch-seeded sign vectors**」，而五条校验之一是「**exact regeneration of seeded signs**」；⭐⭐⭐⭐ 判据（本轮最重要）「**『一个模型文件是不是自足的』取决于『它有没有隐藏的随机状态』——而『用种子生成』意味着：文件 + 种子才等于权重**」；⭐⭐ 判据「**当『随机性』进入一个确定性管线的中间步骤时，它就从『噪声』变成了『参数』——而『参数』必须被存储或被复现**」；⭐⭐ 判据「**『用种子代替数据』把『文件大小』换成了『环境依赖』——而这笔交易在『同一个人同一台机器』上几乎免费，在『别人复现』时可能非常昂贵**」；(b) 🔥🔥🔥 **导出器从不重建稠密解码器**：「**It never reconstructs a dense decoder. Safetensors are mmap-backed and materialized one tensor at a time.**」，且「**Every one of the 158 source files is size- and SHA-256-checked against the frozen package manifest before planning or writing.**」；⭐⭐⭐ 判据（本轮最重要）「**『能不能在一张卡上做出一个比它显存更大的模型』——答案是能，只要你不把模型整体读进来**」；⭐⭐ 对 RTX PRO 6000 的推论：**96 GB 显存是「能推理多大的模型」的上界，不是「能生产多大的模型」的上界**；⭐⭐ 判据「**『显存』这个约束在『推理』与『生产』两个阶段是不同量级的**」；(c) ⚠️⚠️ **基座是 Qwen3.6**：「**the custom Qwen3.6 llama.cpp backend**」；⭐⭐ 判据（本轮最重要）「**『一个模型的名字』在被写作『XX-class』时，它是一个规格；在被写作『Qwen3.6』时，它是一个可查的对象**」；⭐⭐ 判据「**『补上一个模型名』的价值，不在于名字本身，而在于『它让一堆孤立数字有了一个可以对照的结构』**」；(d) ⭐⭐⭐ **170,510,920 字节的差额有解释**：「**The 170,510,920-byte reduction from the source package is expected: the package retains two superseded BF16 island files for provenance, while the export emits only their final INT4 demotions.**」；⭐⭐ 判据（本轮最重要）「**『一个源的字节数』可以大于『一个模型的字节数』，因为它可能包含『为了可追溯性而保留的历史』**」；⭐⭐ 判据「**『一个可复现的产物』与『一个可审计的产物』的差别在于：前者只需要『最终状态』，后者还需要『被舍弃的分支』**」；(e) ⭐⭐⭐ **五条逐张量校验**：「**canonical-name equality; source-shape equality; exact GGUF storage-type equality; exact raw payload-byte equality after required Qwen transformations; exact regeneration of seeded signs**」，三层抽样 **L13 28 张量 / 322,295,104 B；L40 44 / 98,427,808 B；L47 35 / 122,932,064 B** — [src-btl3-doc-gguf-exporter-md]
 
 2. [GitHub / Badtheorylabs — BTL-3 `artifacts/release/BTL-3-Compact-AVQ2.report.json`（1,058 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/artifacts/release/BTL-3-Compact-AVQ2.report.json) —（2026-10 抓取）。⚠️⚠️⚠️ **本报告预期它含 kernel 开销分解——但它没有**：全部字段只有「**字节账本 + `exporter_unsupported: []` + `native_runtime_gaps: []` + `output_bytes: 8392369600` + `output_sha256: 2ddf9527...dc30c` + `verified_tensor_count: 2416` + `verified_payload_count: 2416`**」；⭐⭐ 判据（本轮最重要）「**『一个发布报告里有什么字段』反映了『发布者认为什么是需要证明的』——这份报告证明的是『字节对、校验和对』，不是『跑得快』**」；⭐⭐ 判据「**当一份产物有两份独立文档都省略了同一个维度时，那个维度的缺失是设计，不是疏漏**」；⭐⭐ 判据（本轮最重要）「**『一个问题在源材料里找不到答案』有两种情况：① 材料不全；② 那个问题不在材料的问题空间里——而区分它们的方法是：看材料有没有在别处讨论这件事。这里证明是 ②**」；⭐ 故本报告必须换问题：**不是「它为什么慢」，而是「它在什么条件下能达到作者认可的速度」——而作者认可的唯一速度标准是「能生成」** — [src-btl3-release-report]
 ### CUDA 缺两个算子、20.2% 带宽效率、纯 Python MT19937、248K 词表（第九十四轮补充）
@@ -41002,7 +41221,7 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (a) ⭐⭐⭐⭐ **`TARGET ggml-cuda` 为真 ⇔ 两个条件的合取**：「**ggml_add_backend(CUDA)**」检查 `GGML_CUDA`，「**if (CUDAToolkit_FOUND)**」检查工具链；
 ⭐⭐ 判据「**「把 `if (TARGET X)` 读成『X 开关』是一个常见的简化，而它掩盖了『X 什么时候被创建』这个更关键的问题」**」；
 ⭐⭐ 判据「**「一个 `TARGET` 判据的真实复杂度，等于它上游 `if` 嵌套的层数」**」；
-⭐⭐ 判据「**「判据的复杂度」与「默认值的复杂度」可以分别设计——而这个项目在 CUDA 上把复杂度放在判据里，在 Metal 上把复杂度放在默认值里**」 — [src-btl3-ggml-cuda-cmakelists]
+⭐⭐ 判据「**「判据的复杂度」与「默认值的复杂度」可以分别设计——而这个项目在 CUDA 上把复杂度放在判据里，在 Metal 上把复杂度放在默认值里**」 — [src-btl3-cuda-cmakelists]
 
 ### BTL-3 的 CI：根目录没有 `.github/`，零 workflow，零 runs（第一百零五轮补充）
 
@@ -41017,7 +41236,7 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (c) ⚠️⚠️⚠️ **最后一次提交是 2026-07-24**：「**latest commit: fadb919 2026-07-24T08:10:44Z msg: Default Compact to non-thinking mode**」——**距 `as_of`（2026-10-27）已三个月无提交**；
 ⭐⭐ 判据「**「一个仓库的最后提交日期」是「它的当前状态」的必要限定词——而本报告此前多处用现在时描述 BTL-3，那些句子需要读成「截至 2026-07-24 它是」**」；
 ⭐⭐ 判据「**「找不到证据」有两种情形：「证据不存在」与「产生证据的机制不存在」——后者可以用「机制是否被搭建」来独立判定**」；
-⭐⭐ 判据「**当「找不到 X」持续多轮时，应该转去查「X 的产生机制是否存在」——因为「无」有两种，而只有一种值得继续找**」 — [src-btl3-repo-tree-ci]
+⭐⭐ 判据「**当「找不到 X」持续多轮时，应该转去查「X 的产生机制是否存在」——因为「无」有两种，而只有一种值得继续找**」 — [src-btl3-repo-tree]
 
 2. [GitHub / Badtheorylabs — 被 vendor 的上游 CI 定义（52 个 workflow）]
 (https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/.github/workflows/)
@@ -41114,7 +41333,7 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 「**{5120, 6144, 5, 45} {5120, 17408, 5, 62} {6144, 5120, 6, 44} {10240, 5120, 10, 46} {17408, 5120, 17, 126}**」，**而 `rows / 128` 分别是 40 / 48 / 80 / 136**；
 ⭐⭐ 可算：**17408 行 乘 5120 列 = 89,128,960 参数；`codes` 为 rows*cols/4 = 22,282,240 字节；而 `affine` 只有 17 乘 16 = 272 个 float——占 codes 的 0.0012%**；
 ⭐⭐ 判据「**「一个元数据张量相对于主体张量的比例」说明它是「每块一份」还是「每行一份」——而 0.0012% 只能是「每 1024 行一份」**」；
-⭐⭐ **AVQ2 的十个形状里 AVQ2 部分合计 21,967,667,200 个权重元素（按 2 bit 约 5.11 GiB），INT4 部分合计 1,756,364,800 个（按 4 bit 约 0.82 GiB）** — [src-btl3-metal-suite-shapes]
+⭐⭐ **AVQ2 的十个形状里 AVQ2 部分合计 21,967,667,200 个权重元素（按 2 bit 约 5.11 GiB），INT4 部分合计 1,756,364,800 个（按 4 bit 约 0.82 GiB）** — [src-btl3-test-metal]
 
 ### BTL-3 的 vocab / embedding 实现（第一百零八轮补充）
 
@@ -41219,7 +41438,7 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (e) ⭐⭐⭐⭐ **magic 是从 `op->op_params` 里 `memcpy` 出来再转回指针**：
 「**ggml_custom_op_params params; std::memcpy(&params, op->op_params, sizeof(params)); return reinterpret_cast<std::uintptr_t>(params.userdata);**」；⚠️ 故「magic」在代码里其实是 **`userdata` 指针的值**；
 (f) ⭐⭐⭐⭐ **vocab 路径也有同一条「`codebook_rows` 是 128 的倍数」**：「**columns % 128 == 0 && vocabulary % 128 == 0 && vocabulary % groups == 0 && (vocabulary / groups) % 128 == 0**」；
-⭐⭐ 判据「**「一个接口的复杂度」至少有两个轴：数量与种类——而只数数量会低估 `vocab_rows`**」 — [src-btl3-cuda-avq-marker-h]
+⭐⭐ 判据「**「一个接口的复杂度」至少有两个轴：数量与种类——而只数数量会低估 `vocab_rows`**」 — [src-btl3-cuda-marker]
 
 ### BTL-3 的 CPU 侧 AVQ2/INT4 实现（第一百一十一轮补充）
 
@@ -41714,7 +41933,7 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 「**LM Studio generator event lifecycle represents one active tool call at a time and its argument-fragment callback does not include a call ID. To preserve BTL-3 parallel calls correctly, the plugin buffers tool fragments by upstream call index and emits each complete lifecycle sequentially when the server stream ends. It does not misattribute interleaved arguments merely to make the tool UI look live.**」——**为了正确性牺牲实时性**；
 (e) ⭐⭐⭐⭐⭐ **`model.yaml` 被声明不是能力声明**：
 「**The included model.yaml is catalog metadata, not a claim that the stock LM Studio GGUF engine supports AVQ2. It uses the explicit compatibility label btl3-avq2-native.**」；
- — [src-btl3-doc-gguf-exporter-md] [src-btl3-doc-launch-cuda] [src-btl3-doc-patched-ollama]
+ — [src-btl3-doc-gguf-exporter-md] [src-btl3-doc-launch-cuda] [src-btl3-doc-patched-integrations]
 
 ### 四个真实报告与一次撤回（第一百二十二轮补充）
 
@@ -43261,7 +43480,7 @@ shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 480
 ⭐⭐ 判据（本轮最重要）「**当一份报告测了某个量化在某个卡上的速度，它必须同时报告「这张卡有没有为这个量化专门写的内核」——否则那个速度是「通用路径的速度」，而不是「这个量化在这个硬件上的能力」**」——**⚠️ 故 PRO 6000 的 Q2_0 129.9 tok/s 应读作「在没有任何专门内核的情况下测到的速度」**；⭐⭐ **故这是一个新发现的「对照缺口」：不是「缺 PRO 6000 的数」，而是「缺一个同一量化在两个架构上的数」**；
 6. ⭐⭐⭐⭐⭐ **默认 OFF，而缺 CUTLASS 时直接 FATAL**：
 `FATAL_ERROR` 在这里是一个关于「谁会打开它」的声明：只有已经拥有 CUTLASS checkout 的人才会。**而这条与本报告反复出现的「静默失败」模式正好相反：§10 里记过十几个「配置错了但什么都没说」的例子，而这一个是「配置错了就立刻停下」——故同一个仓库里两种纪律并存**；
- — [src-btl3-cuda-backend-cmake]
+ — [src-btl3-cuda-cmakelists]
 
 ### 读到内核本身：`return false`（第一百六十五轮补充）
 
@@ -43723,6 +43942,48 @@ BTL-3 的 `fattn.cu` 是 **23,551 字节 / 597 行**，`launch` 0、`<<<` 0、`k
 ⭐⭐ 判据（本轮最重要）「**当一条待办在分析后从「该补」变成「该标」时，待办总数下降而信息量上升——这是审计能给出的最好结果。故此后把待办分三类，而「未获取项」这个笼统的词从此不再使用**」——**⚠️ 而这条正是上一轮判据的延续：上一轮说「记欠账要用缺 X 而不是含 X」，这一轮补上后半句：「记完之后还要问 X 是不是我能补的」**；
  — [src-rtx6kpro-daily-full] [src-btl-lab-agents-md]
 
+### 22 组重复源已合并：468 → 444（第一百七十六轮补充）
+
+上一轮给这条待办写好了保护条款（单条来源不参与合并），本轮执行它。而执行的第一件事是发现**那个审计脚本自己的 KEEP 规则是错的**：它按「登记最早」选保留行，于是会把 132 条证据的合集并进只有 13 条证据的那一行。
+
+1. 🔥🔥🔥🔥🔥 **那个审计脚本存在了 53 轮，而它的 KEEP 规则会选错行**：
+`audit_duplicate_sources.py` 第 51-54 行按「**登记最早的那个**」选 KEEP，与证据量无关；于是 `src-rtx6kpro-daily`（**13 条证据**）会吸收 `src-rtx6kpro-daily-full`（**132 条证据**）；
+
+⭐⭐ 判据（本轮最重要）「**当一个检查工具自己带一个「怎么选」的裁决时，那个裁决的正确性从来不被它的输出检查——因为它只报「有几组」，不报「选对了吗」。故此后凡用工具产出的结论，都必须问一句「这个工具在替我做什么决定」**」——**⚠️ 而这条正是「读检查器然后对自己跑一遍」的加强版：读检查器之后，还要读它的裁决逻辑**；
+2. ⭐⭐⭐⭐⭐ **「登记最早」与「信息最全」是两个无关的排序**：
+加 `--keep-ev` 重跑后，**22 组的 KEEP 全部落到更全的那一行**；而「需迁移的 evidence 行」从 r198 记的 **271** 变为本轮的 **124**；
+
+⭐⭐ 判据（本轮最重要）「**当「行序」被当成「权威序」时，合并的净效果可能恰好相反——它会把信息多的并进信息少的。故任何「去重」动作都必须先回答：保留哪一个，以及凭什么**」——**⚠️ 而 r198 那个 271 与现在的 124 的差，是因为这 53 轮里新增的证据挂在了不同的行上**；
+3. 🔥🔥🔥🔥🔥 **合并已执行：468 → 444，证据一行不少**：
+「**sources 468 → 444（删 24 行）/ evidence 2952 → 2952（迁 124 行）/ REPORT 引用改写 32 处**」；`evidence_id` 集合完全相同，`document_id` 逐行比对全部未变；
+
+⭐⭐ 判据（本轮最重要）「**当一次「删除」操作之后evidence 行数不变时，那次删除删的是「目录」，不是「内容」——而这正是去重该有的样子。故去重的正确性判据不是「少了多少行」，而是「有没有任何一条内容失去归属」**」——**⚠️ 而 document_id 一行未动这一点很重要：它是另一根轴，合并来源不应该动它**；
+4. ⚠️⚠️⚠️ **24 组里只有 1 个 KEEP 行的字段被改，方向是更保守**：
+`src-dropandrender-ws` 的 `source_type` 从 **`review` 改成 `vendor`**；其余 **23 个** KEEP 行的 tier 与 type **一字未动**；
+
+⭐⭐ 判据（本轮最重要）「**当一次批量改写的净改动只有 1 处时，要么是这个批处理写得极稳，要么是它根本没做事——而区分这两者的方法是对比输入与输出。故合并同一 URL 的两个登记时，凡冲突的字段一律取更保守的那个**」——**⚠️ 而这对那 12 条证据有直接影响：该源支撑 23 条主张（其中 6 条 high），把 type 从 review 改成 vendor 会让那些主张的来源看上去更弱**；
+5. ⭐⭐⭐⭐⭐ **那两个「冲突」在合并之前就存在**：
+合并前 `src-tpu-eol` 就是 **`tertiary` / `press`**，而 `src-tpu-gb202` 与 `src-tpu-5090-silicon` 是同 URL 的 **`secondary` / `press`**；`src-proxpc-md` 与 `src-proxpc-md2` 都已是 `tertiary`；
+
+⭐⭐ 判据（本轮最重要）「**当一个「合并引起的问题」在备份里被证明早就存在时，它就不是问题的原因，而是问题的证据——它证明这条 URL 被登记过两次，而两次给了不同的强度。故凡处理重复源，都必须先看冲突是不是历史遗留**」——**⚠️ 而这条也解释了一个反常：`src-tpu-eol` 被选为 KEEP，却是 tier 最低的——因为 tier 取决于当时读的人怎么判，而 id 取决于谁先起名**；
+6. 🔥🔥🔥🔥🔥 **我自己的改写不是幂等的，产生了三个坏 id**：
+按 remap 顺序替换时，「**`src-proxpc-md` → `src-proxpc-md2`，随后 `src-proxpc-md2` 又被替换一次 → `src-proxpc-md22`**」；同形还有 `src-rtx6kpro-daily-full-full`、`src-btl3-doc-gguf-exporter-md-md`；
+
+⭐⭐ 判据（本轮最重要）「**当一批替换里存在「A → B」且「B → C」这样的链时，顺序执行会得到 C，而正确结果是 B——故批量改写必须先做一次「谁会被谁命中」的拓扑排序。故此后凡批量改 id，一律用「一次性映射表 + 单遍正则」而不是循环 replace**」——**⚠️ 而这条是本轮自己造的 bug，且是被校验器抓到的——这说明那个校验器值它的维护成本**；
+7. ⭐⭐⭐⭐⭐ **校验器在 4 处抓到了我自己的 bug**：
+四条错误全是「**引用了不存在的 source**」（`src-proxpc-md22`、`src-rtx6kpro-daily-full-full`、`src-btl3-doc-gguf-exporter-md-md` 两次）；修好后通过：**444 来源 / 2957 证据 / 2180 主张**；
+
+⭐⭐ 判据（本轮最重要）「**当校验器抓到的是「我这一轮刚写的东西」时，它证明的不是我的谨慎，而是「那一类错误可以被机械检出」。故应把「引用了不存在的 id」列为最高优先的自动检查**」——**⚠️ 而这条给了一个反直觉的结论：一份报告的可信度，有一半来自它会失败的那些检查**；
+8. 🔥🔥🔥🔥🔥 **重复源 22 → 0，而孤儿源仍是 2 个**：
+`audit_duplicate_sources.py --keep-ev` 输出「**URL 重复组数: 0 / [OK] 无重复来源**」；而真实孤儿仍是 `src-janction` 与 `src-stfc-namd`；
+
+⭐⭐ 判据（本轮最重要）「**当一个「重复」问题被彻底清零、而一个「孤儿」问题一动不动时，它们不是同一类问题——重复是「同一件事被记了两次」，孤儿是「记了一件事，而它没有内容」。故这两条待办不能用同一种方法解决：重复可以机械合并，孤儿只能要么补证据、要么删行**」——**⚠️ 而那两个孤儿本轮明确属于 recoverable（我能补）**；
+9. ⭐⭐⭐⭐⭐ **444 个来源全部被正文引用，一个不缺**：
+`sources.csv` 444 行，`REPORT.md` 里来源标签去重集合 444，「**引用了但不存在的来源 0 / 存在但未被引用的来源 0**」；
+
+⭐⭐ 判据（本轮最重要）「**当「来源数」与「被引用来源数」相等时，那个数才是一个可核对的说法——否则它只是一个库存数。故此后报来源数，都应同时报「其中被正文引用的有多少」**」——**⚠️ 而这条是本轮唯一一个「双向闭合」的指标：它同时对得上 CSV 与正文，故它比任何一个单向计数都强**；
+ — [src-rtx6kpro-daily-full] [src-btl-lab-agents-md]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -43862,7 +44123,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=468, evidence=2952, claims=2171, claims_high=1821, claims_disputed=9, trace_events=1007, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=444, evidence=2957, claims=2180, claims_high=1830, claims_disputed=9, trace_events=959, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
@@ -43887,7 +44148,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 ### 多卡实战 wiki（第二轮补充）
 
-52. [RTX PRO 6000 Blackwell LLM Wiki（16 卡 PCIe 实战）](https://github.com/local-inference-lab/rtx6kpro) — [src-rtx6kpro-wiki]
+52. [RTX PRO 6000 Blackwell LLM Wiki（16 卡 PCIe 实战）](https://github.com/local-inference-lab/rtx6kpro) — [src-rtx6kpro-readme]
 53. [跨用户基准汇总（MTP、上下文缩放、NCCL、P2P）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/benchmarks/results.md) — [src-rtx6kpro-bench]
 54. [功耗扫描：Workstation vs Server vs Max-Q（双卡交叉验证）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/hardware/blackwell-power-limit-sweep.md) — [src-rtx6kpro-power]
 55. [PCIe 拓扑与 GPU 互连](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/master/hardware/topology.md) — [src-rtx6kpro-topo]
@@ -43906,7 +44167,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 64. [GDEP：RTX PRO 6000 Blackwell 三 SKU 对比报告（日文）](https://www.gdep.co.jp/information/news/nvidia-rtx-pro-6000-blackwell_benchmark_report/) — [src-gdep-report]
 65. [Blender Artists：RTX PRO 6000 性能讨论（含 Open Data 5.1.1 版本信息）](https://blenderartists.org/t/rtx-pro-6000-performance/1648521/2)（2026-07-24） — [src-blenderartists]
-66. [Drop & Render：Server Edition 渲染基准（更新于 2026-10-26）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition) — [src-dnr-server]
+66. [Drop & Render：Server Edition 渲染基准（更新于 2026-10-26）](https://blendercloudrender.com/benchmarks/gpu/nvidia-geforce-rtx-pro-6000-blackwell-server-edition) — [src-dropandrender-se]
 ### 真实生产场景与群体性故障（第五轮补充）
 
 67. [NVIDIA Developer Forums：Blackwell Pro 6000 MHz degrading（含 nvidia-smi 现场输出）](https://forums.developer.nvidia.com/t/blackwell-pro-6000-mhz-degrading/355157/17)（2026-07-08） — [src-nvforum-powercap]
@@ -43942,10 +44203,10 @@ python scripts/validate_research.py research/rtx-pro-6000
 91. [NVIDIA：RTX PRO AI Factory——网络物理拓扑（含纯推理不需要计算网络的论断）](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/networking-physical-topologies.html)（2026-05-18） — [src-nv-ra-topo]
 92. [NVIDIA：RTX PRO AI Factory——附录 BOM（交换机/线缆/收发器）](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/appendix.html)（2026-05-18） — [src-nv-ra-app]
 93. [NVIDIA：RTX PRO AI Factory——软件栈](https://docs.nvidia.com/enterprise-reference-architectures/rtx-pro-ai-factory/latest/software.html)（2026-05-18） — [src-nv-ra-sw]
-94. [arXiv 2609.29707：能耗去哪了——Blackwell GPU 上 LLM 智能体推理剖析](https://arxiv.org/abs/2609.29707)（2026-08-31） — [src-arx-energy]
-95. [arXiv 2606.23969：串行化之桥——Blackwell 机密计算下的 LLM 服务性能](https://arxiv.org/abs/2606.23969)（2026-06-22，v2 2026-07-09） — [src-arx-cc]
+94. [arXiv 2609.29707：能耗去哪了——Blackwell GPU 上 LLM 智能体推理剖析](https://arxiv.org/abs/2609.29707)（2026-08-31） — [src-arxiv-energy]
+95. [arXiv 2606.23969：串行化之桥——Blackwell 机密计算下的 LLM 服务性能](https://arxiv.org/abs/2606.23969)（2026-06-22，v2 2026-07-09） — [src-arxiv-cc]
 96. [NVIDIA Developer Forums：RTX PRO 6000 Blackwell 上的静默 CUDA 计算损坏（最终确认为显存故障）](https://forums.developer.nvidia.com/t/silent-cuda-compute-corruption-on-rtx-pro-6000-blackwell/381759)（2026-08-29 起，2026-10-16 结论） — [src-nvf-silent]
-97. [Joshua Odmark：我从 Provantage 买的 RTX Pro 6000 里面到底是什么](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-odmark]
+97. [Joshua Odmark：我从 Provantage 买的 RTX Pro 6000 里面到底是什么](https://joshuaodmark.com/blog/provantage-counterfeit-rtx-pro-6000)（2026-06-11） — [src-provantage-fake]
 98. [NVIDIA Developer Forums：RTX 6000 Pro WS 如何升级 BIOS 至 98.02.55.00.00（MIG 门槛与 VBIOS 分发困境）](https://forums.developer.nvidia.com/t/rtx-6000-pro-ws-bios-update-to-98-02-55-00-00-how/342946)（2025-08-23 起） — [src-nvf-vbios]
 99. [NVIDIA Developer Forums：RTX PRO 6000 Max-Q 的 vBIOS 固件从哪找（含 98.02.6A 与 MIG 可用反例）](https://forums.developer.nvidia.com/t/where-to-find-nvidia-rtx-pro-6000-blackwell-max-q-bios-vbios-firmware-updates/360321)（2026-02-11） — [src-nvf-maxqvb]
 100. [NVIDIA Developer Forums：MIG support on RTX Pro 6000 Blackwell（第 44 帖 Max-Q 成功启用 MIG）](https://forums.developer.nvidia.com/t/mig-support-on-rtx-pro-6000-blackwell/334906/44)（2025-07-30） — [src-nvf-mig44]
@@ -43967,14 +44228,14 @@ python scripts/validate_research.py research/rtx-pro-6000
 116. [LLM Energy Benchmark：RTX PRO 6000 Blackwell 分阶段能耗剖析与后端兼容性](https://hongping-zh.github.io/updates/2026-06-03-rtx-pro6000-blackwell-phase/)（2026-06-03） — [src-energy-phase]
 117. [NVIDIA Developer Forums：Support for a RTX Pro 6000 Blackwell Workstation Edition（支持层级排除实录）](https://forums.developer.nvidia.com/t/support-for-a-rtx-pro-6000-blackwell-workstation-edition/366144)（2026-04-09） — [src-nvf-support]
 118. [local-inference-lab：RTX PRO 6000 Blackwell 功耗上限扫描（WS / Server / Max-Q 完整原始数据）](https://raw.githubusercontent.com/local-inference-lab/rtx6kpro/dd2fba9126ae4a3435a591eef18162a0086bebe3/hardware/blackwell-power-limit-sweep.md) — [src-rtx6k-plsweep]
-119. [ProX PC：分子动力学硬件对比 5090 vs Pro 6000 vs H100/H200（AMBER 24 STMV）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md]
+119. [ProX PC：分子动力学硬件对比 5090 vs Pro 6000 vs H100/H200（AMBER 24 STMV）](https://www.proxpc.com/blogs/the-biggest-molecular-dynamics-hardware-comparison-5090-vs-pro-6000-vs-h100-h200)（2026-01-05） — [src-proxpc-md2]
 120. [HPC Technologies：LAMMPS Benchmark（RTX PRO 6000 SE 单卡 LJ liquid）](https://pub.hpc-technologies.co.jp/hpc-benchmark/lammps-benchmark/) — [src-hpct-lammps]
 121. [HPC Technologies：GROMACS Benchmark（Server / Max-Q / RTX 5090 三平台）](https://pub.hpc-technologies.co.jp/hpc-benchmark/gromacs-benchmark/) — [src-hpct-gromacs]
 122. [HPC Technologies：Llama 3 8B LoRA 微调实测（RTX PRO 6000 SE，含 nvidia-smi 截图）](https://pub.hpc-technologies.co.jp/hpc-benchmark/nvidia-rtx-pro-6000-blackwell-server-edition-gpu-llama-finetuning-benchmark/)（2025-09-29） — [src-hpct-lora]
 123. [Blender Artists Community：RTX PRO 6000 Performance（含 Open Data 5.1.1 四卡对照与社区实测反馈）](https://blenderartists.org/t/rtx-pro-6000-performance/1648521)（2026-07-24） — [src-ba-pro6000]
 124. [PassMark Videocard Benchmark：RTX PRO 6000 Blackwell Server Edition（G3D Mark 与横向对比）](http://216.146.218.45/gpu.php?gpu=RTX+PRO+6000+Blackwell+Server+Edition&id=6962)（截至 2026-10-27） — [src-passmark-se]
 125. [TechPowerUp：NVIDIA 已设定 RTX 5090 / 5080 16GB 的一月停产日期（含官方否认）](https://www.techpowerup.com/353942/nvidia-has-january-discontinuation-dates-set-for-rtx-5090-and-rtx-5080-16-gb-claims-leaker)（2026-10-21） — [src-tpu-5090-eol]
-126. [TechPowerUp：NVIDIA 据称终止 RTX 5090，GB202 硅片留给工作站卡](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-5090-silicon]
+126. [TechPowerUp：NVIDIA 据称终止 RTX 5090，GB202 硅片留给工作站卡](https://www.techpowerup.com/353578/nvidia-reportedly-ending-the-rtx-5090-reserves-gb202-silicon-for-workstation-gpus)（2026-10-10） — [src-tpu-eol]
 127. [Hugging Face：Mistral-Medium-3.5-128B 在 2× RTX PRO 6000 上运行的完整配置与 EAGLE 实测](https://huggingface.co/mistralai/Mistral-Medium-3.5-128B/discussions/17)（2026-05-02 起） — [src-hf-mm35]
 128. [电子工程专辑：美国出台新规，禁止向中企境外子公司出口 AI 芯片（BIS 2026-05-31 指引）](https://www.eet-china.com/mp/a499125.html)（2026-06-01） — [src-eet-bis]
 129. [SemiAnalysis InferenceX：Qwen 3.5 397B-A17B 在 GB300 NVL72 与 RTX PRO 6000 上的每美元性能](https://inferencex.semianalysis.com/zh/compare-per-dollar/qwen-3-5-gb300-vs-rtx6000pro)（截至 2026-10-27） — [src-inferencex-gb300]
@@ -43984,7 +44245,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 133. [Ansys GPU Compute Capabilities — Release 2026 R1（官方 GPU 求解器支持矩阵 PDF）](https://www.ansys.com/content/dam/it-solutions/platform-support/2026-r1/ansys-2026-r1-gpu-compute-capabilities.pdf)（2026） — [src-ansys-gpu]
 134. [Azure Virtual Desktop with RTX PRO 6000：单卡支撑最多 30 个 Siemens NX 用户](https://notanarchitect.io/azure-virtual-desktop-with-rtx-pro-6000-validation-shows-up-to-30-siemens-nx-users-per-gpu/)（2025-10-26，转述 Microsoft 官方验证） — [src-avd-nx]
 135. [CIMdata 转述 Synopsys 官方新闻稿：Synopsys 采用 NVIDIA RTX PRO 服务器加速仿真负载](https://www.cimdata.com/en/industry-summary-articles/item/28273-synopsys-embraces-nvidia-rtx-pro-servers-to-accelerate-compute-heavy-simulation-workloads)（2025-08-28） — [src-synopsys-rtxpro]
-136. [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-p8-4k]
+136. [SPEC.org：SPECviewperf 15.0.1-rc2 官方结果 — ThinkStation P8 / RTX PRO 6000 WS / 4K](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P8_9965WX_RTX_PRO_6000_4K/results.html)（2025-11-12） — [src-spec-vp15-p8]
 137. [SPEC.org：SPECviewperf 15.0 官方结果 — ThinkStation P3 Tower Gen2 / RTX PRO 6000 / FHD](https://www.spec.org/gwpg/gpc.data/viewperf15/lenovo/P3_TWR_G2_Ultra_9_285K_RTX_PRO_6000_FHD/results.html) — [src-spec-p3-fhd]
 138. [Microsoft Learn：在 Azure 虚拟桌面上使用 RTX PRO 6000 Blackwell 运行 Siemens NX（官方参考架构与完整 ATS 结果）](https://learn.microsoft.com/en-us/industry/manufacturing/architecture/siemens-azure-blackwell)（2026-07-31 更新） — [src-ms-learn-nx]
 139. [NVIDIA：List of NVIDIA-Certified Systems（官方认证系统完整清单）](https://docs.nvidia.com/certification-programs/latest/nvidia-certified-systems.html) — [src-nv-cert]
