@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：445 ｜ **证据数**：2970 ｜ **主张数**：2206（高置信 1850，争议 9，低置信 17）
+> **来源数**：445 ｜ **证据数**：2980 ｜ **主张数**：2216（高置信 1860，争议 9，低置信 17）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -37891,6 +37891,237 @@ exit 0
 > ⚠️ **而这条与 §10.634 那个「校验器抓到的是我自己刚写的东西」并列：
 > 它们都是「机械检查救了一次」。**
 
+### 10.656 🔥🔥🔥🔥🔥 GGUF 的默认张量对齐是 **32 字节**，不是 128
+
+[c-gguf-default-alignment-is-32]
+
+> ```python
+> # gguf-py/gguf/constants.py
+> GGUF_DEFAULT_ALIGNMENT = 32
+>
+> # gguf_writer.py:94
+> self.data_alignment = GGUF_DEFAULT_ALIGNMENT
+>
+> # gguf_writer.py:271
+> offset_tensor += GGUFWriter.ggml_pad(ti.nbytes, self.data_alignment)
+> ```
+> 而 `ggml_pad` 只是一个向上取整：
+> `return ((x + n - 1) // n) * n`
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个格式的默认对齐是 32 而不是缓存行大小的 128 时，
+> 「对齐」服务的是「解析器能顺序读」，
+> 不是「GPU 能高效取」。**
+>
+> **⭐⭐ 判据：**
+> **故凡讨论「张量对齐」，
+> 都必须先问「是哪一层的对齐」——
+> 文件格式层是 32，而 kernel 层另有要求。**
+>
+> ⚠️ **而这条正踩在 §10 那个「凡写「被排除」都必须写哪一层」的同类陷阱上。**
+
+### 10.657 ⭐⭐⭐⭐⭐ 那个写入器里**没有** 128 字节的概念
+
+[c-the-writer-has-no-128-byte-concept]
+
+> 60,100 字节的 `gguf_writer.py` 里，「alignment」与 **128 / 256 / 64** 的共现次数：
+>
+> | 数字 | 共现次数 |
+> |---|---:|
+> | 128 | **0** |
+> | 256 | **0** |
+> | 64 | **0** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个数在一个文件里零命中时，
+> 正确的结论不是「这个数不重要」，
+> 而是「这个文件不管这个数」。**
+>
+> **⭐⭐ 判据：**
+> **故凡「某文件里没有 X」的观测，
+> 必须跟着写「那么 X 在哪一层被管」。**
+>
+> ⚠️ **而这条正是 §10.596 那个「零命中意味着这个文件不是那一层」的第二次命中。**
+
+### 10.658 ⚠️⚠️⚠️ 自定义对齐**既被校验、又被写进文件**
+
+[c-custom-alignment-is-checked-and-recorded]
+
+> ```python
+> def add_custom_alignment(self, alignment: int) -> None:
+>     if alignment <= 0 or (alignment & (alignment - 1)) != 0:
+>         raise ValueError('Invalid alignment: must be a non-zero power of two')
+>     self.data_alignment = alignment
+>     self.add_uint32(Keys.General.ALIGNMENT, alignment)
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个可调参数既被「校验取值范围」又被「写进文件」时，
+> 它就是一个契约而不是一个偏好——
+> 因为读取方可以据文件里的值去解析。**
+>
+> **⭐⭐ 判据：**
+> **故凡「对齐」这类参数，
+> 正确的做法是「校验 + 自描述」，而不是「文档里写一句」。**
+>
+> ⚠️ **而这条给一个可检验的推论：
+> 任何自己改过对齐的 GGUF，其元数据里应当能读出那个值。**
+
+### 10.659 🔥🔥🔥🔥🔥 FP16 KV cache 是**每 token 64 KiB**
+
+[c-fp16-kv-cache-is-64-kib-per-token]
+
+> 原文：「**The FP16 KV cache costs 64 KiB per token (~6.3 GiB at 100K),
+> so 100K context fits on many consumer devices even without KV-cache quantization**」
+>
+> 换算：**64 KiB/token × 262,144 token ≈ 16.5 GiB**。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个模型给出「每 token 多少 KiB」时，
+> 它给出的不只是一个数，
+> 而是一条「上下文 与 显存」的换算率——
+> 而这正是本报告此前一直缺的那个乘数。**
+>
+> **⭐⭐ 判据：**
+> **故凡谈「96 GB 能装多长上下文」，
+> 都必须先问「这个模型的 KV 每 token 多少」。**
+>
+> ⚠️ **而 64 KiB/token 意味着 262K 约需 16.5 GiB——
+> 在 96 GB 卡上绰绰有余，
+> 但它同时也说明「长上下文」不是这张卡的瓶颈。**
+
+### 10.660 ⭐⭐⭐⭐⭐ 4 比特 KV 把每 token 降到 **约 18 KiB**
+
+[c-4bit-kv-cuts-per-token-cost-to-18-kib]
+
+> 原文：「**the cache drops to roughly 18 KiB per token,
+> about 1.8 GiB at 100K, saving roughly 4.5 GiB of KV memory**」
+>
+> | KV 精度 | 每 token | 100K | 262K（换算） |
+> |---|---:|---:|---:|
+> | **FP16** | 64 KiB | 6.3 GiB | ≈ 16.5 GiB |
+> | **4-bit** | 18 KiB | 1.8 GiB | ≈ 4.6 GiB |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当量化 KV 的收益是「每 token 的字节数」时，
+> 它的收益与上下文长度成正比——
+> 故它在 100K 上是 4.5 GiB，在 262K 上就约 11.8 GiB。**
+>
+> **⭐⭐ 判据：**
+> **故「KV 量化值不值得」这个问题没有固定答案，
+> 它的答案随目标上下文长度线性增长。**
+>
+> ⚠️ **而这条的实用结论是：
+> 在 96 GB 卡上，KV 量化省下的几 GiB 不改变任何可行性结论——
+> 故它在这张卡上是一个「不需要」的优化。**
+
+### 10.661 ⭐⭐⭐⭐⭐ 默认上下文是**按内存分档的 131K**，不是 262K
+
+[c-default-context-is-ram-tiered-not-262k]
+
+> 原文：「**from 8K on small machines up to 131K for the 27B on machines with
+> more than 71 GB (roughly 0.5 to 8 GiB of KV cache)**」
+> 要跑满 262,144 必须显式设 `BONSAI_CTX=262144`。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个模型宣传「262K 上下文」而它的启动脚本默认给 131K 时，
+> 那个 262K 是「训练上下文」，
+> 不是「开箱即用的上下文」。**
+>
+> **⭐⭐ 判据：**
+> **故凡引用「支持 N 上下文」，
+> 都必须区分「架构上限」与「默认值」。**
+>
+> ⚠️ **而这条与本报告此前那个「262,144 是架构上下文、131,072 是可用上下文」
+> 的发现完全吻合——
+> 故那是同一个事实的第二个来源，而不是新信息。**
+
+### 10.662 ⭐⭐⭐⭐⭐ `xhigh` 是默认档，而 **`low` 不被支持**
+
+[c-xhigh-is-default-and-low-is-unsupported]
+
+> 原文：「**The model uses xhigh reasoning effort by default; use medium for
+> shorter responses... low reasoning effort is not supported and when selected
+> the model will behave close to xhigh**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个参数「存在但无效」时，
+> 它比「不存在」更危险——
+> 因为调用方会以为自己调低了成本，
+> 而实际行为与最高档相同。**
+>
+> **⭐⭐ 判据：**
+> **故凡测「不同推理档位的速度差」，
+> 必须先确认每一档真的改变了行为。**
+>
+> ⚠️ **而这条直接威胁 §10 里任何「reasoning effort 影响 tok/s」的推断：
+> 若把 `low` 与 `xhigh` 对比，得到的会是「零差异」，
+> 而那会被误读成「档位不影响速度」。**
+
+### 10.663 ⚠️⚠️⚠️ 这份 25 KB 的 README 对 PRO 6000 **零提及**
+
+[c-the-bonsai-readme-has-no-pro-6000-data]
+
+> 24,840 字节、529 行的 Bonsai `README.md` 里：
+>
+> | 词 | 出现次数 |
+> |---|---:|
+> | `96 GB` | **0** |
+> | `RTX PRO` | **0** |
+> | `5090` | **0** |
+> | `4090` | **0** |
+>
+> Speed Benchmarks 段全文只有一句：
+> 「**See community-benchmarks/ for results on different hardware**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份 25 KB 的文档对目标硬件零提及时，
+> 它的价值不在「它说了什么」，
+> 而在「它给了什么可换算的常量」。**
+>
+> **⭐⭐ 判据：**
+> **故读文档的目的不应只是「找数字」，还包括「找乘数」。**
+
+### 10.664 ⭐⭐⭐⭐⭐ 一份**零提及目标硬件**的文档，贡献了本报告最缺的常量
+
+[c-a-document-can-be-valuable-without-mentioning-the-target]
+
+> 同一份 README：四个关键词计数全为 **0**，
+> 却给出了「**FP16 KV cache 64 KiB/token**」与「**4-bit 时 18 KiB/token**」。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「这份文档提到我的目标硬件吗」成为唯一的筛选标准时，
+> 那些只给通用常量的文档会被整批丢掉——
+> 而那些常量恰恰是跨硬件可用的。**
+>
+> **⭐⭐ 判据：**
+> **故此后读文档，应当同时问
+> 「它提到这张卡吗」与「它给了什么能用到这张卡上的数」。**
+>
+> ⚠️ **而这条修正了本报告一个隐含的检索策略：
+> 我一直在搜「RTX PRO 6000」，
+> 而真正缺的那个乘数不在任何提到它的页面上。**
+
+### 10.665 ⭐⭐⭐⭐⭐ 默认打包是 `PQ2_0`、**7.8 GB**
+
+[c-default-packing-is-pq2-0-at-7-8-gb]
+
+> 原文：「**Bonsai 2 27B weights, 7.8 GB in the PQ2_0 packing this demo
+> defaults to plus its vision projector**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「默认打包」与「最快打包」不是同一个时，
+> 任何拿默认值做的速度比较
+> 都在比较「默认」而不是「能力」。**
+>
+> **⭐⭐ 判据：**
+> **故引用 Bonsai 数字时，
+> 必须写明用的是 `PQ2_0` 还是 `PTQ1_0`。**
+>
+> ⚠️ **而这条与 §10 里那个「4020 对 124.8（card）vs 4520 对 140.6（whitepaper）」
+> 的差异直接相关：
+> 一部分差异可能就来自「谁用了默认打包」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -44496,6 +44727,52 @@ FAQ 标题「**Is the RTX PRO 6000 faster than my gaming GPU?**」，答案「**
 ⭐⭐ 判据（本轮最重要）「**当「成功」的判据只有一个状态码时，反爬只需要返回 200 就能骗过它——而这正是 TechPowerUp 做的事。故抓取日志的最小字段应是「状态码 + 标题 + 目标关键字命中数」三项**」——**⚠️ 而这条与 §10.634 并列：它们都是「机械检查救了一次」**；
  — [src-storagereview] [src-techpowerup-db]
 
+### KV 每 token 64 KiB：那个一直缺的乘数（第一百七十九轮补充）
+
+上一轮把「超时值是变量」制度化，并把七个失败目标重验了一遍。本轮先确认剩下的五个 403 确实不可回收（**10 秒与 25 秒两个超时、加浏览器 UA，十个请求全部 403**），然后转向那 14 个「已摘未判」来源里体量最大的两个。
+
+1. 🔥🔥🔥🔥🔥 **GGUF 的默认张量对齐是 32 字节，不是 128**：
+`constants.py` 里「**GGUF_DEFAULT_ALIGNMENT = 32**」，`gguf_writer.py` 第 94 行取它、第 271 行用 `ggml_pad(ti.nbytes, self.data_alignment)` 累加偏移；而 `ggml_pad` 只是一个向上取整 `((x + n - 1) // n) * n`；
+
+⭐⭐ 判据（本轮最重要）「**当一个格式的默认对齐是 32 而不是缓存行大小的 128 时，「对齐」服务的是「解析器能顺序读」，不是「GPU 能高效取」。故凡讨论「张量对齐」，都必须先问「是哪一层的对齐」——文件格式层是 32，而 kernel 层另有要求**」——**⚠️ 而这条正踩在「凡写「被排除」都必须写哪一层」的同类陷阱上**；
+2. ⭐⭐⭐⭐⭐ **那个写入器里没有 128 字节的概念**：
+60,100 字节的 `gguf_writer.py` 里，「alignment」与 **128 / 256 / 64** 的共现次数**全是 0**；
+
+⭐⭐ 判据（本轮最重要）「**当一个数在一个文件里零命中时，正确的结论不是「这个数不重要」，而是「这个文件不管这个数」。故凡「某文件里没有 X」的观测，必须跟着写「那么 X 在哪一层被管」**」——**⚠️ 而这条正是 §10.596 的第二次命中**；
+3. ⚠️⚠️⚠️ **自定义对齐既被校验、又被写进文件**：
+第 505-509 行「**if alignment <= 0 or (alignment & (alignment - 1)) != 0: raise ValueError**」，随后 `add_uint32(Keys.General.ALIGNMENT, alignment)`；
+
+⭐⭐ 判据（本轮最重要）「**当一个可调参数既被「校验取值范围」又被「写进文件」时，它就是一个契约而不是一个偏好——因为读取方可以据文件里的值去解析。故凡「对齐」这类参数，正确的做法是「校验 + 自描述」**」——**⚠️ 而这条给了一个可检验的推论：任何自己改过对齐的 GGUF，其元数据里应当能读出那个值**；
+4. 🔥🔥🔥🔥🔥 **FP16 KV cache 是每 token 64 KiB**：
+原文「**The FP16 KV cache costs 64 KiB per token (~6.3 GiB at 100K)**」；换算 **64 KiB/token × 262,144 ≈ 16.5 GiB**；
+
+⭐⭐ 判据（本轮最重要）「**当一个模型给出「每 token 多少 KiB」时，它给出的不只是一个数，而是一条「上下文 与 显存」的换算率——而这正是本报告此前一直缺的那个乘数。故凡谈「96 GB 能装多长上下文」，都必须先问「这个模型的 KV 每 token 多少」**」——**⚠️ 而 64 KiB/token 意味着 262K 约需 16.5 GiB，在 96 GB 卡上绰绰有余，但它同时也说明「长上下文」不是这张卡的瓶颈**；
+5. ⭐⭐⭐⭐⭐ **4 比特 KV 把每 token 降到约 18 KiB**：
+原文「**the cache drops to roughly 18 KiB per token, about 1.8 GiB at 100K, saving roughly 4.5 GiB**」；故 FP16 64 KiB、4-bit 18 KiB，**约 3.6 倍**；
+
+⭐⭐ 判据（本轮最重要）「**当量化 KV 的收益是「每 token 的字节数」时，它的收益与上下文长度成正比——故它在 100K 上是 4.5 GiB，在 262K 上就约 11.8 GiB。故「KV 量化值不值得」没有固定答案，它的答案随目标上下文长度线性增长**」——**⚠️ 而在 96 GB 卡上，KV 量化省下的几 GiB 不改变任何可行性结论——故它在这张卡上是一个「不需要」的优化**；
+6. ⭐⭐⭐⭐⭐ **默认上下文是按内存分档的 131K，不是 262K**：
+原文「**from 8K on small machines up to 131K for the 27B on machines with more than 71 GB**」，要跑满 262,144 必须显式设 `BONSAI_CTX=262144`；
+
+⭐⭐ 判据（本轮最重要）「**当一个模型宣传「262K 上下文」而它的启动脚本默认给 131K 时，那个 262K 是「训练上下文」，不是「开箱即用的上下文」。故凡引用「支持 N 上下文」，都必须区分「架构上限」与「默认值」**」——**⚠️ 而这条与本报告此前那个「262,144 是架构上下文、131,072 是可用上下文」的发现完全吻合，故那是同一个事实的第二个来源，而不是新信息**；
+7. ⭐⭐⭐⭐⭐ **`xhigh` 是默认档，而 `low` 不被支持**：
+原文「**The model uses xhigh reasoning effort by default; low reasoning effort is not supported and when selected the model will behave close to xhigh**」；
+
+⭐⭐ 判据（本轮最重要）「**当一个参数「存在但无效」时，它比「不存在」更危险——因为调用方会以为自己调低了成本，而实际行为与最高档相同。故凡测「不同推理档位的速度差」，必须先确认每一档真的改变了行为**」——**⚠️ 而这条直接威胁 §10 里任何「reasoning effort 影响 tok/s」的推断：若把 low 与 xhigh 对比，得到的会是「零差异」，而那会被误读成「档位不影响速度」**；
+8. ⚠️⚠️⚠️ **这份 25 KB 的 README 对 PRO 6000 零提及**：
+24,840 字节、529 行里，「**96 GB」「RTX PRO」「5090」「4090」的计数全是 0**；Speed Benchmarks 段全文只有一句「**See community-benchmarks/**」；
+
+⭐⭐ 判据（本轮最重要）「**当一份 25 KB 的文档对目标硬件零提及时，它的价值不在「它说了什么」，而在「它给了什么可换算的常量」。故读文档的目的不应只是「找数字」，还包括「找乘数」**」；
+9. ⭐⭐⭐⭐⭐ **一份零提及目标硬件的文档，贡献了本报告最缺的常量**：
+同一份 README，四个关键词计数全为 0，却给出了「**FP16 KV cache 64 KiB/token**」与「**4-bit 时 18 KiB/token**」；
+
+⭐⭐ 判据（本轮最重要）「**当「这份文档提到我的目标硬件吗」成为唯一的筛选标准时，那些只给通用常量的文档会被整批丢掉——而那些常量恰恰是跨硬件可用的。故此后读文档，应当同时问「它提到这张卡吗」与「它给了什么能用到这张卡上的数」**」——**⚠️ 而这条修正了本报告一个隐含的检索策略：我一直在搜「RTX PRO 6000」，而真正缺的那个乘数不在任何提到它的页面上**；
+10. ⭐⭐⭐⭐⭐ **默认打包是 `PQ2_0`、7.8 GB**：
+原文「**Bonsai 2 27B weights, 7.8 GB in the PQ2_0 packing this demo defaults to plus its vision projector**」；
+
+⭐⭐ 判据（本轮最重要）「**当「默认打包」与「最快打包」不是同一个时，任何拿默认值做的速度比较都在比较「默认」而不是「能力」。故引用 Bonsai 数字时，必须写明用的是 PQ2_0 还是 PTQ1_0**」——**⚠️ 而这条与那个「4020 对 124.8（card）vs 4520 对 140.6（whitepaper）」的差异直接相关：一部分差异可能就来自「谁用了默认打包」**；
+ — [src-btl3-gguf-writer-py] [src-bonsai-demo-readme]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -44635,7 +44912,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=445, evidence=2970, claims=2206, claims_high=1850, claims_disputed=9, trace_events=963, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=445, evidence=2980, claims=2216, claims_high=1860, claims_disputed=9, trace_events=963, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
