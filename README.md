@@ -57,7 +57,7 @@ python tests/test_schemas.py
 
 | 任务 | 主题 | 规模 |
 |---|---|---|
-| [rtx-pro-6000](./research/rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **296 来源 / 2265 证据 / 1666 主张（1323 高置信、9 争议）**，71 个子问题 |
+| [rtx-pro-6000](./research/rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **299 来源 / 2271 证据 / 1671 主张（1328 高置信、9 争议）**，71 个子问题 |
 
 该报告的几个结论值得单独一提：
 

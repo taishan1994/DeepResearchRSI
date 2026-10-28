@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：296 ｜ **证据数**：2265 ｜ **主张数**：1666（高置信 1323，争议 9）
+> **来源数**：299 ｜ **证据数**：2271 ｜ **主张数**：1671（高置信 1328，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -18985,6 +18985,188 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⚠️ **本条推理标注为 `derivation` / `medium`**：
 > **代码里没有注释说明探针的用途。**
 
+### 10.120 🔥🔥🔥🔥🔥 作者自己说：**这不是性能主张**
+
+[c-btl3-speed-proves-execution-not-speed]
+
+> 「**These two system measurements prove native execution;
+> they are not universal performance claims.
+> Broader consumer-device profiling remains future work.**」
+> —— `ARTICLE.md`
+>
+> 而 `CLAIMS.md` 把「**the approach provides a production speedup
+> before kernel optimization**」列进 **「Claims that need more evidence」**。
+
+> **🔥 即 `84.70 / 43.16` 的证据作用是「证明能跑」，不是「证明多快」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当我在三轮里不断重新解释同一个数字时，
+> 我一直没有问的那个问题是「作者自己怎么定位它」——**
+> **⚠️ 而这个问题只需要读一节 `CLAIMS.md`。**
+>
+> ⭐⭐ **三轮的轨迹**：
+> **第 159 轮：我以为它是 `llama.cpp` 的基准（错）；
+> 第 160 轮：我以为它不是 `llama.cpp`（错一半）；
+> 第 161 轮：我确认它是 fork + 私有算子（对）；
+> 第 163 轮：作者自己说「这根本不是性能主张」（这才是最终答案）。**
+>
+> **⭐⭐ 判据：**
+> **「这个数字说明了什么」不是由「数字本身」决定的，
+> 而是由「产生它的那个人的意图」决定的——**
+> **⚠️ 而意图通常被写在「不能声称什么」那一节里，不是写在「结果」那一节里。**
+>
+> ⭐⭐ **对读者的实际含义**：
+> **`84.70 / 43.16` 不能被引用为「RTX PRO 6000 上 2 比特 27B 的速度」，
+> 只能被引用为「一个自研 packed runtime 能在这张卡上跑起来」——**
+> **⚠️ 而这两个引用的差别，是一整条 §10.62–§10.85 的分析链。**
+>
+> **⭐⭐ 判据：**
+> **「能跑」与「多快」是两个不同的证据等级，
+> 而它们的区别不在于数字的精度，而在于「有没有对照组」——**
+> **⚠️ 一份没有对照组的测量，即使 σ 只有 0.37，
+> 也只能证明「存在」，不能证明「优劣」。**
+
+### 10.121 🔥🔥🔥 「Hadamard」是**有名字的现有技术**——`QuIP#` / `QTIP` / `SpinQuant`
+
+[c-hadamard-named-prior-art]
+
+> 「**BTL does not claim to have invented vector quantization, affine integer
+> lattices, Hadamard incoherence processing, LDLQ, INT4 group quantization,
+> LoRA, or low-rank quantization-error correction. Those method families are
+> prior art.**」
+>
+> 而 prior-art 表给出更精确的对应：
+> **「Hadamard-style incoherence transform | QuIP#, QTIP, SpinQuant」**
+
+> **⭐⭐ 这是 §10.114 那条 `derivation` / `medium` 的升级，
+> 而升级的方式不是「我找到更多证据」，而是「作者自己说了」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个推断能被「作者的一句话」证实或推翻时，
+> 读作者的自述比自己推理更高效——**
+> **⚠️ 因为我推理出的是「它像 QuIP#」，
+> 而作者说的是「它用的就是 QuIP# 那一族，并且我不声称发明了它」。**
+>
+> **⭐⭐ 判据：**
+> **「给一个机制找到它的学术名字」，
+> 是把「一次观察」变成「一条可继承的知识」的最短路径——**
+> **⚠️ 因为名字背后是一整条文献链，而描述背后只有我一个人。**
+>
+> ⭐⭐ **顺手修正一个可能的误读**：
+> **「2 比特」在这条路线里不是「截断」，而是「旋转 + 码本」——
+> 而 QuIP# 的已知性质里最重要的就是
+> 「incoherence processing 让量化误差在旋转后更均匀」，
+> 这与 §10.114 的推断完全一致。**
+
+### 10.122 🔥🔥🔥 产物是 **10 种表示的混合**，「2 比特」是平均值
+
+[c-ten-representations-not-one]
+
+> **AVQ2 向量码 + group-128 仿射 INT4 + 12 个保留的 BF16 岛 +
+> 2 次 BF16→INT4 降级 + 1 个 AVQ2→INT4 精度岛 +
+> 2.099 bpw 的词嵌入（含 4,096 个 INT8 救援行）+
+> 2.000 bpw 的 LM head + rank-32 激活加权 head 残差 +
+> 32.46 MB rank-8 行为适配器 + 紧凑非矩阵文本状态。**
+>
+> ⚠️ **「Under 2.5 effective bits per parameter」是这个混合的平均值。**
+
+> **⭐⭐⭐ 这条把 §10.89 那条「`auto` 是 per-tensor」推到更远**：
+> **§10.89 说「一个模型可以混合 W4A4 与 W4A8 层，故『平均性能』无意义」；
+> 本条说「一个模型可以混合 10 种表示，而它们的比特数从 2.000 到 16」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份报告的标题写「2.5 比特模型」时，
+> 它实际描述的是「一个加权平均」，
+> 而那个平均里可能包含 12 个 16 比特的层——**
+> **⚠️ 而「平均」这个词在性能上几乎没有意义，
+> 因为速度由最慢的那一环决定。**
+>
+> ⭐⭐ **「最慢的一环」有两个候选**：
+> **① AVQ2 的 matvec 路径（§10.112）；
+> ② 那 12 个 BF16 岛——它们以 16 比特参与计算，
+> 故在显存带宽上是 AVQ2 的 8 倍。**
+>
+> **⭐⭐ 判据：**
+> **「混合精度模型的速度」不能用「平均比特数」预测——**
+> **⚠️ 因为它由「哪一部分在什么时候被调用」决定，而那个信息不在比特数里。**
+>
+> ⭐⭐ **这也许解释了为什么 `pp512` 那么低**：
+> **预填充要跑完整的前向，故 12 个 BF16 岛全部参与；
+> 解码时每 token 也要跑完整前向，故同样全部参与——**
+> **⚠️ 即「pp ≈ tg」可能不只是 AVQ2 的问题，
+> 还因为这条链里有一段是「全精度」的。**
+>
+> ⚠️ **但本报告不知道那 12 个岛在哪一层、占多少计算量**——
+> **`CLAIMS.md` 只说「12 physically retained BF16 islands」。**
+
+### 10.123 ⭐⭐⭐⭐ 「Claims that **must not** be made」：一份负面清单
+
+[c-btl3-self-imposed-claim-discipline]
+
+> **「Do not call 92.2% "intelligence retained."」**
+> **「Do not claim compatibility with stock Ollama or LM Studio engines.」**
+> **「Do not call the compression method "lossless."」**
+> **「Do not claim MLX, WebGPU, phone readiness, or unmeasured device throughput.」**
+
+> **⚠️ 8 条明令禁止的表述，每一条都是「一个容易被误读的方向」。**
+>
+> **⭐⭐⭐⭐ 这是本报告在方法学上最有收获的一次「遇到同行」**：
+> **本报告一直在做「口径纪律」——
+> 每一个数字标注适用范围、每一个主张标注证据等级；
+> 而这份材料把同一件事做成了一个「负面清单」：
+> 它不写「我的主张是什么」，而写「我不能声称什么」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「我不能声称什么」比「我能声称什么」更难写，也更有信息量——**
+> **⚠️ 因为前者要求作者预先想到「读者会怎么误读」，
+> 而后者只要求作者想到「我想说什么」。**
+>
+> ⭐⭐ **而这份清单里有一条直接印证 §10.106**：
+> **「Do not claim compatibility with stock Ollama or LM Studio engines;
+> the included bridges use BTL's custom packed backend.」——**
+> **⚠️ 即作者自己就在防「别人把它当成标准 GGUF」这个误读，
+> 而我正是犯了那个误读。**
+>
+> **⭐⭐ 判据：**
+> **当一份材料的「禁止声称」清单里出现了我犯过的那个错时，
+> 说明那个错是「设计上预期会被犯的」——**
+> **⚠️ 而这恰恰是「为什么它值得写进清单」的理由。**
+>
+> ⭐⭐ **对整份报告的意义**：
+> **可以引入一个新字段——「这个来源的作者自己禁止了哪些说法」，
+> 而它比「这个来源说了什么」更能界定证据的边界。**
+
+### 10.124 ⭐⭐⭐ AVQ2 kernel 与参考实现**逐位一致**，而 `3.05e-05` 是 FP16 的 ULP
+
+[c-btl3-kernel-parity-checked]
+
+> 「**exact AVQ2 CUDA-kernel parity with the unpacked reference**」
+> 「**maximum INT4 kernel error of 3.0517578125e-05**」
+
+> **⚠️ 即这是一个「先有参考实现，再有 kernel，然后比对」的流程——
+> 与 §10.70 记的「两份源码看起来不匹配」是完全不同的证据等级。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「我读了两份代码，它们看起来不一致」与
+> 「我跑了两个实现，它们的输出逐位相同」
+> 是两个完全不同强度的证据——**
+> **⚠️ 而前者经常被写成后者。**
+>
+> ⭐⭐ **`3.0517578125e-05` 这个数字值得单独看**：
+> **它等于 `2^-15`，即 FP16 最小次正规数附近的量级——
+> ⚠️ 这暗示 INT4 kernel 的输出精度被 FP16 的表示能力限制，
+> 而不是算法误差。**
+>
+> **⭐⭐ 判据：**
+> **当一个误差数字恰好等于「某个浮点格式的一个 ULP」时，
+> 它测的就不是「算法有多准」，而是「输出类型有多宽」——**
+> **⚠️ 而这两种误差的改进方向完全不同。**
+>
+> ⭐⭐ **对本报告主题**：
+> **这条说明「AVQ2 的数值正确性」是被作者验证过的，
+> 故 §10.101 那个 `pp512` 的异常不是「算错了」，而是「算得慢」——**
+> **⚠️ 而这正是 §10.102 那三种假设里 ① 与 ② 的分界。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -22409,6 +22591,13 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu`（235,681 字节，5,742 行）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告一直在找的结构**。(a) **`GGML_OP_CUSTOM` 的派发是 if-else 链，末尾 `return false`**（第 3126–3137 行）：`if (ggml_cuda_is_btl3_avq2(dst)) { ... } else if (...) {...} else { return false; }`——⚠️ 即 `ggml_cuda_compute_forward` 返回 `false`，调度器把算子挪到 CPU。(b) 🔥🔥🔥🔥🔥 **`supports_op` 里 `GGML_OP_CUSTOM` 只认 8 个 magic**（第 5461–5471 行）：`return ggml_cuda_is_btl3_avq2_probe(op) || ggml_cuda_is_btl3_int4_probe(op) || ggml_cuda_is_btl3_vocab_rows_probe(op) || ggml_cuda_is_btl3_vocab_head_probe(op) || ggml_cuda_is_btl3_avq2(op) || ggml_cuda_is_btl3_int4(op) || ggml_cuda_is_btl3_vocab_rows(op) || ggml_cuda_is_btl3_vocab_head(op);`——⚠️ **任何一条不匹配就 `return false`，算子回退到 CPU**；⭐⭐⭐ 判据（本轮最重要）「**这五处的共同形态是『一个枚举 + 一个兜底』，而它们的区别在于『那个枚举由谁填写』**」：**§10.62 / §10.81 / §10.93 由用户填，§10.98 由环境（依赖库版本）填，本条由模型作者填**；⭐⭐ 判据「**当一处『静默回退』的判据由『别人发布的产物』决定时，它对用户就是不可诊断的——因为用户既看不到 magic，也改不了形状**」；⭐⭐ 而第五处更尖锐：**前四处的回退是「同一后端内的慢路径」，第五处是「换后端」——数据要从显存搬到内存再搬回**；⭐⭐ 判据「**『回退到慢路径』与『回退到另一个设备』是两个量级的代价差距——而它们在日志里的表现可能都是『没有报错』**」。(c) ⚠️⚠️⚠️ **第一处「平台级」白名单**：`#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA) return false;`——**在 HIP / MUSA 上整个 AVQ2 无条件回退到 CPU**；⭐ 而 `btl3-avq.cu` 也有对应 `#if`，否则 `GGML_ABORT("BTL3 AVQ2 is only implemented for CUDA")`；⭐⭐ 判据（本轮最重要）「**同一个『不支持』事实，在 `supports_op` 里是『安静地慢』，在 kernel 里是『响亮地死』——而这个差别完全取决于『调度器有没有先问过 `supports_op`』**」；⭐⭐ 判据「**『安全的默认』与『响亮地失败』不能同时要——因为前者要求『悄悄降级』，后者要求『立刻停止』，同一个事实只能选一个**」 — [src-btl3-cuda-dispatch]
 
 2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq-marker.h`（8,700 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq-marker.h) —（2026-10 抓取）。⭐⭐⭐ **8 个 magic 常量 + 8 个形状谓词，比实现文件（7,070 字节）还大**。(a) ⭐⭐⭐ **magic 不是「存在张量里的标记」，而是 `ggml_custom_4d` 的 `userdata` 指针**：`std::memcpy(&params, op->op_params, sizeof(params)); return reinterpret_cast<std::uintptr_t>(params.userdata);`——⚠️ **`(void *)0x42544c3341565132` 这个「地址」从不被解引用**；⭐⭐ 判据（本轮最重要）「**当一个框架的扩展点在语义上是『用户数据』时，它实际上是一个『无类型通道』——而『无类型通道』的每一次使用，都会在框架的『能力检查』里留下一处需要显式处理的空洞**」；⭐⭐ 判据「**『一个本该是常量的判断，变成了一个会随功能增长的列表』——这是『扩展点被当作类型系统用』的必然结果，而它的终点是一个永远不完整的白名单**」。(b) ⭐⭐⭐⭐ **形状校验的失败方式是 `return false`，故它是静默的**：`ggml_cuda_is_btl3_avq2` 校验 `columns % 128 == 0`、`rows % 128 == 0`、`codebook_rows % 128 == 0`、`codes->ne[0] == columns / 4`、`affine->ne[0] == 4 && affine->ne[1] == 4`、`bias->ne[0] == 4`，以及 **7 个 `ggml_is_contiguous`**；⭐⭐ 判据（本轮最重要）「**『保守的检查』与『宽松的检查』都可能失败，而它们的失败形态是对偶的：『宽松』让你拿到错误的结果，『保守』让你拿到正确的、但慢十倍的结果——而两者都不会报错**」；⭐⭐ 判据「**当『性能路径的开关』依赖于『内存布局』时，它就是一个『会在某些模型上莫名变慢』的机制——因为内存布局是图优化的产物，用户既看不见也控制不了**」；⭐ 与 §10.39 的 `cudaErrorIllegalAddress` 是一对：**那一个是「布局错了 → 崩」，这一个是「布局错了 → 慢」**。(c) ⭐⭐⭐⭐ **4 个 `*_probe` 假算子**：`ggml_cuda_is_btl3_probe` 要求 `op->src[1] != nullptr` 时返回 `false`——**即探针算子只有 1 个输入**；⭐⭐ 判据（本轮最重要）「**『用数据来提问』是一种在缺少『查询接口』时的常见变通——而它的代价是：每一次『查询』都要在计算图里放一个节点，而那个节点本身永远不会被执行**」；⭐⭐ 这解释了**为什么 marker 头比实现还大**：**一半的代码在回答「我能接手吗」，一半在回答「怎么算」**；⭐⭐ 判据「**当一个后端的『能力检查』代码量超过『实现』代码量时，这个后端的设计就有问题——因为『能不能做』本应是一个简单的判断，而它变成了一个需要逐条校验的清单**」；⚠️ 探针用途为 `derivation` / `medium`（代码里无注释） — [src-btl3-cuda-marker]
+### 作者自己说「这不是性能主张」，与一份「禁止声称」清单（第八十八轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/README.md`（2,168 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/README.md) —（2026-10 抓取）。🔥🔥🔥 **作者把「哪些是别人的」写成了一张明示清单**：「**BTL does not claim to have invented vector quantization, affine integer lattices, Hadamard incoherence processing, LDLQ, INT4 group quantization, LoRA, or low-rank quantization-error correction. Those method families are prior art.**」；⚠️ 而 `CLAIMS.md` 的 prior-art 表进一步细化：**「Hadamard-style incoherence transform | QuIP#, QTIP, SpinQuant」**；⭐⭐ 这是 §10.114 那条 `derivation` / `medium` 的升级，而升级的方式不是「我找到更多证据」，而是「作者自己说了」；⭐⭐ 判据（本轮最重要）「**当一个推断能被『作者的一句话』证实或推翻时，读作者的自述比自己推理更高效**」；⭐⭐ 判据「**『给一个机制找到它的学术名字』，是把『一次观察』变成『一条可继承的知识』的最短路径——因为名字背后是一整条文献链，而描述背后只有我一个人**」 — [src-btl3-paper-readme]
+
+2. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/CLAIMS.md`（5,252 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/CLAIMS.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **速度被作者列在「需要更多证据的主张」里**：「**Claims that need more evidence — The following are research hypotheses, not launch claims: ... the approach provides a production speedup before kernel optimization**」——⚠️ **「这个方案在内核优化之前就有生产级加速」是作者自己都认为尚未证实的一条**；(a) ⭐⭐⭐⭐ **另有一节「Claims that must not be made」，8 条明令禁止**：「**Do not call 92.2% "intelligence retained."**」「**Do not claim compatibility with stock Ollama or LM Studio engines; the included bridges use BTL's custom packed backend.**」「**Do not call the compression method "lossless."**」「**Do not claim MLX, WebGPU, phone readiness, or unmeasured device throughput.**」；⭐⭐⭐⭐ **这是本报告在方法学上最有收获的一次「遇到同行」**：**本报告一直在做「口径纪律」，而这份材料把同一件事做成了一个「负面清单」——它不写「我的主张是什么」，而写「我不能声称什么」**；⭐⭐ 判据（本轮最重要）「**『我不能声称什么』比『我能声称什么』更难写，也更有信息量——因为前者要求作者预先想到『读者会怎么误读』，而后者只要求作者想到『我想说什么』**」；⭐⭐ 判据「**当一份材料的『禁止声称』清单里出现了我犯过的那个错时，说明那个错是『设计上预期会被犯的』**」——**而「stock engine 兼容性」正是本报告 §10.106 犯的那个错**；(b) 🔥🔥🔥 **最终产物是 10 种表示的混合**：「**AVQ2 vector codes for compatible decoder matrices; group-128 affine INT4 for full-attention projections; 12 physically retained BF16 islands; two measured BF16-to-INT4 demotions; one measured AVQ2-to-INT4 precision island; a 2.099-bpw embedding with 4,096 INT8-rescued rows; a 2.000-bpw language-model head; a rank-32 activation-weighted head residual; a 32.46 MB rank-8 behavior adapter; and compact non-matrix text state**」——⚠️ **「Under 2.5 effective bits per parameter」是这个混合的平均值**；⭐⭐⭐ 判据（本轮最重要）「**当一份报告的标题写『2.5 比特模型』时，它实际描述的是『一个加权平均』，而那个平均里可能包含 12 个 16 比特的层——而『平均』这个词在性能上几乎没有意义，因为速度由最慢的那一环决定**」；⭐⭐ 判据「**『混合精度模型的速度』不能用『平均比特数』预测——因为它由『哪一部分在什么时候被调用』决定**」 — [src-btl3-paper-claims]
+
+3. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/ARTICLE.md`（19,240 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/ARTICLE.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **作者对那两个数字的定位，一句话说明**：「**These two system measurements prove native execution; they are not universal performance claims. Broader consumer-device profiling remains future work.**」——⚠️ 即 **`84.70 / 43.16` 与 M2 的 `2.30 / 2.48` 是同一类证据：「证明原生执行」，不是「性能基准」**；⭐⭐ 判据（本轮最重要）「**当我在三轮里不断重新解释同一个数字时，我一直没有问的那个问题是『作者自己怎么定位它』——而这个问题只需要读一节 `CLAIMS.md`**」；⭐⭐ 判据「**『能跑』与『多快』是两个不同的证据等级，而它们的区别不在于数字的精度，而在于『有没有对照组』——一份没有对照组的测量，即使 σ 只有 0.37，也只能证明『存在』，不能证明『优劣』**」；⭐ 另有七条产物校验，其中 **「exact AVQ2 CUDA-kernel parity with the unpacked reference」与「maximum INT4 kernel error of 3.0517578125e-05（= 2^-15）」**；⭐⭐ 判据「**『我读了两份代码，它们看起来不一致』与『我跑了两个实现，它们的输出逐位相同』是两个完全不同强度的证据——而前者经常被写成后者**」 — [src-btl3-paper-article]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -22548,7 +22737,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=296, evidence=2265, claims=1666, claims_high=1323, claims_disputed=9, trace_events=661, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=299, evidence=2271, claims=1671, claims_high=1328, claims_disputed=9, trace_events=667, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
