@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：335 ｜ **证据数**：2409 ｜ **主张数**：1769（高置信 1422，争议 9）
+> **来源数**：335 ｜ **证据数**：2417 ｜ **主张数**：1774（高置信 1427，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -23653,6 +23653,302 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **「操作数个数」是「这个 op 需要多少独立信息」的直接度量——**
 > **⚠️ 而它比「参数个数」更好用，因为它不受形状影响。**
 
+### 10.223 🔥🔥🔥🔥🔥 十个 magic 全部是可读 ASCII，前 4 字节统一 `BTL3`
+
+[c-ten-magics-all-ascii-btl3]
+
+> | 常量 | 字面量 | ASCII |
+> |---|---|---|
+> | `avq2_custom_magic` | `0x42544c3341565132` | `BTL3AVQ2` |
+> | `int4_custom_magic` | `0x42544c33494e5434` | `BTL3INT4` |
+> | `vocab_rows_custom_magic` | `0x42544c3356475257` | `BTL3VGRW` |
+> | `vocab_head_custom_magic` | `0x42544c3356484544` | `BTL3VHED` |
+> | `packed_probe_custom_magic` | `0x42544c3350524f42` | `BTL3PROB` |
+> | `metal_packed_probe_custom_magic` | `0x42544c334d505242` | `BTL3MPRB` |
+> | `cuda_avq2_probe_custom_magic` | `0x42544c3343415651` | `BTL3CAVQ` |
+> | `cuda_int4_probe_custom_magic` | `0x42544c3343494e54` | `BTL3CINT` |
+> | `cuda_vocab_rows_probe_custom_magic` | `0x42544c3343565257` | `BTL3CVRW` |
+> | `cuda_vocab_head_probe_custom_magic` | `0x42544c3343564844` | `BTL3CVHD` |
+
+> **⭐⭐⭐⭐⭐ 这把 §10.171 那张「magic 解码表」补全了**：
+> **那一轮我只解了两个（`BTL3PROB` / `BTL3MPRB`），
+> ⚠️ 而本轮证明了它们是十个同构常量里的两个，
+> 不是两个孤立的标量。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个常量是否属于一个体系」决定了「解出一个」与「解出全部」的差别——**
+> **⚠️ 而判据是「前缀是否相同」：
+> 十个的前 4 字节全是 `BTL3`，故它们是一个命名空间，
+> 不是十次独立选择。**
+>
+> ⭐⭐ **这个命名空间的内部结构也值得记**：
+> **`BTL3` 加 4 字符，而这 4 字符有两种构词法：
+> ① 语义缩写（`AVQ2` `INT4` `PROB` `MPRB`）；
+> ② 单字母维度标记加语义（`VGRW` = Vocab GetRows、`VHED` = Vocab HEaD、
+> `CAVQ` `CINT` `CVRW` `CVHD` 里的 `C` = CUDA）。**
+>
+> **⭐⭐ 判据：**
+> **「一个 4 字符的后缀」能编码的信息量恰好是「一个动词加一个名词缩写」——**
+> **⚠️ 而作者用首字母做维度划分（`V` = vocab、`C` = cuda），
+> 故它其实是「两个正交维度的笛卡尔积」。**
+>
+> ⭐⭐ **而这个笛卡尔积是「不完整」的，这一点比它完整更有信息量**：
+> **vocab 有 `VGRW` / `VHED` 与 `CVRW` / `CVHD`（2x2 齐全）；
+> avq2 与 int4 有 `AVQ2` / `INT4` 与 `CAVQ` / `CINT`（也是 2x2 齐全）；
+> 但 `PROB` / `MPRB` 这一对没有 `V` 或 `C` 前缀。**
+>
+> **⭐⭐ 判据：**
+> **「一个命名系统里的例外」通常不是笔误，
+> 而是「这一项不属于那两个维度」——**
+> **⚠️ 而 `PROB` 与 `MPRB` 确实不属于「哪个算子」这个维度，
+> 而属于「哪个后端」这个维度。**
+>
+> ⭐⭐ **`MPRB` 的 `M` 与 `PROB` 的「无前缀」构成第三种编码**：
+> **「后端」维度用首字母（`M` = Metal），
+> ⚠️ 而默认后端（CPU）不加前缀——
+> 故 `PROB` 实际上就是「CPU 的 probe」。**
+>
+> **⭐⭐ 判据：**
+> **「无前缀」是一个含义，不是「没有含义」——**
+> **⚠️ 而在一个已经用了前缀表示维度的命名系统里，
+> 无前缀等于那个维度的默认值。**
+>
+> ⭐⭐ **这给 §10.179 那个「CUDA 是否接受 `BTL3PROB`」一个更强的判据**：
+> **既然 `PROB` 是「默认后端」的 probe，
+> ⚠️ 那 CUDA 侧必然用自己的 `CAVQ` / `CINT` / `CVRW` / `CVHD`，
+> 而不是 `PROB`——故 §10.179 的答案是「不接受，且这不是缺陷」。**
+>
+> **⚠️ 但这仍是一个待验证的推断，而不是读到的源码**：
+> **本报告没有读到 CUDA 侧对这些 magic 的 `switch`，
+> ⚠️ 故我只能说「命名系统强烈暗示」，
+> 而不能说「代码里确认」。**
+>
+> **⭐⭐ 判据：**
+> **「命名系统的一致性」可以支撑一个推断，
+> ⚠️ 但永远不能替代读那一行代码——**
+> **而区分这两者的能力，正是本报告全部口径纪律的来源。**
+
+### 10.224 🔥🔥🔥🔥🔥 `avq2_shape` 把两个方向拆成两个独立字段
+
+[c-shape-struct-splits-the-two-directions]
+
+> ```cpp
+> struct avq2_shape {
+>     std::size_t rows;
+>     std::size_t columns;
+>     std::size_t codebook_rows;   // 行方向
+>     std::size_t block_size;      // 列方向
+> };
+> ```
+> 而 `avq2_components_per_code = 4`、`avq2_transform_block = 128` 是 `constexpr`。
+
+> **⭐⭐⭐⭐⭐ 这是对 §10.218 的源码级印证，而上一轮我只有推断**：
+> **§10.218 我说「128 是列方向、1024 只是调用方选的」，
+> ⚠️ 而当时我的证据是 `btl3-vocab.cpp` 里 `groups = affine_bias->ne[1]`
+> 这个间接事实——
+> 而本轮直接看到 `struct avq2_shape` 把它们拆成两个字段。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个推断」与「一个结构」的区别在于：
+> 前者可以从多处间接事实拼出来，而后者只能被直接看到——**
+> **⚠️ 而当一个推断被结构证实，它的强度会跳一级，
+> 因为它从「我算出来的」变成「作者写出来的」。**
+>
+> ⭐⭐ **而两个字段的校验条件不同，这是最关键的部分**：
+> **`codebook_rows` 只要 `!= 0` 且 `rows % codebook_rows == 0`；
+> ⚠️ `block_size` 还要求是 2 的幂（`(x & (x-1)) != 0` 判非法），
+> 且必须同时整除 rows 与 columns。**
+>
+> **⭐⭐ 判据：**
+> **「两个字段的校验严格程度不同」说明它们的来源不同——**
+> **⚠️ `block_size` 的「2 的幂」要求只能来自算法
+> （FWHT 要求块长是 2 的幂），
+> 而 `codebook_rows` 的「整除」要求来自数据布局。**
+>
+> ⭐⭐ **这条也给 §10.214 那个错误一个更精确的更正**：
+> **我原来说「1024 是行方向 group」，
+> ⚠️ 更准确的说法是「`codebook_rows` 是一个自由参数，
+> 唯一的约束是它能整除 rows；而 1024 是 `--suite` 为它选的一个值」。**
+>
+> **⭐⭐ 判据：**
+> **「自由参数」与「常量」的区别，在类型系统里是「字段」与「constexpr」——**
+> **⚠️ 而本轮同一个文件里两者都有：
+> `codebook_rows` 是字段、`avq2_transform_block = 128` 是 `constexpr`，
+> 故作者用类型而不是注释表达了「哪个可调、哪个不可调」。**
+>
+> ⭐⭐ **判据：**
+> **「一个值是否可调」最好用类型表达（字段 vs 常量），
+> ⚠️ 而不是用注释或文档——**
+> **因为类型会被编译器检查，而注释不会。**
+>
+> ⭐⭐ **两个 `constexpr` 的存在还说明 §10.170 那条**：
+> **「一个字节 4 个分量」与「块大小 128」，
+> ⚠️ 在这个格式里是公开契约，而不是某个 `.cu` 文件的局部常量。**
+>
+> **⭐⭐ 判据：**
+> **「一个常量放在契约头里」意味着「所有后端都必须遵守」——**
+> **⚠️ 而它比「在三个后端里各写一遍 128」强得多。**
+
+### 10.225 ⭐⭐⭐⭐ 「形状不对」是一个**五值枚举**，不是一个 bool
+
+[c-shape-error-is-enum-not-bool]
+
+> ```cpp
+> enum class avq2_shape_error {
+>     none, empty, packed_columns, codebook_rows, transform_block,
+> };
+> ```
+
+> **⭐⭐⭐⭐ 这是一个「可诊断性」的具体实例**：
+> **同一个「形状不合法」，被拆成四种原因，
+> ⚠️ 而每一种都指向不同的修复方向：
+> `packed_columns` 改 columns；`codebook_rows` 改分组数；
+> `transform_block` 改块长或 rows/columns。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个错误类型的分支数」正比于「调用方能自动修复的可能数」——**
+> **⚠️ 而一个 bool 的自动修复可能数是 0，一个五值枚举是 4。**
+>
+> ⭐⭐ **这正好接上 §10.174 那条**：
+> **那一轮我说「一个错误码枚举的价值取决于有没有人把它的分支真的用起来」，
+> ⚠️ 而本轮看到这个枚举有四个分支，而我只看到一个调用点
+> （`avq2_workspace_bytes` 里只判断 `!= none`）。**
+>
+> **⭐⭐ 判据：**
+> **「枚举有几个值」与「有几个值被区分处理」是两件事——**
+> **⚠️ 而后者才是它的真实价值；
+> 故 §10.174 那条判断在这里的答案是：目前只有一个分支被用起来。**
+>
+> ⭐⭐ **`avq2_workspace_bytes` 用 `!= none` 而不是 `== none`，这个写法值得记**：
+> **它把「所有失败」折叠成一件事（返回 0），
+> ⚠️ 而在调用方那里，四种原因已经无法区分了。**
+>
+> **⭐⭐ 判据：**
+> **「错误类型在向上传递时会被折叠」——**
+> **⚠️ 而在哪一层折叠，决定了「谁还能诊断它」；
+> 这份代码选择了「在 workspace 计算这一层折叠」，
+> 故 `avq2_workspace_bytes` 的调用方永远不知道形状哪里错了。**
+>
+> ⭐⭐ **这是一条可执行的改进建议**：
+> **若 `avq2_workspace_bytes` 返回 `pair<size_t, avq2_shape_error>`，
+> ⚠️ 则四种原因可以传到上层。**
+>
+> **⭐⭐ 判据：**
+> **「一个函数返回 0 表示失败」是一种信息坍缩——**
+> **⚠️ 而当失败原因已经是一个枚举时，坍缩是可以避免的。**
+
+### 10.226 🔥🔥🔥🔥 十个 magic 编码了两个**正交维度**
+
+[c-magic-dimensions-are-orthogonal]
+
+> `BTL3` + 后端标记（空 / `M` / `C`）+ 算子缩写
+
+> **⭐⭐⭐⭐⭐ 拆法只有一种能同时解释全部十个**：
+> **位置 1 至 4 恒为 `BTL3`；位置 5 是后端标记（空 / `M` / `C`）；
+> 其余位置是算子缩写。**
+>
+> **⭐⭐ 这个拆法能解释的唯一反例是 `MPRB`**：
+> **若位置 5 是后端，则 `MPRB` 等于 Metal 加 `PRB`，
+> ⚠️ 而 `PROB` 等于默认后端加 `ROB`——两者对不上。**
+>
+> **⭐⭐ 故正确的拆法是**：
+> **`BTL3` 加后端标记（空 / `M` / `C`）加算子缩写（3 到 4 字符），
+> ⚠️ 而 `PROB` 的算子缩写是 `ROB` 还是 `PROB`，
+> 取决于后端标记是否为空。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个命名系统里的歧义」往往出现在定长与变长的交界处——**
+> **⚠️ 而 `BTL3` 加 4 字符是定长（64 bit 里 8 字节），
+> 故 `MPRB` 必须把 `M` 挤进那 4 字符里，而 `PROB` 不需要挤。**
+>
+> ⭐⭐ **这给出一个可证伪的预测**：
+> **若还有第三个后端（比如 Vulkan 或 SYCL），
+> ⚠️ 它的 packed probe magic 应该是 `BTL3?PRB` 的形式，
+> 而这个 `?` 必须是单字符——
+> 若作者用两个字符（比如 `VK`），就装不进 8 字节。**
+>
+> **⭐⭐ 判据：**
+> **「一个定长字段」会给命名系统施加硬约束——**
+> **⚠️ 而这个约束会在后端数量上体现出来：
+> 最多只能有 1 个默认后端加 25 个单字母后端。**
+>
+> ⭐⭐ **这正好解释了一个此前的疑问**：
+> **为什么 `cuda_vocab_rows` 是 `CVRW` 而不是 `CVGRW`——
+> ⚠️ 因为 `VGRW` 是 4 字符，加 `C` 就变成 5 字符，装不进 8 字节。**
+>
+> **⭐⭐ 判据：**
+> **「一个名字被压缩」的地方，往往就是容量上限所在——**
+> **⚠️ 而读懂它的压缩规则，等于读到了作者当时面对的约束。**
+>
+> ⚠️ **边界（重要）**：
+> **这个解读有一个我无法验证的前提——
+> 本报告没有读到 CUDA 侧对这些 magic 的 `switch` 语句，
+> ⚠️ 故「`CAVQ` 是 CUDA 的 AVQ2 探针」仍是从名字推的，
+> 而不是从代码推的。**
+>
+> **⭐⭐ 判据：**
+> **「从名字推语义」在命名系统自洽时可信度较高，
+> ⚠️ 但它的上限是「作者当时的意图」，
+> 而「代码实际怎么用」是另一个问题。**
+
+### 10.227 🔥🔥🔥🔥🔥 `block_size` 必须是 2 的幂，且**同时**整除两个维度
+
+[c-block-size-pot-requirement]
+
+> ```cpp
+> if (shape.block_size == 0 ||
+>     (shape.block_size & (shape.block_size - 1)) != 0 ||
+>     shape.rows % shape.block_size != 0 ||
+>     shape.columns % shape.block_size != 0) {
+>     return avq2_shape_error::transform_block;
+> }
+> ```
+
+> **⭐⭐⭐⭐⭐ 这是本报告第一次看到「2 的幂」被写成校验条件**：
+> **`x & (x-1) != 0` 是「x 不是 2 的幂」的标准位运算判法——
+> ⚠️ 而作者把它写进了契约头，而不是注释。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个算法要求」被写成校验而不是文档，
+> ⚠️ 说明作者预期「调用方会违反它」——**
+> **而这是一个强信号：它意味着这个约束曾经被违反过，
+> 或者作者知道它很容易被违反。**
+>
+> ⭐⭐ **而 `block_size` 必须同时整除 rows 与 columns，
+> 这件事比「是 2 的幂」更有信息量**：
+> **它说明 FWHT 是二维的——
+> ⚠️ 即先沿列做、再沿行做（或者转置后做），
+> 故两个维度都必须能被块长整除。**
+>
+> **⭐⭐ 判据：**
+> **「一个约束作用在几个维度上」直接反映「那个算法是几维的」——**
+> **⚠️ 而 `block_size` 同时约束 rows 与 columns，
+> 故它的算法必然是二维可分（separable）的。**
+>
+> ⭐⭐ **这给 §10.219 那个「rescue 与主路径量纲是否一致」一个新的线索**：
+> **既然变换是二维的，`sqrt(128) = 11.3` 这个放大倍数可能不是全部——
+> ⚠️ 若沿两个方向各做一次，放大倍数可能是 `sqrt(128) sqrt(128) = 128`。**
+>
+> **⭐⭐ 判据：**
+> **「一个正交变换的放大倍数」等于「它的维数」的平方根——**
+> **⚠️ 而二维变换的放大量与一维不同，
+> 故 §10.219 那条缺口现在有两个候选答案（`sqrt(128)` 或 `128`）。**
+>
+> ⭐⭐ **这是一条可算的检验法**：
+> **若 rescue 行的 scale 与主路径的 scale 相差 `sqrt(128)` 量级，
+> ⚠️ 则是一维；若相差 128 量级，则是二维。**
+>
+> **⭐⭐ 判据：**
+> **「一个未闭合的缺口」如果能被化简成「两个候选值之间的选择」，
+> ⚠️ 那它就从「未知」变成了「待测」——**
+> **而后者是可执行的，前者不是。**
+>
+> ⚠️ **边界**：
+> **`avq2_transform_block = 128` 这个常量本身并不能证明变换是二维的——
+> ⚠️ 它只证明了默认块长是 128；
+> 而「`block_size` 同时整除两个维度」这件事，
+> 是从校验逻辑推出来的，不是从变换实现读到的。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -27550,6 +27846,45 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (g) ⭐⭐⭐⭐ **两个 op 各带一个自己的 magic**：「**reinterpret_cast<void *>(vocab_rows_custom_magic)**」「**reinterpret_cast<void *>(vocab_head_custom_magic)**」；⚠️ **这两个 magic 的数值本文件不含，需读 contract 头**；
 ⭐⭐ 判据「**「操作数个数」是「这个 op 需要多少独立信息」的直接度量——而它比「参数个数」更好用，因为它不受形状影响**」（`mul_mat` 6 个、`vocab_get_rows` 8 个、`vocab_head` 5 个） — [src-btl3-src-vocab-cpp]
 
+### BTL-3 的格式契约头（第一百零九轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/src/btl3-avq-contract.h`（2,627 字节，86 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/btl3-avq-contract.h)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **十个 magic 全部是可读 ASCII，前 4 字节统一 `BTL3`**：
+「**avq2_custom_magic = UINT64_C(0x42544c3341565132)**」（`BTL3AVQ2`）、
+「**int4_custom_magic = UINT64_C(0x42544c33494e5434)**」（`BTL3INT4`）、
+「**vocab_rows_custom_magic = UINT64_C(0x42544c3356475257)**」（`BTL3VGRW`）、
+「**vocab_head_custom_magic = UINT64_C(0x42544c3356484544)**」（`BTL3VHED`）、
+「**packed_probe_custom_magic = UINT64_C(0x42544c3350524f42)**」（`BTL3PROB`）、
+「**metal_packed_probe_custom_magic = UINT64_C(0x42544c334d505242)**」（`BTL3MPRB`）；
+⭐⭐⭐⭐⭐ 这把 §10.171 那张 magic 表补全 —— **那十个不是孤立标量，而是一个命名空间**；
+⭐⭐ 判据（本轮最重要）「**「一个常量是否属于一个体系」决定了「解出一个」与「解出全部」的差别——而判据是「前缀是否相同」**」；
+(a) 🔥🔥🔥🔥🔥 **另有四个 `cuda_` 探针**：
+「**cuda_avq2_probe_custom_magic = UINT64_C(0x42544c3343415651)**」（`BTL3CAVQ`）、
+「**cuda_int4_probe_custom_magic = UINT64_C(0x42544c3343494e54)**」（`BTL3CINT`）、
+「**cuda_vocab_rows_probe_custom_magic = UINT64_C(0x42544c3343565257)**」（`BTL3CVRW`）、
+「**cuda_vocab_head_probe_custom_magic = UINT64_C(0x42544c3343564844)**」（`BTL3CVHD`）；
+(b) ⭐⭐⭐⭐⭐ **`avq2_shape` 把两个方向拆成两个独立字段**：
+「**struct avq2_shape { std::size_t rows; std::size_t columns; std::size_t codebook_rows; std::size_t block_size; };**」；
+⭐⭐⭐ **这是对 §10.218 的源码级印证** —— 上一轮我只有 `groups = affine_bias->ne[1]` 这个间接事实；
+⭐⭐ 判据「**「一个推断」与「一个结构」的区别在于：前者可以从多处间接事实拼出来，而后者只能被直接看到——而当一个推断被结构证实，它的强度会跳一级，因为它从「我算出来的」变成「作者写出来的」**」；
+⭐⭐ 判据「**「自由参数」与「常量」的区别，在类型系统里是「字段」与「constexpr」——而本轮同一个文件里两者都有：`codebook_rows` 是字段、`avq2_transform_block = 128` 是 `constexpr`**」；
+(c) ⭐⭐⭐⭐ **「形状不对」是一个五值枚举**：
+「**enum class avq2_shape_error { none, empty, packed_columns, codebook_rows, transform_block, };**」；
+⭐⭐ 判据「**「一个错误类型的分支数」正比于「调用方能自动修复的可能数」——而一个 bool 的自动修复可能数是 0，一个五值枚举是 4**」；
+⭐⭐ 判据「**「枚举有几个值」与「有几个值被区分处理」是两件事——而后者才是它的真实价值；故 §10.174 那条判断在这里的答案是：目前只有一个分支被用起来**」（`avq2_workspace_bytes` 只判断 `!= none`）；
+(d) 🔥🔥🔥🔥 **四条校验，每条对应一个枚举值**：
+「**if (shape.rows == 0 || shape.columns == 0) { return avq2_shape_error::empty; }**」「**if (shape.columns % avq2_components_per_code != 0) { return avq2_shape_error::packed_columns; }**」「**if (shape.codebook_rows == 0 || shape.rows % shape.codebook_rows != 0) { return avq2_shape_error::codebook_rows; }**」「**if (shape.block_size == 0 || (shape.block_size & (shape.block_size - 1)) != 0 || shape.rows % shape.block_size != 0 || shape.columns % shape.block_size != 0) { return avq2_shape_error::transform_block; }**」；
+⭐⭐ 判据「**「两个字段的校验严格程度不同」说明它们的来源不同——`block_size` 的「2 的幂」要求只能来自算法（FWHT 要求块长是 2 的幂），而 `codebook_rows` 的「整除」要求来自数据布局**」；
+(e) 🔥🔥🔥🔥🔥 **`block_size` 必须同时是 2 的幂、且整除两个维度**：「**(shape.block_size & (shape.block_size - 1)) != 0**」是「不是 2 的幂」的标准判法；
+⭐⭐ 判据「**「一个约束作用在几个维度上」直接反映「那个算法是几维的」——而 `block_size` 同时约束 rows 与 columns，故它的算法必然是二维可分（separable）的**」；
+⭐⭐ 这给 §10.219 那条缺口两个候选答案：**`sqrt(128) = 11.3`（一维）或 `128`（二维）** —— 「**一个未闭合的缺口」如果能被化简成「两个候选值之间的选择」，那它就从「未知」变成了「待测」**」；
+(f) ⭐⭐⭐⭐ **溢出守卫是两步，而不是一步**：
+「**constexpr std::size_t limit = std::numeric_limits<std::size_t>::max() / sizeof(float); if (shape.columns > limit - shape.rows) { return 0; } const std::size_t values_per_token = shape.columns + shape.rows; if (token_count > limit / values_per_token) { return 0; }**」；
+(g) 🔥🔥🔥🔥🔥 **`128` 与 `4` 在这里是具名常量**：
+「**constexpr std::size_t avq2_components_per_code = 4; constexpr std::size_t avq2_transform_block = 128;**」——故它们是**公开契约**，而不是某个 `.cu` 文件的局部常量；
+⭐⭐ 判据「**「一个常量放在契约头里」意味着「所有后端都必须遵守」——而它比「在三个后端里各写一遍 128」强得多**」 — [src-btl3-avq-contract-h]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -27689,7 +28024,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=335, evidence=2409, claims=1769, claims_high=1422, claims_disputed=9, trace_events=738, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=335, evidence=2417, claims=1774, claims_high=1427, claims_disputed=9, trace_events=738, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
