@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：294 ｜ **证据数**：2260 ｜ **主张数**：1661（高置信 1319，争议 9）
+> **来源数**：296 ｜ **证据数**：2265 ｜ **主张数**：1666（高置信 1323，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -18786,6 +18786,205 @@ for (lattice_index = 0..3)
 > **「Hadamard + 码本 = AQLM/QuIP# 路线」是本报告的归类，源码里没有这样写；
 > 且本报告只读了解码端，故「旋转是量化时学的还是固定的」未知。**
 
+### 10.115 🔥🔥🔥🔥🔥 第五处白名单：`GGML_OP_CUSTOM` 只认 **8 个 magic**
+
+[c-avq2-dispatch-is-eight-magic-whitelist]
+
+```cpp
+case GGML_OP_CUSTOM:
+    if (ggml_cuda_is_btl3_avq2(dst))        { ggml_cuda_op_btl3_avq2(ctx, dst); }
+    else if (ggml_cuda_is_btl3_int4(dst))   { ... }
+    else if (ggml_cuda_is_btl3_vocab_rows(dst)) { ... }
+    else if (ggml_cuda_is_btl3_vocab_head(dst)) { ... }
+    else { return false; }
+```
+
+> **⭐⭐⭐⭐⭐ 五处「白名单 + 静默回退」，而它们的区别在于「那个枚举由谁填写」**：
+>
+> | # | 位置 | 判据 | 回退到 | 谁填 |
+> |---|---|---|---|---|
+> | 1 | §10.62 MMQ 32 条 `CASE` | 量化类型 | Ampere 配置 | **用户** |
+> | 2 | §10.81 `GGML_TYPE_COUNT` | 量化类型 | 同上 | **用户** |
+> | 3 | §10.93 FA 7 种组合 | KV 类型对 | `f16-f16` | **用户** |
+> | 4 | §10.98 `DeviceTopK` | **依赖库版本** | 排序实现 | **环境** |
+> | 5 | **本条** | **算子 magic** | **CPU** | **模型作者** |
+>
+> **⭐⭐⭐ 判据（本轮最重要）：**
+> **这五处的共同形态是「一个枚举 + 一个兜底」，
+> 而它们的区别在于「那个枚举由谁填写」——
+> 即前四处的责任在用户或环境，而第五处的责任在模型发布者。**
+>
+> ⭐⭐ **后果非常尖锐**：
+> **对于第 1–4 处，用户可以通过「选对参数」来避免回退；
+> 对于第 5 处，用户完全无法干预——
+> 因为 magic 和形状校验都写在模型的图里，用户手里只有 `.gguf` 文件。**
+>
+> **⭐⭐ 判据：**
+> **当一处「静默回退」的判据由「别人发布的产物」决定时，
+> 它对用户就是不可诊断的——**
+> **⚠️ 因为用户既看不到 magic，也改不了形状。**
+>
+> ⭐⭐ **而第五处还有一个更尖锐的性质**：
+> **前四处的回退是「同一后端内的慢路径」，而第五处的回退是「换后端」——
+> 即数据要从显存搬到内存，算完再搬回来。**
+>
+> **⭐⭐ 判据：**
+> **「回退到慢路径」与「回退到另一个设备」是两个量级的代价差距——**
+> **⚠️ 而它们在日志里的表现可能都是「没有报错」。**
+
+### 10.116 ⭐⭐⭐ magic 是一个**假指针**
+
+[c-avq2-magic-is-a-fake-pointer]
+
+```cpp
+static inline std::uintptr_t ggml_cuda_custom_magic(const ggml_tensor * op) {
+    if (op == nullptr || op->op != GGML_OP_CUSTOM) return 0;
+    ggml_custom_op_params params;
+    std::memcpy(&params, op->op_params, sizeof(params));
+    return reinterpret_cast<std::uintptr_t>(params.userdata);
+}
+```
+
+> ⚠️ **即 `(void *)0x42544c3341565132` 这个「地址」从不被解引用**——
+> **它纯粹是一个 64 位常量塞进了一个指针字段。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个框架的扩展点在语义上是「用户数据」时，
+> 它实际上是一个「无类型通道」——**
+> **⚠️ 而「无类型通道」的每一次使用，
+> 都会在框架的「能力检查」里留下一处需要显式处理的空洞。**
+>
+> ⭐⭐ **这正是 §10.59–§10.98 那些形态的成因**：
+> **`supports_op` 的 `GGML_OP_CUSTOM` 分支本来应该返回 `false`
+> （因为标准 `llama.cpp` 不实现任何自定义算子），
+> 而它现在必须列 8 个 magic——
+> 每一个新算子都会让这个 `||` 链变长一行。**
+>
+> **⭐⭐ 判据：**
+> **「一个本该是常量的判断，变成了一个会随功能增长的列表」——**
+> **⚠️ 这是「扩展点被当作类型系统用」的必然结果，
+> 而它的终点是一个永远不完整的白名单。**
+>
+> ⭐⭐ **实际含义**：**一个第三方 fork 可以往 `llama.cpp` 里塞任意多个私有算子，
+> 而「这个算子在哪跑」完全取决于那个 fork 的 `supports_op` 写得全不全——
+> ⚠️ 而写得全不全，用户看不出来。**
+
+### 10.117 ⚠️⚠️⚠️ 第一处**平台级**白名单：HIP / MUSA 上一律 `return false`
+
+[c-hip-musa-always-false]
+
+```cpp
+case GGML_OP_CUSTOM:
+#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+    return false;
+#else
+    return ggml_cuda_is_btl3_avq2_probe(op) || ... ;
+#endif
+```
+
+> ⚠️ **而 `btl3-avq.cu` 里也有对应的 `#if`，否则
+> `GGML_ABORT("BTL3 AVQ2 is only implemented for CUDA")`。**
+>
+> **⭐⭐ 关键：两条路径给出完全不同的行为**——
+> **`supports_op` 返回 `false` → 静默回退到 CPU（能跑，但慢）；
+> 若 `ggml_cuda_op_btl3_avq2` 被调用 → `GGML_ABORT`（直接崩）。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **同一个「不支持」事实，在 `supports_op` 里是「安静地慢」，
+> 在 kernel 里是「响亮地死」——**
+> **⚠️ 而这个差别完全取决于「调度器有没有先问过 `supports_op`」。**
+>
+> ⭐⭐ **这是 §10.30 / §10.47 那条教训的兑现**：
+> **「一个检查函数在『信息缺失』时选择『假设通过』，
+> 它就不是一个检查，而是一个免责声明」——**
+> **⚠️ 而这里更微妙：`supports_op` 是「假设不通过」（安全），
+> `GGML_ABORT` 是「假设不该到这里」（不安全）。**
+>
+> **⭐⭐ 判据：**
+> **「安全的默认」与「响亮地失败」不能同时要——**
+> **⚠️ 因为前者要求「悄悄降级」，后者要求「立刻停止」，同一个事实只能选一个。**
+>
+> ⭐⭐ **对 RTX PRO 6000**：**它走 CUDA，故走 `#else` 分支——
+> 但「CUDA 上有实现」不等于「RTX PRO 6000 上有优化」，
+> 因为 `decode_mul_mat` 的 grid 形状是 `rows * tokens`，与卡无关。**
+
+### 10.118 ⭐⭐⭐⭐ 形状校验失败 = **静默回退到 CPU**
+
+[c-shape-guard-failure-is-silent]
+
+`ggml_cuda_is_btl3_avq2` 校验 **`columns % 128 == 0`、`rows % 128 == 0`、
+`codebook_rows % 128 == 0`、`codes->ne[0] == columns / 4`、
+`affine->ne[0] == 4 && affine->ne[1] == 4`、`bias->ne[0] == 4`，
+以及 7 个 `ggml_is_contiguous`**——
+**任何一条不满足就 `return false`，整个算子静默在 CPU 上跑。**
+
+> **⭐⭐⭐⭐ 这条把 §10.98 那条判据推进到它的反面**：
+> **那里的检查函数选择了「假设通过」，
+> 这里的检查函数选择了「假设不通过」——
+> 而「假设不通过」同样是一种免责声明，
+> 只是它把代价从「算错」换成了「算慢」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「保守的检查」与「宽松的检查」都可能失败，
+> 而它们的失败形态是对偶的：
+> 「宽松」让你拿到错误的结果，
+> 「保守」让你拿到正确的、但慢十倍的结果——**
+> **⚠️ 而两者都不会报错。**
+>
+> ⭐⭐ **`ggml_is_contiguous` 那 7 条最值得注意**：
+> **它们校验的不是「形状对不对」，而是「内存布局对不对」——
+> 即一个形状完全正确的模型，
+> 可能因为某一步产生了非连续张量，而整条 AVQ2 路径静默回到 CPU。**
+>
+> **⭐⭐ 判据：**
+> **当「性能路径的开关」依赖于「内存布局」时，
+> 它就是一个「会在某些模型上莫名变慢」的机制——**
+> **⚠️ 因为内存布局是图优化的产物，用户既看不见也控制不了。**
+>
+> ⭐⭐ **与 §10.39 的 `cudaErrorIllegalAddress` 是一对**：
+> **那一个是「布局错了 → 崩」，这一个是「布局错了 → 慢」——
+> ⚠️ 而后者更难被发现，因为程序仍然正确。**
+
+### 10.119 ⭐⭐⭐⭐ 四个 `*_probe` 假算子：**用数据来提问**
+
+[c-probe-ops-are-capability-stubs]
+
+```cpp
+static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_t magic) {
+    if (ggml_cuda_custom_magic(op) != magic ||
+        op->src[0] == nullptr || op->src[1] != nullptr) return false;
+    return ggml_is_contiguous(op->src[0]);
+}
+```
+
+> ⚠️ **即 4 个 `*_probe` magic 对应的算子只有 1 个输入**——
+> **它们是「可用性探针」，只为让 `supports_op` 能回答
+> 「这个后端支不支持这一类算子」而存在。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「用数据来提问」是一种在缺少「查询接口」时的常见变通——**
+> **⚠️ 而它的代价是：每一次「查询」都要在计算图里放一个节点，
+> 而那个节点本身永远不会被执行。**
+>
+> ⭐⭐ **这解释了为什么 `btl3-avq-marker.h` 有 8,700 字节——
+> 比 `btl3-avq.cu`（7,070 字节）还大**：
+> **8 个 magic × 每个一个形状谓词 =
+> 一半的代码在回答「我能接手吗」，一半在回答「怎么算」。**
+>
+> **⭐⭐ 判据：**
+> **当一个后端的「能力检查」代码量超过「实现」代码量时，
+> 这个后端的设计就有问题——**
+> **⚠️ 因为「能不能做」本应是一个简单的判断，
+> 而它变成了一个需要逐条校验的清单。**
+>
+> ⭐⭐ **这正是 §10.66 那条的兑现**：
+> **「`blackwell_mma_available(cc)` 检查的是二进制，不是 GPU」——
+> ⚠️ 两处的共同点是「能力判断被实现成了运行时探测」，
+> 而「探测」永远是近似。**
+>
+> ⚠️ **本条推理标注为 `derivation` / `medium`**：
+> **代码里没有注释说明探针的用途。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -22205,6 +22404,11 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu`（7,070 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **CUDA 侧的 grid 形状坐实了同一件事**：**`decode_mul_mat<<<rows * tokens, matvec_threads, 0, stream>>>`**，**`matvec_threads = 256`**，kernel 内 **`row = blockIdx.x % rows; token = blockIdx.x / rows;`**，并用 `warp_sum` 在 block 内归约；⚠️ 即 **一个 block 只负责「一个 token 的一行」，而这是 `matvec`（矩阵-向量）不是 `gemm`（矩阵-矩阵）——故 `tokens` 增加时只是 block 数增加，每个 block 的工作量不变**；⭐⭐ 判据「**『预填充比解码快』这条经验，依赖于『矩阵乘能被大 batch 摊薄』这个前提——而当量化把矩阵乘换成『逐元素解码』时，这个前提就消失了，而没有任何报错**」；⭐ 结论：**§10.101 那个 `84.70 / 43.16` 的比值 1.96 不是因为「卡不行」，而是因为「这个算子没有 batch 维度」** — [src-btl3-avq2-cuda]
 
+### 第五处白名单：`GGML_OP_CUSTOM` 只认 8 个 magic（第八十七轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu`（235,681 字节，5,742 行）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/ggml-cuda.cu) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告一直在找的结构**。(a) **`GGML_OP_CUSTOM` 的派发是 if-else 链，末尾 `return false`**（第 3126–3137 行）：`if (ggml_cuda_is_btl3_avq2(dst)) { ... } else if (...) {...} else { return false; }`——⚠️ 即 `ggml_cuda_compute_forward` 返回 `false`，调度器把算子挪到 CPU。(b) 🔥🔥🔥🔥🔥 **`supports_op` 里 `GGML_OP_CUSTOM` 只认 8 个 magic**（第 5461–5471 行）：`return ggml_cuda_is_btl3_avq2_probe(op) || ggml_cuda_is_btl3_int4_probe(op) || ggml_cuda_is_btl3_vocab_rows_probe(op) || ggml_cuda_is_btl3_vocab_head_probe(op) || ggml_cuda_is_btl3_avq2(op) || ggml_cuda_is_btl3_int4(op) || ggml_cuda_is_btl3_vocab_rows(op) || ggml_cuda_is_btl3_vocab_head(op);`——⚠️ **任何一条不匹配就 `return false`，算子回退到 CPU**；⭐⭐⭐ 判据（本轮最重要）「**这五处的共同形态是『一个枚举 + 一个兜底』，而它们的区别在于『那个枚举由谁填写』**」：**§10.62 / §10.81 / §10.93 由用户填，§10.98 由环境（依赖库版本）填，本条由模型作者填**；⭐⭐ 判据「**当一处『静默回退』的判据由『别人发布的产物』决定时，它对用户就是不可诊断的——因为用户既看不到 magic，也改不了形状**」；⭐⭐ 而第五处更尖锐：**前四处的回退是「同一后端内的慢路径」，第五处是「换后端」——数据要从显存搬到内存再搬回**；⭐⭐ 判据「**『回退到慢路径』与『回退到另一个设备』是两个量级的代价差距——而它们在日志里的表现可能都是『没有报错』**」。(c) ⚠️⚠️⚠️ **第一处「平台级」白名单**：`#if defined(GGML_USE_HIP) || defined(GGML_USE_MUSA) return false;`——**在 HIP / MUSA 上整个 AVQ2 无条件回退到 CPU**；⭐ 而 `btl3-avq.cu` 也有对应 `#if`，否则 `GGML_ABORT("BTL3 AVQ2 is only implemented for CUDA")`；⭐⭐ 判据（本轮最重要）「**同一个『不支持』事实，在 `supports_op` 里是『安静地慢』，在 kernel 里是『响亮地死』——而这个差别完全取决于『调度器有没有先问过 `supports_op`』**」；⭐⭐ 判据「**『安全的默认』与『响亮地失败』不能同时要——因为前者要求『悄悄降级』，后者要求『立刻停止』，同一个事实只能选一个**」 — [src-btl3-cuda-dispatch]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq-marker.h`（8,700 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq-marker.h) —（2026-10 抓取）。⭐⭐⭐ **8 个 magic 常量 + 8 个形状谓词，比实现文件（7,070 字节）还大**。(a) ⭐⭐⭐ **magic 不是「存在张量里的标记」，而是 `ggml_custom_4d` 的 `userdata` 指针**：`std::memcpy(&params, op->op_params, sizeof(params)); return reinterpret_cast<std::uintptr_t>(params.userdata);`——⚠️ **`(void *)0x42544c3341565132` 这个「地址」从不被解引用**；⭐⭐ 判据（本轮最重要）「**当一个框架的扩展点在语义上是『用户数据』时，它实际上是一个『无类型通道』——而『无类型通道』的每一次使用，都会在框架的『能力检查』里留下一处需要显式处理的空洞**」；⭐⭐ 判据「**『一个本该是常量的判断，变成了一个会随功能增长的列表』——这是『扩展点被当作类型系统用』的必然结果，而它的终点是一个永远不完整的白名单**」。(b) ⭐⭐⭐⭐ **形状校验的失败方式是 `return false`，故它是静默的**：`ggml_cuda_is_btl3_avq2` 校验 `columns % 128 == 0`、`rows % 128 == 0`、`codebook_rows % 128 == 0`、`codes->ne[0] == columns / 4`、`affine->ne[0] == 4 && affine->ne[1] == 4`、`bias->ne[0] == 4`，以及 **7 个 `ggml_is_contiguous`**；⭐⭐ 判据（本轮最重要）「**『保守的检查』与『宽松的检查』都可能失败，而它们的失败形态是对偶的：『宽松』让你拿到错误的结果，『保守』让你拿到正确的、但慢十倍的结果——而两者都不会报错**」；⭐⭐ 判据「**当『性能路径的开关』依赖于『内存布局』时，它就是一个『会在某些模型上莫名变慢』的机制——因为内存布局是图优化的产物，用户既看不见也控制不了**」；⭐ 与 §10.39 的 `cudaErrorIllegalAddress` 是一对：**那一个是「布局错了 → 崩」，这一个是「布局错了 → 慢」**。(c) ⭐⭐⭐⭐ **4 个 `*_probe` 假算子**：`ggml_cuda_is_btl3_probe` 要求 `op->src[1] != nullptr` 时返回 `false`——**即探针算子只有 1 个输入**；⭐⭐ 判据（本轮最重要）「**『用数据来提问』是一种在缺少『查询接口』时的常见变通——而它的代价是：每一次『查询』都要在计算图里放一个节点，而那个节点本身永远不会被执行**」；⭐⭐ 这解释了**为什么 marker 头比实现还大**：**一半的代码在回答「我能接手吗」，一半在回答「怎么算」**；⭐⭐ 判据「**当一个后端的『能力检查』代码量超过『实现』代码量时，这个后端的设计就有问题——因为『能不能做』本应是一个简单的判断，而它变成了一个需要逐条校验的清单**」；⚠️ 探针用途为 `derivation` / `medium`（代码里无注释） — [src-btl3-cuda-marker]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -22344,7 +22548,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=294, evidence=2260, claims=1661, claims_high=1319, claims_disputed=9, trace_events=657, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=296, evidence=2265, claims=1666, claims_high=1323, claims_disputed=9, trace_events=661, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
