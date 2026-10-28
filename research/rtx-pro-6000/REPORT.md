@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：368 ｜ **证据数**：2602 ｜ **主张数**：1846（高置信 1499，争议 9）
+> **来源数**：368 ｜ **证据数**：2607 ｜ **主张数**：1849（高置信 1502，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -27272,6 +27272,123 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **⚠️ 这解释了 §10.293 那条「四种默认上下文」为什么在 LM Studio 侧又多一种行为**：
 > **因为插件把上下文选择也写进了自己的一份实现。**
 
+### 10.303 🔥🔥🔥🔥🔥 【修正】`262,144` 是**架构上限**，`131,072` 是**策略默认**
+
+[c-architectural-262144-is-not-a-default]
+
+> **model card 第 84 行**：
+> **`| Architectural context | 262,144 tokens |`**
+>
+> **紧接着第 89-91 行**：
+> **`Usable context depends on device memory, KV cache, and runtime workspace.
+> Start with 4K on a 16 GB Mac, 16K on a 12–16 GB GPU, or 32K on a 24 GB GPU,
+> then increase the window after measuring headroom.`**
+
+> **⚠️⚠️⚠️ 故 §10.301 那条「声明的能力没有任何路径能走到」
+> 把两个量当成了一个量。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当两个数字不同时，先问它们是不是同一个量的一对取值；
+> 而「上限」与「默认」是全报告里最常被混用的一对。**
+>
+> **⭐⭐ 判据：**
+> **一个 262,144 与一个 131,072 并排出现时，
+> 最可能的解释是「前者是结构上限、后者是策略默认」，
+> 而不是「后者是前者的 bug」。**
+>
+> ⚠️ **那么 §10.301 那条判据还成立吗？部分成立**：
+> **`model.yaml` 的字段名是 `contextLengths`，用户会把它当成可达能力，
+> 故它仍然会误导。**
+> **⚠️ 但它不是写错——它填的就是架构上限。**
+>
+> **⭐⭐ 判据：**
+> **「误导」与「写错」是两件事；
+> 前者需要改文档措辞，后者需要改代码。**
+
+> ⚠️⚠️⚠️ **而这条给本报告的教训更值钱**：
+> **`src-hf-btl3-model-card` 早在库里，我在第 203 轮就有它，
+> 而我没有打开它就去判了「不一致」。**
+>
+> **⭐⭐ 判据：**
+> **一个「不一致」的结论，必须先打开那个最能解释不一致的文档；
+> 否则我是在用一半的证据判另一半错。**
+
+### 10.304 🌟🌟 model card 的三条建议，被**编码进了三个阈值**
+
+[c-model-card-advice-is-encoded-in-thresholds]
+
+| model card 的建议 | 代码的阈值 | 是否一致 |
+|---|---|---|
+| `Start with 4K on a 16 GB Mac` | `darwin → 4096` | ✅ |
+| `16K on a 12–16 GB GPU` | `memoryMiB < 20_000 → 16384` | ✅ |
+| `32K on a 24 GB GPU` | `memoryMiB < 28_000 → 32768` | ✅ |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当文档给的是「建议值」而代码给的是「阈值」时，
+> 建议值应当恰好落在阈值的边界上；
+> 而这里三条全部落在边界上——这不是巧合。**
+>
+> **⭐⭐ 判据：**
+> **「文档与实现一致」最强的证据不是「数字相同」，
+> 而是「文档的定性建议能被实现的定量阈值重现」。**
+
+> ⭐⭐⭐ **为什么这条值得单独记**：
+> **本报告到目前为止的 §10 绝大多数是缺陷清单；
+> 而这一条是唯一一处「作者把文档里的建议真的写进了代码」。**
+>
+> **⭐⭐ 判据：**
+> **一份缺陷清单如果全是缺陷，它的可信度反而下降；
+> 因为它说明我只在找缺陷。**
+>
+> ⭐ **故我把这条记下来，作为「这套代码不是随手写的」的一个证据。**
+> **⚠️ 这不会抵消 §10.301 那条——它只是把「误导」与「写错」分开了。**
+
+### 10.305 🔥🔥🔥🔥🔥 性能表里有那台机器，支持矩阵里**没有那个平台**
+
+[c-perf-table-lists-platform-absent-from-support-matrix]
+
+> **model card 的 Runtime support 表只有五行**：
+> | 目标 | 状态 |
+> |---|---|
+> | macOS arm64 / Apple Metal | **Verified** |
+> | **Linux arm64 / NVIDIA CUDA / DGX Spark** | **Preview** |
+> | OpenAI-compatible HTTP | Verified |
+> | LM Studio | Supported through included generator |
+> | Ollama CLI | Supported through included bridge |
+>
+> **⚠️⚠️⚠️ 五行里没有 `linux-x86_64`，也没有 `windows-x86_64`。**
+>
+> **而性能表第一行是**：
+> **`| RTX PRO 6000 Blackwell 96 GB | 84.70 tok/s | 43.16 tok/s | Exact GGUF, full CUDA offload |`**
+
+> **🔥🔥🔥🔥🔥 故那 43.16 tok/s 是在一个「不作为产品支持目标」的平台上测出来的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份文档的「性能表」与「支持矩阵」是两个不同的声明，
+> 而性能表通常更强——因为它带数字。**
+>
+> **⭐⭐ 判据：**
+> **当性能表里出现一个支持矩阵里没有的平台时，
+> 那不是矛盾，而是「测过但没承诺」；
+> ⚠️ 而读者会把它当成「承诺了」。**
+>
+> **⭐⭐ 判据：**
+> **一个数字的「可复现性」与它所在的「支持等级」是两件事；
+> 前者取决于测量条件，后者取决于作者的承诺。**
+
+> ⭐⭐⭐⭐⭐ **而这两个缺口（`linux-x86_64` 与 `windows-x86_64`）
+> 恰好是 `build_cuda_bundle.py` 的两个 target**——
+> **故打包脚本比 model card 承诺得更多。**
+>
+> **⭐⭐ 判据：**
+> **当一个仓库的构建目标多于它的文档承诺时，
+> 多出来的那些就是「可以做但不说」的部分。**
+>
+> ⭐⭐ **而 model card 与 §10.290 两处独立地写着同一件事**：
+> **manifest 自带 `status: cross-compiled; NVIDIA runtime conformance pending`，
+> model card 把 `Linux arm64 / DGX Spark` 标为 `Preview`**——
+> **「三个 CUDA 目标都还是 preview」这件事有两份独立证据。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -31968,6 +32085,38 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个批评如果数字错了，它的方向仍可能对，但它的强度被削弱了；故数字必须先更正，再保留方向**」；
  — [src-btl3-lmstudio-generator] [src-btl3-lmstudio-nativerunner] [src-btl3-lmstudio-model-yaml]
 
+### model card 的补读（第一百二十九轮补充）
+
+本轮没有新增来源——`src-hf-btl3-model-card` 早在库里，
+我只是第一次把它读完。补五条证据：
+
+1. 🔥🔥🔥🔥🔥 **`Architectural context` 与 `Usable context` 是两个量**：
+「**| Architectural context | 262,144 tokens |**」（84 行）+
+「**Usable context depends on device memory, KV cache, and runtime workspace. Start with 4K on a 16 GB Mac, 16K on a 12–16 GB GPU, or 32K on a 24 GB GPU, then increase the window after measuring headroom.**」（89-91 行）——
+**故 §10.301 那条「声明的能力没有任何路径能走到」把两个量当成了一个量**；
+⭐⭐ 判据（本轮最重要）「**当两个数字不同时，先问它们是不是同一个量的一对取值；而「上限」与「默认」是全报告里最常被混用的一对**」；
+⭐⭐ 判据「**「误导」与「写错」是两件事；前者需要改文档措辞，后者需要改代码**」；
+2. 🌟🌟 **三条建议起点被编码成了三个阈值下界**：
+「**Start with 4K on a 16 GB Mac**」-> `darwin -> 4096`；「**16K on a 12–16 GB GPU**」-> `memoryMiB < 20_000 -> 16384`；「**32K on a 24 GB GPU**」-> `memoryMiB < 28_000 -> 32768`——
+**三条全部落在边界上**；
+⭐⭐ 判据「**「文档与实现一致」最强的证据不是「数字相同」，而是「文档的定性建议能被实现的定量阈值重现」**」；
+⭐⭐ **这是本报告 §10 里唯一一处「作者把文档建议真的写进了代码」**；
+⭐⭐ 判据「**一份缺陷清单如果全是缺陷，它的可信度反而下降；因为它说明我只在找缺陷**」；
+3. 🔥🔥🔥🔥🔥 **性能表有那台机器，支持矩阵没有那个平台**：
+「**| macOS arm64 / Apple Metal | Verified | | Linux arm64 / NVIDIA CUDA / DGX Spark | Preview | | OpenAI-compatible HTTP | Verified | | LM Studio | Supported through included generator | | Ollama CLI | Supported through included bridge |**」（127-133 行，五行）——
+⚠️ **五行里没有 `linux-x86_64`，也没有 `windows-x86_64`**，**而性能表第一行是 `RTX PRO 6000 Blackwell 96 GB | 84.70 | 43.16`**；
+⭐⭐ 判据「**一份文档的「性能表」与「支持矩阵」是两个不同的声明，而性能表通常更强——因为它带数字**」；
+⭐⭐ 判据「**当性能表里出现一个支持矩阵里没有的平台时，那不是矛盾，而是「测过但没承诺」；而读者会把它当成「承诺了」**」；
+⭐⭐ 判据「**一个数字的「可复现性」与它所在的「支持等级」是两件事；前者取决于测量条件，后者取决于作者的承诺**」；
+4. ⭐⭐⭐⭐⭐ **`Verified` 原生运行时全仓库只有 macOS arm64**：
+**而 `Linux arm64 / DGX Spark` 是 `Preview`**——**这与 §10.290 那条 bundle manifest 自带的 `status: cross-compiled; NVIDIA runtime conformance pending` 完全一致**；
+⭐⭐ **故「三个 CUDA 目标都还是 preview」在 model card 与 manifest 两处独立地写着**；
+5. ⭐⭐⭐⭐ **M2 那组数字的形状值得记**：
+「**| Apple M2 16 GB | 2.30 tok/s | 2.48 tok/s | Exact GGUF, Metal compatibility smoke |**」——
+⚠️ **prompt 处理 2.30 竟然低于生成 2.48**，**而 RTX PRO 6000 那组是 84.70 / 43.16（prompt 快于生成，符合预期）**；
+⭐⭐ 判据「**当 prompt processing 慢于 generation 时，瓶颈不在算力而在权重搬运之外的某个环节**」；
+ — [src-hf-btl3-model-card]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -32107,7 +32256,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=368, evidence=2602, claims=1846, claims_high=1499, claims_disputed=9, trace_events=807, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=368, evidence=2607, claims=1849, claims_high=1502, claims_disputed=9, trace_events=807, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
