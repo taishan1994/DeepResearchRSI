@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：301 ｜ **证据数**：2283 ｜ **主张数**：1681（高置信 1338，争议 9）
+> **来源数**：304 ｜ **证据数**：2289 ｜ **主张数**：1686（高置信 1343，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -19542,6 +19542,208 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⚠️ 显存、带宽、精度三者的账，可以在下单前算平；
 > 而「先买一张试试」是最贵的预检。**
 
+### 10.135 ⚠️⚠️⚠️ 找到原始出处文档：**是 Server Edition，不是 Workstation**
+
+[c-speed-doc-is-server-edition]
+
+> `docs/rtx-pro-6000-speed-2026-07-19.md`（1,957 字节）——
+> **§10.101 那组数字的原始出处**，而它比 `model card` 详细得多。
+>
+> 「**GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition**」
+> 「**GPU memory: 97,887 MiB reported by `nvidia-smi`**」
+> 「**CUDA architecture: `sm_120a`；KV types: FP16**」
+
+> **⭐⭐⭐ 这是一次「口径收窄」，而它收窄的是本报告自己的 34 节**：
+> **从 §10.101 起，我一直把这组数字当作「RTX PRO 6000 这个型号」的数据，
+> 而实际上它是「Server Edition 这一款 SKU」的数据。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「型号」与「SKU」是两个不同的粒度——
+> ⚠️ 而「RTX PRO 6000」这个名字下面至少有 Server Edition 与 Workstation Edition 两款。**
+>
+> ⭐⭐ **而后果是具体的**：
+> **Server Edition 是被动散热、面向机架的版本，
+> Workstation Edition 是主动散热、面向工作站的版本——
+> 两者标称带宽相同（1,792 GB/s）、标称显存相同（96 GB），
+> 但持续负载下的功耗与频率行为可能不同。**
+>
+> **⭐⭐ 判据：**
+> **当两个 SKU 的「标称参数完全相同」时，
+> 它们的差异不在参数表里，而在「持续负载」里——**
+> **⚠️ 而「持续负载」恰恰是 `llama-bench -r 3` 测不到的东西。**
+
+### 10.136 ⚠️⚠️⚠️ 整个基准只跑 **41.03 秒**，故 σ = 0.29 不证明稳定
+
+[c-bench-duration-41-seconds]
+
+> 「**The measured benchmark body, including model load,
+> completed in 41.03 seconds.**」
+>
+> **Generation samples: `42.83`, `43.35`, `43.30` tok/s**（极差 0.52，均值 43.16）
+> **Prompt-processing samples: `84.28`, `84.91`, `84.91` tok/s**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「σ 小」在短跑里有两种可能：① 系统真的稳；② 三次跑的是同一个热状态——**
+> **⚠️ 而 41 秒的总时长让 ② 变得非常可能。**
+>
+> ⭐⭐ **算一下**：
+> **8.39 GB 的模型加载本身就要若干秒，
+> 故三次生成的净时间可能在 20 秒量级——
+> ⚠️ 而这个时长里，GPU 的温度与频率几乎不会变化。**
+>
+> **⭐⭐ 判据：**
+> **「重复测量」的价值取决于「重复之间有没有变量」——**
+> **⚠️ 如果三次跑完总时长还不到一次热平衡的时间常数，
+> 那么这三次测的是「同一个状态」，
+> 它们的 σ 只反映「测量噪声」，不反映「系统波动」。**
+>
+> ⭐⭐ **与 §10.105 那条完全同构**：
+> **「768-token bench 3× = 19.97 / 21.18 / 23.31（σ 不小），
+> 而 1500–2700-token 持续流式掉到 6–9 tok/s」——
+> ⚠️ 即「短跑之间的一致」与「长跑之后的一致」是两件事。**
+>
+> **⭐⭐ 判据：**
+> **当你要用「σ」来论证「稳定」时，必须先回答
+> 「我的采样窗口有多长，而系统的热时间常数有多长」——**
+> **⚠️ 如果前者远小于后者，那个 σ 只证明了「我测了三次」，
+> 没有证明「它很稳」。**
+>
+> ⚠️ **边界**：**本报告不知道那次跑是冷机还是热机，
+> 也不知道 RTX PRO 6000 的热时间常数**——
+> 故上面的结论是「σ 不足以支撑稳定性结论」，不是「它其实不稳」。**
+
+### 10.137 ⭐⭐⭐ 消费级投影表：**按带宽缩放，且只往下不往上**
+
+[c-consumer-projections-are-bandwidth-only]
+
+> 「**These are projections, not measurements.
+> Single-stream decode is scaled primarily from memory bandwidth,
+> then widened to account for architecture, clock, power,
+> kernel occupancy, and driver differences.**」
+
+| GPU | 预估生成 | 预估预处理 | Fit |
+|---|---:|---:|:--:|
+| RTX 5090 32GB | 39–44 tok/s | 75–88 tok/s | Yes |
+| RTX 4090 24GB | 22–28 tok/s | 45–60 tok/s | Yes |
+| RTX 4050 Laptop 6GB | 无可信估计 | 无可信估计 | **No** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「投影区间」比一个「投影点」更诚实，
+> 而「区间只往下不往上」更诚实——**
+> **⚠️ 因为「按带宽缩放」得到的是理论上限，
+> 而所有其它因素都只会让它更慢。**
+>
+> ⭐⭐ **一个可检验的预测**：
+> **`43.16 × 0.5625 = 24.28 tok/s`，而作者给的是 22–28——
+> ⚠️ 即预测区间**包含**纯带宽缩放值，且下界低于它。**
+>
+> **⭐⭐ 判据：**
+> **「一个预测区间是否可信」的一个廉价检验是：
+> 把「最简单的模型」（这里就是按带宽线性缩放）代进去，
+> 看它落在区间的哪里——**
+> **⚠️ 落在中间偏上是好迹象；落在区间外说明「简单模型都不成立」。**
+>
+> ⭐⭐ **4050 Laptop 那一条尤其值得记**：
+> **「…only 6GB of VRAM, below the 8.39GB weight file before KV cache and
+> runtime allocations; it therefore requires CPU offload and should be
+> described as a low-single-digit, system-dependent fallback rather than a
+> supported full-GPU target.」**
+>
+> **⭐⭐ 判据：**
+> **「装不下」与「跑得慢」是两个不同类别的问题，
+> 而把它们混为一谈会让读者以为「优化一下就能跑」——**
+> **⚠️ 作者的做法是把它从 `Fit: Yes` 那一列踢出去，
+> 而不是给它一个很低的数字。**
+
+### 10.138 ⚠️⚠️⚠️ `source_weight_bytes` 是一个**口径陷阱**
+
+[c-source-weight-bytes-is-not-bf16]
+
+> `artifacts/btl3-compact-gguf-dry-run.json`：
+> 「**source_weight_bytes: 8551772952**」
+> 「**source_checksums_verified: 158**」「**tensor_count: 2416**」
+> 「**projected_tensor_bytes: 8381262032**」
+> 「**exporter_unsupported: []**」「**native_runtime_gaps: []**」
+
+> **⚠️ 若它是 BF16 的 27B 权重，则参数量 = 4.28 B，而不是 27B——
+> 故据此算出的「压缩比 1.019×」是错的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个字段的名字里出现「source」时，
+> 要问的不是「它是什么」，而是「它是**哪一步**的 source」——**
+> **⚠️ 因为一条流水线里有多个「源」：
+> 原始 BF16、去量化中间态、重排后的 safetensors。**
+>
+> ⭐⭐ **与 `CLAIMS.md` 完全对得上**：
+> **「It does not download, load, or reconstruct the original BF16 checkpoint」——
+> ⚠️ 即这条流水线从头到尾就没碰过 BF16 原权重，
+> 所以「source」只能指「它实际读的那个东西」。**
+>
+> **⭐⭐ 判据：**
+> **「一个数字的口径」不能从字段名推断，只能从「它在哪一步产生」推断——
+> ⚠️ 而「哪一步」这个信息通常在另一份文件里（这里是 `CLAIMS.md`）。**
+>
+> ⭐⭐ **正确口径**：
+> **若 27B 参数在 BF16 下是 54 GB，最终 8.39 GB，
+> 则压缩比约 6.4×，等效 2.48 bpw——
+> ⚠️ 这与「Under 2.5 effective bits per parameter」完全一致。**
+>
+> **⭐⭐ 判据：**
+> **当一个「官方数字」算出来与「官方宣称」矛盾时，
+> 先怀疑那个数字的口径，而不是先怀疑那个宣称——**
+> **⚠️ 因为宣称通常经过更多次校对。**
+>
+> ⚠️ **边界**：**本报告不知道 `source_weight_bytes` 的确切定义，
+> 只知道它不能是 BF16 的 27B。**
+
+### 10.139 ⚠️⚠️⚠️ `vendor/`、`pocs/`、`benches/` **根本不存在**
+
+[c-repo-has-no-vendor-dirs]
+
+> `git/trees/main?recursive=1` 返回 **3,439 条目（`truncated=false`）**，
+> 顶层只有：
+>
+> **`native/` 2,990 ｜ `tools/` 17 ｜ `papers/` 16 ｜ `integrations/` 12 ｜
+> `tests/` 9 ｜ `docs/` 7 ｜ `artifacts/` 6 ｜ `launch/` 4 ｜ `packaging/` 3**
+
+> **⚠️ 而本报告在「未获取项」里列了十几轮的三个目录，从来没有存在过。**
+>
+> **⭐⭐⭐⭐ 这条暴露的缺陷很尖锐**：
+> **我把它们写进未获取项写了十几轮，
+> 而它们从来没有存在过——**
+> **⚠️ 我大概是某次从「`native/llama.cpp/` 里应该有这些目录」的推断里生成了它们。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「未获取项」清单里最危险的一项，
+> 不是「我知道它存在但读不到」，而是「我以为它存在」——**
+> **⚠️ 因为前者会随着时间变成「已放弃」，
+> 而后者会永久占据清单，
+> 并且让清单看起来比实际更长。**
+>
+> ⭐⭐ **与 §10.139 前身那条「未获取项清单太长会退化为免责声明」是同一个病的另一个病因**：
+> **不只是「太长」，而是「里面有不存在的东西」。**
+>
+> **⭐⭐ 判据：**
+> **一个「未获取项」只有在**能被指认**时才是诚实的——**
+> **⚠️ 而「能被指认」的最低标准是「我在某份清单里见过它」，
+> 不是「我推断它应该有」。**
+>
+> ⭐⭐ **修复方式**：
+> **用一次 `git/trees?recursive=1` 把「存在性」变成可判定的——
+> ⚠️ 即「未获取项」应该有一个「存在性校验」步骤，
+> 而那个步骤只需要一个 API 调用。**
+>
+> **⭐⭐ 判据：**
+> **当一个清单里的项目长期无法推进时，
+> 第一个要问的不是「怎么读到它」，而是「它到底在不在」——**
+> **⚠️ 因为「不存在」这个答案会让整条线索消失，
+> 而「读不到」会让它永远留在那里。**
+>
+> ⭐ **本轮实际结果**：**清单里 3 项被删除，
+> 同时新增 1 项真正的发现——
+> `docs/rtx-pro-6000-speed-2026-07-19.md`，
+> 一份专门讲这张卡速度的文档。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -22979,6 +23181,13 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 ### 「诚实的一句话」里没有速度、`adds` 这个动词、与 3.9 GB 的失败目标（第九十轮补充）
 
 1. [GitHub / Badtheorylabs — BTL-3 `papers/behavior-before-perplexity/ARTICLE-IMPLEMENTATION-APPENDIX.md`（7,918 字节，节 13-19）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/papers/behavior-before-perplexity/ARTICLE-IMPLEMENTATION-APPENDIX.md) —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **§19「The honest launch sentence」全文里没有速度**：「**BTL-3 Compact is a complete 8.39 GB text-only native GGUF for a 27B-class agentic model. On a fresh 100-turn private tool-contract gate, it retained 83 of 90 teacher-correct turns (92.2% conditional retention), with perfect measured retention on single, parallel, sequential, and abstention cases, but only 30% on parallel-multiple. Its custom packed backend executes on CUDA and Metal without loading the BF16 source checkpoint.**」；⭐⭐⭐⭐ 判据（本轮最重要）「**一个人写『诚实的一句话』时，会把『自己最不确定的东西』全部剔除——而速度被剔除了**」；⭐⭐ 判据「**『一句话总结』是检验『作者自己认为什么最重要』的最好工具——因为总结必然要丢东西，而『丢掉哪些』比『留下哪些』更能说明问题**」；⭐⭐ 判据「**『未证实』与『不值得一提』是两个不同的信号——而区分它们的唯一方法是看『总结里有没有它』**」；(b) 🔥🔥🔥🔥🔥 **作者用的动词是 `adds`**：「**The release backend adds native packed CUDA and Metal operators to llama.cpp, an OpenAI-compatible server, and launch bridges.**」——⭐⭐⭐⭐ 这给 §10.111 那场「是不是 llama.cpp」的三轮更正画上了句号；⭐⭐ 判据（本轮最重要）「**`adds operators to X` 这个措辞本身就把答案说完了——它不是『重写』，不是『替代』，而是『在 X 上加』——而我用了两轮去推断这件事，答案在一个动词里**」；⭐⭐ 判据「**当一句话里有一个精确的动词（`adds` / `replaces` / `wraps` / `embeds`）时，它对『这是什么关系』的判定力，强于整段架构描述**」；(c) 🔥🔥🔥🔥 **最初的目标是 3.9 GB**：「**Stop pure one-bit work sooner. A rigid 3.9 GB target forced the project into the representation regime most hostile to tool behavior.**」；⭐⭐ 判据（本轮最重要）「**『一个数字是目标还是结果』决定了它能不能被当作『最优』来引用**」；⭐⭐ 判据「**『一个失败的目标』是一份比『一个成功的结果』更有信息量的材料——因为前者告诉你『边界在哪』，后者只告诉你『边界内有什么』**」；(d) ⭐⭐⭐⭐ **「总体通过、分项失败」被写成两条并列结论**：「**The package passes the overall 90% rule and fails the per-category 90% rule. Both statements belong in the release.**」，分项表 **Single 20/20、Parallel 20/20、Sequential 20/20、Parallel-multiple 10/3 (30%)、Abstention 20/20、Overall 90/83 (92.2%)**；⭐⭐ 判据（本轮最重要）「**『一个聚合分数是否可信』取决于『它的分母里最小的那一格有多大』**」；⭐⭐ 作者第 7 条教训：「**Report category denominators. An aggregate can hide a completely dead action family or reward a model that always abstains.**」；(e) ⭐⭐⭐ **「干跑投影」：算不平就不开始打包**：「**The package builder has a dry-run projection. It refuses to begin the expensive pack unless the projected candidate, required reserve, and selected demotions fit under the declared limit.**」，投影 8,551,634,944 逻辑权重字节，预留 25,000,000 字节；⭐⭐ 判据（本轮最重要）「**预检的输出必须是『可行 / 不可行』，不是『大概行』**」；⭐⭐ 判据「**『一个可执行的预算』不是『一个数字』，而是『一个能在花钱之前回答是/否的函数』**」；(f) ⭐⭐⭐ **七条「What we would do differently」，每条都是一次失败**：「**1. Design the behavior gate before the first quantizer. 2. Use balanced tool structures from the start. 3. Budget the vocabulary on day one. 4. Separate the development and release gates earlier. 5. Build the native runtime earlier. 6. Stop pure one-bit work sooner. 7. Report category denominators.**」，其中第 4 条附注「**Once a gate guides a repair, it is no longer untouched.**」 — [src-btl3-impl-appendix]
+### 原始出处文档、Server Edition、41 秒短跑、与不存在的三个目录（第九十一轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `docs/rtx-pro-6000-speed-2026-07-19.md`（1,957 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/rtx-pro-6000-speed-2026-07-19.md) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **本报告 §10.101 那组数字的原始出处文档**。(a) ⚠️⚠️⚠️ **GPU 的完整 SKU**：「**GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition**」、「**GPU memory: 97,887 MiB reported by `nvidia-smi`**」、「**CUDA architecture: `sm_120a`；KV types: FP16**」；⭐⭐ 判据（本轮最重要）「**『型号』与『SKU』是两个不同的粒度——而『RTX PRO 6000』这个名字下面至少有 Server Edition 与 Workstation Edition 两款**」；⭐⭐ 判据「**当两个 SKU 的『标称参数完全相同』时，它们的差异不在参数表里，而在『持续负载』里——而『持续负载』恰恰是 `llama-bench -r 3` 测不到的东西**」；(b) 🔥🔥🔥 **完整命令**：「**llama-bench -m /vol/release/compact/BTL-3-Compact-AVQ2.gguf -ngl 99 -p 512 -n 128 -r 3 -o json**」；(c) ⚠️⚠️⚠️ **整个基准只跑 41.03 秒**：「**The measured benchmark body, including model load, completed in 41.03 seconds.**」，单次采样「**Generation samples: `42.83`, `43.35`, and `43.30` tok/s. Prompt-processing samples: `84.28`, `84.91`, and `84.91` tok/s**」；⭐⭐ 判据（本轮最重要）「**『σ 小』在短跑里有两种可能：① 系统真的稳；② 三次跑的是同一个热状态——而 41 秒的总时长让 ② 变得非常可能**」；⭐⭐ 判据「**当你要用『σ』来论证『稳定』时，必须先回答『我的采样窗口有多长，而系统的热时间常数有多长』——如果前者远小于后者，那个 σ 只证明了『我测了三次』**」；(d) 🔥🔥🔥🔥🔥 **一张明示为投影的消费级表**：「**These are projections, not measurements. Single-stream decode is scaled primarily from memory bandwidth, then widened to account for architecture, clock, power, kernel occupancy, and driver differences.**」，「**RTX 5090 32GB | 39-44 tok/s | 75-88 tok/s | Fit: Yes；RTX 4090 24GB | 22-28 tok/s | 45-60 tok/s | Fit: Yes；RTX 4050 Laptop 6GB | No credible full-GPU estimate | 同 | Fit: No**」；⭐⭐ 判据（本轮最重要）「**一个『投影区间』比一个『投影点』更诚实，而『区间只往下不往上』更诚实——因为『按带宽缩放』得到的是理论上限**」；⭐⭐ 可检验：**`43.16 × 0.5625 = 24.28 tok/s` 落在作者给的 22-28 区间内且偏上**；⭐⭐ 判据「**『装不下』与『跑得慢』是两个不同类别的问题，而把它们混为一谈会让读者以为『优化一下就能跑』**」 — [src-btl3-doc-rtxpro6000-speed]
+
+2. [GitHub / Badtheorylabs — BTL-3 `artifacts/btl3-compact-gguf-dry-run.json`（910 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/artifacts/btl3-compact-gguf-dry-run.json) —（2026-10 抓取）。⚠️⚠️⚠️ **`source_weight_bytes: 8551772952` 是一个口径陷阱**：「**source_weight_bytes: 8551772952 | source_checksums_verified: 158 | tensor_count: 2416 | projected_tensor_bytes: 8381262032 | exporter_unsupported: [] | native_runtime_gaps: []**」；⚠️ **若它是 BF16 的 27B 权重，则参数量 = 4.28 B——故据此算出的「压缩比 1.019×」是错的**；⭐⭐ 判据（本轮最重要）「**当一个字段的名字里出现『source』时，要问的不是『它是什么』，而是『它是哪一步的 source』**」；⭐⭐ 正确口径：**27B 在 BF16 下约 54 GB，最终 8.39 GB，压缩比约 6.4×，等效 2.48 bpw**——与「Under 2.5 effective bits per parameter」一致；⭐⭐ 判据「**当一个『官方数字』算出来与『官方宣称』矛盾时，先怀疑那个数字的口径，而不是先怀疑那个宣称**」；⚠️ 分项与 `PAPER.tex` 的 `tab:bytes` 完全一致 — [src-btl3-artifact-dry-run]
+
+3. [GitHub API / Badtheorylabs BTL-3 完整文件树](https://api.github.com/repos/Badtheorylabs/BTL-3/git/trees/main?recursive=1) —（2026-10 抓取）。⚠️⚠️⚠️ **本报告列了十几轮的三组目录根本不存在**：`git/trees/main?recursive=1` 返回 **3,439 条目（`truncated=false`）**，顶层只有 **`native/` 2,990、`tools/` 17、`papers/` 16、`integrations/` 12、`tests/` 9、`docs/` 7、`artifacts/` 6、`launch/` 4、`packaging/` 3**；⚠️ **没有 `vendor/`、没有 `pocs/`、没有 `benches/`**；⭐⭐⭐⭐ 判据（本轮最重要）「**『未获取项』清单里最危险的一项，不是『我知道它存在但读不到』，而是『我以为它存在』——因为前者会随着时间变成『已放弃』，而后者会永久占据清单，并且让清单看起来比实际更长**」；⭐⭐ 判据「**一个『未获取项』只有在能被指认时才是诚实的——而『能被指认』的最低标准是『我在某份清单里见过它』，不是『我推断它应该有』**」；⭐⭐ 判据「**当一个清单里的项目长期无法推进时，第一个要问的不是『怎么读到它』，而是『它到底在不在』**」；⭐ **本轮实际结果：清单里 3 项被删除，同时新增 1 项真正的发现** — [src-btl3-repo-tree]
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -23118,7 +23327,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=301, evidence=2283, claims=1681, claims_high=1338, claims_disputed=9, trace_events=671, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=304, evidence=2289, claims=1686, claims_high=1343, claims_disputed=9, trace_events=677, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
