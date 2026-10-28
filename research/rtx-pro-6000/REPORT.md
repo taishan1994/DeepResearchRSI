@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：468 ｜ **证据数**：2935 ｜ **主张数**：2144（高置信 1794，争议 9）
+> **来源数**：468 ｜ **证据数**：2942 ｜ **主张数**：2153（高置信 1803，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -36588,6 +36588,225 @@ exit 0
 > 拿到一份默认构建的二进制，
 > 你得到的是「省着编、拼命跑」的那一档。**
 
+### 10.601 🔥🔥🔥🔥🔥 本报告没有「证据等级」这一维，而 btl-lab 的模板有**五级**
+
+[c-there-is-a-five-rung-evidence-ladder]
+
+> **`EXPERIMENT_TEMPLATE.md` 第 6 行**：
+> ```
+> - Evidence status: untested / diagnostic / measured / reproduced / released
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份研究模板把「证据状态」写成五级而不是两级时，
+> 它承认了一件本报告一直没承认的事：
+> 「我读到了这个事实」与「这个事实被复现过」
+> 是两个不同的陈述。**
+>
+> **⭐⭐ 判据：**
+> **故本报告的 `trust_tier` 与这五级不是同一个轴：
+> 前者答「谁说的」，后者答「验到哪一步」。**
+>
+> ⚠️ **而这条对 RTX PRO 6000 这个主题是致命的：
+> §10 里几乎每一个性能数字都停在 `measured` 之前
+> （因为测的人是别人），
+> 而本报告一直用 `high` 置信度去标记它们。**
+
+### 10.602 ⚠️⚠️⚠️ 那五级阶梯**只出现在模板里**，三份主文档零提及
+
+[c-the-ladder-appears-in-no-other-btl-lab-document]
+
+> **对 btl-lab 三份主文档筛 `untested|diagnostic|reproduced`**：
+> ```
+> WORKFLOWS.md   8,274 字节   0 处
+> AGENTS.md      1,980 字节   0 处
+> README.md      5,321 字节   0 处
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个概念只出现在模板里、而三份主文档都不提它时，
+> 它不是「这个仓库的规范」，
+> 而是「填表时的一个空位」——
+> 而空位是可以被留空的。**
+>
+> **⭐⭐ 判据：**
+> **故本报告不能把「btl-lab 有五级证据阶梯」
+> 写成「btl-lab 的规范要求五级证据」。**
+>
+> ⚠️ **而这条正是本报告第 N 次撞到同一个形状：
+> 「这个字段存在」与「这个字段被使用」之间隔着一整个仓库。**
+
+### 10.603 🔥🔥🔥🔥🔥 四条必须互不替代的事，与一条禁令
+
+[c-four-levels-that-must-stay-distinct]
+
+> **`AGENTS.md` 第 7 行**：
+> > Keep local audit success, imported evidence, hardware validation and
+> > model-quality results distinct. **Never promote a result because a hash or
+> > configuration check passes.**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份规范把「审计通过」与「硬件验证」明确列为不可互相提升的两条时，
+> 它给出的不是流程，而是一条逻辑：
+> 「检查通过」是必要条件，
+> 而它从来不是充分条件。**
+>
+> **⭐⭐ 判据：**
+> **故「DRAM 校验和通过」不能推出「这张卡能跑」，
+> 「CI 绿」不能推出「Blackwell 能跑」——
+> 这正是本报告 §10.583 那条四环链的语言学版本。**
+>
+> ⚠️ **而「Never promote a result because a hash or configuration check passes」
+> 这一句，可以直接搬来当 §10.36 那个 wheel shadowing 的判据。**
+
+### 10.604 ⭐⭐⭐⭐⭐ 训练奖励与自报聚合值**不是**发布证据
+
+[c-training-rewards-are-not-release-evidence]
+
+> **`AGENTS.md` 第 6 行**：
+> > BTL Measure is the independent evaluation product. **Recompute per-item
+> > scores and preserve incomparable/failed reports; never treat training rewards
+> > or self-reported aggregates as release evidence.**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「自报的聚合值」被明确排除在证据之外时，
+> 它同时也在说：
+> 「聚合」这个动作本身就是一次不可逆的信息损失。**
+>
+> **⭐⭐ 判据：**
+> **故本报告 §10 里那些「官方说 XX tok/s」的数字，
+> 按这条规范只能算 tertiary——
+> 因为它们是自报的聚合值。**
+>
+> ⚠️ **而这条给本报告一个可执行的降级清单：
+> 凡「厂商说」「社区榜说」的单一数字，一律不应达到 `high`。**
+
+### 10.605 ⭐⭐⭐⭐⭐ 验收门列了**五个量**，而本报告的 §10 大多缺
+
+[c-the-acceptance-gate-lists-five-things-this-report-lacks]
+
+> **`EXPERIMENT_TEMPLATE.md` 第 24 行**：
+> > Correctness and behavioral quality requirements; **primary metric and
+> > denominator**; **workload distribution**; **comparison budget**;
+> > **variability and repetition policy**. **Separate microbenchmark gains,
+> > end-to-end system speed and learning efficiency.**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份验收门要求「主指标与分母」成对出现时，
+> 「一个数」就不是一个结果——
+> 它只是结果的一半。**
+>
+> **⭐⭐ 判据：**
+> **故本报告 §10 里那些「129.9 tok/s」
+> 缺的不是精度，而是分母（什么工作负载、什么 batch、重复几次）。**
+>
+> ⚠️ **而这条把本报告三条悬着的待办
+> （给每个百分比补分母、给每个数字补重复次数、
+> 给每个「A 比 B 快」补 profile 名）
+> 一次性归到了一个来源下。**
+
+### 10.606 ⚠️⚠️⚠️ 冻结清单的 14 个维度里，最后两个是 `seeds` 与 `equal tuning budget`
+
+[c-fourteen-dimensions-must-be-frozen-two-of-them-are-seeds-and-tuning]
+
+> **`EXPERIMENT_TEMPLATE.md` 第 16 行**（14 个维度压成一句）：
+> > Baseline and candidate source commits; upstream attribution/license;
+> > model revision and checkpoint hashes; dataset manifest and split hashes;
+> > environment/verifier version; hardware and topology; software image;
+> > precision; context and batch shape; optimizer; decoding; **seeds**;
+> > **equal tuning budget**. Identify the single changed variable and any
+> > unavoidable differences.
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份冻结清单把 `seeds` 与 `equal tuning budget` 放在最后时，
+> 它们不是补充项，而是最容易在报告里被忘掉的两项——
+> 因为前 12 项都可以从配置里抄，
+> 而这两项只能靠实验设计。**
+>
+> **⭐⭐ 判据：**
+> **故本报告里所有跨硬件的「A 比 B 快」
+> 都缺 `seeds`（重复了几次）与 `equal tuning budget`（两边调的功夫一样吗）。**
+>
+> ⚠️ **而 `equal tuning budget` 这一项
+> 直接击中 §10 里 Bonsai 与 BTL-3 的对比：
+> 前者有社区调优记录，后者没有。**
+
+### 10.607 ⭐⭐⭐⭐⭐ 同一页上：保留失败，且别把这张表当钱
+
+[c-preserve-negative-outcomes-and-do-not-read-the-template-as-authorization]
+
+> **第 28 行（Result and evidence）末句**：`Preserve negative outcomes.`
+> **第 20 行（Execution and budget）末句**：`Do not interpret this template as spend authorization.`
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份模板在同一页上既说「留下失败」又说「别把这张表当钱」时，
+> 它防的是两种相反的错误：
+> 一是删掉不利结果，
+> 二是把「填了表」当成「批准了」。**
+>
+> **⭐⭐ 判据：**
+> **故本报告的结构（`claims.csv` 里 9 条 `disputed`、
+> §10 里那些「与上一轮结论相反」的小节）
+> 恰好符合第一条，而从来没有第二条的风险——
+> 因为本报告从不申请预算，也从不产出授权。**
+>
+> ⚠️ **而这条给本报告一个自评：
+> 「保留失败」这一项，做到了；
+> 而「保留失败」的更深一层是「保留那些让读者不舒服的失败」，
+> 后者本报告只在 9 条 `disputed` 里做到了。**
+
+### 10.608 🔥🔥🔥🔥🔥 按那五级，本报告整体停在 `diagnostic`
+
+[c-this-report-sits-at-measured-not-reproduced]
+
+> | 五级 | 含义 | 本报告的位置 |
+> |---|---|---|
+> | `untested` | 没测过 | — |
+> | `diagnostic` | 做了诊断，未亲测 | **← 全部性能数字** |
+> | `measured` | 亲测过 | **← 全部代码/文档事实** |
+> | `reproduced` | 被第三方复现 | **没有一条** |
+> | `released` | 随发布物交付 | **没有一条** |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份报告用「我读到了别人的测量」去支撑「高置信」时，
+> 它把两个不同主体的动作合并成了一个词——
+> 而五级阶梯的第一个作用就是不让这种合并发生。**
+>
+> **⭐⭐ 判据：**
+> **故本报告的 1,803 条 `high` 里，
+> 凡涉及性能数字的，其真实等级是 `diagnostic`：
+> 我诊断了那些数字的来源与一致性，
+> 而我没有测量它们。**
+>
+> ⚠️ **而这不是要降级全部——
+> 「`release.yml` 里没有 `linux-cuda`」这类代码事实，
+> 在本报告里确实是 `measured`（我读了文件）。
+> 故正确的做法是分工：
+> 代码与文档事实用 `high`，
+> 别人测出的性能数字用 `diagnostic` 并注明。**
+
+### 10.609 ⭐⭐⭐⭐⭐ 两类主张，两个等级——**从此分两栏**
+
+[c-the-code-facts-are-measured-and-the-perf-numbers-are-diagnostic]
+
+> | 类 | 例 | 主语 | 等级 |
+> |---|---|---|---|
+> | 代码与文档事实 | `release.yml` 没有 `linux-cuda`；`PDL` 默认开 | **我读了原文** | `measured` |
+> | 性能数字 | `129.9 tok/s`；`43.16 tok/s` | **他人测出** | `diagnostic` |
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一份报告里「我读到的」与「别人测出的」被同一个词标记时，
+> 那个词就不再传递信息——
+> 而修它的成本不是重写，只是分两栏。**
+>
+> **⭐⭐ 判据：**
+> **故本报告此后凡性能数字，
+> 一律在 `notes` 里写明「他人实测，本报告未复现」。**
+>
+> ⚠️ **而这条的普适价值是：
+> 它把「置信度」从一个形容词变成了一个主语问题——
+> 问「谁做的」，而不是「有多确定」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -42937,6 +43156,48 @@ BTL-3 的 `fattn.cu` 是 **23,551 字节 / 597 行**，`launch` 0、`<<<` 0、`k
 ⭐⭐ 判据（本轮最重要）「**当同一份代码在编译期极度保守、在运行期却默认开启一个会削弱另一优化的特性时，那不是不一致，而是「编译期省的是构建资源，运行期赌的是运行时收益」——两个不同的成本账户。故此前把「默认关」当成「不推荐」的读法在这里第一次失效**」——**⚠️ 而这条对 PRO 6000 的实操含义是：拿到一份默认构建的二进制，你得到的是「省着编、拼命跑」的那一档**；
  — [src-btl3-common-cuh] [src-btl3-cuda-dispatch] [src-btl3-cuda-cmakelists]
 
+### 五级证据阶梯：本报告停在 diagnostic（第一百七十三轮补充）
+
+本轮换了一条判据：不再问「还有哪个文件没读」，而问「**这份报告凭什么说自己是高置信**」。答案在 btl-lab 的 `EXPERIMENT_TEMPLATE.md` 第 6 行：那一行给出一个**五级证据阶梯**「**untested / diagnostic / measured / reproduced / released**」——**而按它自评，本报告的全部性能数字只到 `diagnostic`。**
+
+1. 🔥🔥🔥🔥🔥 **本报告没有「证据等级」这一维，而模板有五级**：
+`EXPERIMENT_TEMPLATE.md` 第 6 行是「**- Evidence status: untested / diagnostic / measured / reproduced / released**」；
+
+⭐⭐ 判据（本轮最重要）「**当一份研究模板把「证据状态」写成五级而不是两级时，它承认了一件本报告一直没承认的事：「我读到了这个事实」与「这个事实被复现过」是两个不同的陈述。故本报告的 trust_tier 与这五级不是同一个轴：前者答「谁说的」，后者答「验到哪一步」**」——**⚠️ 而这对 PRO 6000 是致命的：§10 里几乎每一个性能数字都停在 measured 之前，而本报告一直用 high 去标记它们**；
+2. ⚠️⚠️⚠️ **那五级阶梯只出现在模板里，三份主文档零提及**：
+对 `WORKFLOWS.md`（8,274 字节）、`AGENTS.md`（1,980 字节）、`README.md`（5,321 字节）筛 `untested|diagnostic|reproduced`：**各 0 处**；
+
+⭐⭐ 判据（本轮最重要）「**当一个概念只出现在模板里、而三份主文档都不提它时，它不是「这个仓库的规范」，而是「填表时的一个空位」——而空位是可以被留空的。故不能把「btl-lab 有五级证据阶梯」写成「btl-lab 的规范要求五级证据」**」——**⚠️ 而这条正是本报告第 N 次撞到同一个形状：「这个字段存在」与「这个字段被使用」之间隔着一整个仓库**；
+3. 🔥🔥🔥🔥🔥 **四条必须互不替代的事，与一条禁令**：
+`AGENTS.md` 第 7 行是「**Keep local audit success, imported evidence, hardware validation and model-quality results distinct. Never promote a result because a hash or configuration check passes.**」；
+
+⭐⭐ 判据（本轮最重要）「**当一份规范把「审计通过」与「硬件验证」明确列为不可互相提升的两条时，它给出的不是流程，而是一条逻辑：「检查通过」是必要条件，而它从来不是充分条件。故「DRAM 校验和通过」不能推出「这张卡能跑」，「CI 绿」不能推出「Blackwell 能跑」**」——**⚠️ 而「Never promote a result because a hash or configuration check passes」这一句，可以直接搬来当 §10.36 那个 wheel shadowing 的判据**；
+4. ⭐⭐⭐⭐⭐ **训练奖励与自报聚合值不是发布证据**：
+`AGENTS.md` 第 6 行是「**Recompute per-item scores and preserve incomparable/failed reports; never treat training rewards or self-reported aggregates as release evidence.**」；
+
+⭐⭐ 判据（本轮最重要）「**当「自报的聚合值」被明确排除在证据之外时，它同时也在说：「聚合」这个动作本身就是一次不可逆的信息损失。故本报告 §10 里那些「官方说 XX tok/s」的数字，按这条规范只能算 tertiary**」——**⚠️ 故凡「厂商说」「社区榜说」的单一数字，一律不应达到 high**；
+5. ⭐⭐⭐⭐⭐ **验收门列了五个量，而 §10 大多缺**：
+第 24 行要求「**primary metric and denominator; workload distribution; comparison budget; variability and repetition policy**」，并「**Separate microbenchmark gains, end-to-end system speed and learning efficiency**」；
+
+⭐⭐ 判据（本轮最重要）「**当一份验收门要求「主指标与分母」成对出现时，「一个数」就不是一个结果——它只是结果的一半。故「129.9 tok/s」缺的不是精度，而是分母（什么工作负载、什么 batch、重复几次）**」——**⚠️ 而这条把本报告三条悬着的待办（补分母、补重复次数、补 profile 名）一次性归到了一个来源下**；
+6. ⚠️⚠️⚠️ **冻结清单 14 个维度里，最后两个是 `seeds` 与 `equal tuning budget`**：
+第 16 行把 14 个维度压成一句，末尾是「**optimizer; decoding; seeds; equal tuning budget. Identify the single changed variable and any unavoidable differences.**」；
+
+⭐⭐ 判据（本轮最重要）「**当一份冻结清单把 seeds 与 equal tuning budget 放在最后时，它们不是补充项，而是最容易在报告里被忘掉的两项——因为前 12 项都可以从配置里抄，而这两项只能靠实验设计。故所有跨硬件的「A 比 B 快」都缺这两项**」——**⚠️ 而 equal tuning budget 直接击中 Bonsai 与 BTL-3 的对比：前者有社区调优记录，后者没有**；
+7. ⭐⭐⭐⭐⭐ **同一页上：保留失败，且别把这张表当钱**：
+第 28 行末句「**Preserve negative outcomes.**」，第 20 行末句「**Do not interpret this template as spend authorization.**」；
+
+⭐⭐ 判据（本轮最重要）「**当一份模板在同一页上既说「留下失败」又说「别把这张表当钱」时，它防的是两种相反的错误：一是删掉不利结果，二是把「填了表」当成「批准了」。故本报告的结构恰好符合第一条，而从来没有第二条的风险**」——**⚠️ 而「保留失败」的更深一层是「保留那些让读者不舒服的失败」，后者本报告只在 9 条 disputed 里做到了**；
+8. 🔥🔥🔥🔥🔥 **按那五级，本报告整体停在 `diagnostic`**：
+六个位置排好：「**untested（没测过）/ diagnostic（做了诊断，未亲测）/ measured（亲测过）/ reproduced（被第三方复现）/ released（随发布物交付）**」——**全部性能数字在 diagnostic，全部代码与文档事实在 measured，而 reproduced 与 released 一条都没有**；
+
+⭐⭐ 判据（本轮最重要）「**当一份报告用「我读到了别人的测量」去支撑「高置信」时，它把两个不同主体的动作合并成了一个词——而五级阶梯的第一个作用就是不让这种合并发生。故 1,803 条 high 里，凡涉及性能数字的，其真实等级是 diagnostic**」——**⚠️ 而这不是要降级全部：「release.yml 里没有 linux-cuda」这类代码事实确实是 measured。故正确的做法是分工**；
+9. ⭐⭐⭐⭐⭐ **两类主张，两个等级——从此分两栏**：
+表格两行：「**代码与文档事实（如没有 linux-cuda、PDL 默认开）——我读了原文，属 measured**」；「**性能数字（如 129.9 tok/s、43.16 tok/s）——他人测出，我只做了一致性诊断，属 diagnostic**」；
+
+⭐⭐ 判据（本轮最重要）「**当同一份报告里「我读到的」与「别人测出的」被同一个词标记时，那个词就不再传递信息——而修它的成本不是重写，只是分两栏。故此后凡性能数字，一律在 notes 里写明「他人实测，本报告未复现」**」——**⚠️ 而这条的普适价值是：它把「置信度」从一个形容词变成了一个主语问题——问「谁做的」，而不是「有多确定」**；
+ — [src-btl-lab-experiment-template] [src-btl-lab-agents-md]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -43076,7 +43337,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=468, evidence=2935, claims=2144, claims_high=1794, claims_disputed=9, trace_events=1007, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=468, evidence=2942, claims=2153, claims_high=1803, claims_disputed=9, trace_events=1007, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
