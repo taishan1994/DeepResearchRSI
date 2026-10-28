@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：412 ｜ **证据数**：2732 ｜ **主张数**：1935（高置信 1587，争议 9）
+> **来源数**：414 ｜ **证据数**：2740 ｜ **主张数**：1943（高置信 1595，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -30421,6 +30421,236 @@ exit 0
 > 一个是质量门，一个是发布门；两个都还没过。**
 > **故这是一个尚未发布的实验，而不是一个隐藏的缺陷。**
 
+### 10.392 🔥🔥🔥🔥🔥 那个拒绝是**明确写出**的，不是缺席
+
+[c-dspark-cli-refusal-is-explicit-and-documented-in-code]
+
+> **`common/speculative.cpp` 40-46 行，七行注释**：
+> ```
+> // draft-dspark requires the driver to engage multi-layer capture on the
+> // target context (llama_set_capture_layers with the drafter's target layer
+> // ids, plus logits requested on every row) before drafting -- see
+> // need_embd_capture()/process(). The reference driver that does this is
+> // tests/test-dspark-real-eval.cpp; the generic CLI (--spec-type) and server
+> // paths do NOT yet engage capture, so selecting draft-dspark there currently
+> // fails at the first draft round with a clear error rather than running.
+> ```
+>
+> **它把前置条件写全了三项**：target context、`llama_set_capture_layers`、
+> 每个位置都请求 logits。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个功能还没接上」有两种写法：静默不工作，与在第一轮就抛一个清晰的错误；
+> 而后者是一个可以被引用的状态声明。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.391 那条「不在文档类型表里」要补一句：
+> 它在代码里是「可用但会拒绝」，不是「可用但会静默错」。**
+>
+> **⭐⭐ 这条使 DSpark 的成熟度评级从「实验」精确到「实验，且失败模式是响亮的」。**
+>
+> ⭐ **而这也是本报告反复引用的那条判据的一个实例**：
+> **「成功静默、失败响亮」是构建脚本的正确姿势**（§10.196 一带）——
+> **这里它被用在了运行时。**
+
+### 10.393 🔥🔥🔥🔥🔥 代码注册 **10** 个类型，文档只列 **8** 个
+
+[c-code-registers-ten-types-docs-list-eight]
+
+> **`common/speculative.cpp` 35-53 行的映射表（10 个）**：
+> ```
+> none / draft-simple / draft-eagle3 / draft-mtp / draft-dspark /
+> ngram-simple / ngram-map-k / ngram-map-k4v / ngram-mod / ngram-cache
+> ```
+> **`docs/speculative.md` 246-255 行的表（8 个）**：
+> ```
+> none / draft-simple / draft-mtp / ngram-cache /
+> ngram-simple / ngram-map-k / ngram-map-k4v / ngram-mod
+> ```
+> **差集恰好是 `draft-eagle3` 与 `draft-dspark`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个被排除的集合里有两个成员时，
+> 要找的不是「它们各自为什么被排除」，而是「它们共享了什么」。**
+>
+> **⭐⭐ 判据：**
+> **而这里它们共享的是 capture 依赖——
+> 这由 `llama-ext.h:107` 的节标题直接命名。**
+>
+> **⭐⭐ 故那次排除不是针对 DSpark 的，而是针对一整类
+> 「需要目标侧配合」的实现。**
+
+### 10.394 ⭐⭐⭐⭐⭐ 两个被排除的类型**共享同一个原语**
+
+[c-the-two-excluded-types-share-capture-dependency]
+
+> **`src/llama-ext.h` 107 行的节标题**：
+> ```
+> // multi-layer hidden-state tap (EAGLE3 / dspark target-feature reuse)
+> ```
+> **而 `common/speculative.h` 65-69 行**：
+> 「**true if any implementation requires the target's multi-layer tap capture
+> (see `llama_set_capture_layers` / `llama_get_embeddings_capture_ith`) --
+> used by dspark, which conditions on several intermediate target layers
+> concatenated per position rather than a single pre/post-norm embedding.**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个共享的原语如果在一处注释里被两个消费者同时点名，
+> 那这两个消费者在「能不能被通用调用方驱动」这个问题上大概率同命。**
+>
+> **⭐⭐ 判据：**
+> **故「DSpark 没有 CLI」不能单独看；
+> 它是「凡是用多层级 tap 的实现都没有 CLI」的一个实例。**
+>
+> **⭐⭐ 而这条把一个单点观察升级成了一条分类规则。**
+>
+> ⭐ **它同时解释了为什么 §10.381 的接口面那么窄**：
+> **`need_embd_capture()` 是一个 bool，因为「要不要捕获」是这一类实现唯一
+> 能被通用调用方问的问题；其余参数（层号、宽度）都在实现内部。**
+
+### 10.395 🔥🔥🔥🔥🔥 `--help` 是**枚举出来的**，故它比文档新
+
+[c-spec-type-help-is-generated-from-the-enum]
+
+> **`common/speculative.cpp` 1959-1985 行**：
+> ```cpp
+> const char * common_speculative_all_types_str() {
+>     static std::string all_types_str = []() {
+>         std::vector<common_speculative_type> types;
+>         types.reserve(COMMON_SPECULATIVE_TYPE_COUNT);
+>         for (int i = 0; i < COMMON_SPECULATIVE_TYPE_COUNT; i++) {
+>             types.push_back((common_speculative_type) i);
+>         }
+>         return common_speculative_type_name_str(types);
+>     }();
+>     return all_types_str.c_str();
+> }
+> ```
+> **故它返回全部 10 个名字，含 `draft-eagle3` 与 `draft-dspark`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份「由代码生成的帮助文本」比一份「手写的帮助文本」更难撒谎，
+> 但它也更容易比文档新——
+> 因为代码一改它就跟着改，而文档不会。**
+>
+> **⭐⭐ 判据：**
+> **故「`--help` 里有它」与「文档里有它」是两个独立的事实，
+> 而前者是更弱的那一个：它只说明枚举里有。**
+
+### 10.396 ⭐⭐⭐⭐⭐ 一个「零命中」的正确解释
+
+[c-arg-cpp-never-holds-the-type-names]
+
+> **`common/arg.cpp` 里 `dspark` 出现 `0` 次**（192,432 字节，4,185 行），
+> **而 `--spec-type draft-dspark` 仍然可用。**
+>
+> **原因在 3656 行**：
+> ```cpp
+> {"--spec-type"}, common_speculative_all_types_str(),
+> ```
+> **即帮助文本由注册表生成。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **在一个文件里 grep 不到某个字符串，
+> 可能不是「这个功能不在这里」，而是「这个文件不存这个名字」。**
+>
+> **⭐⭐ 判据：**
+> **而 `arg.cpp` 是「选项定义文件」，不是「值域定义文件」——
+> 值域在 `speculative.cpp` 的映射表里。**
+>
+> **⭐⭐ 故「零命中」的正确解释要先问「这个文件的职责包不包括存这个名字」。**
+>
+> ⚠️ **这是本报告第一次把「零命中」这件事本身拆成三种解释**：
+> ```
+> ① 功能不在这里
+> ② 这个文件不存这个名字      <- 本条
+> ③ 我搜的机制不对
+> ```
+> **而三者的分界只能靠读那个文件的结构，不能靠再搜一次。**
+
+### 10.397 ⚠️⚠️⚠️ `--help` 列 10 个，文档列 8 个
+
+[c-help-lists-ten-while-the-doc-lists-eight]
+
+> **帮助文本来自 `common_speculative_all_types_str()`（全部 10 个），
+> 而 `docs/speculative.md` 的表是 8 个。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当帮助文本比文档更全时，
+> 那不是文档的疏漏，而是「这两个东西的作者不是同一个人在同一时刻」。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.390（文档里不存在 DSpark）加了一个精确的补语：
+> 文档里不存在，但 `--help` 里存在——
+> 所以「不读源码就用不了」这句话要改成
+> 「读了 `--help` 就知道了，但没有一处解释它」。**
+
+### 10.398 ⭐⭐⭐⭐⭐ 那个 `set_input` 的形参**没有名字**
+
+[c-set-input-takes-an-unnamed-ubatch]
+
+> **`src/llama-graph.cpp` 152-160 行**：
+> ```cpp
+> void llm_graph_input_dspark_ctx::set_input(const llama_ubatch *) {
+>     // ignores ubatch entirely (like llm_graph_input_cross_embd): the context
+>     // feature row count (n_ctx_rows) is independent of the current ubatch's
+>     // token count and comes purely from the staged llama_dspark_ctx.
+>     if (ctx_feat && dctx && !dctx->v_ctx_feat.empty()) {
+>         GGML_ASSERT((int64_t) dctx->v_ctx_feat.size() == ggml_nelements(ctx_feat));
+>         ggml_backend_tensor_set(ctx_feat, dctx->v_ctx_feat.data(), 0,
+>                                 ggml_nbytes(ctx_feat));
+>     }
+> }
+> ```
+> **注意形参是 `const llama_ubatch *` 后面直接跟 `)`——
+> 它在 C++ 里没有名字。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「形参无名字」比「注释说不用」强一级，
+> 因为前者会让「你用了它」变成编译警告而不是一句谎。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.389 那条「位置晚绑定到 batch」在这里有一个精确的边界：
+> `set_input` 不看 batch 的 token，
+> 而位置由**另一个**输入类（`llm_graph_input_pos::set_input`，162 行）负责。**
+>
+> **⭐⭐ 两个输入类各管一半——这才是「数据与位置分开传递」的代码形态。**
+>
+> ⭐ **而那句 `GGML_ASSERT` 是整条链上唯一的断言**：
+> **它断言「暂存的特征元素数恰好等于图里那个张量的元素数」——
+> 即「宽度和行数都对上了」。这是 §10.385 那个 `n_ctx_rows` 的唯一守卫。**
+
+### 10.399 ⚠️⚠️⚠️ `logsnr` 那个类**只有声明，没有实现**
+
+[c-logsnr-input-class-has-no-implementation]
+
+> **`dspark` 在 `src/llama-graph.cpp`（114,732 字节，3,259 行）里只出现 4 处**：
+> ```
+> 142
+> 152     llm_graph_input_dspark_ctx::set_input
+> 155         （同一函数的注释）
+> 1110
+> ```
+> **故 `llm_graph_input_dspark_logsnr` 在这份实现文件里没有成员函数定义。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个类如果在头文件里被声明、而实现文件里没有它的成员函数定义，
+> 那它要么是「还没写」，要么是「只被构造、从不被驱动」。**
+>
+> **⭐⭐ 判据：**
+> **而 `logsnr` 属于后者：它被构造（用来占住图里的一个输入槽），
+> 但它的 `set_input` 走的是基类的纯虚——
+> 故它根本不可能被实例化为一个具体对象。**
+>
+> **⭐⭐ 这条让 §10.374 从「数值上无影响」升级为「结构上无实现」。**
+>
+> ⭐ **而两条独立路径指向同一个结论**：
+> ```
+> 数值路径   t 只取 0 与 1000，归一化参数被约掉     (§10.374)
+> 结构路径   那个输入类没有 set_input 定义           (§10.399)
+> ```
+> **前者说「它算了也没用」，后者说「它根本没算」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -35779,6 +36009,44 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ **而两条独立证据指向同一个结论：10.360 说「接受率还没打赢 MTP」，本节说「不在文档类型表里」——一个是质量门，一个是发布门；两个都还没过。故这是一个尚未发布的实验，而不是一个隐藏的缺陷**；
  — [src-btl3-graph-h] [src-btl3-llama-ext-h] [src-btl3-docs-speculative-md]
 
+### 那个拒绝是写出来的，而 --help 比文档新（第一百四十六轮补充）
+
+上一轮结尾说两件事：读 `set_input` 的实现，以及 `common/arg.cpp` 里 `draft-dspark` 的解析处。本轮两件都做了，而第二件给出了一个我没预料到的结果：
+**`arg.cpp` 里 `dspark` 出现 0 次**——因为那个文件的 `--spec-type` 帮助文本是**枚举出来的**。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/common/speculative.cpp`（97,104 字节，2,442 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/common/speculative.cpp)
+ —（2026-10 重读）。
+🔥🔥🔥🔥🔥 **那个拒绝是明确写出的，不是缺席**：40-46 行七行注释写「**draft-dspark requires the driver to engage multi-layer capture on the target context (llama_set_capture_layers with the drafter's target layer ids, plus logits requested on every row) before drafting ... the generic CLI (--spec-type) and server paths do NOT yet engage capture, so selecting draft-dspark there currently fails at the first draft round with a clear error rather than running**」；
+⭐⭐ 判据（本轮最重要）「**「一个功能还没接上」有两种写法：静默不工作，与在第一轮就抛一个清晰的错误；而后者是一个可以被引用的状态声明**」——**故 10.391 那条「不在文档类型表里」要补一句：它在代码里是「可用但会拒绝」，不是「可用但会静默错」**；
+⭐⭐ **这条使 DSpark 的成熟度评级从「实验」精确到「实验，且失败模式是响亮的」**；
+(a) 🔥🔥🔥🔥🔥 **代码注册 10 个类型，文档只列 8 个**：映射表（35-53 行）是 none / draft-simple / draft-eagle3 / draft-mtp / draft-dspark / ngram-simple / ngram-map-k / ngram-map-k4v / ngram-mod / ngram-cache，**而文档表是 8 个，差集恰好是 draft-eagle3 与 draft-dspark**；
+⭐⭐ 判据「**当一个被排除的集合里有两个成员时，要找的不是「它们各自为什么被排除」，而是「它们共享了什么」**」——**而这里它们共享的是 capture 依赖**；
+(b) ⭐⭐⭐⭐⭐ **两个被排除的类型共享同一个原语**：**llama-ext.h 107 行的节标题是「multi-layer hidden-state tap (EAGLE3 / dspark target-feature reuse)」**；
+⭐⭐ 判据（本轮最重要）「**一个共享的原语如果在一处注释里被两个消费者同时点名，那这两个消费者在「能不能被通用调用方驱动」这个问题上大概率同命**」——**故「DSpark 没有 CLI」不能单独看；它是「凡是用多层级 tap 的实现都没有 CLI」的一个实例。这条把一个单点观察升级成了一条分类规则**；
+⭐⭐ **它同时解释了为什么 10.381 的接口面那么窄：need_embd_capture() 是一个 bool，因为「要不要捕获」是这一类实现唯一能被通用调用方问的问题**；
+(c) 🔥🔥🔥🔥🔥 **--help 是枚举出来的，故它比文档新**：**common_speculative_all_types_str()（1959-1985 行）遍历 COMMON_SPECULATIVE_TYPE_COUNT 并逐个转名，故它返回全部 10 个名字**；
+⭐⭐ 判据「**一份「由代码生成的帮助文本」比一份「手写的帮助文本」更难撒谎，但它也更容易比文档新——因为代码一改它就跟着改，而文档不会**」；
+2. [GitHub / Badtheorylabs — `native/llama.cpp/common/arg.cpp`（192,432 字节，4,185 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/common/arg.cpp)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **一个「零命中」的正确解释**：**dspark 在这份文件里出现 0 次，而 --spec-type draft-dspark 仍然可用；原因在 3656 行：{"--spec-type"}, common_speculative_all_types_str()**；
+⭐⭐ 判据（本轮最重要）「**在一个文件里 grep 不到某个字符串，可能不是「这个功能不在这里」，而是「这个文件不存这个名字」**」——**而 arg.cpp 是「选项定义文件」，不是「值域定义文件」：值域在 speculative.cpp 的映射表里**；
+⚠️ **这是本报告第一次把「零命中」这件事本身拆成三种解释**：**① 功能不在这里；② 这个文件不存这个名字；③ 我搜的机制不对——而三者的分界只能靠读那个文件的结构，不能靠再搜一次**；
+(d) ⚠️⚠️⚠️ **--help 列 10 个，文档列 8 个**：
+⭐⭐ 判据「**当帮助文本比文档更全时，那不是文档的疏漏，而是「这两个东西的作者不是同一个人在同一时刻」**」——**故 10.390 那条要改口：「不读源码就用不了」应改成「读了 --help 就知道了，但没有一处解释它」**；
+3. [GitHub / Badtheorylabs — `native/llama.cpp/src/llama-graph.cpp`（114,732 字节，3,259 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/llama-graph.cpp)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **那个 set_input 的形参没有名字**：「**void llm_graph_input_dspark_ctx::set_input(const llama_ubatch *) { // ignores ubatch entirely (like llm_graph_input_cross_embd): the context feature row count (n_ctx_rows) is independent of the current ubatch's token count ...**」——**形参是 const llama_ubatch * 后面直接跟 )**；
+⭐⭐ 判据「**「形参无名字」比「注释说不用」强一级，因为前者会让「你用了它」变成编译警告而不是一句谎**」——
+⭐⭐ **故 10.389 那条「位置晚绑定到 batch」有一个精确边界：set_input 不看 batch 的 token，而位置由另一个输入类（llm_graph_input_pos::set_input，162 行）负责——两个输入类各管一半，这才是「数据与位置分开传递」的代码形态**；
+⭐ **而那句 GGML_ASSERT 是整条链上唯一的断言：它断言「暂存的特征元素数恰好等于图里那个张量的元素数」——即「宽度和行数都对上了」。这是 10.385 那个 n_ctx_rows 的唯一守卫**；
+(e) ⚠️⚠️⚠️ **logsnr 那个类只有声明，没有实现**：**dspark 在这份实现文件里只出现 4 处（142、152、155、1110），而 152 与 155 都属于 dspark_ctx::set_input 及其注释**；
+⭐⭐ 判据「**一个类如果在头文件里被声明、而实现文件里没有它的成员函数定义，那它要么是「还没写」，要么是「只被构造、从不被驱动」**」——**而 logsnr 属于后者：它的 set_input 走基类纯虚，故它根本不可能被实例化为一个具体对象**；
+⭐⭐ **这条让 10.374 从「数值上无影响」升级为「结构上无实现」：数值路径说「它算了也没用」，结构路径说「它根本没算」**；
+ — [src-btl3-speculative-cpp] [src-btl3-arg-cpp] [src-btl3-graph-cpp]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -35918,7 +36186,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=412, evidence=2732, claims=1935, claims_high=1587, claims_disputed=9, trace_events=895, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=414, evidence=2740, claims=1943, claims_high=1595, claims_disputed=9, trace_events=899, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
