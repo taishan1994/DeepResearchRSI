@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：365 ｜ **证据数**：2595 ｜ **主张数**：1843（高置信 1496，争议 9）
+> **来源数**：368 ｜ **证据数**：2602 ｜ **主张数**：1846（高置信 1499，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -27137,6 +27137,141 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > **一个自称 static 的检查，其输出的布尔量必须带 static 前缀；
 > 否则它会继承运行时布尔量的可信度。**
 
+### 10.300 🔥🔥🔥🔥🔥 `RepetitionGuard` 是**活的守卫，它的输出通道是异常**
+
+[c-repetition-guard-throws-not-dead]
+
+> **`integrations/lmstudio/btl3-native/src/generator.ts` 第 25-46 行**：
+> ```typescript
+> class RepetitionGuard {
+>   private text = "";
+>
+>   push(fragment: string): void {
+>     this.text = (this.text + fragment).slice(-16_000);
+>     const words = this.text.toLowerCase().match(/[\p{L}\p{N}_'-]+/gu) ?? [];
+>     for (let width = 6; width <= 32; width += 1) {
+>       if (words.length < width * 4) continue;
+>       const end = words.length;
+>       const block = words.slice(end - width, end).join(" ");
+>       const repeated = [2, 3, 4].every(offset =>
+>         words.slice(end - width * offset, end - width * (offset - 1)).join(" ") === block
+>       );
+>       if (repeated) {
+>         throw new Error(
+>           "BTL-3 stopped a repeated-output loop. Retry with thinking disabled or a shorter context.",
+>         );
+>       }
+>     }
+>   }
+> }
+> ```
+
+> **🔥🔥🔥🔥🔥 我原本想证明这里有一个「只写不读」的守卫。
+> ⚠️ 而读完之后发现它根本不是。**
+>
+> **它的返回类型是 `void`，但它在自己内部直接 `throw`——
+> 故输出通道是异常，不是返回值。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「push 之后没人读」的守卫，和一个「在 push 里就抛错」的守卫，
+> 长得一模一样，行为完全不同；
+> 而区分它们只需要看返回类型和函数体。**
+>
+> **⭐⭐ 为什么会差点写错**：
+> **因为我从「调用点的形状」推断「数据流向」。**
+>
+> **⭐⭐ 判据：**
+> **调用点的形状只能告诉你「它被调了」，不能告诉你「结果去哪了」；
+> 而 `void` 函数的「结果」可能就是它的副作用。**
+
+> ⭐⭐⭐⭐⭐ **可算出的最小触发长度：24 个词**。
+> **`width` 从 6 到 32，触发需 `words.length >= width * 4`
+> 且末尾四个 `width` 块逐字相同**——
+> **故 `width = 6` 时门槛最低：24 词，
+> 最小可触发文本 = 6 词块重复 4 次（如 `a b c d e f` 重复 4 次 = 24 词 / 39 字符）。**
+> **而缓冲上限 `slice(-16_000)` 只裁掉更早的内容，不影响最短触发。**
+>
+> **⭐⭐ 而错误文案本身是一条证据**：
+> **「Retry with thinking disabled or a shorter context」——
+> 作者把这归因为 thinking 或长上下文，而不是采样参数。**
+>
+> **⭐⭐ 判据：**
+> **一个错误文案里的建议，是作者对成因的判断，
+> 而那句话可以和我测到的参数表直接对账。**
+
+### 10.301 🔥🔥🔥🔥🔥 声明 **256 Ki**，五份实现最大 **128 Ki**
+
+[c-declared-262144-unreachable]
+
+> **`model.yaml`**：
+> ```yaml
+> metadataOverrides:
+>   contextLengths:
+>     - 262144
+> ```
+
+> **而 `chooseContext` 现在已知有五份**：
+
+| 实现 | 语言 | 显存分档 | 平台分支 | PRO 6000 得 |
+|---|---|---|---|---|
+| `launch/btl3-cuda-server` | sh | 有 | 无 | **131,072** |
+| `launch/btl3-cuda-server.ps1` | PowerShell | 有 | 无 | **131,072** |
+| `launch/btl3-server`（macOS） | sh | 无（硬编码 32768） | `uname` | 32,768 |
+| `launch/btl3-ollama-bridge` | sh | 无（硬编码 32768） | 无 | 32,768 |
+| **`src/nativeRunner.ts`** | TypeScript | 有 | **`darwin → 4096`** | **131,072** |
+
+> **⭐⭐ 三份带分档的阈值逐字相同**：
+> **`96000→131072`、`48000→98304`、`28000→65536`、`20000→32768`、否则 `16384`。**
+> **而 `nativeRunner.ts` 是唯一多一条 `darwin → 4096` 的。**
+>
+> **🔥🔥🔥🔥🔥 故「这个模型支持 256K」这句话，在这个仓库里没有任何一条路径能走到。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个能力声明（`contextLengths`）如果没有任何一条路径能走到，
+> 那它不是「支持」，而是「上限的意图书」。**
+>
+> **⭐⭐ 判据：**
+> **一个上限值若在五处独立出现且都相同，
+> 它就是这套代码的真实上限；而文档里的更大值只是未实现的目标。**
+>
+> ⚠️⚠️ **实用含义（本条对 RTX PRO 6000 的读者最直接）**：
+> **在这张卡上，BTL-3 Compact 的实际可用上下文是 131,072，不是 262,144。**
+> **想用 256K 必须显式设 `BTL3_CTX_SIZE`，
+> ⚠️ 而那条路径没有任何一处校验显存够不够。**
+
+### 10.302 ⚠️⚠️⚠️ 【更正】校验器里是 **24 处** `require`，不是 37 处
+
+[c-validate-lmstudio-24-requires-all-present]
+
+> **用精确正则 `require\(\s*(source|config|runner|model_yaml)\s*,\s*"..."` 抓取**，
+> **得到 24 条：`source` 13、`config` 1、`runner` 9、`model_yaml` 1。**
+
+> **⚠️⚠️⚠️ 而我第 202 轮写的「37 项」是把「所有校验动作」与「`require` 调用」混算了。**
+>
+> **⭐⭐ 而那 24 条全部命中，0 缺失。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个校验器「全部通过」这个结果，
+> 只有在「检查项数」也被独立数过之后才有意义。**
+>
+> **⭐⭐ 判据：**
+> **一个批评如果数字错了，它的方向仍可能对，但它的强度被削弱了；
+> 故数字必须先更正，再保留方向。**
+>
+> **⭐⭐ 而「24 项全命中」这个事实本身有价值**：
+> **它说明这个校验器没有虚报——它要求的字符串真的都在。**
+> **⚠️ 问题仍然在 §10.299 那条：这些字符串存在，不等于功能会工作。**
+
+> ⭐⭐⭐⭐ **顺带记下 LM Studio 插件写死的四个采样参数**：
+> **`temperature: 0.2`、`top_p: 0.9`、`repeat_penalty: 1.1`、`repeat_last_n: 512`**——
+> **而这四个在 `config.ts` 里没有对应项**
+> （只有 `baseUrl` / `autoStart` / `thinkingMode` / `maxTokens`）。
+> **故 LM Studio 用户能改的只有 thinking 与 `maxTokens`
+> （后者被 `boundedInteger(raw, 2_048)` 夹在 64..16,384 之间）。**
+>
+> **⚠️ 这解释了 §10.293 那条「四种默认上下文」为什么在 LM Studio 侧又多一种行为**：
+> **因为插件把上下文选择也写进了自己的一份实现。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -31804,6 +31939,35 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个常量出现在一个无法测量的位置，不是缺陷；缺陷是这个常量被下游当成测量结果用**」；
  — [src-btl3-tools-build-launch-release] [src-btl3-tools-validate-lmstudio]
 
+### LM Studio 插件三文件（第一百二十八轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 LM Studio 插件 `src/generator.ts`（7,285 字节，239 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/integrations/lmstudio/btl3-native/src/generator.ts)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **`RepetitionGuard` 是活的守卫，输出通道是异常**：
+「**class RepetitionGuard { private text = ; push(fragment: string): void { this.text = (this.text + fragment).slice(-16_000); const words = this.text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []; for (let width = 6; width <= 32; width += 1) { if (words.length < width * 4) continue; const repeated = [2, 3, 4].every(offset => words.slice(end - width * offset, end - width * (offset - 1)).join( ) === block); if (repeated) { throw new Error(BTL-3 stopped a repeated-output loop. Retry with thinking disabled or a shorter context.); } } } }**」——
+⭐⭐ 判据（本轮最重要）「**一个「push 之后没人读」的守卫，和一个「在 push 里就抛错」的守卫，长得一模一样，行为完全不同；而区分它们只需要看返回类型和函数体**」；
+⭐⭐ 判据「**调用点的形状只能告诉你「它被调了」，不能告诉你「结果去哪了」；而 `void` 函数的「结果」可能就是它的副作用**」；
+(a) ⭐⭐⭐⭐⭐ **可算出的最小触发长度：24 个词**（`width = 6` 时 `6 * 4`，如 `a b c d e f` 重复 4 次 = 24 词 / 39 字符）；
+(b) ⭐⭐ **错误文案里有一条可对账的判断**：「**Retry with thinking disabled or a shorter context**」——**作者把这归因为 thinking 或长上下文，而不是采样参数**；
+(c) ⭐⭐⭐⭐ **四个采样参数写死，不从配置读**：「**temperature: 0.2, top_p: 0.9, repeat_penalty: 1.1, repeat_last_n: 512**」——**而 `config.ts` 只有 baseUrl / autoStart / thinkingMode / maxTokens**；
+2. [GitHub / Badtheorylabs — BTL-3 LM Studio 插件 `src/nativeRunner.ts`（5,943 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/integrations/lmstudio/btl3-native/src/nativeRunner.ts)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **`chooseContext` 的第五份实现，唯一有 darwin 分支的**：
+「**if (process.env.BTL3_CTX_SIZE) return process.env.BTL3_CTX_SIZE; if (process.platform === darwin) return 4096; if (!memoryMiB || memoryMiB < 20_000) return 16384; if (memoryMiB < 28_000) return 32768; if (memoryMiB < 48_000) return 65536; if (memoryMiB < 96_000) return 98304; return 131072;**」——
+⭐⭐ **四档阈值与 sh / ps1 两份逐字相同**；
+3. [GitHub / Badtheorylabs — BTL-3 LM Studio 插件 `model.yaml`（410 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/integrations/lmstudio/btl3-native/model.yaml)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **声明 256 Ki，实现最大 128 Ki**：
+「**metadataOverrides: contextLengths: - 262144**」——
+⚠️ **而五份 `chooseContext` 的最大值都是 `131072`，没有第六种实现**；
+⭐⭐ 判据「**一个能力声明如果没有任何一条路径能走到，那它不是「支持」，而是「上限的意图书」**」；
+⭐⭐ 判据「**一个上限值若在五处独立出现且都相同，它就是这套代码的真实上限**」；
+⚠️⚠️ **实用含义**：**RTX PRO 6000 上实际可用上下文是 131,072，不是 262,144；想用 256K 必须显式设 `BTL3_CTX_SIZE`，而那条路径没有任何一处校验显存够不够**；
+ ⚠️⚠️⚠️ **【更正】校验器里是 24 处 `require`，不是 37 处**：**精确正则得到 source 13 / config 1 / runner 9 / model_yaml 1 共 24 条，全部命中 0 缺失**——**r202 那个 37 是把「所有校验动作」与「require 调用」混算了**；
+⭐⭐ 判据「**一个校验器「全部通过」这个结果，只有在「检查项数」也被独立数过之后才有意义**」；
+⭐⭐ 判据「**一个批评如果数字错了，它的方向仍可能对，但它的强度被削弱了；故数字必须先更正，再保留方向**」；
+ — [src-btl3-lmstudio-generator] [src-btl3-lmstudio-nativerunner] [src-btl3-lmstudio-model-yaml]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -31943,7 +32107,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=365, evidence=2595, claims=1843, claims_high=1496, claims_disputed=9, trace_events=801, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=368, evidence=2602, claims=1846, claims_high=1499, claims_disputed=9, trace_events=807, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
