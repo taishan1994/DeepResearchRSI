@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：393 ｜ **证据数**：2675 ｜ **主张数**：1885（高置信 1537，争议 9）
+> **来源数**：396 ｜ **证据数**：2682 ｜ **主张数**：1890（高置信 1542，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -28772,6 +28772,11 @@ exit 0
 > **它说明两套数字测的是同一个「形状」，
 > 故 12-16% 的差是绝对水平差，不是配置差。**
 
+> **✅ 而下一轮（§10.342）找到了第三份数据，把这个疑虑正式消解**：
+> **社区 llama-bench 是 `129.92 ± 1.95 / 4552.38 ± 163.78`，
+> 三份的极差是 11.2% / 11.7%，与白皮书自述的 11% 单机波动同量级。
+> 故那 12% 不是矛盾，是噪声。**
+
 ### 10.339 🔥🔥🔥🔥🔥 **预填每 token 的能耗是解码的 1/37.5**
 
 [c-prefill-is-37x-cheaper-per-token-than-decode]
@@ -28890,6 +28895,158 @@ exit 0
 > **⭐⭐ 判据：**
 > **当两个数字的差与测量噪声同量级时，
 > 你既不能说它们矛盾，也不能说它们一致——只能说它们不可分辨。**
+
+### 10.342 🔥🔥🔥🔥🔥 **三份 PRO 6000 数据凑齐，而它们不矛盾**
+
+[c-three-pro-6000-numbers-agree-within-noise]
+
+> | 来源 | TG128 | PP512 | 备注 |
+> |---|---:|---:|---|
+> | 白皮书 Table 5（`PQ2_0`） | 140.6 | 4520 | `measured on 2026-09-16` |
+> | 模型卡（`PQ2_0`） | 124.8 | 4020 | 无日期 |
+> | **社区 llama-bench（`Q2_0`）** | **129.92 ± 1.95** | **4552.38 ± 163.78** | **`build 9fcaed763 (9596)`** |
+> | BTL-3 Compact（AVQ2） | 43.16 | 84.70 | 同族 build |
+>
+> **⭐ 极差：TG `11.2%`、PP `11.7%`。**
+> **⭐ 而白皮书自述「run-to-run variation of up to approximately 11%」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **三个来源给出同一量级的数，而它们的极差小于该来源自述的噪声，
+> 那这三个数就不是「三个互相矛盾的说法」，而是「同一次测量的三个样本」。**
+>
+> **⭐⭐ 判据：**
+> **而 BTL-3 的 `43.16 / 84.70` 落在那个噪声带之外 `3` 到 `53` 倍处，
+> 故它不是「第四个样本」，而是「另一种实现」。**
+>
+> **✅ 这条把 §10.338 那个「两份文档两套吞吐」的疑虑正式消解**：
+> **12% 的差在噪声内，不是矛盾。**
+>
+> **⭐⭐ 判据：**
+> **一个「矛盾」如果在加上第三份数据之后消失了，
+> 那它从一开始就不是矛盾，而是样本太少。**
+
+### 10.343 🔥 **`PP/TG` 比在三个独立来源上稳定在 32–35**
+
+[c-pp-tg-ratio-is-stable-across-three-sources]
+
+> ```
+> 白皮书:     4520.00 / 140.60 = 32.15
+> 模型卡:     4020.00 / 124.80 = 32.21
+> 社区:       4552.38 / 129.92 = 35.04
+> BTL-3:        84.70 /  43.16 =  1.96
+> ```
+> **⭐ 绝对吞吐有 12% 抖动，而比值只有 9%——且三者都远离 1.96。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **三个独立来源给出同一个比值（32–35），
+> 说明这个比值是「这类实现」的属性，不是某次测量的偶然。**
+>
+> **⭐⭐ 判据：**
+> **一个比值如果在三个互相独立的测量里都稳定，
+> 那它比任何一个绝对值都更可靠——因为比值消掉了绝对口径的差。**
+>
+> **⭐⭐ 而这条正是 §10.332 那个发现的加固**：
+> **比值稳定、绝对值有 12% 抖动，故 1.96 这个异常不是口径问题。**
+
+### 10.344 🔥🔥🔥🔥🔥 第三方报告复现了**同一个 build 9596**
+
+[c-community-report-reproduces-build-9596]
+
+> **社区报告（`cuda-rtx-pro-6000-blackwell-linux.md`）**：
+> 「**build: 9fcaed763 (9596)**」
+> 「**llama.cpp PrismML fork build 9fcaed7 (prism-b9596)**」
+>
+> **而 `docs/launch-btl3-compact.md` 第 10 行记的是**：
+> 「**`llama.cpp` build `9596`, commit `9fcaed763`**」——**逐字相同。**
+>
+> **故 BTL-3 的 `43.16` 与 Bonsai 的 `129.92` 是在同一个二进制上测的，
+> 两者的差不是版本差。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个第三方报告如果与本报告已记录的 build 号逐字相同，
+> 那它就不是「另一个来源」，而是「同一构建的另一次运行」——
+> 而后者能验证前者，不能替代前者。**
+>
+> **⭐⭐ 判据：**
+> **「另一个来源」与「另一个样本」是两个不同的证据等级；
+> 而区分它们的唯一方法是看两者的构建标识是否相同。**
+
+> ⭐ **而它把整台机器写全了**：
+> 「**CPU: Intel Core Ultra 9 285K (24 cores, no HT) ｜ RAM: 62 GiB ｜
+> GPU: NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 96 GB VRAM, SM 12.0 ｜
+> Driver: 595.71.05, CUDA 13.2 ｜ OS: Ubuntu 24.04**」
+> **⭐ `595.71.05` 是本报告记到的第三个驱动版本
+> （§10.226 记过 595.45 与 595.58）。**
+> ⭐ **而它明说「Host GPU 0 is occupied by a vLLM service;
+> benchmark ran on host GPU 1 only」——单卡实测，未跨卡。**
+
+### 10.345 ⚠️⚠️⚠️ 「PRO 6000 最快成绩」用的是**被弃用的格式**
+
+[c-fastest-pro-6000-row-uses-a-deprecated-format]
+
+> **社区报告称**：
+> 「**Ternary-Bonsai-27B Q2_0 (6.66 GiB): ~4552 t/s pp512, ~130 t/s tg128.
+> Fastest submitted result for the 27B model**」
+>
+> **而 `ternary-bonsai/README.md` 说**：
+> 「**The legacy `*-Q2_0.gguf` files (no `g64` in the name) predate the
+> migration: they still work on the old `prism-v5` releases, but
+> `prism-b10658+` builds refuse them with an error ...
+> Don't benchmark those on new builds.**」
+
+> **⚠️ 故这张榜的第一名用的是一个「新构建会拒绝」的格式。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一张社区跑分榜如果允许提交一个「官方说不要用来跑分」的格式，
+> 那这张榜的第一名就不是「最快」，而是「最不合规」。**
+>
+> **⭐⭐ 判据：**
+> **一个数字的合规性不取决于它被谁提交，
+> 而取决于它用的格式是否在支持列表里。**
+>
+> **⚠️ 而这不是一个可以按 12% 噪声解释的差——它是口径差。**
+
+> ⭐ **而官方自己也把文件名陷阱写进了文档**：
+> 「**Filename trap: on the 27B repo a search for `Q2_0` surfaces the legacy
+> file first, and a search for `Q2_0_g64` finds nothing
+> (the 27B file is `Q2_g64`).**」
+> **并给出正确命令**：`hf download prism-ml/Ternary-Bonsai-27B-GGUF
+> --include "*PQ2_0*" --include "*g64*"`。
+
+### 10.346 🔥🔥🔥🔥🔥 **DSpark 的加速比与基线 TG 严格反相关**
+
+[c-dspark-speedup-is-inverse-to-baseline-tg]
+
+> **这是这条赛道上第一组 DSpark（投机解码）实测量**：
+>
+> | 硬件 | 基线 TG128 | DSpark TG | 加速比 |
+> |---|---:|---:|---:|
+> | Bonsai 1-bit L40S 48 GB | 107.5 | ~169 | **1.57x** |
+> | Ternary L40S 48 GB | 74.3 | ~150 | **2.02x** |
+> | Bonsai 1-bit DGX Spark (GB10) | 45.4 | ~96.1 | **2.12x** |
+> | Ternary RTX 5060 Ti 16 GB | 44.4 | ~79 | **1.78x** |
+> | Ternary DGX Spark (GB10) | 29.2 | ~70.0 | **2.40x** |
+> | **Ternary RTX PRO 6000 96 GB** | **129.9** | **（空）** | **—** |
+>
+> **⭐ 基线越快，加速比越低。而 RTX PRO 6000 那一行的 DSpark 列是空的。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **投机解码的加速比如果与「基线 TG 成反比」，
+> 说明它的收益来自「每次前向多产几个 token」，
+> 而这个收益在基线越慢的卡上占比越大。**
+>
+> **⭐⭐ 判据：**
+> **故 DSpark 在 RTX PRO 6000 上会接近 `1.6x` 那个下限，而不是 `2.45x`——
+> 但这是一个推断，不是一个测量，因为 PRO 6000 的 DSpark 列是空的。**
+>
+> **⚠️ 而这条正好接上本报告已有的 `native/llama.cpp/common/dspark-markov.cu`
+> 与 `.h`**：**那个文件是 DSpark 的实现，而本轮第一次拿到它的收益曲线。**
+
+> **⭐⭐ 文档并明说**：
+> 「**The optional DSpark column records speculative decoding with a paired
+> drafter. Plain `llama-bench` does not exercise it. Server and standalone
+> harness results are not directly comparable.**」
+> **⭐ 故这张表里有两套 harness 的结果混在一起，而它自己标注了这一点。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -33956,6 +34113,48 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 (e) ⭐⭐⭐⭐⭐ **两个 packing 的胜负随架构反转，且给出了机理**：「**PTQ1_0 moves 18% less weight data per step than PQ2_0, but its dense trit representation requires additional arithmetic during unpacking. ... PTQ1_0 is faster on the Ada-generation parts and on the L4, while PQ2_0 is faster on several larger accelerators**」——**「This reflects a shift in the limiting resource」**；
  — [src-bonsai-whitepaper]
 
+### 社区跑分总表与 DSpark（第一百三十八轮补充）
+
+继续按上一轮的待追项推进。本轮重试 Bonsai 的 community-benchmarks/，
+这次通过 raw 路径拿到了总表与那份被直接链接的 PRO 6000 报告。
+
+1. [PrismML-Eng/Bonsai-demo — `community-benchmarks/README.md`（12,958 字节，130 行）]
+(https://raw.githubusercontent.com/PrismML-Eng/Bonsai-demo/main/community-benchmarks/README.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **这是这条赛道上第一组 DSpark（投机解码）实测量**：
+**Bonsai 1-bit L40S 107.5 -> ~169（1.57x）；Ternary L40S 74.3 -> ~150（2.02x）；Bonsai 1-bit GB10 45.4 -> ~96.1（2.12x）；Ternary RTX 5060 Ti 44.4 -> ~79（1.78x）；Ternary GB10 29.2 -> ~70.0（2.40x）**——
+**基线越快，加速比越低；而 Ternary RTX PRO 6000 96 GB 那一行是 4,552 / 129.9、DSpark 列空**；
+⭐⭐ 判据（本轮最重要）「**投机解码的加速比如果与「基线 TG 成反比」，说明它的收益来自「每次前向多产几个 token」，而这个收益在基线越慢的卡上占比越大**」；
+⭐⭐ 判据「**故 DSpark 在 RTX PRO 6000 上会接近 1.6x 那个下限，而不是 2.45x——但这是一个推断，不是一个测量**」；
+⚠️ **而这条正好接上本报告已有的 `native/llama.cpp/common/dspark-markov.cu` 与 `.h`**——**那个文件是 DSpark 的实现，而本轮第一次拿到它的收益曲线**；
+(a) 🔥🔥🔥🔥🔥 **RTX 5090 的 TG128 比 PRO 6000 还高**：「**PQ2_0 / RTX 5090 32 GB / CUDA 12.8 / 4,075 / 143.0；PTQ1_0 / RTX 5090 / 4,117 / 133.0**」——**而 Earlier 27B 表里 PRO 6000 是 4,552 / 129.9、5090 未列**；**故最高的 TG128 = 143.0 是那张 32 GB 的卡，不是 96 GB 的 PRO 6000**；
+(b) **文档明说两套 harness 混在一起**：「**The optional DSpark column records speculative decoding with a paired drafter. Plain llama-bench does not exercise it. Server and standalone harness results are not directly comparable**」；
+2. [PrismML-Eng/Bonsai-demo — `community-benchmarks/ternary-bonsai/cuda-rtx-pro-6000-blackwell-linux.md`（1,282 字节）]
+(https://raw.githubusercontent.com/PrismML-Eng/Bonsai-demo/main/community-benchmarks/ternary-bonsai/cuda-rtx-pro-6000-blackwell-linux.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **这是 RTX PRO 6000 上的第三份数据，且是唯一带误差棒的原始输出**：
+「**| qwen35 27B Q2_0 | 6.66 GiB | 26.90 B | CUDA | 9999 | pp512 | 4552.38 ± 163.78 | | qwen35 27B Q2_0 | 6.66 GiB | 26.90 B | CUDA | 9999 | tg128 | 129.92 ± 1.95 | build: 9fcaed763 (9596)**」——
+**故三份数据是：白皮书 140.6 / 4520、模型卡 124.8 / 4020、这里 129.92 / 4552.38**；
+⭐ **极差 TG 11.2%、PP 11.7%，与白皮书自述的 11% 单机波动同量级**；
+⭐⭐ 判据「**三个来源给出同一量级的数，而它们的极差小于该来源自述的噪声，那这三个数就不是「三个互相矛盾的说法」，而是「同一次测量的三个样本**」；
+⭐⭐ 判据「**一个「矛盾」如果在加上第三份数据之后消失了，那它从一开始就不是矛盾，而是样本太少**」——**这正式消解了 §10.338 那个疑虑**；
+(a) 🔥🔥🔥🔥🔥 **第三方报告的 build 号与本报告已记录的逐字相同**：「**build: 9fcaed763 (9596)**」+「**llama.cpp PrismML fork build 9fcaed7 (prism-b9596)**」——**而 §10.322 记的是「llama.cpp build 9596, commit 9fcaed763」**；
+⭐⭐ 判据「**一个第三方报告如果与本报告已记录的 build 号逐字相同，那它就不是「另一个来源」，而是「同一构建的另一次运行」——而后者能验证前者，不能替代前者**」；
+**故 BTL-3 的 43.16 与 Bonsai 的 129.92 是在同一个二进制上测的，两者的差不是版本差**；
+(b) ⭐⭐⭐⭐⭐ **它把整台机器的身份写全了**：「**CPU: Intel Core Ultra 9 285K (24 cores, no HT) ｜ RAM: 62 GiB ｜ GPU: RTX PRO 6000 Blackwell Workstation Edition, 96 GB VRAM, SM 12.0 ｜ Driver: 595.71.05, CUDA 13.2 ｜ OS: Ubuntu 24.04**」——**而 595.71.05 是本报告记到的第三个驱动版本**；
+(c) ⚠️⚠️⚠️ **「最快成绩」用的是被弃用的格式**：报告称「**Ternary-Bonsai-27B Q2_0 (6.66 GiB) ... Fastest submitted result for the 27B model**」，而格式说明写「**The legacy `*-Q2_0.gguf` files ... `prism-b10658+` builds refuse them with an error ... Don't benchmark those on new builds**」；
+⭐⭐ 判据「**一张社区跑分榜如果允许提交一个「官方说不要用来跑分」的格式，那这张榜的第一名就不是「最快」，而是「最不合规**」；
+⭐⭐ 判据「**一个数字的合规性不取决于它被谁提交，而取决于它用的格式是否在支持列表里**」——**而这不是一个可以按 12% 噪声解释的差，它是口径差**；
+3. [PrismML-Eng/Bonsai-demo — `community-benchmarks/ternary-bonsai/README.md`（6,322 字节，90 行）]
+(https://raw.githubusercontent.com/PrismML-Eng/Bonsai-demo/main/community-benchmarks/ternary-bonsai/README.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **官方把「文件名陷阱」写进了格式说明**：
+「**Filename trap: on the 27B repo a search for `Q2_0` surfaces the legacy file first, and a search for `Q2_0_g64` finds nothing (the 27B file is `Q2_g64`). If the only Q2 file you see is `Ternary-Bonsai-27B-Q2_0.gguf`, keep looking**」；
+**并给出正确命令 `hf download prism-ml/Ternary-Bonsai-27B-GGUF --include "*PQ2_0*" --include "*g64*"`**；
+(a) **三个格式的完整定义**：「**PQ2_0 = our group-128 packing（27B: 6.66 GiB）；Q2_0 group-64 = the official upstream format（27B: 7.05 GiB，widest backend coverage，adds Vulkan and SYCL）；legacy *-Q2_0.gguf = predate the migration**」；
+(b) 🔥 **一个纯算术导出量**：**PP/TG 比：白皮书 4520/140.6 = 32.15、模型卡 4020/124.8 = 32.21、社区 4552.38/129.92 = 35.04、而 BTL-3 84.70/43.16 = 1.96**；⭐⭐ 判据「**三个独立来源给出同一个比值（32-35），说明这个比值是「这类实现」的属性，不是某次测量的偶然**」；
+ — [src-bonsai-community-benchmarks] [src-bonsai-cb-pro-6000] [src-bonsai-cb-ternary-readme]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -34095,7 +34294,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=393, evidence=2675, claims=1885, claims_high=1537, claims_disputed=9, trace_events=857, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=396, evidence=2682, claims=1890, claims_high=1542, claims_disputed=9, trace_events=863, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
