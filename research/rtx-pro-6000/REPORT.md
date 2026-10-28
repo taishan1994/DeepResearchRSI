@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：363 ｜ **证据数**：2584 ｜ **主张数**：1840（高置信 1493，争议 9）
+> **来源数**：365 ｜ **证据数**：2595 ｜ **主张数**：1843（高置信 1496，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -26989,6 +26989,154 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > 只有「把 macOS 包和 CUDA 包叠在一起」时才会撞名。**
 > **⚠️ 而那种叠法没有文档推荐，故它是一条「结构上存在、实际未触发」的隐患。**
 
+### 10.297 🔥🔥🔥🔥🔥 【修正】这个仓库**真的校验模型**——我第 201 轮那句说过头了
+
+[c-launch-release-really-verifies-model-sha]
+
+> **`tools/build_launch_release.py` 第 25-41 行**：
+> ```python
+> def sha256(path: Path) -> str:
+>     digest = hashlib.sha256()
+>     with path.open("rb") as stream:
+>         for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+>             digest.update(chunk)
+>     return digest.hexdigest()
+>
+> def verify_model(model: Path) -> None:
+>     if not model.is_file():
+>         raise ReleaseError(f"model is missing: {model}")
+>     if model.stat().st_size != MODEL_BYTES:
+>         raise ReleaseError(f"model size mismatch: expected {MODEL_BYTES}, got ...")
+>     if sha256(model) != MODEL_SHA256:
+>         raise ReleaseError("model SHA-256 mismatch")
+> ```
+>
+> **三层：存在、大小、哈希，每层都 `raise`。**
+> **而 `verify_model(model)` 是 `build_release` 的第一条语句（205 行）**——
+> **不是最后一道检查，而是第一道。**
+
+> ⚠️⚠️⚠️ **故第 201 轮的「五个副本、零次测量」只对 `ollama_bridge.py` 成立，
+> 不对整个仓库成立。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「这个仓库不校验模型」这句话，在我说它的时候，
+> 我没有读完 `tools/` 下所有脚本。**
+>
+> **⭐⭐ 判据：**
+> **一个否定的全称断言，需要一个穷举的搜索；
+> 而我当时只搜了三个文件。**
+>
+> **⭐⭐ 为什么这条重要**：**它改变了缺陷的性质。**
+> **不再是「作者不校验」，而是「有的地方校验、有的地方不校验」。**
+>
+> **⭐⭐ 判据：**
+> **一个「不一致」比一个「缺失」更容易修，也更容易被忽视；
+> 因为每一处单独看都能找到理由。**
+
+> ⭐⭐⭐⭐⭐ **而它还有一道真的门**（第 77-79、116-119 行）：
+> ```python
+> def is_pending(manifest: dict) -> bool:
+>     status = str(manifest.get("status", "")).lower()
+>     return any(word in status for word in ("pending", "preview", "cross-compiled"))
+>
+> if tier == "supported" and is_pending(manifest):
+>     raise ReleaseError(f"conformance pending runtime cannot be marked supported: {bundle}")
+> ```
+>
+> **故 §10.290 那条 `status: cross-compiled; NVIDIA runtime conformance pending`
+> 不是一句免责声明，而是一道真的会拦下来的门**——
+> **它让「交叉编译的运行时」在结构上无法被标成 `supported`。**
+>
+> ⭐⭐ **而它逐个文件重算哈希并比对**（含符号链接目标）：
+> **`if sha256(path) != expected["sha256"]: raise ReleaseError("runtime file checksum mismatch")`**
+> **故 `SHA256SUMS` 里每一行都是一次真测量，而不是从别处抄来的常量。**
+
+### 10.298 🌟 同一个 manifest 里，**包内文件是测的，外部模型是抄的**
+
+[c-manifest-inner-files-measured-external-copied]
+
+> `tools/build_cuda_bundle.py`：
+> ```python
+> files[relative] = {"bytes": path.stat().st_size, "sha256": sha256(path)}   # 128 行
+> ...
+> "external_model": {
+>     "filename": MODEL_NAME,
+>     "bytes": MODEL_BYTES,        # 常量
+>     "sha256": MODEL_SHA256,      # 常量
+> },                                                                          # 139-142 行
+> ```
+
+> **🔥🔥🔥🔥🔥 故这不是「忘了测量」，而是「这个字段被设计成不测量」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **不是「这个数字没有测量」，
+> 而是「这个数字所在的字段被设计成不测量」。**
+>
+> **⭐⭐ 判据：**
+> **一个字段是否被测量，看它的兄弟字段；
+> 因为同一个 dict 里的字段通常由同一个人在同一分钟写出。**
+>
+> ⭐⭐ **而这条为什么诚实**：
+> **`external_model` 的语义就是「这个文件不在包里」，
+> 故它无法被包内的测量覆盖。**
+> **⚠️ 而常量写在那里，是唯一的表达方式。**
+>
+> **⭐⭐ 判据：**
+> **一个常量出现在一个无法测量的位置，不是缺陷；
+> 缺陷是这个常量被下游当成测量结果用。**
+>
+> ⭐⭐ **而 §10.295 那条桥接正好是后者**：
+> **它把常量当成 `digest` 返回给 Ollama 客户端。**
+
+### 10.299 ⚠️⚠️⚠️ LM Studio 校验器：**37 项子串检查，16 个 `true`**
+
+[c-lmstudio-validator-is-substring-checker]
+
+> **`tools/validate_lmstudio_package.py` 的全部校验手段**：
+> ```python
+> def require(source: str, token: str, meaning: str) -> None:
+>     if token not in source:
+>         raise ValidationError(f"generator lacks {meaning}: {token}")
+> ```
+> **全文 `hashlib` 0 次、`sha256(` 0 次。**
+
+> ⭐⭐⭐⭐⭐ **而它返回 16 个 `true`**：
+> `streaming` / `cancellation` / `tool_calls` / `parallel_tool_calls` /
+> `tool_call_fragments_buffered` / `api_errors_propagated` / `reasoning` /
+> `auto_start` / `full_gpu_offload` / `safe_context` / `bounded_generation` /
+> `thinking_disabled_by_default` / `repetition_guard` /
+> `explicit_stream_abort` / `default_base_url`——
+> **而这 16 个布尔量没有一个来自运行，唯一来源是子串查找。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个校验器的输出格式如果是布尔量，
+> 那它必须能说明每个布尔量来自哪一次观测；
+> 而这里 16 个布尔量全部来自同一个操作：子串查找。**
+>
+> **⭐⭐ 判据：**
+> **「源码里有这个字符串」与「这个功能会工作」之间隔着一个运行时；
+> 而这个校验器只走到了前者的边界。**
+
+> ⭐⭐⭐⭐ **但它有四条真的否定式检查，这比子串强得多**：
+> ① 工具生命周期必须按 SDK 顺序出现
+> （`positions != sorted(positions)` 即报错）；
+> ② 禁止 `"parallel_tool_calls: false"`；
+> ③ 禁止 runner 里的 `"shell: true"`；
+> ④ 禁止 `model.yaml` 声称 gguf 兼容。
+>
+> **⭐⭐ 判据：**
+> **静态检查擅长证明「不存在」与「顺序」，不擅长证明「会工作」。**
+> **故它不是全弱——四条否定式检查是真的，
+> 因为「不存在」和「顺序」都可以在静态层面被确定。**
+
+> ⭐⭐ **而它自称 `Static contract checks`（文件第 1 行）**——
+> **这句自我描述是准确的。**
+> **⚠️ 问题不在它，而在「它的 16 个 `true` 会被下游当成能力声明」。**
+>
+> **⭐⭐ 判据：**
+> **一个自称 static 的检查，其输出的布尔量必须带 static 前缀；
+> 否则它会继承运行时布尔量的可信度。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -31627,6 +31775,35 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⚠️ **这一条标为「可能」而不是「是」**：**两个包不会同时解到同一目录，只有叠放时才撞名**；
  — [src-btl3-tools-ollama-bridge] [src-btl3-test-ollama-bridge] [src-btl3-tools-build-macos-arm64]
 
+### 发版装配与两个校验器（第一百二十七轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `tools/build_launch_release.py`（9,921 字节，288 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/build_launch_release.py)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **这是全仓库唯一一处「真的算、真的比、真的抛错」的模型校验**：
+「**def sha256(path: Path) -> str: digest = hashlib.sha256() …for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b) …return digest.hexdigest()**」——
+「**def verify_model(model: Path) -> None: if not model.is_file(): raise ReleaseError(model is missing) if model.stat().st_size != MODEL_BYTES: raise ReleaseError(model size mismatch) if sha256(model) != MODEL_SHA256: raise ReleaseError(model SHA-256 mismatch)**」——
+⭐⭐ 判据（本轮最重要）「**「这个仓库不校验模型」这句话，在我说它的时候，我没有读完 tools/ 下所有脚本**」；
+⭐⭐ 判据「**一个否定的全称断言，需要一个穷举的搜索；而我当时只搜了三个文件**」；
+(a) ⭐⭐⭐⭐⭐ **`verify_model` 是 `build_release` 的第一条语句**：「**output = output.resolve(); model = model.resolve(); verify_model(model); output.parent.mkdir(...); staging = Path(tempfile.mkdtemp(...))**」（203-207 行）——**故「模型完整性」不是最后一道检查，而是第一道**；
+(b) 🔥🔥🔥🔥🔥 **它拒绝把「待定」的运行时标为 supported**：「**return any(word in status for word in (pending, preview, cross-compiled))**」「**if tier == supported and is_pending(manifest): raise ReleaseError(conformance pending runtime cannot be marked supported)**」——**故 §10.290 那条 status 不是免责声明，而是一道真的会拦下来的门**；
+(c) ⭐⭐⭐⭐⭐ **它逐个文件重算哈希并比对，连符号链接目标都比**：「**if sha256(path) != expected[sha256]: raise ReleaseError(runtime file checksum mismatch)**」「**if not path.is_symlink() or os.readlink(path) != expected[symlink]: raise ReleaseError(runtime symlink mismatch)**」；
+(d) ⭐⭐⭐⭐ **`SHA256SUMS` 每一行都是当场算的**：「**f({sha256(path)}  {path.relative_to(staging)}) for path in files**」；
+(e) ⚠️⚠️⚠️ **但这个脚本里没有任何 launch/ 引用**：**故我上一轮推测它「才是决定启动器归属的那一层」是错的**——**它只接受 --supported-runtime / --preview-runtime 等路径参数**；
+2. [GitHub / Badtheorylabs — BTL-3 `tools/validate_lmstudio_package.py`（5,299 字节，123 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/validate_lmstudio_package.py)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **37 项子串检查，返回 16 个 `true`**：
+「**def require(source: str, token: str, meaning: str) -> None: if token not in source: raise ValidationError(f(generator lacks {meaning}: {token}))**」——
+**全文 hashlib 0 次、sha256( 0 次**；
+⭐⭐ 判据（本轮最重要）「**一个校验器的输出格式如果是布尔量，那它必须能说明每个布尔量来自哪一次观测；而这里 16 个布尔量全部来自同一个操作：子串查找**」；
+⭐⭐ 判据「**「源码里有这个字符串」与「这个功能会工作」之间隔着一个运行时；而这个校验器只走到了前者的边界**」；
+(a) ⭐⭐⭐⭐ **但它有四条真的否定式检查**：「**if any(position < 0 for position in positions) or positions != sorted(positions): raise ValidationError(buffered tool lifecycle is not emitted in SDK order)**」「**if parallel_tool_calls: false in source: raise ValidationError(parallel tool calls are disabled)**」「**if shell: true in runner: raise ValidationError(native runner must not use shell execution)**」「**if \n    - gguf in model_yaml: raise ValidationError(model.yaml falsely claims stock GGUF compatibility)**」；
+⭐⭐ 判据「**静态检查擅长证明「不存在」与「顺序」，不擅长证明「会工作」**」；
+(b) ⭐⭐ **它自称 `Static contract checks`（第 1 行）——这句自我描述是准确的**；
+ ⭐⭐⭐⭐⭐ **四个「校验」文件，强度四档**：**build_launch_release.py（hashlib 2、sha256( 5、比对 4、raise 13）> build_cuda_bundle.py（2、3、0、8）> build_macos_arm64_bundle.py（2、3、0、0）> ollama_bridge.py（0、0、0、6）与 validate_lmstudio_package.py（0、0、0）**；
+ ⭐🔥🔥🔥🔥🔥 **同一个 manifest 里，包内文件是测的，外部模型是抄的**：「**files[relative] = {bytes: path.stat().st_size, sha256: sha256(path)}**」（128 行）vs「**external_model: {filename: MODEL_NAME, bytes: MODEL_BYTES, sha256: MODEL_SHA256}**」（139-142 行）——**故这不是「忘了测量」，而是「这个字段被设计成不测量」**；
+⭐⭐ 判据「**一个常量出现在一个无法测量的位置，不是缺陷；缺陷是这个常量被下游当成测量结果用**」；
+ — [src-btl3-tools-build-launch-release] [src-btl3-tools-validate-lmstudio]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -31766,7 +31943,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=363, evidence=2584, claims=1840, claims_high=1493, claims_disputed=9, trace_events=796, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=365, evidence=2595, claims=1843, claims_high=1496, claims_disputed=9, trace_events=801, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
