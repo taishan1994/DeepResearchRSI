@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：405 ｜ **证据数**：2718 ｜ **主张数**：1921（高置信 1573，争议 9）
+> **来源数**：409 ｜ **证据数**：2725 ｜ **主张数**：1928（高置信 1580，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -29670,6 +29670,17 @@ exit 0
 > **判据：一个绕开公共 API 的做法，如果附带「no core-file changes needed」，
 > 那它就是一次「用分层换不改动」的交易。**
 
+
+> ⚠️⚠️⚠️ **第 219 轮的限定（见 §10.378 与 §10.380）**：
+> **那个 `continue` 确实存在（`llama-model.cpp:1030-1032`，原样是
+> `if (type == GGUF_TYPE_ARRAY) { continue; }`），
+> 但它跳过的是「把元数据装进 `gguf_kv` 这个字符串映射」的那个循环，
+> 而不是「数组型 key 的读取能力」。**
+> **`llama_model_loader` 另有 `get_key_or_arr` / `get_arr_n` / `get_arr`
+> 三条路径都能读数组，而 `src/models/dspark.cpp` 用的正是它们。**
+> **故本节那句「`target_layers` 永远不可达」应读作
+> 「`target_layers` 没有字符串形式的投影」。**
+
 ### 10.366 🔥🔥🔥🔥🔥 `tau` 是「每轮平均提交的 token 数」，上限 **8.0**
 
 [c-tau-is-tokens-per-round-with-a-block-size-ceiling]
@@ -30001,6 +30012,201 @@ exit 0
 >
 > **⭐⭐ 故「注释里的形容词」是仓库里最不可靠的一类证据，
 > 而它恰好是最容易被引用的一类。**
+
+### 10.378 ⭐⭐⭐⭐⭐ 我去读了那个 `continue` 本身——它比转述窄
+
+[c-the-array-continue-guards-only-the-string-cache]
+
+> **`src/llama-model.cpp` 1027-1036 行，原样**：
+> ```cpp
+> // get metadata as string
+> for (int i = 0; i < gguf_get_n_kv(ctx); i++) {
+>     gguf_type type = gguf_get_kv_type(ctx, i);
+>     if (type == GGUF_TYPE_ARRAY) {
+>         continue;
+>     }
+>     const char * name = gguf_get_key(ctx, i);
+>     const std::string value = gguf_kv_to_str(ctx, i);
+>     gguf_kv.emplace(name, value);
+> }
+> ```
+> **而全文件 `GGUF_TYPE_ARRAY` 只出现这一处（第 1030 行）。**
+
+> **🔥 转述准确：那个 `continue` 确实存在，而且全文件只此一处。**
+> **⭐⭐ 但它的作用域比上一轮的说法窄得多——它只跳过这个字符串缓存循环。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个 `continue` 的作用域是「它所在的那个循环」，
+> 而不是「那个类型的所有读取」。**
+>
+> **⭐⭐ 判据：**
+> **故「类型 X 被跳过」这句话必须先问「被哪个循环跳过」。**
+>
+> **⭐⭐ 这条的价值在于：我上一轮把它读成了「`target_layers` 不可达」，
+> 而它实际是「`target_layers` 不在 `gguf_kv` 里」。**
+
+### 10.379 🔥🔥🔥🔥🔥 数组型 key 有**三条可读路径**
+
+[c-three-array-reading-paths-exist-in-the-loader]
+
+> **`src/llama-model-loader.cpp` 455-464 行**：
+> ```cpp
+> if (gguf_get_kv_type(metadata, kid) == GGUF_TYPE_ARRAY) {
+>     struct GGUFMeta::ArrayInfo arr_info =
+>         GGUFMeta::GKV<GGUFMeta::ArrayInfo>::get_kv(metadata, kid);
+>     if (n != arr_info.length) { throw ... }
+>     return get_arr(key, result, required);
+> }
+> ```
+> **而 `get_arr_n` 在 274 行、`get_arr` 在 301 行，各自独立。**
+
+> **🔥 故数组型 key 不是「读不到」，而是「要用对入口」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当同一个数据类型既有「标量缓存」又有「数组读取器」时，
+> 「缓存里没有它」与「读不到它」是两个不同的事实。**
+>
+> **⭐⭐ 判据：**
+> **而这两者在报告里长得一模一样，都叫「没有 getter」。**
+>
+> **⭐⭐ 故「没有公共 getter」的正确解释是：
+> 「没有一个叫 `meta_val_str` 的函数能给你」，
+> 而不是「这个值在设计上不可得」。**
+
+### 10.380 ⚠️⚠️⚠️ 「不可达」必须带一个入口
+
+[c-array-keys-are-unreachable-only-from-the-string-api]
+
+> **三条路径交叉之后的精确表述**：
+> ```
+> llama_model_meta_val_str()      读不到  (gguf_kv 里没有它)
+> ml.get_arr_n(...)               读得到  (dspark.cpp:84)
+> ml.get_key_or_arr(...)          读得到  (dspark.cpp:85)
+> ```
+> **而 `src/models/dspark.cpp` 84-85 行用的正是后两者。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个「不可达」的断言，必须附带「从哪个入口不可达」；
+> 否则它会在下一次被引用时自动放大成「不可达」。**
+>
+> **⭐⭐ 判据：**
+> **而 `dspark.cpp` 84-85 行用的正是 `get_arr_n` + `get_key_or_arr`——
+> 故那条路径是通的，只是不通向那个字符串 API。**
+>
+> **⭐⭐ 故正确的说法是：
+> 「`target_layers` 没有字符串形式的投影」，
+> 而不是「`target_layers` 没有公共 getter」。**
+
+> ⚠️ **这是本报告第 27 次同型自我修正**：
+> **上一轮我把「测试框架自己说没有 getter」当成了「这个值不可得」；
+> 而那个框架说的是「我需要绕开它」，不是「它绕不过去」。**
+
+### 10.381 🔥🔥🔥🔥🔥 DSpark 的公共接口面是**一个 `bool`**
+
+[c-dspark-public-surface-is-one-bool]
+
+> **`common/speculative.h` 全文 103 行、18 个不同函数名**，
+> **与 dspark 直接相关的只有两块**：
+> ```c
+> // true if any implementation requires the target's multi-layer tap capture
+> // (see llama_set_capture_layers / llama_get_embeddings_capture_ith) -- used by
+> // dspark ...
+> bool common_speculative_need_embd_capture(common_speculative * spec);
+>
+> // TEST/DEBUG ONLY: directly stage target-tap context rows for the dspark
+> // implementation (if registered), bypassing the normal process()-driven
+> // capture path ...
+> bool common_speculative_dspark_stage_ctx_test(...);
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个能力的公共接口面有多窄，决定了它有多容易被「接进」一个调用方——
+> 而 DSpark 的接口面窄到只剩一个布尔量。**
+>
+> **⭐⭐ 判据：**
+> **故「为什么没有 CLI」这个问题有一个结构性答案：
+> 公共头文件没有暴露「跑一轮」所需要的任何参数，
+> 故任何调用方都必须自己知道那些参数——
+> 而那正是 `test-dspark-real-eval.cpp` 做的事。**
+>
+> **⭐⭐ 故 §10.364 那条「没有 CLI 路径」不是「忘了接」，
+> 而是「接口面不允许一个通用调用方接」。**
+
+### 10.382 ⚠️⚠️⚠️ Phase 2 门禁**绕过**了真实捕获路径
+
+[c-the-synthetic-gate-bypasses-the-capture-path]
+
+> **`common/speculative.h` 80-89 行**：
+> 「**TEST/DEBUG ONLY: directly stage target-tap context rows for the dspark
+> implementation (if registered), bypassing the normal process()-driven capture
+> path, which requires a real target context with `llama_set_capture_layers`
+> engaged and logits requested on every row. Used by the Phase 2
+> synthetic-target harness (`tests/test-dspark-loop.cpp`) to drive the
+> block-draft loop deterministically without a target model.**」
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个测试如果「bypass 了被测路径的前置条件」，
+> 那它验证的是「后半段」，不是「整条链」。**
+>
+> **⭐⭐ 判据：**
+> **而这条与 §10.376（只在 CPU 上跑）叠加后，
+> Phase 2 门禁的覆盖范围就变成了：
+> 「CPU 后端 + 手工注入的特征 + 真实的草稿循环」。**
+>
+> **⭐⭐ 它验证了循环，没验证捕获。**
+
+### 10.383 🔥🔥🔥🔥🔥 `ref.bin` **不可能入库**，故 Tier 2 只能手工跑
+
+[c-ref-bin-can-never-be-committed]
+
+> **`native/llama.cpp/.gitignore` 第 5 行**：
+> ```
+> *.bin
+> ```
+> **而 `test-dspark-forward.cpp` 的 Tier 2（唯一的数值门禁）需要一个外部
+> `ref.bin`，其格式由该文件头部注释定义（`int32` 头 + `ctx_pos` + `ctx_feat`
+> + `draft_token_ids` + `draft_pos` + `ref_logits`）。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个测试如果依赖一个「按仓库规则不许入库」的输入，
+> 那它在 CI 里只能是「跳过」，而不是「通过」。**
+>
+> **⭐⭐ 判据：**
+> **而 `test-dspark-forward.cpp` 里 `skip` 出现 `0` 次——
+> 它没有跳过分支，故它要么被手工运行，要么根本不运行。**
+>
+> **⭐⭐ 故「DSpark 的数值正确性」这条链的最后一环，
+> 是一个既不在仓库里、也没有生成脚本的数据文件。**
+
+### 10.384 ⚠️⚠️⚠️ `scratchpad/` 是**真的不存在**，不是被忽略
+
+[c-scratchpad-genuinely-absent-not-ignored]
+
+> **`native/llama.cpp/.gitignore` 全文 1,864 字节**，
+> 忽略项包括 `*.a *.bat *.bin *.dll *.gguf *.o *.so`、
+> `/build* /release /out/ /tmp/ /tags`、`/.cache/ /.vscode/ /.idea/` 等。
+> **而 `scratchpad` 与 `scratch/` 都未出现。**
+>
+> **两次 404 探测**：
+> ```
+> scratchpad/dspark_phase2_py_ref.py   404
+> scratchpad/dspark_tier2_gen.py       404
+> scratchpad/README.md                 404
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **要证明「一个路径不存在」，最弱的证据是 404，
+> 次强的是「树里没有」，
+> 最强的是「它不在忽略列表里，而树里没有」。**
+>
+> **⭐⭐ 判据：**
+> **而 `*.bin` 在忽略列表里，故 `ref.bin` 的缺席属于第二类，
+> `scratchpad/` 的缺席属于第三类。
+> 两者看起来都是「不在仓库里」，但一个是设计，一个是遗漏。**
+>
+> **⭐⭐ 故 `test-dspark-loop.cpp` 引用的
+> `scratchpad/dspark_phase2_py_ref.py` 是真的不存在，
+> 而它引用的「同轮对照」因此不可复现。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -35287,6 +35493,45 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ **而这条是本报告第 20 条同型错误的一个正面案例：我这次确实去读了 B，于是发现 A 的用词比 B 的实现强得多**；
  — [src-btl3-model-dspark-cpp] [src-btl3-test-dspark-forward] [src-btl3-test-dspark-loop]
 
+### 那个 `continue` 的作用域，与两个不在仓库里的对照（第一百四十四轮补充）
+
+上一轮结尾说两件事：读 `src/llama-model.cpp` 的 `load_hparams` 亲眼确认那个 `if (type == GGUF_TYPE_ARRAY) continue;`；并查 `scratchpad/dspark_phase2_py_ref.py` 是否存在。
+本轮两件都做了，而结论是两条限定：
+**那个 `continue` 确实存在，但它只守住字符串缓存**；
+**而那两份对照脚本与对照数据都不在仓库里**。
+
+1. [GitHub / Badtheorylabs — `native/llama.cpp/src/llama-model.cpp`（126,236 字节，2,792 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/llama-model.cpp)
+ —（2026-10 抓取）。
+🔥 **转述准确**：1027-1036 行原样是
+「**// get metadata as string ... if (type == GGUF_TYPE_ARRAY) { continue; } ... gguf_kv.emplace(name, value);**」——**而全文件 GGUF_TYPE_ARRAY 只出现这一处（第 1030 行）**；
+⭐⭐ 判据（本轮最重要）「**一个 continue 的作用域是「它所在的那个循环」，而不是「那个类型的所有读取」**」——**故「类型 X 被跳过」这句话必须先问「被哪个循环跳过」**；
+2. [GitHub / Badtheorylabs — `native/llama.cpp/src/llama-model-loader.cpp`（75,536 字节，1,814 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/llama-model-loader.cpp)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **数组型 key 有三条可读路径**：「**if (gguf_get_kv_type(metadata, kid) == GGUF_TYPE_ARRAY) { struct GGUFMeta::ArrayInfo arr_info = ...get_kv(metadata, kid); if (n != arr_info.length) { throw ... } return get_arr(key, result, required); }**」——**即 get_key_or_arr（441-478 行）显式判 GGUF_TYPE_ARRAY 然后转 get_arr；另有 get_arr_n（274 行）与 get_arr（301 行）**；
+⭐⭐ 判据「**当同一个数据类型既有「标量缓存」又有「数组读取器」时，「缓存里没有它」与「读不到它」是两个不同的事实**」——**而这两者在报告里长得一模一样，都叫「没有 getter」**；
+**故「没有公共 getter」的正确解释是「没有一个叫 meta_val_str 的函数能给你」，而不是「这个值在设计上不可得」**；
+(a) ⚠️⚠️⚠️ **「不可达」必须带一个入口**：llama_model_meta_val_str() 读不到（gguf_kv 里没有它）、ml.get_arr_n(...) 读得到（dspark.cpp:84）、ml.get_key_or_arr(...) 读得到（dspark.cpp:85）——
+⭐⭐ 判据「**一个「不可达」的断言，必须附带「从哪个入口不可达」；否则它会在下一次被引用时自动放大成「不可达」**」——**故正确的说法是「target_layers 没有字符串形式的投影」，而不是「target_layers 没有公共 getter」**；
+⚠️ **这是本报告第 27 次同型自我修正：上一轮我把「测试框架自己说没有 getter」当成了「这个值不可得」；而那个框架说的是「我需要绕开它」，不是「它绕不过去」**；
+3. [GitHub / Badtheorylabs — `native/llama.cpp/common/speculative.h`（4,503 字节，103 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/common/speculative.h)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **DSpark 的公共接口面是一个 bool**：全文 103 行、18 个不同函数名，与 dspark 相关的只有
+「**bool common_speculative_need_embd_capture(common_speculative * spec);**」与「**// TEST/DEBUG ONLY ... bool common_speculative_dspark_stage_ctx_test(...);**」；
+⭐⭐ 判据「**一个能力的公共接口面有多窄，决定了它有多容易被「接进」一个调用方——而 DSpark 的接口面窄到只剩一个布尔量**」——**故 §10.364 那条「没有 CLI 路径」不是「忘了接」，而是「接口面不允许一个通用调用方接」**；
+(b) ⚠️⚠️⚠️ **Phase 2 门禁绕过真实捕获路径**：「**TEST/DEBUG ONLY: directly stage target-tap context rows for the dspark implementation (if registered), bypassing the normal process()-driven capture path, which requires a real target context with llama_set_capture_layers engaged and logits requested on every row**」——
+⭐⭐ 判据「**一个测试如果「bypass 了被测路径的前置条件」，那它验证的是「后半段」，不是「整条链」**」——**与 §10.376（只在 CPU 上跑）叠加后，Phase 2 门禁的覆盖范围是「CPU 后端 + 手工注入的特征 + 真实的草稿循环」：它验证了循环，没验证捕获**；
+4. [GitHub / Badtheorylabs — `native/llama.cpp/.gitignore`（1,864 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/.gitignore)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **ref.bin 不可能入库，故 Tier 2 只能手工跑**：**.gitignore 第 5 行是 `*.bin`**，而 test-dspark-forward.cpp 的 Tier 2（唯一的数值门禁）需要一个外部 ref.bin；
+⭐⭐ 判据「**一个测试如果依赖一个「按仓库规则不许入库」的输入，那它在 CI 里只能是「跳过」，而不是「通过」**」——**而该文件里 skip 出现 0 次，故它要么被手工运行，要么根本不运行**；
+⚠️⚠️⚠️ **scratchpad/ 是真的不存在，不是被忽略**：**.gitignore 里 scratchpad 与 scratch/ 都未出现**，而两次 404 探测（dspark_phase2_py_ref.py、dspark_tier2_gen.py）都失败；
+⭐⭐ 判据（本轮最重要）「**要证明「一个路径不存在」，最弱的证据是 404，次强的是「树里没有」，最强的是「它不在忽略列表里，而树里没有」**」——**而 *.bin 在忽略列表里，故 ref.bin 的缺席属于第二类，scratchpad/ 的缺席属于第三类：两者看起来都是「不在仓库里」，但一个是设计，一个是遗漏**；
+ — [src-btl3-llama-model-cpp] [src-btl3-model-loader-cpp] [src-btl3-speculative-h] [src-btl3-gitignore]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -35426,7 +35671,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=405, evidence=2718, claims=1921, claims_high=1573, claims_disputed=9, trace_events=881, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=409, evidence=2725, claims=1928, claims_high=1580, claims_disputed=9, trace_events=889, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
