@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：341 ｜ **证据数**：2468 ｜ **主张数**：1804（高置信 1457，争议 9）
+> **来源数**：343 ｜ **证据数**：2482 ｜ **主张数**：1809（高置信 1462，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -25458,6 +25458,212 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > ⭐⭐ **而这条也标志着 btl3 的 C++/CUDA 源码语料到此全部读完**：
 > **十九个文件，全部有证据落在库里。**
 
+### 10.258 🔥🔥🔥🔥🔥 作者承认：CUDA 后端**从未被编译、也从未在 GPU 上跑过**
+
+[c-cuda-backend-never-executed]
+
+> 「These checks pass locally. The CUDA test sources also pass host C++ syntax
+> checking, but this machine has **neither NVCC nor an NVIDIA GPU**.
+> CUDA compilation, device correctness and speed are therefore **not claimed**.」
+> —— `native/llama.cpp/docs/btl3-avq-cuda-validation.md`
+
+> **⭐⭐⭐⭐⭐ 这是本报告第一次拿到「这个后端从未执行」的直接证据**：
+> **在此之前，任何「它不 work」或「它 work」的推断都是**双向的猜测**。**
+>
+> **⭐⭐ 而这条重新标定了本报告过去几十轮的工作性质**：
+> **我从 `btl3-avq.cu`、`btl3-int4.cu`、`btl3-vocab.cu` 里读出的
+> 每一个常量、每一次归约、每一个 `__syncthreads()`，都是真实的代码，
+> ⚠️ 而「这些代码在 RTX PRO 6000 上跑出来是多少 tok/s」是完全没有依据的。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「读源码能得到的」与「读源码不能得到的」之间有一条清晰的界线——**
+> **源码能告诉你它会做什么，不能告诉你它做出来多快、对不对——
+> ⚠️ 而后者恰恰是本报告的主题（性能分析）。**
+>
+> ⭐⭐ **而这条也给「作者为什么写这个后端」一个解释**：
+> **因为他能写（host C++ 语法检查通过），
+> ⚠️ 而他没有硬件去验证——
+> 故这份 CUDA 后端是一个可编译的提案，而不是一个已交付的实现。**
+>
+> **⭐⭐ 判据：**
+> **「一个实现的状态」应该分成四档：
+> ① 能编译；② 能跑；③ 跑对；④ 跑得快——**
+> **⚠️ 而这一份停在①，而本报告此前一直按③在写它。**
+
+### 10.259 🔥🔥🔥🔥🔥 契约说「越界 token 产 0 行」，**CPU 违反了它**
+
+[c-contract-vs-cpu-disagree-on-invalid-token]
+
+> 契约：「**Invalid token IDs explicitly produce zero rows.**」
+> 实现：`btl3-vocab.cpp:93` 是 `continue;`。
+> 故正确的三方关系是：**CUDA 合规、Metal 合规、CPU 违约**。
+
+> **⭐⭐⭐⭐⭐ 这条推翻了我上一轮的一个归因**：
+> **上一轮我把「CUDA/Metal 写 0、CPU 不写」写成「两个后端做了防御、一个没做」——
+> ⚠️ 而现在看到，契约本身就是「写 0」，**
+> **故正确的三方关系是：CUDA 合规、Metal 合规、CPU 违约。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「两个实现与一个文档不一致」时，不能假设文档是描述性的——**
+> **⚠️ 它也可能是规定性的——
+> 而区分两者的办法是看「这份文档是在描述现状还是在定义要求」。**
+>
+> ⭐⭐ **而这份文档显然是规定性的**：
+> **它的标题是「Implemented contract」，用的是「accepts」「explicitly produce」
+> 这种规范性动词，而不是「currently does」。**
+>
+> **⭐⭐ 判据：**
+> **「一份文档的时态与动词」暴露了它是规范还是现状——**
+> **⚠️ 而「契约（contract）」这个词本身就是规范性的。**
+>
+> ⭐⭐ **故 §10.254 那条「CPU 写垃圾」的正确表述应当再升一级**：
+> **它不只是一个未初始化读取，而是一个明确的契约违反——
+> ⚠️ 因为「写 0」是被写下来的要求，而不是某个后端的自由选择。**
+>
+> **⭐⭐ 判据：**
+> **「一个行为是不是缺陷」取决于「有没有一份规定它该怎么做的东西」——**
+> **⚠️ 而存在这样一份文档时，偏离它就是违规，而不是风格差异。**
+>
+> ⭐⭐ **而这条还给「谁该改」一个明确答案**：
+> **该改的是 CPU——因为 CUDA 与 Metal 已经按契约实现了，
+> ⚠️ 故这不是「三方各自为政」，而是「两方已对齐、一方未对齐」。**
+>
+> **⭐⭐ 判据：**
+> **「三方里两方一致」比「两方一致」信息量更大——**
+> **⚠️ 因为两方一致可能是巧合，
+> 而三方中两方对上第三方则说明那两方是照同一份东西写的。**
+
+### 10.260 ⚠️⚠️⚠️ 作者明文禁止「从源码或单测发布吞吐结论」
+
+[c-no-throughput-from-source-reading]
+
+> 「Only then profile prompt and decode separately.
+> **Do not publish a throughput or latency claim from source inspection or unit tests.**」
+
+> **⚠️⚠️⚠️ 这条是对本报告自身的一条禁令，而不是关于显卡的一条事实。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个实现者对自己代码的谨慎程度」是引用他代码时该继承的东西——**
+> **⚠️ 而若他都不敢声称速度，我就更不该替他声称。**
+>
+> ⭐⭐ **而这条直接命中本报告的一个结构性弱点**：
+> **§10 有上百个小节在分析「这个内核怎么算」，
+> ⚠️ 其中不少在结尾处滑向了「故它在这个卡上会怎样」。
+> 而按作者的标准，那些结尾都应当被标注为无依据。**
+>
+> **⭐⭐ 判据：**
+> **「一份报告的自律程度」可以用「它有没有引用被分析对象的自我限定」来衡量——**
+> **⚠️ 而这一条是我在第 191 轮才第一次读到并引用的。**
+>
+> ⭐⭐ **而这条不否定那些分析的价值**：
+> **「这个内核用 XOR-partner 蝶形而不是 lane/width」是一个事实，
+> ⚠️ 而「故它在 RTX PRO 6000 上快 5%」是一个无依据的推断——**
+> **故正确的做法是保留前者、删掉后者，而不是整段作废。**
+>
+> **⭐⭐ 判据：**
+> **「一条分析里的事实部分与推断部分应当被分开标注」——**
+> **⚠️ 因为前者可以独立成立，而后者依赖一个本报告没有做过的实验。**
+>
+> ⭐⭐ **而这条给「怎么处理已经写下的推断」一个不删的做法**：
+> **不改写内容，而是在段末加一句「本节为源码推断，未经 profile 验证」——**
+> **⚠️ 这与 §10.183 那条「撤回有两种做法，只有保留并标注有价值」是同一招。**
+
+### 10.261 ⭐⭐⭐⭐⭐ 符号张量必须**逐位复现** `torch.randint`
+
+[c-signs-must-be-bit-reproducible]
+
+> `tools/btl3_gguf/signs.py` 用纯 Python 重写了 **MT19937**：
+> 624 字状态、`1812433253` 初始化乘数、`0x9908B0DF` twist 常数、三段 tempering 全部硬编码。
+> 取符号只用最低位：`values[index] = 1 if generator.next_u32() & 1 else -1`。
+
+> **⭐⭐⭐⭐⭐ 这条揭示了一个反直觉的事实**：
+> **模型里那两个「符号向量」看起来是随机的，而实际上每一个比特都由种子唯一决定——
+> ⚠️ 故它们与任何其他权重一样，是可枚举、可版本化、可校验的常量。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个张量是不是『随机的』」，取决于它有没有被冻结进制品，
+> 而不是取决于怎么生成它——**
+> **⚠️ 而一旦它随 GGUF 一起发布，那个种子就只是一个生成方式的说明，
+> 而不是一个运行时依赖。**
+>
+> ⭐⭐ **而这条给 §10.178 那条「把符号烘进权重」一个具体的实现路径**：
+> **符号不是「运行时随机生成」，而是「构建时用固定种子生成一次」——
+> ⚠️ 故「烘进去」不是优化，而是唯一合理的做法。**
+>
+> **⭐⭐ 判据：**
+> **「一个随机量的生命周期」越长，它就越应该被物化——**
+> **⚠️ 而判据是「它的种子会不会变」。**
+>
+> ⭐⭐ **而这条还有一个安全含义**：
+> **若符号表是固定的，那么它就是一个可被公开的常量，
+> ⚠️ 故它不提供任何「每模型唯一」的隔离性——
+> 而若有人以为它在防什么，那是一个误解。**
+>
+> **⭐⭐ 判据：**
+> **「一个『随机』张量」常常被误当成密钥，而它只是参数——**
+> **⚠️ 判据是「它会不会被写进发布制品」——若会，它就不是秘密。**
+>
+> ⭐⭐ **而这条的技术细节还说明作者的严谨程度**：
+> **他没有调 `torch.randint`，而是重写了一个 MT19937——
+> ⚠️ 因为「torch 的版本变了会不会改 PRNG」是一个真实风险，
+> 而重写之后，这个依赖就被彻底去掉了。**
+>
+> **⭐⭐ 判据：**
+> **「为了消除一个隐式依赖而重写一个标准算法」是一种极端的确定性追求——**
+> **⚠️ 而它的判据是「这个值会不会进制品」：
+> 若会，重写就值得；若只是中间量，就不值得。**
+
+### 10.262 🔥🔥🔥🔥🔥 「2.9 bpw」掩盖了一个 **1.2 GB 的 bf16 孤岛**
+
+[c-bf16-island-is-14-percent-of-model]
+
+> 全量报告组件表（2,416 张量 / 8,391,269,600 字节）：
+
+| 组件 | 张量数 | 字节 | 占比 |
+|---|---:|---:|---:|
+| `avq2` | 1,615 | 5,498,130,320 | 65.5% |
+| `bf16-island` | **12** | **1,205,862,400** | **14.4%** |
+| `affine-int4` | 189 | 875,438,080 | 10.4% |
+| `vocabulary` | 13 | 667,713,856 | 8.0% |
+| `small-state` | 449 | 57,767,936 | 0.7% |
+| `affine-int4-demotion` | 6 | 43,909,120 | 0.5% |
+| `behavior-lora` | 132 | 32,440,320 | 0.4% |
+
+> **⭐⭐⭐⭐⭐ 这条把「2.9 bpw」这个整体数字拆开了。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个平均比特数」的信息量，取决于分布有多集中——**
+> **⚠️ 而这里 14.4% 的体积集中在 12 个未量化的张量上，
+> 故「2.9 bpw」对这 12 个张量完全不适用。**
+>
+> ⭐⭐ **而这条给「为什么需要 bf16 孤岛」一个可推断的解释**：
+> **这 12 个张量大概是对数值精度极敏感的（例如 norm 或 embedding），
+> ⚠️ 而把它们的 bf16 保留下来，是用 14.4% 的体积换整模型可用性——
+> 故这是一个划算的交易，而不是一个缺陷。**
+>
+> **⭐⭐ 判据：**
+> **「混合精度里的高精度孤岛」不是「没压干净」，而是对敏感部分的显式保护——**
+> **⚠️ 而判据是「它的占比是否与它的数量成反比」：
+> 12 个张量占 14.4%，而 1,615 个占 65.5%——故保护是高度定向的。**
+>
+> ⭐⭐ **而这条与 §10.247 那条「INT4 没有 FWHT」形成呼应**：
+> **INT4 张量占 875 MB（10.4%），而 AVQ2 占 5.5 GB（65.5%）——
+> ⚠️ 故这个模型的主力格式是 AVQ2，INT4 只是局部补充。**
+>
+> **⭐⭐ 判据：**
+> **「一个多格式模型里谁是主力」可以从字节占比直接读出——**
+> **⚠️ 而「哪个格式更先进」这个问题的答案，应该与占比一致；
+> 若不一致，说明作者用先进格式只是为了补某个特定层的短板。**
+>
+> ⚠️ **而这条也纠正一个可能的误读**：
+> **「2.9 bpw」不是「每权重 2.9 比特」，而是「8.39 GB / 参数总数」——
+> ⚠️ 而参数总数里包含那 12 个 bf16 张量的完整 16 比特，
+> 故真实的分层比特率是：AVQ2 约 4 比特、INT4 约 4 比特、bf16 是 16 比特。**
+>
+> **⭐⭐ 判据：**
+> **「一个平均比特数」必须能被分解回每一层，否则它无法指导任何决策——**
+> **⚠️ 因为「我要不要用这个格式」取决于我要跑的那个层是什么格式。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -29645,6 +29851,46 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 - [src-btl3-cuda-vocab-cuh] — BTL-3 `ggml/src/ggml-cuda/btl3-vocab.cuh`（275 字节）：`ggml_cuda_op_btl3_vocab_rows` 与 `_head` 两个原型，无校验。
 - [src-btl3-ggml-c] — BTL-3 内置 `ggml/src/ggml.c`（251,221 字节）：本报告只用到 `ggml_custom_4d`（6007-6037 行）、`ggml_new_tensor_impl`（1736-1810 行）、`ggml_set_zero`（7287-7300 行）三处，用来裁决「自定义算子的输出是否被清零」。
 
+### 校验契约、符号生成与组件字节分解（第一百一十六轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/docs/btl3-avq-cuda-validation.md`（4,116 字节，130 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/docs/btl3-avq-cuda-validation.md)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **作者自己承认 CUDA 后端从未被编译、也从未在 GPU 上跑过**：
+「**These checks pass locally. The CUDA test sources also pass host C++ syntax checking, but this machine has neither NVCC nor an NVIDIA GPU. CUDA compilation, device correctness and speed are therefore not claimed.**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「读源码能得到的」与「读源码不能得到的」之间有一条清晰的界线——源码能告诉你它**会做什么**，不能告诉你它**做出来多快、对不对**——⚠️ 而后者恰恰是本报告的主题（性能分析）**」；
+⭐⭐ 判据「**「一个实现的状态」应该分成四档：① 能编译；② 能跑；③ 跑对；④ 跑得快——⚠️ 而这一份停在①，而本报告此前一直按③在写它**」；
+(a) 🔥🔥🔥🔥🔥 **契约说「越界 token 产 0 行」，**CPU 违反了它****：
+「**3. Vocabulary get-rows for both AVQ2 rows and rescued packed 8-bit rows. Invalid token IDs explicitly produce zero rows.**」而 `btl3-vocab.cpp` 第 93 行是 `continue;`；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「两个实现与一个文档不一致」时，不能假设文档是**描述性**的——⚠️ 它也可能是**规定性**的——而区分两者的办法是看「这份文档是**在描述现状**还是在**定义要求**」**」；
+⭐⭐ 判据「**「一份文档的时态与动词」暴露了它是**规范**还是**现状**——⚠️ 而「契约（contract）」这个词本身就是**规范性**的**」；
+⭐⭐ 判据「**「一个行为是不是缺陷」取决于「有没有一份**规定它该怎么做**的东西」——⚠️ 而存在这样一份文档时，偏离它就是**违规**，而不是**风格差异****」；
+⭐⭐ 判据「**「三方里两方一致」比「两方一致」信息量更大——⚠️ 因为两方一致可能是**巧合**，而三方中两方对上第三方则说明那两方是**照同一份东西**写的**」；
+(b) ⚠️⚠️⚠️ **作者明文禁止「从源码或单测发布吞吐结论」**：
+「**Only then profile prompt and decode separately. Do not publish a throughput or latency claim from source inspection or unit tests.**」——**故这是对本报告自身的一条禁令**；
+⭐⭐ 判据（本轮最重要）「**「一个实现者对自己代码的谨慎程度」是**引用他代码时该继承**的东西——⚠️ 而若他都不敢声称速度，我就更不该替他声称**」；
+⭐⭐ 判据「**「一条分析里的事实部分与推断部分应当被**分开标注**」——⚠️ 因为前者可以独立成立，而后者依赖一个本报告没有做过的实验**」；
+(c) ⭐⭐⭐⭐ **四条架构配方，最低 CUDA 版本按 SM 递增**：
+「**RTX 4090 (Ada, SM89) — Use CUDA 11.8 or newer；RTX 5090 (Blackwell, SM120) — Use CUDA 12.8 or newer；DGX Spark (Linux arm64, GB10, SM121) — Use CUDA 12.9 or newer**」——**而「This tree normalizes plain `120` to the architecture-specific `120a` target」**；
+(d) ⭐⭐⭐⭐⭐ **作者把「探针不可跨认领」写成了一句设计意图**：
+「**Each representation has its own model-loader placement probe; CUDA cannot claim one packed tensor merely because it supports another. Unmarked custom operations remain unsupported.**」；
+2. [GitHub / Badtheorylabs — BTL-3 `tools/btl3_gguf/signs.py`（1,804 字节，56 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/tools/btl3_gguf/signs.py)
+ —（2026-10 抓取）。⭐⭐⭐⭐⭐ **符号张量必须逐位复现 `torch.randint`，故这里用纯 Python 重写了 MT19937**：
+「**class _MT19937: self.state = [seed]; for index in range(1, 624): previous = self.state[-1]; self.state.append((1812433253 * (previous ^ (previous >> 30)) + index) & 0xFFFFFFFF); self.index = 624**」而 tempering 是「**value ^= value >> 11; value ^= (value << 7) & 0x9D2C5680; value ^= (value << 15) & 0xEFC60000; value ^= value >> 18**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个张量是不是『随机的』」，取决于**它有没有被冻结进制品**，而不是取决于**怎么生成它**——⚠️ 而一旦它随 GGUF 一起发布，那个种子就只是一个**生成方式的说明**，而不是一个**运行时依赖****」；
+⭐⭐ 判据「**「一个随机量的**生命周期**」越长，它就越应该被**物化**——⚠️ 而判据是「它的**种子会不会变**」**」；
+⭐⭐ 判据「**「一个『随机』张量」常常被误当成**密钥**，而它只是**参数**——⚠️ 判据是「它**会不会被写进发布制品**」——若会，它就不是秘密**」；
+⭐⭐ 判据「**「为了消除一个隐式依赖而**重写一个标准算法**」是一种**极端的确定性**追求——⚠️ 而它的判据是「这个值会不会进制品」**」；
+(e) ⭐⭐⭐⭐ **参数校验用自定义异常，且校验**类型**而非值**：
+「**if type(count) is not int or count < 0: raise SignError("count must be a non-negative integer")**」——**故 `bool` 也会被拒（`type(True) is not int`）**；
+3. [GitHub / Badtheorylabs — BTL-3 `artifacts/conformance/btl-3-compact-layer{13,47}.report.json`（833 / 823 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/artifacts/conformance/btl-3-compact-layer13.report.json)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **第 13 层的 bf16-island 一项占 74.8%**：
+「**"small-state": {"tensors": 8, "bytes": 1188736}, "avq2": {"tensors": 15, "bytes": 52487360}, "bf16-island": {"tensors": 2, "bytes": 241172480}, "affine-int4-demotion": {"tensors": 3, "bytes": 27443200}**」——**两个 bf16 张量比十五个 AVQ2 张量大 4.6 倍**；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**四份报告的 output_bytes 减 projected_tensor_bytes 不是张量数的线性函数**：layer13 28 张量多 3,328 B（118.86 B/张量）；layer40 44 张量多 4,448 B（101.09）；layer47 35 张量多 3,888 B（111.09）；release 2,416 张量多 11,107,568 B（4,597.50）——**故「每张量固定元数据开销」这个假设被证伪**」；
+(f) ⭐⭐⭐⭐ **第 47 层是唯一同时含 avq2 与 affine-int4 两份的层报告**：「**"avq2": {"tensors": 15, "bytes": 66917424}, "affine-int4": {"tensors": 12, "bytes": 54886400}**」——**而第 13 层用的是 `affine-int4-demotion`，故 INT4 在这份模型里有**两种角色****；
+ — [src-btl3-doc-cuda-validation] [src-btl3-tools-signs-py] [src-btl3-conformance-layer13] [src-btl3-conformance-layer47]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -29784,7 +30030,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=341, evidence=2468, claims=1804, claims_high=1457, claims_disputed=9, trace_events=749, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=343, evidence=2482, claims=1809, claims_high=1462, claims_disputed=9, trace_events=753, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
