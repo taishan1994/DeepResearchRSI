@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：313 ｜ **证据数**：2318 ｜ **主张数**：1711（高置信 1367，争议 9）
+> **来源数**：313 ｜ **证据数**：2321 ｜ **主张数**：1714（高置信 1370，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -20842,9 +20842,142 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 >
 > ⚠️ **另注**：**本轮发现 `src-btl3-cuda-marker` 这个来源已存在
 > （指向同一个 `btl3-avq-marker.h`），与本轮新增的
-> `src-btl3-cuda-avq-marker-h` 指向同一 URL。
+> `src-btl3-cuda-marker` 指向同一 URL。
 > 这是本报告第 5 次重复注册来源（§10.117 记过 4 次），
 > 下一轮将合并二者。**
+
+### 10.165 🔥🔥🔥🔥🔥 **`grep btl3` 零命中，而它们确实会被编译**
+
+[c-btl3-glob-compiles-all-cu]
+
+> ```cmake
+> file(GLOB   GGML_HEADERS_CUDA "*.cuh")
+> list(APPEND GGML_HEADERS_CUDA "../../include/ggml-cuda.h")
+>
+> file(GLOB   GGML_SOURCES_CUDA "*.cu")
+> file(GLOB   SRCS "template-instances/fattn-tile*.cu")
+> list(APPEND GGML_SOURCES_CUDA ${SRCS})
+> ```
+>
+> ⚠️ **`grep btl3` 在这份 11,878 字节的 `CMakeLists.txt` 里零命中。**
+
+> **⭐⭐⭐⭐⭐ 这条最终裁决了 §10.155 的矛盾，而裁决方式是「两边都对了一半」**：
+> **`grep btl3` 零命中（§10.150 的隐含依据）与
+> 「四个算子在文档里都写了」（§10.155 的证据）可以同时为真——
+> ⚠️ 因为「没被显式登记」与「不会被编译」不是一回事。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当你要判断「一个源文件会不会被编进二进制」时，
+> `grep 文件名` 是最差的方法——**
+> **⚠️ 因为通配（GLOB）与显式列举在构建系统里是两种完全不同的机制，
+> 而前者在文本里不可见。**
+>
+> ⭐⭐ **这与 §10.146 那条「SM120 kernel 零 CI 覆盖」是同一种病**：
+> **`deepgemm.cmake` 只触发 H100 任务，也是「文本可见但语义不可见」——
+> ⚠️ 即构建系统的「看不见」有两种：
+> ① 文件没被列（GLOB 掩盖）；② 列了但条件不满足（CI 掩盖）。**
+>
+> **⭐⭐ 判据：**
+> **「一个源文件被编译」这件事，在 CMake 里至少有三层可能：
+> ① 被 GLOB 收编；② 被显式列举；③ 两者都没有——
+> ⚠️ 而「grep 不到」只能否证 ②，不能否证 ①。**
+>
+> ⭐⭐ **对 §10.155 的最终结论**：
+> **CUDA 侧四个算子
+> ① 源码存在（§10.155 确认）；
+> ② 会被编入（本条确认）；
+> ③ 从未被编译过（§10.156 确认，因为那台机器没有 NVCC）——**
+> **⚠️ 即「② 成立」与「③ 从未发生」并不冲突：
+> 一个文件可以「被正确地加入编译单元」而「从未真正被编译过」。**
+>
+> **⭐⭐ 判据：**
+> **「构建系统的正确性」与「构建是否发生过」是两个正交的事实——
+> ⚠️ 而一份「只做过宿主语法检查」的验证文档，
+> 对这二者都只能给出前者。**
+
+### 10.166 ⚠️⚠️⚠️ **在构建清单里搜不到一个模块名，可能是一个伪证**
+
+[c-btl3-no-explicit-registration]
+
+> 四个 `btl3-*.cu` **从未被显式列入**任何 `set()` 或 `target_sources()`；
+> 全文 11,878 字节里没有 `btl3` 字样。
+
+> **⭐⭐ 这条的价值在于它是一个「反直觉的事实」**：
+> **一份 11,878 字节的构建清单里，一个字都没提到那四个文件，
+> 而它们确实会被编译——
+> ⚠️ 即「在构建清单里搜索一个模块名」这个方法，在本项目里必然失效。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个构建系统用通配收集源文件时，
+> 「模块清单」这个概念在文本层面就不存在了——**
+> **⚠️ 而任何依赖「读清单来确认某模块在不在」的审计方法，
+> 都会得到「零命中」这个看起来像反证、实际是伪证的答案。**
+>
+> ⭐⭐ **而这条顺带解释了 §10.150 那个错误的成因**：
+> **§10.150 我说「CUDA 根本没走自定义算子」，依据是「Metal 文档说没实现」——
+> ⚠️ 而如果我当时去 grep CMakeLists，我会得到「零命中」，
+> 并因此更加确信那个错误结论。**
+>
+> **⭐⭐ 判据：**
+> **「一个错误的假设」最危险的时候，
+> 不是它没有证据，而是它有一个看起来独立的第二证据——**
+> **⚠️ 而那个「第二证据」往往与第一证据共享同一个盲区。**
+>
+> ⭐⭐ **实践结论很简单**：
+> **要判断「某模块会不会被编译」，只有两个可靠办法：
+> ① 读构建系统收集源文件的方式（本条做的）；
+> ② 直接看编译产物的符号表——
+> ⚠️ 而 ② 在本项目里做不到，因为没有产物。**
+>
+> **⭐⭐ 判据：**
+> **「一个只能通过产物验证的问题」，
+> 在「没有产物」的项目里就是一个永久缺口——**
+> **⚠️ 而本报告已经把这条列进 §10.156 的边界里了。**
+
+### 10.167 ⭐⭐⭐ 「不写死架构」的代价：**每个硬件一份构建**
+
+[c-btl3-arch-fallback-native]
+
+> ```cmake
+> set(CMAKE_CUDA_ARCHITECTURES "native")
+> set(FIXED_ARCHS "")
+> set(${ARCHS} ${FIXED_ARCHS})
+> set(CMAKE_CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES_NATIVE})
+> message(STATUS "Using CMAKE_CUDA_ARCHITECTURES=... CMAKE_CUDA_ARCHITECTURES_NATIVE=...")
+> ```
+
+> **⭐⭐⭐ 这条与 §10.157 那条「内核刻意不针对任何 SM 架构」互为补充**：
+> **内核代码不写死架构，而构建系统用 `native` 或显式列表决定架构——
+> ⚠️ 即「架构选择」被完全外置到构建参数里。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一份代码支持哪些架构」这件事，
+> 在「代码里不写死架构」时，答案就变成了
+> 「构建时传了什么 `CMAKE_CUDA_ARCHITECTURES`」——**
+> **⚠️ 即它从「一个源码事实」变成了「一个构建事实」。**
+>
+> ⭐⭐ **这恰好解释了 §10.157 那条验证指引为什么分成三组**：
+> **RTX 4090 用 `-DCMAKE_CUDA_ARCHITECTURES=89`、
+> RTX 5090 用 `120`（并 normalize 到 `120a`）、DGX Spark 用 `121`——
+> ⚠️ 即「每个硬件一份构建」。**
+>
+> **⭐⭐ 判据：**
+> **当一个项目要求「每个硬件一份构建」时，
+> 它就没有「一个可发布的二进制」——**
+> **⚠️ 而这在消费级产品里是致命的，在自用项目里则完全可以接受。**
+>
+> ⭐⭐ **`native` 这个回落值值得单独记**：
+> **`set(CMAKE_CUDA_ARCHITECTURES "native")` 意味着「跟着构建机上的 GPU 走」——
+> ⚠️ 而 §10.89 那条「`nvcc warning : Cannot find valid GPU for '-arch=native'`」
+> 正是这条分支在无 GPU 机器上的行为。**
+>
+> **⭐⭐ 判据：**
+> **「`native` 是一个只在「构建机 = 目标机」时才正确的默认值——
+> ⚠️ 而本项目恰好满足这个条件（作者在自己的机器上构建），
+> 所以这个默认值对它是对的，对 CI 是错的。**
+>
+> ⚠️ **边界**：**本报告没有看到这段逻辑被触发时的实际输出**，
+> 因为那台机器没有 NVCC（§10.156）。
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -24333,9 +24466,31 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 (e) 🔥🔥🔥🔥🔥 **AVQ2 有六个操作数与两组符号向量**：
 「**src[0]=codes src[1]=affine src[2]=bias src[3]=input_signs src[4]=output_signs src[5]=input**」，而词表侧只有四个基础操作数；
 ⭐⭐ 判据（本轮最重要）「**「一次 Hadamard 旋转」在数值上只需要一次正变换；而「输入侧一次 + 输出侧一次」意味着这个算子在两端都做了 incoherence 处理**」；
-⭐⭐ 判据「**当一份文档列出 prior art，而代码结构又与那些 prior art 一致时，「它不是原创」这个判断就从「作者自述」升级成了「结构证据」**」 — [src-btl3-cuda-avq-marker-h]
+⭐⭐ 判据「**当一份文档列出 prior art，而代码结构又与那些 prior art 一致时，「它不是原创」这个判断就从「作者自述」升级成了「结构证据」**」 — [src-btl3-cuda-marker]
 
-> ⚠️ **来源去重声明**：`src-btl3-cuda-marker` 与本轮新增的 `src-btl3-cuda-avq-marker-h` 指向同一 URL。这是本报告第 5 次重复注册来源（§10.117 记过 4 次）。本轮已删除因此产生的重复证据行 `e-btl3-magic-is-userdata-pointer`，但两个来源条目**仍然并存**，下一轮合并。
+> ✅ **来源去重已完成（第 172 轮）**：`src-btl3-cuda-avq-marker-h` 与 `src-btl3-cuda-marker` 指向同一 URL。这是本报告第 5 次重复注册来源（§10.117 记过 4 次）。第 171 轮已删除因此产生的重复证据行 `e-btl3-magic-is-userdata-pointer`；第 172 轮进一步删除了重复来源行，把 5 条证据改绑到保留条目 `src-btl3-cuda-marker`，并同步更新本文所有引用。
+
+### GLOB 之于 CMake、显式登记的缺席、arch 外置（第九十七轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt`（11,878 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/CMakeLists.txt)
+ —（2026-10 抓取）。(a) 🔥🔥🔥🔥🔥 **`grep btl3` 零命中，而它们确实会被编译**：
+「**file(GLOB   GGML_HEADERS_CUDA "*.cuh") … file(GLOB   GGML_SOURCES_CUDA "*.cu")**」，故四个 `btl3-*.cu` 无需显式登记即被收编；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**当你要判断「一个源文件会不会被编进二进制」时，`grep 文件名` 是最差的方法——因为通配（GLOB）与显式列举在构建系统里是两种完全不同的机制，而前者在文本里不可见**」；
+⭐⭐ 判据「**「一个源文件被编译」这件事，在 CMake 里至少有三层可能：① 被 GLOB 收编；② 被显式列举；③ 两者都没有——而「grep 不到」只能否证 ②，不能否证 ①**」；
+⭐⭐ **对 §10.155 的最终裁决**：**CUDA 侧四个算子 ① 源码存在（§10.155）；② 会被编入（本条）；③ 从未被编译过（§10.156）——即「② 成立」与「③ 从未发生」并不冲突**；
+(b) ⚠️⚠️⚠️ **在构建清单里搜不到一个模块名，可能是一个伪证**：四个 `btl3-*.cu` **从未被显式列入**任何 `set()` 或 `target_sources()`**，全文 11,878 字节里没有 `btl3` 字样；
+⭐⭐ 判据（本轮最重要）「**当一个构建系统用通配收集源文件时，「模块清单」这个概念在文本层面就不存在了——而任何依赖「读清单来确认某模块在不在」的审计方法，都会得到「零命中」这个看起来像反证、实际是伪证的答案**」；
+⭐⭐ 判据「**「一个错误的假设」最危险的时候，不是它没有证据，而是它有一个看起来独立的第二证据——而那个「第二证据」往往与第一证据共享同一个盲区**」；
+⭐⭐ 判据「**「一个只能通过产物验证的问题」，在「没有产物」的项目里就是一个永久缺口**」；
+(c) ⭐⭐⭐ **「不写死架构」的代价：每个硬件一份构建**：
+「**set(CMAKE_CUDA_ARCHITECTURES "native") … set(CMAKE_CUDA_ARCHITECTURES ${CMAKE_CUDA_ARCHITECTURES_NATIVE})**」，并打印「**Using CMAKE_CUDA_ARCHITECTURES=… CMAKE_CUDA_ARCHITECTURES_NATIVE=…**」；
+⭐⭐ 判据（本轮最重要）「**「一份代码支持哪些架构」这件事，在「代码里不写死架构」时，答案就变成了「构建时传了什么 `CMAKE_CUDA_ARCHITECTURES`」——即它从「一个源码事实」变成了「一个构建事实」**」；
+⭐⭐ 判据「**当一个项目要求「每个硬件一份构建」时，它就没有「一个可发布的二进制」——而这在消费级产品里是致命的，在自用项目里则完全可以接受**」；
+⭐⭐ 判据「**「`native` 是一个只在「构建机 = 目标机」时才正确的默认值**」；
+⚠️ **边界**：**本报告没有看到这段逻辑被触发时的实际输出**，因为那台机器没有 NVCC（§10.156）** — [src-btl3-cuda-cmakelists]
+
+> ✅ **结构性清理（第 172 轮）**：删除了重复来源 `src-btl3-cuda-avq-marker-h`（与 `src-btl3-cuda-marker` 同 URL），把 5 条证据改绑到保留条目，并同步更新全文 3 处引用。这是本报告第 5 次重复注册来源的收尾。
 
 ## 附录 A：子问题完成度
 
@@ -24476,7 +24631,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=313, evidence=2318, claims=1711, claims_high=1367, claims_disputed=9, trace_events=695, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=313, evidence=2321, claims=1714, claims_high=1370, claims_disputed=9, trace_events=695, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
