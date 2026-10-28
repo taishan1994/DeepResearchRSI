@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：375 ｜ **证据数**：2634 ｜ **主张数**：1863（高置信 1515，争议 9）
+> **来源数**：380 ｜ **证据数**：2646 ｜ **主张数**：1868（高置信 1520，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -28035,6 +28035,190 @@ exit 0
 > **一个测试的假数据越接近真数据，它能测到的层就越深；
 > 而 `b"model"` 这种假数据只能测到「长度对不对」。**
 
+### 10.320 🔥🔥🔥🔥🔥 `96 GB` 是标称、`97,887 MiB` 是实测——**两者不矛盾**
+
+[c-96gb-is-nominal-and-97887mib-is-measured]
+
+> **`docs/compact-release-readme.md` 的实测表**：
+> ```
+> | Device | Prompt processing | Generation | Status |
+> | RTX PRO 6000 Blackwell 96 GB | 84.70 tok/s | 43.16 tok/s | Exact GGUF, full CUDA offload |
+> | Apple M2 16 GB | 2.30 tok/s | 2.48 tok/s | Exact GGUF, Metal smoke |
+> ```
+>
+> **而 `docs/rtx-pro-6000-speed-2026-07-19.md` 记的 `nvidia-smi` 是 `97,887 MiB`。**
+
+> **🔥 `97,887 / 1024 = 95.59 GiB`，距 `96 GiB` 差 `0.41 GiB`（约 420 MiB 保留）。**
+> **故「96 GB」是产品标称、「97,887 MiB」是驱动报的可分配量。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个容量数字如果同时以「96 GB」和「97,887 MiB」出现，
+> 先做一次单位换算，而不是先报一个矛盾。**
+>
+> **⭐⭐ 而 `launch-btl3-cuda.md` 的 ctx 分层表最高档阈值正是 `at least 96,000 MiB`**——
+> **故那条分界线不是随手取的，它就是「96 GB 标称卡」这条线。**
+>
+> **⭐⭐ 判据：**
+> **当一个阈值恰好等于一个产品标称值，
+> 说明写这个阈值的人是在按「卡型」分档，而不是按「内存量」分档。**
+
+### 10.321 🔥🔥🔥🔥🔥 `32768` 与 `131072` 是**两个启动器**的默认值
+
+[c-two-ctx-tables-are-two-launchers]
+
+> **`docs/launch-btl3-compact.md` 58-70 行的环境变量表**：
+> ```
+> | Variable | Default | Meaning |
+> | BTL3_HOST           | 127.0.0.1 | Listen address |
+> | BTL3_PORT           | 8080      | OpenAI API port |
+> | BTL3_CTX_SIZE       | 32768     | Allocated context |
+> | BTL3_PARALLEL       | 1         | Concurrent slots |
+> | BTL3_GPU_LAYERS     | 99        | Layers requested on Metal |
+> | BTL3_MAX_TOKENS     | 2048      | Default per-response generation cap |
+> | BTL3_REPEAT_PENALTY | 1.10      | Default repetition penalty |
+> | BTL3_REPEAT_LAST_N  | 512       | Token window used by repetition penalty |
+> | BTL3_ENABLE_THINKING| false     | Experimental opt-in |
+> ```
+
+> **🔥 这份文档通篇讲的是 macOS 的 `btl3-server`（§10.293 记的
+> 唯一硬编码 `32768` 的那个），所以这里的 `32768` 与 CUDA 启动器的 `131072`
+> 不是矛盾，而是两个可执行文件的默认。**
+>
+> **⚠️ 但**：这张表的表头只写 `Variable | Default | Meaning`，
+> **没有一处声明「这些默认值属于 `btl3-server`」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **两份文档给出同一个变量的两个默认值，
+> 如果它们描述的是两个不同的可执行文件，那这不是矛盾；
+> 但如果两份文档都没有在表头写清「这是哪个启动器」，它就会误导。**
+>
+> **⭐⭐ 判据：**
+> **一个默认值表最该标注的不是数值，而是「这张表属于哪个二进制」。**
+>
+> **⭐⭐ 判据：**
+> **一张缺了作用域的默认值表，会被读者当成全局默认值；
+> 而它一旦与另一张表并存，就产生了「两个默认值」的错觉。**
+
+> ⭐ **而这份文档还有另外三个可直接用的确定数**：
+> **`llama.cpp build 9596`、`commit 9fcaed763`**（第 10 行）——
+> **故这个 bundle 不是「某个 llama.cpp」，而是第 9596 号构建的那一次提交。**
+> **`BTL3_MODEL_ALIASES` 默认 `BTL-3`；
+> 而 LM Studio 那节要求把它改成 `BTL-3,gpt-4.1-2025-04-14`。**
+
+### 10.322 🔥🔥🔥🔥🔥 五档阈值在**文档与三段代码**里逐字相同
+
+[c-five-tier-table-doc-matches-code]
+
+> **`docs/launch-btl3-cuda.md` 103-109 行**：
+> ```
+> The launcher detects the first NVIDIA GPU's total memory.
+> DGX Spark falls back to system memory because CPU and GPU share its 128 GB unified pool.
+>
+> | Detected memory | Default context |
+> | below 20,000 MiB      | 16,384  |
+> | 20,000-27,999 MiB     | 32,768  |
+> | 28,000-47,999 MiB     | 65,536  |
+> | 48,000-95,999 MiB     | 98,304  |
+> | at least 96,000 MiB   | 131,072 |
+> ```
+
+> **🔥 而 §10.301 从 `launch/btl3-cuda-server`（sh）、`.ps1`、
+> `src/nativeRunner.ts` 三处读到的阈值与取值完全相同。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **文档与实现各给出同一组五个阈值、且都是边界值，
+> 这不像巧合，而像「文档由实现生成」或「实现由文档抄写」。**
+> **而这恰好是 §10.304 那条「文档的建议值能被实现的定量阈值重现」的第二次命中。**
+>
+> **⭐⭐ 判据：**
+> **一个阈值表如果五档全部落在整数千位上
+> （20,000 / 28,000 / 48,000 / 96,000），
+> 说明它是人选的，不是测出来的。**
+>
+> **⚠️ 而「96,000」这一档恰好是 96 GB 标称卡的分界——
+> 故这张表的最高档是为这张卡设计的。**
+>
+> ⭐ **它还回答了 §10.291 那个「DGX Spark 为什么走系统内存」**：
+> **「DGX Spark falls back to system memory because CPU and GPU share its
+> 128 GB unified pool」**——**因为那 128 GB 是 CPU 与 GPU 共享的，
+> 而 `nvidia-smi` 报的 `memory.total` 在 UMA 下不代表可用显存。**
+
+> **📌 而这张表对 RTX PRO 6000 的读者最直接的一行是最后一行**：
+> **`at least 96,000 MiB → 131,072`——故这张卡（95.59 GiB）落在最高档，
+> 默认上下文就是 131,072，不需要任何环境变量。**
+
+### 10.323 🔥🔥🔥🔥🔥 两份「我没测什么」的清单，**四项 vs 五项**
+
+[c-not-established-lists-are-four-and-five]
+
+> **`docs/launch-btl3-compact.md` 163-168 行**：
+> 「**This does not establish RTX 4090, RTX 5090, DGX Spark, or Windows
+> compatibility; each target still requires its own packaged-runtime gate.
+> Do not reuse the old Python/Triton H100 number as a native-runtime claim.**」
+>
+> **`docs/compact-release-readme.md` 96-97 行**：
+> 「**RTX 4090, RTX 5090, DGX Spark, Windows, Ollama-patched CUDA packages,
+> and phone execution are not represented by these measurements.**」
+
+> **🔥 一份四项、一份五项。后者多出「Ollama-patched CUDA packages」与
+> 「phone execution」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份「我测了什么」的表，必须配一份「我没测什么」的表；
+> 而后者通常是前者长度的两倍。**
+>
+> **⭐⭐ 这两份文档的比例是 2 行实测 vs 4-5 项不保证，接近 1:2——
+> 这个比例在本报告见过的所有硬件文档里是最好的。**
+>
+> **⭐⭐ 判据：**
+> **一个性能数字的可信度，
+> 与它旁边那份「不保证」清单的长度成正比。**
+>
+> **⭐⭐ 而两份清单不一致本身也有信息量**：
+> **一份多出两项，说明那份写得更晚或更保守。**
+
+> ⭐ **而 `launch-btl3-compact.md` 那句「不要把旧的 Python/Triton H100 数字
+> 当本机数字」特别值得记**：
+> **它承认了这个项目曾有一个 H100 上的 Python/Triton 实现，
+> 而那个实现的数字不能拿来当原生运行时的性能声明。**
+> **⭐⭐ 判据：**
+> **一个项目主动指出「我们以前那个数字不算数」，
+> 比它给出十个新数字更能说明它的测量纪律。**
+
+### 10.324 🔥🔥🔥🔥🔥 `preview` 是一个**目录**，不是一个标签
+
+[c-preview-is-a-directory-not-a-label]
+
+> **`docs/compact-release-readme.md` 78-83 行**：
+> 「**Patched Ollama: packaging source is included, but stock `ollama create`
+> cannot execute this GGUF and patched CUDA distributions remain release
+> candidates until their target-device gates pass.**」
+> +「**Compatibility is never faked: a preview runtime lives under
+> `runtimes/preview`, not `runtimes/supported`.**」
+
+> **🔥 故一个包是 `preview` 还是 `supported`，看它在哪个目录，
+> 不看它打什么标签。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个状态的判定如果能被一次「路径比较」完成，
+> 它就不可能被误标——因为标签可以撒谎，路径不会。**
+>
+> **⭐⭐ 判据：**
+> **「Compatibility is never faked」这句话的实现方式不是一句承诺，
+> 而是一个目录名。**
+>
+> **⭐⭐ 而这句话本身是本报告见过的最强的同类声明，
+> 因为它附带一个可检查的机制。**
+
+> **📌 而它对 RTX PRO 6000 的读者有一条直接的坏消息**：
+> **「patched CUDA distributions remain **release candidates**」——
+> 故那条 Ollama 补丁路径（§10.309-§10.311）在这份文档的措辞里
+> 还不是 `supported`，而是 `candidate`。**
+>
+> **⭐⭐ 判据：**
+> **一个项目对自己最想要的那个能力（CUDA 支持）用了「候选」这个词，
+> 说明它的自我评价是按实测走的，不是按路线图走的。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -32898,6 +33082,53 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐⭐ 判据「**一个测试的假数据越接近真数据，它能测到的层就越深；而 `b"model"` 这种假数据只能测到「长度对不对」**」；
  — [src-btl3-repo-tree] [src-btl3-tools-probe-windows-runner] [src-btl3-integrations-ollama-modelfile] [src-btl3-tests-consumer-installer] [src-btl3-tests-patched-ollama]
 
+### 两个 docs 与 lmstudio 集成（第一百三十四轮补充）
+
+继续按 r208 那 39 个清单推进，本轮读完 docs 下最后两个与
+`integrations/lmstudio/btl3-native` 的五个小文件。
+
+1. [GitHub / Badtheorylabs — `docs/launch-btl3-compact.md`（6,108 字节，173 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/launch-btl3-compact.md)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐ **runtime 的构建身份被写死在文档里**：
+「**runtime: llama.cpp build 9596, commit `9fcaed763`**」——
+**故这个 bundle 不是「某个 llama.cpp」，而是第 9596 号构建的 `9fcaed76` 那一次提交**；
+🔥🔥🔥🔥🔥 **十个环境变量的默认值在同一张表里**：
+「**BTL3_HOST 127.0.0.1 / BTL3_PORT 8080 / BTL3_CTX_SIZE 32768 / BTL3_PARALLEL 1 / BTL3_GPU_LAYERS 99 / BTL3_MAX_TOKENS 2048 / BTL3_REPEAT_PENALTY 1.10 / BTL3_REPEAT_LAST_N 512 / BTL3_ENABLE_THINKING false / BTL3_MODEL_ALIASES BTL-3**」——
+⚠️ **而这张表的表头只写 Variable / Default / Meaning，没有一处声明「这些默认值属于 btl3-server」**；
+⭐⭐ 判据（本轮最重要）「**两份文档给出同一个变量的两个默认值，如果它们描述的是两个不同的可执行文件，那这不是矛盾；但如果两份文档都没有在表头写清「这是哪个启动器」，它就会误导**」；
+⭐⭐ 判据「**一个默认值表最该标注的不是数值，而是「这张表属于哪个二进制」**」；
+⭐ **而 `num_ctx 32768` 与 CUDA 启动器的 `131072` 不是矛盾**：**这份文档通篇讲的是 macOS 的 `btl3-server`（§10.293 记的唯一硬编码 32768 的那个）**；
+(a) 🔥🔥🔥🔥🔥 **速度数字后面紧跟一份「不保证」清单**：「**This does not establish RTX 4090, RTX 5090, DGX Spark, or Windows compatibility; each target still requires its own packaged-runtime gate. Do not reuse the old Python/Triton H100 number as a native-runtime claim.**」——**四项不保证 + 一句「不要把旧的 H100 数字当本机数字」**；
+(b) ⭐⭐⭐⭐⭐ **M2 的实测数字被写成「一次冒烟」而不是「吞吐量」**：「**2.30 prompt tokens/second and 2.48 generated tokens/second at a 128-token allocated context. Treat those as one-device smoke results, not universal throughput claims.**」——**生成 2.48 > 预填 2.30：预填比生成还慢，这是 Metal 上 AVQ2 的真实形状**；
+2. [GitHub / Badtheorylabs — `docs/compact-release-readme.md`（3,526 字节，111 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/docs/compact-release-readme.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **实测表的设备名带容量，且是 96 GB**：
+「**| RTX PRO 6000 Blackwell 96 GB | 84.70 tok/s | 43.16 tok/s | Exact GGUF, full CUDA offload |**」+「**| Apple M2 16 GB | 2.30 tok/s | 2.48 tok/s | Exact GGUF, Metal smoke |**」——
+⭐ **而速度文档的 nvidia-smi 报 97,887 MiB = 95.59 GiB，故「96 GB」是标称、「97,887 MiB」是实测可分配量**；
+⭐⭐ 判据（本轮最重要）「**一个容量数字如果同时以「96 GB」和「97,887 MiB」出现，先做一次单位换算，而不是先报一个矛盾**」；
+⭐⭐ 而 `launch-btl3-cuda.md` 的 ctx 分层表最高档阈值正是 `at least 96,000 MiB`——**故那条分界线就是「96 GB 标称卡」这条线**；
+(a) 🔥🔥🔥🔥🔥 **五档阈值在文档与三段代码里逐字相同**：「**below 20,000 -> 16,384 / 20,000-27,999 -> 32,768 / 28,000-47,999 -> 65,536 / 48,000-95,999 -> 98,304 / at least 96,000 -> 131,072**」——**而 §10.301 从 sh/.ps1/nativeRunner.ts 三处读到的完全相同**；
+⭐⭐ 判据「**一个阈值表如果五档全部落在整数千位（20,000 / 28,000 / 48,000 / 96,000），说明它是人选的，不是测出来的**」；
+⭐ **它还回答了 §10.291 那个「DGX Spark 为什么走系统内存」**：「**DGX Spark falls back to system memory because CPU and GPU share its 128 GB unified pool**」——**因为那 128 GB 是 CPU 与 GPU 共享的**；
+(b) ⭐⭐⭐⭐⭐ **「未被这些测量代表」的清单是五项，比另一份多两项**：「**RTX 4090, RTX 5090, DGX Spark, Windows, Ollama-patched CUDA packages, and phone execution are not represented by these measurements.**」——**而 launch-btl3-compact.md 只列四项**；
+⭐⭐ 判据「**一份「我测了什么」的表，必须配一份「我没测什么」的表；而后者通常是前者长度的两倍**」——**这两份的比例是 2 行实测 vs 4-5 项不保证，接近 1:2**；
+⭐⭐ 判据「**一个性能数字的可信度，与它旁边那份「不保证」清单的长度成正比**」；
+(c) 🔥🔥🔥🔥🔥 **`preview` 与 `supported` 是目录级区分**：「**Compatibility is never faked: a preview runtime lives under `runtimes/preview`, not `runtimes/supported`.**」+「**patched CUDA distributions remain release candidates until their target-device gates pass**」——
+⭐⭐ 判据「**一个状态的判定如果能被一次「路径比较」完成，它就不可能被误标——因为标签可以撒谎，路径不会**」；
+⭐⭐ 判据「**「Compatibility is never faked」这句话的实现方式不是一句承诺，而是一个目录名**」；
+⚠️ **故 §10.309-§10.311 那条 Ollama 补丁路径在这份文档的措辞里还不是 supported，而是 candidate**；
+(d) ⭐⭐⭐⭐ **YAML front matter 给出许可证与基座模型**：「**license: apache-2.0 / base_model: Qwen/Qwen3.6-27B / pipeline_tag: text-generation / library_name: llama.cpp**」，而正文写「**Logical architecture: Qwen3.6-27B**」与「**Frozen checkpoint: BTL-3 RL-0013**」；
+3. ⭐⭐⭐⭐ **`integrations/lmstudio/btl3-native` 五个小文件读完了**：
+**`package.json`（320 B）：`@lmstudio/sdk 1.5.0`、`openai 6.48.0`、`typescript 5.9.3`、`@types/node 24.0.0`，全部精确锁定无 `^`/`~`；而整个文件没有 `engines` 字段**——⚠️ **故插件不声明它需要哪个 Node 版本**；
+**`manifest.json`（113 B）：`type plugin / runner node / owner badtheorylabs / name btl3-native / revision 1`**——**不声明入口、不声明权限、不声明依赖，只声明身份**；
+**`src/index.ts`（39 B）：`export { main } from "./generator";`**——**整个插件的装配面是一个 re-export**；
+**`run-local`（255 B）：检查 `lms` CLI 存在、`npm ci --ignore-scripts`、`exec lms dev`；缺 CLI 时 `exit 2` 并提示 `npx lmstudio install-cli`**——**`--ignore-scripts` 关掉了安装期脚本，与 §10.185 那个 postinstall 隐患同族**；
+**`tsconfig.json`（286 B）：`strict true / target ES2021 / rootDir src / outDir dist / declaration true`**——**而 `build` 与 `typecheck` 都是 `tsc --noEmit`，故 `outDir dist` 永远不会被产出**；
+⭐⭐ 判据「**一个声明了 `outDir` 却在 `build` 里用 `--noEmit` 的项目，它的 `dist` 是一个从未存在过的目录**」；
+ — [src-btl3-docs-launch-compact] [src-btl3-docs-compact-release-readme] [src-btl3-integrations-lmstudio-pkg] [src-btl3-integrations-lmstudio-manifest] [src-btl3-integrations-lmstudio-runlocal]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -33037,7 +33268,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=375, evidence=2634, claims=1863, claims_high=1515, claims_disputed=9, trace_events=821, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=380, evidence=2646, claims=1868, claims_high=1520, claims_disputed=9, trace_events=831, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
