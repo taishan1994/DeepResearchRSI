@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：292 ｜ **证据数**：2254 ｜ **主张数**：1657（高置信 1316，争议 9）
+> **来源数**：294 ｜ **证据数**：2260 ｜ **主张数**：1661（高置信 1319，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -18465,7 +18465,7 @@ flash-attn   = on
 > 说明他把主卡设成了第二张（Max-Q 300W）——
 > 这是一个反直觉的选择，而作者没解释。**
 
-### 10.106 🔥🔥🔥🔥🔥 **推翻 §10.101 的前提：那不是 `llama.cpp`**
+### 10.106 ⚠️⚠️ **第一层更正：那不是标准的 `llama.cpp`**（§10.111 二次更正）
 
 [c-btl3-is-not-llamacpp]
 
@@ -18627,6 +18627,164 @@ flash-attn   = on
 >
 > ⚠️ **本报告没有验证那个实测平台是 `x86_64` 还是 `arm64`——
 > model card 只写了「RTX PRO 6000 Blackwell 96 GB」。**
+
+### 10.111 ⚠️⚠️⚠️ 二次更正：它**是** `llama.cpp` 的 fork——我上一轮也错了一半
+
+[c-avq2-is-llamacpp-fork-after-all]
+
+> **`native/llama.cpp/` 的顶层包含
+> `ggml/`、`src/`、`tools/`、`examples/`、`gguf-py/`、
+> `CMakeLists.txt`、`convert_hf_to_gguf.py`、`AUTHORS`（65,818 字节）。**
+
+> ⚠️⚠️⚠️ **这是本报告连续两轮第二次修正同一件事，而两次错误的方向相反**：
+> **第 159 轮：把「外壳」当成了 `llama.cpp`（错在「太信」）；
+> 第 160 轮：把「根目录没有 `ggml/`」当成了「不是 `llama.cpp`」（错在「太不信」）。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **两次错误都源于同一个动作：
+> 「用一层目录的结构去判断整个项目的性质」——**
+> **⚠️ 第一次用了 model card 的字面，第二次用了仓库根目录的列表，
+> 两次都没有再往下看一层。**
+>
+> **⭐⭐ 判据：**
+> **「它不是 X」这个结论的风险，比「它是 X」更高——**
+> **⚠️ 因为「是」只需要一个证据，而「不是」需要对所有可能的位置做穷举，
+> 而我两次都只查了一个位置。**
+>
+> ⭐⭐ **正确答案是一个更精确的三段式**：
+> 1. **它是 `llama.cpp` 的一个 fork（有 `ggml/` 与 `src/`）；**
+> 2. **它加了私有算子（`ggml_custom_4d` + magic `0x42544c3341565132` = `BTL3AVQ2`）；**
+> 3. **故「标准 `llama.cpp` 读不了 AVQ2」仍然成立**——
+> **但成立的理由不是「它不是 `llama.cpp`」，而是「它的 `llama.cpp` 被改了」。**
+>
+> **⭐⭐ 判据：**
+> **当一个结论在修正之后仍然成立、但理由完全变了时，
+> 必须把理由也改掉——**
+> **⚠️ 因为「结论对」会掩盖「理由是错的」，
+> 而错误的理由会在下一个场合给出错误的预测。**
+
+### 10.112 🔥🔥🔥🔥🔥 那条机制从「推断」升级为「观察」
+
+[c-avq2-prefill-is-matvec-observed]
+
+**CPU 侧**（`src/btl3-avq.cpp`）：
+```cpp
+for (std::size_t token = ith; token < token_count; token += nth) {
+    mul_mat_vec(matrix, input_data + token * columns,
+                output_data + token * rows);
+}
+```
+**CUDA 侧**（`ggml-cuda/btl3-avq.cu`）：
+```cpp
+decode_mul_mat<<<rows * tokens, matvec_threads, 0, stream>>>(...)
+// kernel: row = blockIdx.x % rows;  token = blockIdx.x / rows;
+```
+**工作区**（`btl3-avq-contract.h`）：
+```cpp
+const std::size_t values_per_token = shape.columns + shape.rows;
+return token_count * values_per_token * sizeof(float);
+```
+
+> **🔥 即：解码路径是「逐 token 的矩阵-向量乘」，不是矩阵乘。
+> 故预填充无法利用大 batch 摊薄。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「推断」与「观察」之间的差距，不是「可信度」，
+> 而是「能不能定位到那一行」——**
+> **⚠️ 因为只有定位到那一行，才知道「这个特性是设计选择还是实现遗漏」。**
+>
+> ⭐⭐ **而这里的答案是设计选择，三条证据**：
+> 1. **`hadamard_blocks` 按 `avq2_transform_block = 128` 分块做蝶形变换**——
+>    **它的意义就是「用 O(n log n) 的变换把矩阵乘变成对角乘」，
+>    而对角乘天然是逐元素的，没有 batch 维度可利用**；
+> 2. **一个 codebook group 的全部仿射参数只有 20 个 float
+>    （`group_weight` 16 + `group_bias` 4）**——
+>    **权重不是「存储在矩阵里」，而是「由 2 比特码查出来再算出来」**；
+> 3. **故「解码」在这里是字面意义的：每个权重都要现场算。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一种量化把「权重」变成「权重的生成规则」时，
+> 它就必须在每个 token 上重新执行那条规则——**
+> **⚠️ 而这正是「2 比特」这个名字完全不表达的东西。**
+>
+> ⭐⭐ **这给了 §10.101 那个 `84.70 / 43.16` 一个完整、可检验的解释**：
+> **比值 1.96 不是因为「卡不行」，
+> 而是因为「这个算子没有 batch 维度」——**
+> **故「更大的 batch 更快」这条常识在这里不成立。**
+>
+> **⭐⭐ 判据：**
+> **「预填充比解码快」这条经验，
+> 依赖于「矩阵乘能被大 batch 摊薄」这个前提——**
+> **⚠️ 而当量化把矩阵乘换成「逐元素解码」时，这个前提就消失了，
+> 而没有任何报错。**
+
+### 10.113 ⭐⭐⭐⭐ 「2 比特」存的是**码**，不是**值**
+
+[c-avq2-two-bits-is-a-generated-weight]
+
+```cpp
+std::array<float, 4> decode_avq2_code(uint8_t code) {
+    return { (code >> 6 & 3) - 1.5F, (code >> 4 & 3) - 1.5F,
+             (code >> 2 & 3) - 1.5F, (code      & 3) - 1.5F };
+}
+```
+```cpp
+weight = group_bias[component];
+for (lattice_index = 0..3)
+    weight += lattice[lattice_index] * group_weight[component*4 + lattice_index];
+```
+
+> ⚠️ **一个权重 = 「2 比特码」+「20 个 float 的组参数」+「Hadamard 变换」。**
+>
+> ⭐⭐⭐⭐ **这条把 §10.87 那条判据推到它的逻辑终点**：
+> **§10.87：「『同一份权重』在量化生态里几乎总是不完整的」；
+> §10.109：「有些量化产生的是『一个不同的模型』」；
+> 本条：「有些量化连『权重』都不产生——它产生的是『一个生成权重的函数』。」**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「量化」这个词隐含了「值还在，只是精度低了」——
+> 而当存储的是「码 + 变换 + 仿射参数」时，
+> 「精度」这个词本身就不再适用，**
+> **⚠️ 因为「一个码解出来的值」不是「某个原始值的近似」，
+> 而是「由码和参数共同定义的一个新值」。**
+>
+> ⭐⭐ **一个非常实际的后果**：
+> **你无法把 AVQ2 的一个张量「转回」BF16 再喂给别的引擎——
+> 不是「转回去会损失精度」，而是「转回去得到的是一个不同的模型」。**
+>
+> **⭐⭐ 判据：**
+> **当一份权重的「格式」包含了一个变换（这里是 Hadamard）时，
+> 它的「可移植性」就归零了——**
+> **⚠️ 因为变换必须由同一个 runtime 施加，
+> 而「同一个」意味着「不能换实现」。**
+>
+> ⭐⭐ **这也解释了 §10.110 那条「CUDA 侧只有 arm64 包」**：
+> **一个自带变换的权重格式，其每一种后端都要单独实现那个变换**——
+> **故「支持几个平台」的成本远高于普通 GGUF。**
+
+### 10.114 ⭐⭐⭐ 压缩的来源是「Hadamard + 码本」，不是「更少的比特」
+
+[c-avq2-hadamard-is-the-compression]
+
+> `hadamard_blocks(values, block_size)` 对输入与输出各做一次
+> **分块（128）Hadamard 变换**，缩放因子 `1/sqrt(128)`。
+>
+> ⚠️ **即它是「先把激活旋转到一个稀疏基，再在那里做对角近似」——
+> 这是 AQLM / QuIP# 一类的路线，不是 GPTQ 一类的路线。**
+>
+> **⭐⭐ 判据：**
+> **当一份报告的标题写「2 比特模型」时，
+> 读者会以为「权重被截断到 2 比特」——
+> ⚠️ 而实际发生的可能是「权重被旋转、分块、再用一个 20 参数的码本重建」。
+> 这两件事对「精度」与「速度」的影响完全不同。**
+>
+> ⭐⭐ **对本报告的速度主题**：
+> **旋转类量化的解码成本是「固定的算法成本」，它不随 batch 摊薄——**
+> **故这类模型在「预填充」上系统性吃亏，而在「显存」上系统性占优。**
+>
+> ⚠️ **本条是 `derivation`，置信度 `medium`**：
+> **「Hadamard + 码本 = AQLM/QuIP# 路线」是本报告的归类，源码里没有这样写；
+> 且本报告只读了解码端，故「旋转是量化时学的还是固定的」未知。**
 
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
@@ -22041,6 +22199,12 @@ python scripts/audit_uncited.py research/rtx-pro-6000
 
 2. [GitHub / Badtheorylabs — `BTL-3` 仓库元数据（API）](https://api.github.com/repos/Badtheorylabs/BTL-3) —（2026-10 抓取）。⭐⭐⭐ **它有自己的 C++ native runtime**：**`"language": "C++"`、`"size": 32020`、`pushed_at: 2026-07-24T08:11:31Z`**，描述「**Native runtime, integrations, and reproducible packaging for BTL-3 and BTL-3 Compact**」；顶层目录 `artifacts/`、`docs/`、`integrations/`、`launch/`、**`native/`**、`packaging/`、**`papers/`**、`tests/`、`tools/`——⚠️ **既没有 `ggml/` 也没有 `src/`（`llama.cpp` 的两大标志）**，即它不是 fork 而是一个从零写的运行时 — [src-github-btl3-runtime]
 
+### AVQ2 的源码：一条机制从「推断」升级为「观察」，与第二次自我更正（第八十六轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/src/btl3-avq.cpp`（11,368 字节）与 `btl3-avq-contract.h`（2,627 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/src/btl3-avq.cpp) —（2026-10 抓取）。(a) ⚠️⚠️⚠️ **二次更正：`native/llama.cpp/` 是一个完整的 `llama.cpp` 树**——顶层含 **`ggml/`、`src/`、`tools/`、`examples/`、`gguf-py/`、`CMakeLists.txt`、`convert_hf_to_gguf.py`、`AUTHORS`（65,818 字节）**，故 **上一轮「它不是 `llama.cpp`」这句话也错了一半**；⭐⭐ 判据（本轮最重要）「**两次错误都源于同一个动作：『用一层目录的结构去判断整个项目的性质』——第一次用了 model card 的字面，第二次用了仓库根目录的列表，两次都没有再往下看一层**」；⭐⭐ 判据「**『它不是 X』这个结论的风险，比『它是 X』更高——因为『是』只需要一个证据，而『不是』需要对所有可能的位置做穷举，而我两次都只查了一个位置**」；⭐ 正确答案是三段式：**① 它是 `llama.cpp` 的 fork ② 它加了私有算子（`ggml_custom_4d` + magic `0x42544c3341565132` = `BTL3AVQ2`）③ 故「标准 `llama.cpp` 读不了 AVQ2」仍成立——但理由不是「它不是 llama.cpp」而是「它的 llama.cpp 被改了」**；⭐⭐ 判据「**当一个结论在修正之后仍然成立、但理由完全变了时，必须把理由也改掉——因为『结论对』会掩盖『理由是错的』，而错误的理由会在下一个场合给出错误的预测**」。(b) 🔥🔥🔥🔥🔥 **解码结构四步**：`decode_avq2_code` 把一个字节解成 **4 个 2 比特值 `((code >> 6) & 3) - 1.5` 等**；`hadamard_blocks` 对输入做**分块（`avq2_transform_block = 128`）Hadamard 变换**、缩放 `1/sqrt(128)`；逐行累加 **`weight = group_bias[c] + Σ lattice[i] * group_weight[c*4+i]`**（**`group_weight` 只有 16 个 float、`group_bias` 只有 4 个**）；再对输出做一次 Hadamard 并乘 `output_signs`；⭐⭐⭐ 判据（本轮最重要）「**当一种量化把『权重』变成『权重的生成规则』时，它就必须在每个 token 上重新执行那条规则——而这正是『2 比特』这个名字完全不表达的东西**」；⭐⭐⭐⭐ 判据「**『量化』这个词隐含了『值还在，只是精度低了』——而当存储的是『码 + 变换 + 仿射参数』时，『精度』这个词本身就不再适用，因为『一个码解出来的值』不是『某个原始值的近似』，而是『由码和参数共同定义的一个新值』**」；⭐⭐ 实际后果：**无法把 AVQ2 的一个张量「转回」BF16 再喂给别的引擎——不是「转回去会损失精度」，而是「转回去得到的是一个不同的模型」**；⭐⭐ 判据「**当一份权重的『格式』包含了一个变换（这里是 Hadamard）时，它的『可移植性』就归零了——因为变换必须由同一个 runtime 施加，而『同一个』意味着『不能换实现』**」。(c) 🔥🔥🔥🔥🔥 **决定性的一句：解码路径是 `mul_mat_vec`，不是 `mul_mat`**——`compute_mul_mat` 是逐 token 循环 `for (token = ith; token < token_count; token += nth) mul_mat_vec(...)`；⚠️ 即 **预填充时它仍然一个 token 一个 token 地做「矩阵-向量乘」**；⭐⭐ 判据（本轮最重要）「**『推断』与『观察』之间的差距，不是『可信度』，而是『能不能定位到那一行』——因为只有定位到那一行，才知道『这个特性是设计选择还是实现遗漏』**」。(d) 🔥🔥🔥🔥🔥 **合同头里有一行直接给出「随 token 线性增长」**：`values_per_token = shape.columns + shape.rows; return token_count * values_per_token * sizeof(float);`——**工作区 = `token_count × (columns + rows) × 4 字节`，没有一项是「大矩阵乘」** — [src-btl3-avq2-src]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu`（7,070 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/ggml/src/ggml-cuda/btl3-avq.cu) —（2026-10 抓取）。🔥🔥🔥🔥🔥 **CUDA 侧的 grid 形状坐实了同一件事**：**`decode_mul_mat<<<rows * tokens, matvec_threads, 0, stream>>>`**，**`matvec_threads = 256`**，kernel 内 **`row = blockIdx.x % rows; token = blockIdx.x / rows;`**，并用 `warp_sum` 在 block 内归约；⚠️ 即 **一个 block 只负责「一个 token 的一行」，而这是 `matvec`（矩阵-向量）不是 `gemm`（矩阵-矩阵）——故 `tokens` 增加时只是 block 数增加，每个 block 的工作量不变**；⭐⭐ 判据「**『预填充比解码快』这条经验，依赖于『矩阵乘能被大 batch 摊薄』这个前提——而当量化把矩阵乘换成『逐元素解码』时，这个前提就消失了，而没有任何报错**」；⭐ 结论：**§10.101 那个 `84.70 / 43.16` 的比值 1.96 不是因为「卡不行」，而是因为「这个算子没有 batch 维度」** — [src-btl3-avq2-cuda]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -22180,7 +22344,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=292, evidence=2254, claims=1657, claims_high=1316, claims_disputed=9, trace_events=653, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=294, evidence=2260, claims=1661, claims_high=1319, claims_disputed=9, trace_events=657, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
