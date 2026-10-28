@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：323 ｜ **证据数**：2361 ｜ **主张数**：1739（高置信 1393，争议 9）
+> **来源数**：325 ｜ **证据数**：2369 ｜ **主张数**：1744（高置信 1398，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -22122,6 +22122,218 @@ static inline bool ggml_cuda_is_btl3_probe(const ggml_tensor * op, std::uintptr_
 > `tests/CMakeLists.txt` 的默认目标**，
 > 故「它们会不会被 `ctest` 收集」仍未知。
 
+### 10.193 🔥🔥🔥🔥🔥 `add_test` **无条件**——gate 只在函数调用点
+
+[c-btl3-tests-all-registered]
+
+> ```cmake
+> llama_build_and_test(test-btl3-avq.cpp)          # 无条件
+> if (TARGET ggml-cuda)
+>     llama_build_and_test(test-btl3-avq-cuda.cpp)
+>     llama_build_and_test(test-btl3-int4-cuda.cpp)
+>     llama_build_and_test(test-btl3-vocab-cuda.cpp)
+> endif()
+> llama_build(test-btl3-model-load.cpp)            # 只 build
+> if (DEFINED BTL3_TEST_MODEL)
+>     llama_test(test-btl3-model-load ARGS ${BTL3_TEST_MODEL})
+> endif()
+> if (GGML_METAL)
+>     llama_build_and_test(test-btl3-metal.cpp)
+>     llama_build_and_test(test-btl3-metal-vocab.cpp)
+> endif()
+> ```
+>
+> 而 `llama_build_and_test` 函数体内**没有任何 gate**：
+> `add_executable` → `add_test` → `set_property(TEST ... LABELS ...)`。
+
+> **⭐⭐⭐⭐⭐ 这条彻底回答了「测试存在与测试会跑之间是不是断的」**：
+> **答案是「不是断的，但有一道很高的门」——
+> 一旦 `add_test` 被调用，`ctest` 一定会跑它；
+> ⚠️ 而它在缺硬件时会 `throw`（§10.192），故结果是「红」，不是「跳过」。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「`add_test` 有没有被调用」与「`add_test` 被调用后会不会通过」
+> 是两个独立的问题——**
+> **⚠️ 而大多数关于「CI 覆盖」的讨论
+> 把这两个问题混成了「有没有测试」。**
+>
+> ⭐⭐ **这给 §10.192 那条补上了另一半**：
+> **§10.192 我看到 `throw`，推断「CI 上要么排除、要么真有卡」——
+> ⚠️ 而本轮看到的是第三种可能：
+> 它既没被排除，也不一定有卡，而是「就一直红着」。**
+>
+> **⭐⭐ 判据：**
+> **「一个长期红的测试」与「一个不存在的测试」
+> 对 CI 的信号价值几乎相同——**
+> **⚠️ 因为红久了就没人看了。**
+>
+> ⭐⭐ **这与 §10.145 那条「SM120 内核改动零 CI 覆盖」形成尖锐对照**：
+> **上游 `llama.cpp` 是「测试在，但 CI 不跑 SM120」；
+> BTL-3 是「测试会跑，但没有 GPU 就红」——**
+> **⚠️ 两种失效模式的外观相反（一个静默，一个噪音），而结果相同（覆盖为零）。**
+>
+> **⭐⭐ 判据：**
+> **「覆盖为零」至少有两条不同的成因：
+> 「测试不在」与「测试红着」——**
+> **⚠️ 而只看「有没有测试」这一个指标，两者都查不出来。**
+>
+> ⭐⭐ **一个可算的细节**：
+> **五个测试的调用都没传 `LABEL`，故全落在 `main` 标签下（§10.197）——
+> ⚠️ 即它们与 400+ 个上游测试混在同一批里，
+> 使得「单独跑 BTL-3 测试」在 `ctest` 层面不可行。**
+
+### 10.194 ⚠️⚠️ CUDA 与 Metal 的 gate **用了两种不同判据**
+
+[c-cuda-vs-metal-gate-mismatch]
+
+> CUDA：`if (TARGET ggml-cuda)` ——看**目标是否被创建**
+> Metal：`if (GGML_METAL)` ——看**选项变量**
+
+> **⭐⭐⭐⭐ 这是一个「同一种需求用两种判据」的干净例子**：
+> **两个 gate 想做的事完全一样（「这个后端可用吗」），
+> ⚠️ 而它们读的东西不同：一个读构建产物，一个读配置变量。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **`if (TARGET X)` 与 `if (VAR)` 的可靠性不同：
+> 前者保证「那个目标真的存在」，后者只保证「那个选项被打开了」——**
+> **⚠️ 而选项打开 ≠ 后端可用。**
+>
+> ⭐⭐ **`if (TARGET ggml-cuda)` 更严格，理由可查**：
+> **CMake 的 `TARGET` 谓词只在该目标已由
+> `add_library`/`add_executable` 创建时为真——
+> ⚠️ 故它排除了「选项开着但后端因故没被加进来」的情况。**
+>
+> **⭐⭐ 判据：**
+> **「用构建产物做条件」比「用配置变量做条件」更难被写错——**
+> **⚠️ 因为产物是事实，变量是意图。**
+>
+> ⭐⭐ **这个不对称本身没有危害**：
+> **Metal 的失败模式是「编译不过」而不是「静默跳过」——
+> ⚠️ 但它是一个值得记的模式。**
+>
+> **⭐⭐ 判据：**
+> **「同一个文件里对两件同类事情用两种判据」通常说明
+> 「它们是在不同时间写的」——**
+> **⚠️ 而时间差是这类不对称最常见的成因，也是最难从代码里看出来的。**
+>
+> ⚠️ **边界**：**本报告没有看 `ggml/CMakeLists.txt`**，
+> 故「`ggml-cuda` 目标在什么条件下被创建」仍是未知的。
+
+### 10.195 🔥🔥🔥🔥🔥 `LLAMA_BUILD_TESTS` 的默认值是 `${LLAMA_STANDALONE}`
+
+[c-llama-build-tests-default]
+
+> ```cmake
+> option(LLAMA_BUILD_TESTS "llama: build tests" ${LLAMA_STANDALONE})
+> ...
+> if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION)
+>     add_subdirectory(tests)
+> ```
+
+> **⭐⭐⭐⭐⭐ 这条解释了「测试存在」与「测试会跑」之间的那道门**：
+> **独立构建 `ON`、作为子项目 `OFF`——
+> ⚠️ 即默认值不是常量，而是另一个变量的函数。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个默认值写成另一个变量的函数」是一种上下文敏感的设计——**
+> **⚠️ 它的好处是「自建时不需要额外参数」，
+> 代价是「同一个 commit 在不同用法下行为不同」。**
+>
+> ⭐⭐ **这给出一个可判定的推论**：
+> **如果 BTL-3 是作为「一个 fork 的 llama.cpp」被独立构建的，
+> 则 `LLAMA_STANDALONE` 为真，测试默认开——
+> ⚠️ 即 §10.192 那些 `throw` 在开发者的机器上是真会执行的。**
+>
+> **⭐⭐ 判据：**
+> **「一个项目怎么被构建」决定了「它的默认值是什么」——**
+> **⚠️ 而在讨论「CI 覆盖」时，必须先确定「它是 standalone 还是子项目」。**
+>
+> ⭐⭐ **这对 §10.177 那个「jasl 用 2 张 RTX PRO 6000 开发」有直接含义**：
+> **他若是 standalone 构建，则那三个 `-cuda` 测试会自动被注册并执行，
+> ⚠️ 故他的「可用（虽然有些 bug）」这句话背后，
+> 大概率真的跑过 CUDA 差分测试。**
+>
+> **⭐⭐ 判据：**
+> **「一个用户说『能跑』」的可信度，
+> 取决于「他那个构建配置下，测试会不会自动跑」——**
+> **⚠️ 而这是一个可以从 CMake 默认值推出来的事实，
+> 不需要信任他的措辞。**
+>
+> ⭐⭐ **`NOT CMAKE_JS_VERSION` 这个条件值得单独记**：
+> **它是为了排除 Node.js 原生模块构建（`cmake-js`），
+> ⚠️ 而那正好是 `integrations/lmstudio/btl3-native/` 可能走的路径——
+> 即「同一个仓库在 Node 构建下不建测试」。**
+>
+> **⭐⭐ 判据：**
+> **「一个 `NOT` 条件往往指向一次具体的事故」——**
+> **⚠️ 因为「排除某场景」总是因为那个场景曾经坏事。**
+
+### 10.196 ⚠️⚠️ `test-btl3-model-load` 默认**不会被注册**
+
+[c-model-load-not-registered-by-default]
+
+> `llama_build(test-btl3-model-load.cpp)` ——只有 `add_executable`，**没有 `add_test`**
+> 注册要另写 `llama_test(...)`，而它被 `if (DEFINED BTL3_TEST_MODEL)` 包着。
+
+> **⭐⭐⭐⭐ 这是五个测试里唯一的「只 build 不 test」**，
+> 而它的理由很明确：**它需要一个真实的模型文件路径**。
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「需要一个外部数据文件」的测试，
+> 其注册条件必然带一个「文件在哪」的开关——**
+> **⚠️ 而那个开关的默认值几乎总是「未定义」，故这类测试默认不跑。**
+>
+> ⭐⭐ **这给出一个可复用的识别法**：
+> **当看到一个测试用 `llama_build` 而不是 `llama_build_and_test` 时，
+> 先找「它的数据从哪来」——
+> ⚠️ 因为这两个函数的差别就是「要不要 `add_test`」。**
+>
+> **⭐⭐ 判据：**
+> **「一个测试的注册方式」是它「依赖外部资源」的可靠信号——**
+> **⚠️ 而 `llama_build` 这个词在函数名里就说明了它只做一半。**
+>
+> ⭐⭐ **这与 §10.166 那条「`test-btl3-model-load.cpp`（970 字节）」呼应**：
+> **970 字节恰好是「加载一个模型然后什么都不做」的规模，
+> ⚠️ 故它测的是「加载路径不崩」，而不是「加载后算得对」。**
+>
+> **⭐⭐ 判据：**
+> **「一个测试文件的字节数」与「它验证的范围」成正比——**
+> **⚠️ 而 970 字节不足以验证任何数值正确性。**
+
+### 10.197 ⚠️⚠️⚠️ 根 `CMakeLists.txt` 里**没有任何 CI 专用分支**
+
+[c-no-ci-branch-in-cmake]
+
+> 进入 `tests/` 的唯一条件是
+> `LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION`；
+> 无 `if (CI)`、无 `CMAKE_BUILD_TYPE STREQUAL "CI"`。
+
+> **⭐⭐⭐⭐ 这条排除了「CI 上自动跳过 GPU 测试」这个可能**：
+> **若存在 `if (CI)` 分支，那 §10.192 那些 `throw` 就不会在 CI 上触发——
+> ⚠️ 而实际没有任何这样的分支，故「CI 会红」这个推论成立。**
+>
+> **⭐⭐ 判据（本轮最重要）：**
+> **「一个项目有没有 CI 专用分支」决定了
+> 「它的测试在 CI 上的行为能否与本地不同」——**
+> **⚠️ 而没有分支意味着「CI 上跑的就是本地那一套」。**
+>
+> ⭐⭐ **这给 §10.145 那条对照一个更精确的表述**：
+> **上游 `llama.cpp` 的 CI 覆盖问题出在工作流文件里
+> （`deepgemm.cmake` 只触发 H100 job）；
+> ⚠️ 而 BTL-3 的问题出在没有 CI 配置（至少在 `tests/` 这一层）——
+> 两者的诊断位置完全不同。**
+>
+> **⭐⭐ 判据：**
+> **「CI 覆盖为零」要分两处查：
+> 「构建脚本里有没有 gate」与「工作流文件里有没有 job」——**
+> **⚠️ 而只看其中一处会得出相反的结论：
+> 只看 CMake 会说「测试默认开」，
+> 只看工作流会说「没有 SM120 job」。**
+>
+> ⚠️ **边界**：**本报告没有看 `.github/workflows/`**，
+> 故「BTL-3 到底有没有 CI」仍是未知的——
+> 本条只能证明「`tests/` 这一层没有 CI 专用分支」。
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -25797,6 +26009,43 @@ INT4「**codes->ne[0] == columns / 2；scales->ne[0] == columns / 128；scales->
 ⭐⭐ 判据「**「一个测试数据生成式里的乘数」往往比数据本身更能说明作者的意图**」，**当看到 `(i * k + c) & 0xFF` 时先算 `k mod 16`** ；
 (b) ⭐⭐⭐ **`zeros` 非零（3..9）、`scales` 变化（1..5 倍）**：「**zeros[index] = static_cast<int8_t>(3 + index % 7);**」「**0.03125F * static_cast<float>(1 + index % 5)**」，**故「减 zero」这一步不会被漏掉** — [src-btl3-test-int4-cuda]
 
+### 五个 BTL-3 测试在 ctest 里的注册条件（第一百零三轮补充）
+
+1. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/tests/CMakeLists.txt`（17,891 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/tests/CMakeLists.txt)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **五个测试的注册条件全在一段里**：
+「**llama_build_and_test(test-btl3-avq.cpp)**」；
+「**if (TARGET ggml-cuda) llama_build_and_test(test-btl3-avq-cuda.cpp) llama_build_and_test(test-btl3-int4-cuda.cpp) llama_build_and_test(test-btl3-vocab-cuda.cpp) endif()**」；
+「**llama_build(test-btl3-model-load.cpp) if (DEFINED BTL3_TEST_MODEL) llama_test(test-btl3-model-load ARGS ${BTL3_TEST_MODEL}) endif()**」；
+「**if (GGML_METAL) llama_build_and_test(test-btl3-metal.cpp) llama_build_and_test(test-btl3-metal-vocab.cpp) endif()**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「`add_test` 有没有被调用」与「`add_test` 被调用后会不会通过」是两个独立的问题——而大多数关于「CI 覆盖」的讨论把这两个问题混成了「有没有测试」**」；
+⭐⭐ 判据「**「一个长期红的测试」与「一个不存在的测试」对 CI 的信号价值几乎相同——因为红久了就没人看了**」；
+⭐⭐ 判据「**「覆盖为零」至少有两条不同的成因：「测试不在」与「测试红着」——而只看「有没有测试」这一个指标，两者都查不出来**」；
+(a) 🔥🔥🔥🔥🔥 **`llama_build_and_test` 内部是无条件的 `add_test`**：「**add_executable(${TEST_TARGET} ${TEST_SOURCES}) ... target_link_libraries(${TEST_TARGET} PRIVATE llama-common) add_test( NAME ${TEST_TARGET} WORKING_DIRECTORY ${LLAMA_TEST_WORKING_DIRECTORY} COMMAND $<TARGET_FILE:${TEST_TARGET}> ${LLAMA_TEST_ARGS}) set_property(TEST ${TEST_TARGET} PROPERTY LABELS ${LLAMA_TEST_LABEL})**」，**函数体里没有任何 gate**；
+(b) ⚠️⚠️ **CUDA 与 Metal 的 gate 用了两种不同判据**：CUDA 是「**if (TARGET ggml-cuda)**」（看目标是否被创建），Metal 是「**if (GGML_METAL)**」（看选项变量）；
+⭐⭐ 判据「**`if (TARGET X)` 与 `if (VAR)` 的可靠性不同：前者保证「那个目标真的存在」，后者只保证「那个选项被打开了」——而选项打开不等于后端可用**」；
+⭐⭐ 判据「**「用构建产物做条件」比「用配置变量做条件」更难被写错——因为产物是事实，变量是意图**」；
+⭐⭐ 判据「**「同一个文件里对两件同类事情用两种判据」通常说明「它们是在不同时间写的」**」；
+(c) ⭐⭐ **所有未指定 LABEL 的测试都被打上 `main`**：「**if (NOT DEFINED LLAMA_TEST_LABEL) { set(LLAMA_TEST_LABEL "main") }**」，**而五个 BTL-3 测试的调用都没传 LABEL**；
+(d) ⭐⭐⭐ **`test-btl3-model-load` 只 build 不 test**：「**llama_build**」无 `add_test`，注册要另写「**llama_test(test-btl3-model-load ARGS ${BTL3_TEST_MODEL})**」；
+⭐⭐ 判据「**「需要一个外部数据文件」的测试，其注册条件必然带一个「文件在哪」的开关——而那个开关的默认值几乎总是「未定义」，故这类测试默认不跑**」；
+⭐⭐ 判据「**「一个测试的注册方式」是它「依赖外部资源」的可靠信号——而 `llama_build` 这个词在函数名里就说明了它只做一半**」 — [src-btl3-tests-cmakelists]
+
+2. [GitHub / Badtheorylabs — BTL-3 `native/llama.cpp/CMakeLists.txt`（9,551 字节）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/native/llama.cpp/CMakeLists.txt)
+ —（2026-10 抓取）。🔥🔥🔥🔥🔥 **测试目录的开关默认值跟着 `LLAMA_STANDALONE` 走**：
+「**option(LLAMA_BUILD_TESTS "llama: build tests" ${LLAMA_STANDALONE})**」，
+进入条件是「**if (LLAMA_BUILD_COMMON AND LLAMA_BUILD_TESTS AND NOT CMAKE_JS_VERSION) ... add_subdirectory(tests)**」；
+⭐⭐⭐⭐⭐ 判据（本轮最重要）「**「一个默认值写成另一个变量的函数」是一种上下文敏感的设计——它的好处是「自建时不需要额外参数」，代价是「同一个 commit 在不同用法下行为不同」**」；
+⭐⭐ 可判定的推论：**若 BTL-3 作为「一个 fork 的 llama.cpp」被独立构建，则 `LLAMA_STANDALONE` 为真，测试默认开——即 §10.192 那些 `throw` 在开发者机器上是真会执行的**；
+⭐⭐ 判据「**「一个项目怎么被构建」决定了「它的默认值是什么」——而在讨论「CI 覆盖」时，必须先确定「它是 standalone 还是子项目」**」；
+⭐⭐ 判据「**「一个用户说『能跑』」的可信度，取决于「他那个构建配置下，测试会不会自动跑」——而这是一个可以从 CMake 默认值推出来的事实，不需要信任他的措辞**」；
+(a) ⭐⭐ **`NOT CMAKE_JS_VERSION` 是为了排除 Node.js 原生模块构建**（`cmake-js`），而那正好是 `integrations/lmstudio/btl3-native/` 可能走的路径；
+⭐⭐ 判据「**「一个 `NOT` 条件往往指向一次具体的事故」——因为「排除某场景」总是因为那个场景曾经坏事**」；
+(b) ⚠️⚠️⚠️ **根 CMakeLists 里没有任何 CI 专用分支**：无「**if (CI)**」、无「**CMAKE_BUILD_TYPE STREQUAL "CI"**」，**故「CI 上自动跳过 GPU 测试」这个可能被排除**；
+⭐⭐ 判据（本轮最重要）「**「一个项目有没有 CI 专用分支」决定了「它的测试在 CI 上的行为能否与本地不同」——而没有分支意味着「CI 上跑的就是本地那一套」**」；
+⭐⭐ 判据「**「CI 覆盖为零」要分两处查：「构建脚本里有没有 gate」与「工作流文件里有没有 job」——而只看其中一处会得出相反的结论**」 — [src-btl3-root-cmakelists]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -25936,7 +26185,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=323, evidence=2361, claims=1739, claims_high=1393, claims_disputed=9, trace_events=714, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=325, evidence=2369, claims=1744, claims_high=1398, claims_disputed=9, trace_events=718, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
