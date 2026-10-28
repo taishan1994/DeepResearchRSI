@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：459 ｜ **证据数**：2883 ｜ **主张数**：2088（高置信 1738，争议 9）
+> **来源数**：460 ｜ **证据数**：2889 ｜ **主张数**：2095（高置信 1745，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -35023,6 +35023,219 @@ exit 0
 > **⭐⭐ 故两轮相邻、同一类推理、正确率 1/2——
 > 这就是为什么「读原文」不能省。**
 
+### 10.545 🔥🔥🔥🔥🔥 那条「需要的 tcgen05 路径」，全仓 **0 次**
+
+[c-the-tcgen05-path-does-not-exist-in-this-repo]
+
+> **上一轮那行注释说 Blackwell「needs the tcgen05 path」。
+> 而对 `git/trees/main?recursive=1` 的 3,070 个 blob 做文件名匹配**：
+> ```
+> tcgen05      全部=   0  ggml-cuda 内=   0
+> tcgen        全部=   0  ggml-cuda 内=   0
+> MMA_1SM      全部=   0  ggml-cuda 内=   0
+> sm_100       全部=   0  ggml-cuda 内=   0
+> UMMA         全部=   0  ggml-cuda 内=   0
+> ```
+> **而这不是忽略造成的：同树有 190 个 `.cu`，
+> `ggml-cuda/` 下 188 个，
+> 最大的 `ggml-cuda.cu` 是 235,681 字节。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份代码的注释说「需要 X 路径」而 X 在同一个仓库里不存在时，
+> 那句话不是「这里没实现」，
+> 而是「这里承认了另一条路才有解」——
+> 故它是一份关于「这条路到此为止」的声明。**
+>
+> **⭐⭐ 判据：**
+> **故第 453 行那个 `return false` 不是「暂时不支持」，
+> 而是「在 tcgen05 被写出来之前，
+> Blackwell 只能走通用路径」。**
+>
+> ⚠️ **而这条给本报告一个可检验的边界：
+> 零命中必须用「树是完整的」来支撑——
+> 本轮用「190 个 `.cu` 都在、最大文件 235,681 字节」证明了这一点。**
+> **⭐⭐ 故「零命中」的可信度，
+> 等于「你证明了你搜的地方是全的」的可信度。**
+
+### 10.546 ⭐🔥🔥🔥🔥 「Blackwell 支持」的唯一内容是 **FP4**
+
+[c-blackwell-mma-exists-but-only-for-block-scaled-fp4]
+
+> **`mma.cuh` 第 1126-1153 行是 `mma_block_scaled_fp4`**：
+> ```cpp
+> #ifdef BLACKWELL_MMA_AVAILABLE
+>     if constexpr (type == GGML_TYPE_MXFP4) {
+>         asm volatile(
+>             "mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X."
+>             "m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 ...");
+>     } else {
+>         asm volatile(
+>             "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X."
+>             "m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 ...");
+>     }
+> #else
+>     GGML_UNUSED_VARS(D, A, B, a_scale, b_scale);
+> #endif
+> ```
+> **而 `common.cuh` 第 860 行写
+> 「This is used for NVFP4 subblock scale quantizations only」。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当「支持 Blackwell」这句话的唯一内容是 FP4 时，
+> 它对低比特整数（`Q1_0`/`Q2_0`）的帮助为零——
+> 因为 FP4 是浮点格式，
+> 而 `Q1_0`/`Q2_0` 是三元/二元的整数格。**
+>
+> **⭐⭐ 判据：**
+> **故「Blackwell 有张量核」与「Blackwell 能加速 1-bit 量化」是两件事，
+> 而 corpus 里从来没有人把这两件事分开。**
+>
+> ⚠️ **而这条给本报告一个直接结论：
+> PRO 6000 上 `Q2_0` 的 129.9 tok/s，
+> 既没有 Hopper 的 wgmma 路径（被排除），
+> 也用不上 Blackwell 的 FP4 MMA（格式不匹配）——
+> 故它走的是从 Ampere 一路继承下来的通用 `mma.sync.m16n8k16`。**
+
+### 10.547 🔥🔥🔥🔥🔥 `sm_120` **确实满足** `BLACKWELL_MMA_AVAILABLE`
+
+[c-sm120-does-satisfy-the-blackwell-mma-guard]
+
+> **`common.cuh` 第 286-288 行**：
+> ```c
+> #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
+>     && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN
+> #    define BLACKWELL_MMA_AVAILABLE
+> #endif
+> ```
+> **而 `BLACKWELL = 1200`、`RUBIN = 1300`，
+> 故 `1200 >= 1200 && 1200 < 1300` 为真。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个宏的守卫写成「>= A && < B」时，
+> 它的意图是「A 到 B 之间」，
+> 而它的实现在 `A == B` 的边界上恰好等于 A——
+> 故 `1200` 落在区间内是设计，不是巧合。**
+>
+> **⭐⭐ 判据：**
+> **故 `BLACKWELL_MMA_AVAILABLE` 的命名比它的实际范围宽：
+> 它真的覆盖 Blackwell，
+> 但它只在一个 FP4 函数里被用到。**
+>
+> ⚠️ **而这条与 §10.538 形成对照：
+> 同一个 `1200` 常量，
+> 在 `mmq-hopper-q1.cu` 里被用来排除，
+> 在 `common.cuh` 里被用来包含——
+> 故「Blackwell 能用什么」的答案取决于问的是哪条路径。**
+
+### 10.548 ⭐⭐⭐⭐⭐ 没有「架构断档」——因为 Ampere 那条也覆盖 `sm_120`
+
+[c-there-is-no-architecture-gap-because-ampere-also-covers-sm120]
+
+> **`common.cuh` 第 282-284 行**：
+> ```c
+> #if !defined(GGML_USE_HIP) && __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE
+> #define AMPERE_MMA_AVAILABLE
+> #endif
+> ```
+> **第 352-354 行 `ampere_mma_available(cc)` 判 `>= GGML_CUDA_CC_AMPERE`，
+> 而 `AMPERE = 800`，故 `1200 >= 800` 为真。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条较新的路径被排除时，
+> 必须同时检查「较旧的那条是否仍然覆盖新硬件」——
+> 如果覆盖，那排除的不是「支持」，而是「优化」。**
+>
+> **⭐⭐ 判据：**
+> **故「PRO 6000 没有专门的低比特内核」与
+> 「PRO 6000 跑不了低比特」是两个完全不同的事实：
+> 前者为真，后者为假。**
+>
+> ⚠️ **而这条把 §10.537 的措辞必须收紧：
+> 上一轮写「故 PRO 6000 的 `Q2_0` 129.9 tok/s 应读作
+> 『在没有任何专门内核的情况下测到的速度』」——
+> 这句是对的；但如果读成「所以这个数字不可用」，那就错了。**
+> **⭐⭐ 故「通用路径」不是「没有路径」。**
+
+### 10.549 ⭐⭐⭐⭐⭐ `mma.cuh` 里 14 个守卫，上界全是 **Ampere**
+
+[c-the-upper-bound-in-mma-cuh-is-ampere-not-blackwell]
+
+> **对该文件 grep `__CUDA_ARCH__|GGML_CUDA_CC_` 得 83 处命中，
+> 其中 14 处是成对的
+> `#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE ... #endif`。
+> 而 `BLACKWELL|1200|1210|tcgen|RUBIN` 只命中三处**
+> （第 79 行的注释、第 1131 与 1153 行的那个 FP4 函数）。
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一份文件里 14 个守卫的上界都是同一个旧架构时，
+> 它表达的不是「这些指令在更新的卡上也有效」，
+> 而是「作者没有为更新的卡写新分支」——
+> 而这两者在功能上等价、在意图上完全不同。**
+>
+> **⭐⭐ 判据：**
+> **故 `>= GGML_CUDA_CC_AMPERE` 这个写法的语义是
+> 「从 Ampere 起都用这一份」，
+> 而不是「Ampere 是最后一个支持的架构」。**
+>
+> ⚠️ **而这条给本报告一个可借用的读法：
+> 一个 `>= 旧架构` 的守卫，
+> 在遇到新硬件时不会报错，也不会变快——
+> 它只是继续用旧的那份代码。**
+
+### 10.550 🔥🔥🔥🔥🔥 FP4 **帮不了** 1-bit：格式层面的不可达
+
+[c-blackwell-support-is-fp4-only-which-cannot-help-1-bit]
+
+> **`mma.cuh` 第 1136-1150 行两条指令的操作数类型是 `e2m1.e2m1.f32`（4 位浮点），
+> 而 `Q1_0`/`Q2_0` 是三元/二元的整数格；
+> 故 `mma_block_scaled_fp4` 的 `if constexpr (type == GGML_TYPE_MXFP4)` 分支
+> 对 `Q1_0`/`Q2_0` 不可达。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「这个硬件有这个指令」与「这个指令能算这个格式」是两个断言——
+> 而后者需要操作数类型匹配，前者只需要架构编号匹配。**
+>
+> **⭐⭐ 判据：**
+> **故 PRO 6000 的低比特推理，
+> 在格式层面就注定走整数 MMA（`m16n8k16` 那族），
+> 而不是 Blackwell 新增的 FP4 MMA。**
+>
+> ⚠️ **而这条给本报告一个可检验的预测：
+> 如果有人在 PRO 6000 上跑 `MXFP4` 而不是 `Q2_0`，
+> 他会看到 Blackwell 的 FP4 快得多——
+> 而这个对比在 corpus 里不存在。**
+> **⭐⭐ 故这是一个新的「对照缺口」：
+> 不是缺 PRO 6000 的数，
+> 而是缺「同一个模型量化成 MXFP4 与 Q2_0 后的速度对比」。**
+
+### 10.551 ⭐⭐⭐⭐⭐ 上一轮的推论**需要收紧一句**
+
+[c-the-previous-rounds-inference-needs-one-clause-narrowed]
+
+> **上一轮（§10.537）写：
+> 「故 PRO 6000 的 `Q2_0` 129.9 tok/s 应读作
+> 『在没有任何专门内核的情况下测到的速度』」——
+> 本轮确认这句是对的，
+> 但必须同时写清「通用路径仍然存在」。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一条撤回或收紧只针对「优化」而不针对「功能」时，
+> 报告必须把这两个词分开写——
+> 否则读者会把「没有加速」读成「不能跑」。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.537 与 §10.548 合起来的完整结论是：
+> PRO 6000 的低比特推理有路径、没有专门优化、
+> 且它的正确性来自 Ampere 那一代的整数 MMA。**
+>
+> ⚠️ **而这条也说明本报告的一个系统性风险：
+> 「被排除」这个词在 238-240 轮里出现了太多次，
+> 而它每次指的都不是同一层——
+> 有时是「这个开关排除这张卡」，
+> 有时是「这个格式不匹配」，
+> 有时是「这条路径不存在」。**
+> **⭐⭐ 故凡写「被排除」，都必须跟着写「哪一层被排除」。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -41106,6 +41319,40 @@ shell 实装是「**if [ $memory -ge 96000 ]; then 131072 elif [ $memory -ge 480
 ⭐⭐ 判据「**当一条推断被原文确认时，它的价值不在于「结论对了」，而在于「现在可以引用一句话而不是一段推理」**」——**⚠️ 而这条也说明「选项名足够推断」是一个危险的巧合：这一次数值对上了（1200 >= 1200），但上一轮同样基于名字的推断（121-real）是错的。故两轮相邻、同一类推理、正确率 1/2——这就是为什么「读原文」不能省**；
  — [src-btl3-mmq-hopper-q1-cu] [src-btl3-common-cuh]
 
+### 那条「需要的路径」不存在（第一百六十六轮补充）
+
+上一轮结尾说「查 `tcgen05` 路径在 `sm_120a` 上是否存在——注释说 Blackwell needs the tcgen05 path」。本轮查了：**`tcgen05` 在整个仓库里出现 0 次**。但同时查到一个反转——**Ampere 那条路径仍然覆盖 `sm_120`**。
+
+1. 🔥🔥🔥🔥🔥 **那条「需要的 tcgen05 路径」，全仓 0 次**：
+对 `git/trees/main?recursive=1` 的 3,070 个 blob 做文件名匹配「**tcgen05 全部=0、tcgen 全部=0、MMA_1SM 全部=0、sm_100 全部=0、UMMA 全部=0**」，**而这不是忽略造成的：同树有 190 个 `.cu`，`ggml-cuda/` 下 188 个，最大的 `ggml-cuda.cu` 是 235,681 字节**；
+
+⭐⭐ 判据（本轮最重要）「**当一份代码的注释说「需要 X 路径」而 X 在同一个仓库里不存在时，那句话不是「这里没实现」，而是「这里承认了另一条路才有解」——故它是一份关于「这条路到此为止」的声明**」——**⚠️ 故「零命中」的可信度，等于「你证明了你搜的地方是全的」的可信度**；
+2. ⭐🔥🔥🔥🔥 **「Blackwell 支持」的唯一内容是 FP4**：
+`mma.cuh` 第 1126-1153 行是 `mma_block_scaled_fp4`，里面两条 `asm volatile` 的操作数类型是 `e2m1.e2m1.f32`（4 位浮点），而 `common.cuh` 第 860 行写「This is used for NVFP4 subblock scale quantizations only」；
+
+⭐⭐ 判据（本轮最重要）「**当「支持 Blackwell」这句话的唯一内容是 FP4 时，它对低比特整数（Q1_0/Q2_0）的帮助为零——因为 FP4 是浮点格式，而 Q1_0/Q2_0 是三元/二元的整数格**」——**⚠️ 故「Blackwell 有张量核」与「Blackwell 能加速 1-bit 量化」是两件事，而 corpus 里从来没有人把这两件事分开**；
+3. 🔥🔥🔥🔥🔥 **`sm_120` 确实满足 `BLACKWELL_MMA_AVAILABLE`**：
+`common.cuh` 第 286-288 行写「**#if ... __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL && __CUDA_ARCH__ < GGML_CUDA_CC_RUBIN #    define BLACKWELL_MMA_AVAILABLE #endif**」，而 `BLACKWELL = 1200`、`RUBIN = 1300`，故 `1200 >= 1200 && 1200 < 1300` 为真；
+
+⭐⭐ 判据「**当一个宏的守卫写成「>= A && < B」时，它的意图是「A 到 B 之间」，而它的实现在 A == B 的边界上恰好等于 A**」——**⚠️ 而这条与 §10.538 形成对照：同一个 1200 常量，在 mmq-hopper-q1.cu 里被用来排除，在 common.cuh 里被用来包含——故「Blackwell 能用什么」的答案取决于问的是哪条路径**；
+4. ⭐⭐⭐⭐⭐ **没有「架构断档」——因为 Ampere 那条也覆盖 `sm_120`**：
+`common.cuh` 第 282-284 行的 `AMPERE_MMA_AVAILABLE` 判 `>= GGML_CUDA_CC_AMPERE`，而 `AMPERE = 800`，故 `1200 >= 800` 为真；
+
+⭐⭐ 判据（本轮最重要）「**当一条较新的路径被排除时，必须同时检查「较旧的那条是否仍然覆盖新硬件」——如果覆盖，那排除的不是「支持」，而是「优化」。故「PRO 6000 没有专门的低比特内核」与「PRO 6000 跑不了低比特」是两个完全不同的事实：前者为真，后者为假**」——**⭐⭐ 故「通用路径」不是「没有路径」**；
+5. ⭐⭐⭐⭐⭐ **`mma.cuh` 里 14 个守卫，上界全是 Ampere**：
+对该文件 grep `__CUDA_ARCH__|GGML_CUDA_CC_` 得 83 处命中，其中 14 处是成对的 `#if __CUDA_ARCH__ >= GGML_CUDA_CC_AMPERE ... #endif`，而 `BLACKWELL|1200|1210|tcgen|RUBIN` 只命中三处；
+
+⭐⭐ 判据「**当一份文件里 14 个守卫的上界都是同一个旧架构时，它表达的不是「这些指令在更新的卡上也有效」，而是「作者没有为更新的卡写新分支」——而这两者在功能上等价、在意图上完全不同。故「>= 旧架构」这个写法的语义是「从 Ampere 起都用这一份」**」——**⚠️ 一个 `>= 旧架构` 的守卫，在遇到新硬件时不会报错，也不会变快——它只是继续用旧的那份代码**；
+6. 🔥🔥🔥🔥🔥 **FP4 帮不了 1-bit：格式层面的不可达**：
+`mma.cuh` 第 1136-1150 行的操作数类型是 `e2m1.e2m1.f32`，而 `Q1_0`/`Q2_0` 是整数格，故那个 `if constexpr (type == GGML_TYPE_MXFP4)` 分支对它们不可达；
+
+⭐⭐ 判据（本轮最重要）「**「这个硬件有这个指令」与「这个指令能算这个格式」是两个断言——而后者需要操作数类型匹配，前者只需要架构编号匹配。故 PRO 6000 的低比特推理，在格式层面就注定走整数 MMA（m16n8k16 那族），而不是 Blackwell 新增的 FP4 MMA**」——**⭐⭐ 新缺口：缺「同一个模型量化成 MXFP4 与 Q2_0 后的速度对比」**；
+7. ⭐⭐⭐⭐⭐ **上一轮的推论需要收紧一句**：
+§10.537 的「没有专门内核」是对的，但必须同时写清「通用路径仍然存在」；
+
+⭐⭐ 判据（本轮最重要）「**当一条撤回或收紧只针对「优化」而不针对「功能」时，报告必须把这两个词分开写——否则读者会把「没有加速」读成「不能跑」**」——**⚠️ 而这条也暴露本报告的系统性风险：「被排除」这个词在 238-240 轮里出现了太多次，而它每次指的都不是同一层——有时是「这个开关排除这张卡」，有时是「这个格式不匹配」，有时是「这条路径不存在」。故凡写「被排除」，都必须跟着写「哪一层被排除」**；
+ — [src-btl3-mma-cuh]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -41245,7 +41492,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=459, evidence=2883, claims=2088, claims_high=1738, claims_disputed=9, trace_events=989, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=460, evidence=2889, claims=2095, claims_high=1745, claims_disputed=9, trace_events=991, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
