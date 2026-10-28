@@ -3,7 +3,7 @@
 > **状态**：已完成（存在已声明的证据缺口）
 > **信息截止**：2026-10-27
 > **覆盖范围**：Workstation Edition / Max-Q Workstation Edition / Server Edition 三个 SKU
-> **来源数**：415 ｜ **证据数**：2748 ｜ **主张数**：1951（高置信 1603，争议 9）
+> **来源数**：421 ｜ **证据数**：2760 ｜ **主张数**：1959（高置信 1610，争议 9）
 > **任务留档**：[brief.yaml](./brief.yaml) · [sources.csv](./sources.csv) · [claims.csv](./claims.csv) · [evidence.csv](./evidence.csv)
 
 ---
@@ -30882,6 +30882,219 @@ exit 0
 > ⭐ **而这条是本报告里第一条「元数据型 API 的语义与直觉不同」的证据**：
 > **`ggml_view_*` 在名字上像 `numpy` 的切片，在实现上是图的边。**
 
+### 10.408 🔥🔥🔥🔥🔥 所有权契约说「不要在这里做」，而它就在这里
+
+[c-agents-md-assigns-exporter-to-another-repo]
+
+> **`AGENTS.md` 14-16 行**：
+> ```
+> The packed model format, GGUF exporter, GGML tensor implementations and
+> AVQ2/INT4 kernels belong to the separate runtime repository maintained by
+> the runtime lane. Do not duplicate or silently fork those implementations
+> here.
+> ```
+> **而 `tools/btl3_gguf/exporter.py` 实际存在——18,357 字节，495 行。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一份所有权契约如果与目录树不一致，
+> 那它对读者的价值不是「告诉你东西在哪」，
+> 而是「告诉你作者希望东西在哪」——
+> 而这两者在工程上完全不同。**
+>
+> **⭐⭐ 判据：**
+> **故这份契约最准确的读法是：
+> 「这些是本仓库当前拥有的七项」+「这些是我希望搬走的五项」。**
+>
+> ⚠️ **而这是本报告第一次拿到这个仓库的「自我描述」**：
+> 此前 400 多节都在读它的产物，而这一节读的是**它对自身的定义**。
+
+### 10.409 ⚠️⚠️⚠️ 那条契约禁止的是「复制」，不是「拥有」
+
+[c-the-ownership-clause-forbids-forking-not-having]
+
+> **`AGENTS.md:16` 的原话是**「**Do not duplicate or silently fork those
+> implementations here**」；
+> **而 `tools/btl3_gguf/` 实际有五个模块**：
+> ```
+> exporter.py        18,357 字节
+> metadata.py         4,183
+> qwen35.py           3,459
+> safetensor_view.py  2,902
+> signs.py            1,804
+> ------------------------------
+> 合计               30,705 字节
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **「声明」与「现状」不一致时，只有两种解释：
+> 声明是意图（未来态），或声明是遗忘（过去态）。
+> 而区分它们的唯一办法是看「声明里有没有给例外留位置」。**
+>
+> **⭐⭐ 判据：**
+> **而这条禁止的是「复制」，不是「拥有」——
+> 故最可能的读法是：这些代码本来在另一仓库，这里是同步来的副本。**
+>
+> **⭐⭐ 而这条读法可以被检验：若为副本，两处的 exporter 应当逐字节相同。**
+> ⚠️ **这个检验本轮没做**——它需要一个我还没有的地址。
+
+### 10.410 🔥🔥🔥🔥🔥 第五个字节数，而它与已登记的那个**恰好相等**
+
+[c-agents-md-shares-one-byte-count-with-the-manifest]
+
+> **`AGENTS.md` 22-26 行**：
+> ```
+> - package bytes: `8,572,102,407`;
+> - declared payload bytes: `8,572,070,080`;
+> - weight bytes: `8,551,772,952`;
+> - package manifest SHA-256:
+>   `a2b763323eed76d8f78fe5cbdf5a2349323b2c3d87dddc037714569946961116`.
+> ```
+> **而 `RESEARCH_MANIFEST.json` 的 `frozen_provenance_package_bytes` 也是
+> `8,572,070,080`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当两个不同文件用两个不同字段名给出同一个数时，
+> 那不是两次测量，而是一次测量被引用了两次——
+> 而「引用」与「测量」的区别，在于有没有第二个人独立算过。**
+>
+> **⭐⭐ 判据：**
+> **故这条给 §10.290「四个副本只有一次测量」加了一个对照：
+> 这里也是多个副本，但其中一个是「契约」而不是「产物」——
+> 而契约引用那个数是为了「不许改」，不是为了「报告它」。**
+>
+> ⭐ **这是本报告第一次见到一个字节数被写成「不许改」的形式**：
+> 28 行的原话是「**Never modify, repack or requantize the source package
+> from this repository.**」
+
+### 10.411 ⭐⭐⭐⭐⭐ 那个 32,327 字节的差额**有一个名字**
+
+[c-the-32327-byte-gap-is-the-manifest-itself]
+
+> **两次减法，两个被减数都来自文件**：
+> ```
+> 8,572,102,407 − 8,572,070,080 = 32,327          整包 − 清单各条之和
+> 8,600,000,000 − 8,572,102,407 = 27,897,593      上限 − 整包
+> ```
+> **而此前记录的 `ceiling − frozen = 8,600,000,000 − 8,572,070,080 =
+> 27,929,920`，与 `27,897,593` 之差仍是 `32,327`。**
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个差额如果能被一个具名文件的大小精确解释，
+> 那它就不是「开销」，而是「被排除在外的那个东西」。**
+>
+> **⭐⭐ 判据：**
+> **故「真实余量」是 `27,897,593` 字节，不是 `27,929,920`。**
+> **差的那 32,327 就是清单文件自身——它被两次算进了不同的口径。**
+>
+> ⭐ **这条给本报告 §10.290 那个「四个副本只有一个测量」补了一个正面例子**：
+> **这里不是「同一个数被抄了四遍」，而是「两个口径被混用了一次」。**
+
+### 10.412 ⭐⭐⭐⭐⭐ 代码是 MIT，权重是 Apache——**按部件切分**
+
+[c-code-is-mit-and-weights-are-apache]
+
+> **`LICENSE` 前三行**：
+> ```
+> MIT License
+>
+> Copyright (c) 2026 Bad Theory Labs
+> ```
+> **而 `THIRD_PARTY_NOTICES.md` 9-14 行**：
+> ```
+> ## Qwen3.6-27B
+>
+> BTL-3 is post-trained from `Qwen/Qwen3.6-27B`, revision
+> `6a9e13bd6fc8f0983b9b99948120bc37f49c13e9`. Model weights are distributed
+> separately under Apache License 2.0 and are never committed to this source
+> repository.
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **当一个仓库同时包含 MIT 代码与 Apache 权重时，
+> 「这个项目是什么许可」这个问题没有单一答案——
+> 而一份写清楚了切分点的 notices 文件，比一个 LICENSE 更完整。**
+>
+> **⭐⭐ 判据：**
+> **故 §10.196 一带记的「Windows 包缺 LICENSE」要重新读：
+> 缺的可能只是代码那一半，而权重的许可从来不随包分发。**
+>
+> ⭐ **而 `never committed to this source repository` 这句解释了
+> 为什么 `safetensors` 一个都不在树里**：
+> **这个仓库里 3,070 个 blob 中有 19 个 `.gguf`，但零个 `.safetensors`。**
+
+### 10.413 ⭐⭐⭐⭐⭐ 基座是 Qwen3.6-27B，而模块名叫 `qwen35.py`
+
+[c-the-base-model-is-qwen36-while-the-module-is-qwen35]
+
+> **`THIRD_PARTY_NOTICES.md:11`**：「**`Qwen/Qwen3.6-27B`**」
+> **而 `tools/btl3_gguf/qwen35.py` 第 1 行**：
+> ```python
+> """Qwen3.5/3.6 GGUF naming and small-state conversion semantics."""
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一个文件名滞后于它所处理的模型代次时，
+> 它通常不是错误，而是「这个模块出生在 3.5 时代并向后兼容」。**
+>
+> **⭐⭐ 判据：**
+> **而区分「滞后」与「错误」的办法，是看它的 docstring 覆盖了几代：
+> 写了 3.5/3.6 就是兼容，只写 3.5 就是错误。**
+>
+> ⭐ **而错误信息仍然只说 3.5**：`qwen35.py` 31 行与 40 行都是
+> 「**`f"Qwen3.5 converter cannot map {source!r}"`**」——
+> **故「滞后」存在于这一处的两行，而 docstring 已经是新的。**
+
+### 10.414 🔥🔥🔥🔥🔥 那条「不得超过 500 行」的规则，**有一个文件恰好 500 行**
+
+[c-the-500-line-rule-is-enforced-at-the-limit]
+
+> **`AGENTS.md:32`**：「**1. No file may exceed 500 lines.**」
+> **而实测**：
+> ```
+> tools/ollama_bridge.py         18,873 字节   物理行 500   末行有换行
+> tools/btl3_gguf/exporter.py    18,357 字节   495 行
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **一条「不得超过 N」的规则，如果最大的两个实例分别是 N−5 与 N，
+> 那这条规则是被执行的，而不是被写在文档里的。**
+>
+> **⭐⭐ 判据：**
+> **故「规则是否被执行」的证据不是「规则写在契约里」，
+> 而是「最大的实例贴着上限」。**
+>
+> ⭐ **而 500 行顶格也意味着：这个文件下一行就会越界。**
+> **故它是一份「即将违反自己规则」的文件——**
+> **而这条对本报告的意义是：它在功能上还会长，而在结构上已经不能长了。**
+
+### 10.415 ⚠️⚠️⚠️ 同一个量，估算说「越界 9 行」，实测说「恰好不越界」
+
+[c-estimating-lines-from-bytes-fails-near-fifty-hundred]
+
+> **按 `exporter.py` 的 `37.08` 字节/行外推**：
+> ```
+> 18,873 / 37.08 = 509.0 行   =>  「越界 9 行」
+> ```
+> **而实测是 500 行，恰好不越界。**
+> **两个校准点**：
+> ```
+> exporter.py       18,357 B / 495 行 = 37.085 B/行
+> ollama_bridge.py  18,873 B / 500 行 = 37.746 B/行
+> 两者相差 1.8%
+> ```
+
+> **⭐⭐ 判据（本轮最重要）：**
+> **用「字节数 ÷ 每行字节数」去估行数，
+> 在远离 500 行时够用，在贴着 500 行时必然出错——
+> 因为那个比例本身就在 ±1.8% 内浮动，而 1.8% 的 500 行是 9 行。**
+>
+> **⭐⭐ 判据：**
+> **故「估算」与「测量」的分界线不在精度，而在「结论是否依赖那点精度」。**
+>
+> ⚠️⚠️⚠️ **而这一轮我差点把「约 509 行，越界」写成一个发现——
+> 那会是一条完全错误的指控，对象是一个恰好守规矩的文件。**
+> **这是「一个数字写成四舍五入之后就不再是那个数字」的第一次显式记录。**
+
 ## 11. 虚拟化与机密计算：两个被忽视的企业能力
 
 这两个维度是与 RTX 5090 的**结构性分野**，跑分完全不体现，但决定了能否进入企业采购清单。
@@ -36310,6 +36523,48 @@ AVQ2 `3.66604e-05`、INT4 `2.15352e-06`、vocabulary head `1.43051e-06`、embedd
 ⭐ **这是本报告里第一条「元数据型 API 的语义与直觉不同」的证据：ggml_view_* 在名字上像 numpy 的切片，在实现上是图的边**；
  — [src-btl3-context-cpp]
 
+### 契约说不要在这里做，而它就在这里（第一百四十八轮补充）
+
+上一轮结尾说查两个 env 变量。本轮改做了一件更基础的事：**回到「39 个真缺口」这个计数本身**——因为我连着几轮说「已读 36 个，剩 3 个」，而 run.json 里那「3 个」实际列了 15 个路径。本轮把这批全读了，并由此拿到这个仓库的**自我描述**。
+
+1. [GitHub / Badtheorylabs — `AGENTS.md`（1,592 字节，42 行）]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/AGENTS.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **所有权契约说「不要在这里做」，而它就在这里**：14-16 行写「**The packed model format, GGUF exporter, GGML tensor implementations and AVQ2/INT4 kernels belong to the separate runtime repository maintained by the runtime lane. Do not duplicate or silently fork those implementations here.**」——**而 tools/btl3_gguf/exporter.py 实际存在，18,357 字节、495 行**；
+⭐⭐ 判据（本轮最重要）「**一份所有权契约如果与目录树不一致，那它对读者的价值不是「告诉你东西在哪」，而是「告诉你作者希望东西在哪」——而这两者在工程上完全不同**」；
+⚠️ **而这是本报告第一次拿到这个仓库的「自我描述」**：此前 400 多节都在读它的产物，而这一节读的是它对自身的定义；
+(a) ⚠️⚠️⚠️ **那条契约禁止的是「复制」，不是「拥有」**：16 行原话是「Do not duplicate or silently fork」，**而 tools/btl3_gguf/ 有五个模块共 30,705 字节**；
+⭐⭐ 判据「**「声明」与「现状」不一致时，只有两种解释：声明是意图（未来态），或声明是遗忘（过去态）。而区分它们的唯一办法是看「声明里有没有给例外留位置」**」——**故最可能的读法是：这些代码本来在另一仓库，这里是同步来的副本；而这条读法可被检验：若为副本，两处的 exporter 应当逐字节相同**（⚠️ 这个检验本轮没做，它需要一个我还没有的地址）；
+(b) 🔥🔥🔥🔥🔥 **第五个字节数，而它与已登记的那个恰好相等**：22-26 行给出 package bytes 8,572,102,407 / declared payload bytes 8,572,070,080 / weight bytes 8,551,772,952 / package manifest SHA-256 a2b7633...；**而 declared payload 恰好等于 RESEARCH_MANIFEST.json 的 frozen_provenance_package_bytes**；
+⭐⭐ 判据（本轮最重要）「**当两个不同文件用两个不同字段名给出同一个数时，那不是两次测量，而是一次测量被引用了两次——而「引用」与「测量」的区别，在于有没有第二个人独立算过**」——**故这条给 10.290「四个副本只有一次测量」加了一个对照：这里也是多个副本，但其中一个是「契约」而不是「产物」**；
+⭐ **这是本报告第一次见到一个字节数被写成「不许改」的形式**：28 行原话是「Never modify, repack or requantize the source package from this repository.」；
+(c) ⭐⭐⭐⭐⭐ **那个 32,327 字节的差额有一个名字**：**8,572,102,407 − 8,572,070,080 = 32,327（整包 − 清单各条之和），而 8,600,000,000 − 8,572,102,407 = 27,897,593；此前记的 ceiling − frozen = 27,929,920，两者之差仍是 32,327**；
+⭐⭐ 判据（本轮最重要）「**一个差额如果能被一个具名文件的大小精确解释，那它就不是「开销」，而是「被排除在外的那个东西」**」——**故「真实余量」是 27,897,593 字节，不是 27,929,920；差的那 32,327 就是清单文件自身，它被两次算进了不同的口径**；
+2. [GitHub / Badtheorylabs — `LICENSE`（1,072 字节）与 `THIRD_PARTY_NOTICES.md`（684 字节）](https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/LICENSE)
+ —（2026-10 抓取）。
+⭐⭐⭐⭐⭐ **代码是 MIT，权重是 Apache——按部件切分**：LICENSE 是「MIT License / Copyright (c) 2026 Bad Theory Labs」，**而 THIRD_PARTY_NOTICES.md 9-14 行写「BTL-3 is post-trained from Qwen/Qwen3.6-27B, revision 6a9e13bd6fc8f0983b9b99948120bc37f49c13e9. Model weights are distributed separately under Apache License 2.0 and are never committed to this source repository.」**；
+⭐⭐ 判据（本轮最重要）「**当一个仓库同时包含 MIT 代码与 Apache 权重时，「这个项目是什么许可」这个问题没有单一答案——而一份写清楚了切分点的 notices 文件，比一个 LICENSE 更完整**」——**故 10.196 一带记的「Windows 包缺 LICENSE」要重新读：缺的可能只是代码那一半，而权重的许可从来不随包分发**；
+⭐ **而「never committed to this source repository」这句解释了为什么树里 19 个 .gguf 而零个 .safetensors**；
+(a) ⭐⭐⭐⭐⭐ **基座是 Qwen3.6-27B，而模块名叫 qwen35.py**：THIRD_PARTY_NOTICES.md:11 写 Qwen/Qwen3.6-27B，**而 tools/btl3_gguf/qwen35.py 第 1 行的 docstring 是「Qwen3.5/3.6 GGUF naming and small-state conversion semantics.」**；
+⭐⭐ 判据「**一个文件名滞后于它所处理的模型代次时，它通常不是错误，而是「这个模块出生在 3.5 时代并向后兼容」**」——**而区分「滞后」与「错误」的办法，是看它的 docstring 覆盖了几代；而错误信息仍只说 3.5（31 行与 40 行都是 Qwen3.5 converter cannot map）**；
+3. [GitHub / Badtheorylabs — `AGENTS.md` 的八条工程规则]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/AGENTS.md)
+ —（2026-10 抓取）。
+🔥🔥🔥🔥🔥 **第 1 条「不得超过 500 行」的规则，有一个文件恰好 500 行**：**AGENTS.md:32 是「1. No file may exceed 500 lines.」，而 tools/ollama_bridge.py 实测 18,873 字节、物理行恰好 500、末行有换行（即 500 行，不越界）**；**自有代码里第二大的 exporter.py 是 495 行**；
+⭐⭐ 判据（本轮最重要）「**一条「不得超过 N」的规则，如果最大的两个实例分别是 N−5 与 N，那这条规则是被执行的，而不是被写在文档里的**」——
+⭐⭐ **故「规则是否被执行」的证据不是「规则写在契约里」，而是「最大的实例贴着上限」；而 500 行顶格也意味着这个文件下一行就会越界——它在功能上还会长，而在结构上已经不能长了**；
+(a) ⚠️⚠️⚠️ **同一个量，估算说「越界 9 行」，实测说「恰好不越界」**：按 exporter.py 的 37.08 字节/行外推，18,873 字节被估成 509 行；**而两个校准点的比例是 37.085 与 37.746（差 1.8%），故在 500 行附近误差可达 ±10 行**；
+⭐⭐ 判据（本轮最重要）「**用「字节数 ÷ 每行字节数」去估行数，在远离 500 行时够用，在贴着 500 行时必然出错**」——**「估算」与「测量」的分界线不在精度，而在「结论是否依赖那点精度」**；
+⚠️⚠️⚠️ **而这一轮我差点把「约 509 行，越界」写成一个发现——那会是一条完全错误的指控，对象是一个恰好守规矩的文件**；
+4. [GitHub / Badtheorylabs — 其余五个小文件]
+(https://raw.githubusercontent.com/Badtheorylabs/BTL-3/main/pytest.ini)
+ —（2026-10 抓取）。
+**pytest.ini（56 字节）**：pythonpath 含 . 与 tools，testpaths = tests；
+**tools/__init__.py（55 字节）与 tools/btl3_gguf/__init__.py（41 字节）**：各只有一行 docstring；
+**tools/export_btl3_compact_gguf.py（320 字节，17 行）**：纯入口——一句 from btl3_gguf.exporter import main 加 main()，**全部实现都在被 AGENTS.md 划归另一仓库的那个模块里**；
+⭐⭐ 判据「**一个 320 字节的入口脚本，它的信息量不在它自己，而在「它把哪一层设为公开边界」**」——**而这个入口暴露的正是那条契约想搬走的那个模块**；
+ — [src-btl3-agents-md] [src-btl3-third-party-notices] [src-btl3-license] [src-btl3-pytest-ini] [src-btl3-tools-init] [src-btl3-export-entrypoint]
+
 ## 附录 A：子问题完成度
 
 | # | 问题 | 状态 | 主要依据 |
@@ -36449,7 +36704,7 @@ python scripts/validate_research.py research/rtx-pro-6000
 
 校验项：来源 ID 唯一性、证据引用的来源存在、主张引用的证据闭合（含反证）、日期可解析、prediction 类主张必须有 derivation、报告中的 `[src-<id>]` / `[c-<id>]` / `[e-<id>]` 引用均能解析。
 
-当前校验结果：`sources=415, evidence=2748, claims=1951, claims_high=1603, claims_disputed=9, trace_events=901, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
+当前校验结果：`sources=421, evidence=2760, claims=1959, claims_high=1610, claims_disputed=9, trace_events=909, c3_violations=0, subquestions=70, r2_violations=0, c1_violations=0`
 
 **阅读约定**：
 - `[c-<id>]` = 主张 ID，指向 `claims.csv` 中一行
