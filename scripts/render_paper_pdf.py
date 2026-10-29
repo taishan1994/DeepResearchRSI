@@ -287,13 +287,29 @@ class Paper(FPDF):
         total = sum(weights)
         widths = [avail * w / total for w in weights]
         self.set_font("CJK", "", 8.2)
-        for ri, r in enumerate(rows):
+        # fpdf2 的 multi_cell 在页面底部会自行分页，于是同一行表格的内容
+        # 被拆到两页、每页只剩一个词。表格行的分页必须由我们决定，
+        # 故绘制期间关掉自动分页，函数末尾恢复。
+        prev_auto = self.auto_page_break
+        self.set_auto_page_break(False)
+        try:
+            for ri, r in enumerate(rows):
+                self._table_row(ri, r, ncol, widths)
+        finally:
+            self.set_auto_page_break(prev_auto)
+        self.ln(2.5)
+
+    def _table_row(self, ri, r, ncol, widths) -> None:
+        if True:
             cells = [(r[c] if c < len(r) else "") for c in range(ncol)]
             lines_per_cell = []
             for c, cell in enumerate(cells):
-                units = max(int(widths[c] / ((8.2 / 10.0) * UNIT_MM_PER_HALF_CJK)) - 1, 4)
+                # 多留 2 个半角位余量：fpdf2 自身折行更保守，
+                # 估少了会溢出行高、把内容推到页外。
+                units = max(int(widths[c] / ((8.2 / 10.0) * UNIT_MM_PER_HALF_CJK)) - 2, 4)
                 lines_per_cell.append(wrap_cjk(cell, max(units, 4)))
             nlines = max(len(x) for x in lines_per_cell)
+            # 整行放不下就换页，绝不让一行跨页
             if self.get_y() + nlines * 4.6 > 280:
                 self.add_page()
             y0 = self.get_y()
@@ -316,7 +332,6 @@ class Paper(FPDF):
             self.set_draw_color(215, 220, 226)
             self.line(20, y0 + nlines * 4.6, 190, y0 + nlines * 4.6)
             self.set_y(y0 + nlines * 4.6 + 0.6)
-        self.ln(2.5)
 
     def figure(self, path: Path, caption: str, max_w: float = 168) -> None:
         if not path.is_file():
