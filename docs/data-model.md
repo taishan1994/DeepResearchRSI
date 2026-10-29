@@ -125,6 +125,34 @@ ResearchRun ──> Brief / Plan / Trace / Report ────────┘
 P1–P3 由 `scripts/audit_paper.py` 实现，可放进 CI。
 
 
+### Claim.sku — 这是哪个 SKU
+
+当一个产品名对应多个硬件配置时，「该产品的性能是 X」这句话的误差棒
+等于 SKU 之间的最大差距。RTX PRO 6000 就是这种情况：一个名字下有
+`ws`（Workstation Edition，600 W）、`mq`（Max-Q，300 W）、`se`（Server Edition，被动散热）三个 SKU。
+
+| 值 | 含义 |
+|---|---|
+| `ws` / `mq` / `se` | 单一 SKU |
+| `mq+ws` 等 | 比较型主张，按字母序用 `+` 连接 |
+| `all` | 显式说三个 SKU 都适用（如共有的架构事实） |
+| `na` | 与该型号的 SKU 无关（方法论、其他产品、跨产品结论） |
+| `unspecified` | 提到了该产品，但来源没写明 SKU |
+
+#### 为什么 `unspecified` 是一个正式取值，而不是留空
+
+留空会被当成「没有这个字段」；而 `unspecified` 是一个**可被程序统计的欠账状态**。
+校验器每次运行都会输出 `sku_unspecified` 的当前值，因此：
+
+1. 这个数字会出现在每次通过的输出里，无法被忘记；
+2. 它无法在无人察觉的情况下变大；
+3. 把它硬填成某个 SKU 会造成不存在的精度，而这是被禁止的修法。
+
+#### 不变量
+
+- **K1**：`sku` 的取值必须属于上述枚举。
+- 不强制补全 `unspecified`。归档的诚实性优先于字段的完整性。
+
 ## ResearchRun — 一次研究运行
 
 | 字段 | 说明 |

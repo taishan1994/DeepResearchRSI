@@ -202,3 +202,10 @@ python scripts/build_paper.py research/rtx-pro-6000/paper
 python scripts/build_paper.py research/rtx-pro-6000/paper --check
 ```
 
+### 校验器输出里的 `sku_unspecified`
+
+`validate_research.py` 的成功输出里包含 `sku_unspecified=N`。
+这个数表示有多少条主张提到了目标产品、但来源没写明是哪个 SKU。
+
+它不是警告，而是一个**欠账计量**：修它需要补来源，而不是改数字。
+把它写进成功输出而不是单独的报告，是因为「看不到的债不会还」。

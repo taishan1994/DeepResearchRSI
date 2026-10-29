@@ -24,6 +24,13 @@ SRC_REF_RE = re.compile(r"\[(src-[a-z0-9-]+)\]")
 EVIDENCE_REF_RE = re.compile(r"\[(e-[a-z0-9-]+)\]")
 
 # 与 packages/schemas/json/source.schema.json 的枚举保持一致
+SKU_VALUES = {
+    "ws", "mq", "se", "all", "na", "unspecified",
+    "mq+ws", "se+ws", "mq+se", "mq+se+ws",
+}
+# sku=unspecified 是允许的，但它是一个可统计的欠账状态；
+# 校验器只检查枚举合法性与「比较型主张不该是单值」，不强制补全。
+
 STOP_REASONS = {"answered", "budget_exhausted", "gap_remaining", "error"}
 TRACE_KINDS = {
     "search", "fetch", "fetch_failed", "extract", "claim_added",
@@ -128,6 +135,7 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
     }
 
     claim_ids: set[str] = set()
+    sku_unspecified = 0
     for row in claims:
         cid = (row.get("claim_id") or "").strip()
         if not cid.startswith("c-"):
@@ -172,6 +180,15 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
         _parse_date(row.get("as_of", ""), where=f"claims.csv[{cid}].as_of")
         if row.get("claim_type") == "prediction" and not (row.get("derivation") or "").strip():
             errors.append(f"claims.csv[{cid}]: prediction 缺少 derivation（不变量 C2）")
+        # SKU 枚举校验。unspecified 合法，但它是一个可统计的欠账状态，
+        # 故这里只拒绝非法值，并把 unspecified 计入 stats 对外暴露。
+        sku = (row.get("sku") or "").strip().lower()
+        if sku and sku not in SKU_VALUES:
+            errors.append(
+                f"claims.csv[{cid}]: 非法 sku {sku!r}（允许 {sorted(SKU_VALUES)}）"
+            )
+        elif sku == "unspecified":
+            sku_unspecified += 1
 
     report_path = root / "REPORT.md"
     if report_path.exists():
@@ -343,6 +360,7 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
         if not ok:
             c1_violations.append(cid)
     stats_extra["c1_violations"] = len(c1_violations)
+    stats_extra["sku_unspecified"] = sku_unspecified
     for cid in c1_violations:
         errors.append(
             f"claims.csv[{cid}]: confidence=high 但缺少 trust_tier=primary 的 supports 证据"

@@ -65,7 +65,34 @@
 >
 > **故性能对比的最小单位不是「型号」，而是「型号 + SKU + 功耗上限」三元组。**
 
-本报告自身就违反过这条：2,238 条主张里有 **227 条**只写「RTX PRO 6000」而不指明 SKU [c-227-of-2233-claims-do-not-name-a-sku]。
+本报告自身就违反过这条，而这件事现在是**可被程序统计的**：
+`claims.csv` 新增了 `sku` 列（枚举 `ws` / `mq` / `se` / `all` / `na` / `unspecified`），
+校验器会在每次通过的输出里报告 `sku_unspecified`。当前值是 **280**（共 2,238 条主张）。
+
+而本文引用的 29 条主张里，有 **9 条是 `unspecified`**——即本文自己的表格里，
+大约三分之一的引用无法定位到具体 SKU。这不是疏忽，而是**上游来源没说**：
+Procyon 的原始记录只写「PRO 6000」，MLPerf 的配置表只写「RTX Pro 6000」。
+把它们标成三个 SKU 中的任何一个，都会是编造。
+
+#### 1.1.1　欠账清单
+
+| claim_id | claim_type | sku | 陈述摘要 |
+|---|---|---|---|
+| c-1m-feasible | measurement | unspecified | 百万 token上下文在 RTX PRO 6000 上已可端到端跑通：DeepSeek V4 Flash 在 llama |
+| c-gn-70b-capacity-domain | measurement | unspecified | LM Studio 的 Llama 3.3 70B Q4_K_S 测试中 PRO 6000 比 5090 提升 928% |
+| c-sr-96gb-unique | measurement | unspecified | 96 GB 的不可替代性在 120B 模型上得到直接验证：RTX 5090 无法加载或执行 120B 模型、甚至常处理不 |
+| c-sr-blender-narrow | measurement | unspecified | 在 StorageReview 的受控并排测试中，PRO 6000 相对 RTX 5090 的 Blender 4.4  |
+| c-sr-int8-saturates | measurement | unspecified | INT8 量化推理上 PRO 6000 与 RTX 5090 基本持平（79；064 对 79；272，5090 略高  |
+| c-sr-renderer-split | derivation | unspecified | 同一批评测中，PRO 6000 在 Blender（+6.3%）、LuxMark（+1.7%~5.0%）、Geekben |
+| c-sr-token-vs-score | derivation | unspecified | Procyon 文本生成的 token 速率与总分给出了不同的图景：PRO 6000 相对 5090 的 token 速 |
+| c-sr-vray-loses | measurement | unspecified | V-Ray 6 上 RTX 5090 以 14；764 vpaths 领先 PRO 6000 的 12；128，领先幅度 |
+| c-the-bonsai-readme-has-no-pro-6000-data | measurement | unspecified | ⚠️⚠️⚠️ **这份 24；840 字节的 README 里，「96 GB」「RTX PRO」「5090」「4090」 |
+
+*表 4　本文引用中 SKU 未指明的主张（欠账清单）。*
+
+这 9 条不是「没查」，而是「查了、原始记录里就没有」。
+把 `unspecified` 硬填成某个 SKU 会制造不存在的精度，
+而把它隐藏起来则会让读者以为每个数字都能定位到具体产品。
 
 ### 1.2　第二个问题：这是性能结论还是容量结论？
 
@@ -598,12 +625,14 @@ SDXL FP16 负载下（`WS` 版），整机平均功耗 **918.5 W**、峰值 **1,
 | 5 | 官方 Known Issue「multi-GPU on RTX Pro 6000」的具体内容 | context |
 | 6 | 同一量化在 `sm_120` 与 `sm_100` 上的成对对照 | context |
 
-> **⚠️ 一个必须写在结论里的自我定位**
+> **⭐ 一个已经修掉的结构性缺陷**
 >
-> 本文的 SKU 纪律是**事后加的**——227 条旧主张仍然不带 SKU 字段。
-> 这暴露了一个结构性缺陷：`claims.csv` 里没有 `sku` 列。
-> 正确的修法不是逐条补文字，而是给数据模型加一个字段，
-> 让「没说 SKU」变成一个可被程序检出的状态，而不是一段需要人读的散文。
+> 上一版本文的 SKU 纪律是**事后加的散文**——227 条旧主张不带 SKU 字段。
+> 本轮把它变成了字段：`claims.csv` 新增 `sku` 列，校验器每次运行都报告
+> `sku_unspecified` 的当前值（现为 **280**）。
+>
+> 关键差别不在「多了一列」，而在**这个数字从此会出现在每次通过的输出里**：
+> 它无法再被忘记，也无法在无人察觉的情况下变大。
 
 ---
 

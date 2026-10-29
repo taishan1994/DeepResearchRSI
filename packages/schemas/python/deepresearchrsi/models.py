@@ -13,6 +13,12 @@ TrustTier = Literal["primary", "secondary", "tertiary"]
 Access = Literal["open", "paywalled", "blocked", "login_required"]
 ClaimType = Literal["spec", "measurement", "price", "attribution", "prediction"]
 Confidence = Literal["high", "medium", "low", "disputed"]
+# RTX PRO 6000 有 WS / MQ / SE 三个 SKU；unspecified 表示来源没写明，
+# 是一个需要偿还的欠账状态，不是一个中性的默认值。
+Sku = Literal[
+    "ws", "mq", "se", "all", "na", "unspecified",
+    "mq+ws", "se+ws", "mq+se", "mq+se+ws",
+]
 Stance = Literal["supports", "refutes", "context"]
 QuestionStatus = Literal["answered", "partial", "unanswered"]
 StopReason = Literal["answered", "budget_exhausted", "gap_remaining", "error"]
@@ -82,6 +88,7 @@ class Claim:
     counter_evidence_ids: list[str] = field(default_factory=list)
     derivation: Optional[str] = None
     notes: Optional[str] = None
+    sku: Sku = "na"
 
     def __post_init__(self) -> None:
         if not self.claim_id.startswith("c-"):
