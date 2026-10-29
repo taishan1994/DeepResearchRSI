@@ -209,3 +209,4 @@ python scripts/build_paper.py research/rtx-pro-6000/paper --check
 
 它不是警告，而是一个**欠账计量**：修它需要补来源，而不是改数字。
 把它写进成功输出而不是单独的报告，是因为「看不到的债不会还」。
+### sku 分类：`classify_sku.py` / `test_classify_sku.py` `classify_sku.py` 给 `claims.csv` 的 `sku` 列做分类。核心规则是**作用域**： 一个 SKU 名称只修饰它附近的那个产品名。 这条规则被四版失败逼出来，每一版都在修一个具体误判： 1. 用功耗当证据 → 把整机功耗判成 Max-Q。改为只用显式 SKU 名。 2. 产品身份与 SKU 判定混在一起 → 「PRO 5000 72GB 版规格」因其证据提到 6000 而被判 unspecified。 改为产品身份只看陈述。 3. SKU 名全文任意位置都算 → PRO 4500 的 Workstation Edition 让 PRO 6000 的主张被判 ws。 改为只在产品名附近取。 4. 单一窗口宽度 → 60 太宽（WS<->5090 对照标注误判）、42 太窄（WS 的 16-pin 漏判）。 改为双窗口：完整 SKU 名 60、多义缩写 12。 `test_classify_sku.py` 有 10 条回归用例，每一条对应上面的一次误判。 改规则必须先让这 10 条继续通过。 python scripts/test_classify_sku.py python scripts/classify_sku.py 两个纪律：`unspecified` 是正式取值（表示来源确实没写），不是失败； RTX 6000D 是独立产品，不是第四个 SKU。

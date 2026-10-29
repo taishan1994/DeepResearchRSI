@@ -205,3 +205,4 @@ subquestions:
 | 报告 | 问题覆盖、事实正确、引用准确、时效性、结构完整 | rubric 评分 |
 | 系统 | 成功率、延迟、单任务成本、工具错误率 | `ResearchRun.trace` |
 | 进化 | 改动前后配对评测、跨主题泛化、回归率 | `evals/reports/` |
+#### SKU 判定的作用域原则 一个 SKU 名称只修饰它**附近**的那个产品名。证据文本里的 「RTX PRO 4500 Workstation Edition」不能用来判定「RTX PRO 6000」的 SKU。 这条规则看似实现细节，其实是语义：SKU 名称在自然语言里的作用域， 比「整份证据」小，也比「整段陈述」小，只覆盖它紧邻的型号名。 实现见 `scripts/classify_sku.py`，回归用例见 `scripts/test_classify_sku.py`。 #### RTX 6000D 不是第四个 SKU RTX 6000D 是中国特供的独立产品（削减约 17% 计算单元、84GB、448-bit）， 与 WS / MQ / SE 并列会污染统计。只提它的主张 `sku` 判 `na`。

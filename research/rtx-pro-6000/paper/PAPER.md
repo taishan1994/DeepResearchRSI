@@ -74,32 +74,83 @@ H100 SXM5 的 3,352 GB/s 是这张卡 1,792 GB/s 的 1.87 倍。
 
 本报告自身就违反过这条，而这件事现在是**可被程序统计的**：
 `claims.csv` 新增了 `sku` 列（枚举 `ws` / `mq` / `se` / `all` / `na` / `unspecified`），
-校验器会在每次通过的输出里报告 `sku_unspecified`。当前值是 **280**（共 2,238 条主张）。
+校验器会在每次通过的输出里报告 `sku_unspecified`。当前值是 **244**（共 2,238 条主张）。
 
-而本文引用的 29 条主张里，有 **9 条是 `unspecified`**——即本文自己的表格里，
+而本文引用的 29 条主张里，有 **12 条是 `unspecified`**——即本文自己的表格里，
 大约三分之一的引用无法定位到具体 SKU。这不是疏忽，而是**上游来源没说**：
 Procyon 的原始记录只写「PRO 6000」，MLPerf 的配置表只写「RTX Pro 6000」。
 把它们标成三个 SKU 中的任何一个，都会是编造。
 
-#### 1.1.1　欠账清单
+#### 1.1.4　欠账清单
 
 | claim_id | claim_type | sku | 陈述摘要 |
 |---|---|---|---|
-| c-1m-feasible | measurement | unspecified | 百万 token上下文在 RTX PRO 6000 上已可端到端跑通：DeepSeek V4 Flash 在 llama |
-| c-gn-70b-capacity-domain | measurement | unspecified | LM Studio 的 Llama 3.3 70B Q4_K_S 测试中 PRO 6000 比 5090 提升 928% |
-| c-sr-96gb-unique | measurement | unspecified | 96 GB 的不可替代性在 120B 模型上得到直接验证：RTX 5090 无法加载或执行 120B 模型、甚至常处理不 |
-| c-sr-blender-narrow | measurement | unspecified | 在 StorageReview 的受控并排测试中，PRO 6000 相对 RTX 5090 的 Blender 4.4  |
-| c-sr-int8-saturates | measurement | unspecified | INT8 量化推理上 PRO 6000 与 RTX 5090 基本持平（79；064 对 79；272，5090 略高  |
-| c-sr-renderer-split | derivation | unspecified | 同一批评测中，PRO 6000 在 Blender（+6.3%）、LuxMark（+1.7%~5.0%）、Geekben |
-| c-sr-token-vs-score | derivation | unspecified | Procyon 文本生成的 token 速率与总分给出了不同的图景：PRO 6000 相对 5090 的 token 速 |
-| c-sr-vray-loses | measurement | unspecified | V-Ray 6 上 RTX 5090 以 14；764 vpaths 领先 PRO 6000 的 12；128，领先幅度 |
-| c-the-bonsai-readme-has-no-pro-6000-data | measurement | unspecified | ⚠️⚠️⚠️ **这份 24；840 字节的 README 里，「96 GB」「RTX PRO」「5090」「4090」 |
+| c-1m-feasible | measurement | unspecified | 百万 token上下文在 RTX PRO 6000 上已可端到端跑通：DeepSeek V4 Flash 在 lla |
+| c-gn-70b-capacity-domain | measurement | unspecified | LM Studio 的 Llama 3.3 70B Q4_K_S 测试中 PRO 6000 比 5090 提升 92 |
+| c-ix-paradox | derivation | unspecified | 这里有一个必须说清的**悖论**：RTX PRO 6000 的 **$/chip/hr 最低（0.68，是 GB30 |
+| c-slac-h100-vs-rtx | measurement | unspecified | ⭐ SLAC 的逐路径规格对比给出了一个比「谁更快」更实用的框架：FP32 上 RTX PRO 6000 约 125 |
+| c-slac-power-favors-h100 | measurement | unspecified | ⚠️ 但机架密度下功耗倾向 H100：约 1.5 倍性能每瓦。即 RTX PRO 6000 在「每美元性能」上胜出， |
+| c-sr-96gb-unique | measurement | unspecified | 96 GB 的不可替代性在 120B 模型上得到直接验证：RTX 5090 无法加载或执行 120B 模型、甚至常处 |
+| c-sr-blender-narrow | measurement | unspecified | 在 StorageReview 的受控并排测试中，PRO 6000 相对 RTX 5090 的 Blender 4. |
+| c-sr-int8-saturates | measurement | unspecified | INT8 量化推理上 PRO 6000 与 RTX 5090 基本持平（79；064 对 79；272，5090 略 |
+| c-sr-renderer-split | derivation | unspecified | 同一批评测中，PRO 6000 在 Blender（+6.3%）、LuxMark（+1.7%~5.0%）、Geekb |
+| c-sr-token-vs-score | derivation | unspecified | Procyon 文本生成的 token 速率与总分给出了不同的图景：PRO 6000 相对 5090 的 token |
+| c-sr-vray-loses | measurement | unspecified | V-Ray 6 上 RTX 5090 以 14；764 vpaths 领先 PRO 6000 的 12；128，领先 |
+| c-the-bonsai-readme-has-no-pro-6000-data | measurement | unspecified | ⚠️⚠️⚠️ **这份 24；840 字节的 README 里，「96 GB」「RTX PRO」「5090」「409 |
 
 *表 4　本文引用中 SKU 未指明的主张（欠账清单）。*
 
-这 9 条不是「没查」，而是「查了、原始记录里就没有」。
+这 12 条不是「没查」，而是「查了、原始记录里就没有」。
 把 `unspecified` 硬填成某个 SKU 会制造不存在的精度，
 而把它隐藏起来则会让读者以为每个数字都能定位到具体产品。
+
+#### 1.1.2　SKU 判定的四条规则，以及它们各自的失败
+
+把「是哪个 SKU」变成字段之后，剩下的问题是**怎么判**。这件事我做了四版，
+每一版都被一个具体的误判推翻。记在这里，因为误判的类型比结论更有迁移价值。
+
+**第一版：用功耗当证据。** `300 W` 判 Max-Q、`600 W` 判 Workstation。
+错在「整机功耗」「电源上限」这类与 SKU 无关的句子也含这些数字。
+*规则一：只用显式 SKU 名称，不用间接信号。*
+
+**第二版：产品身份与 SKU 判定混在一起。** 两者都看「陈述 + 全部证据原文」。
+于是「RTX PRO 5000 72GB 版规格……」仅因其证据顺带提到 PRO 6000，
+就被判成「提到该产品但未写明 SKU」。
+*规则二：产品身份只看陈述——一条主张讲的是哪个产品，由它自己的主语决定。*
+
+**第三版：SKU 名称在全文任意位置都算。** 证据里的「RTX PRO 4500 Workstation Edition」
+让一条讲 PRO 6000 的主张被判成 `ws`——可那是 PRO 4500 的 Workstation 版。
+*规则三：SKU 名称必须紧邻产品名。一个 SKU 名称在自然语言里的作用域就是它旁边的那个型号。*
+
+**第四版：单一窗口宽度。** 60 字符太宽（「WS↔5090 比值」这种对照标注被当成 SKU），
+42 字符又太窄（「RTX PRO 6000 WS 的 16-pin」里的 WS 紧邻却漏掉）。
+*规则四：完整 SKU 名用宽窗口，多义缩写用窄窗口。*
+
+最终实现见 `scripts/classify_sku.py`，并由 `scripts/test_classify_sku.py` 的
+**10 条回归用例**钉住——每一条都对应上面的一次误判，或一次险些发生的误判。
+
+> **⭐⭐⭐ 判据**
+>
+> 这四版的共同点是：**每一版都在把一个更宽的文本范围当成「同一句话」。**
+> 先是把整份证据当成一句话，再把全文当成一句话。
+> 而 SKU 的作用域比任何一层都小——它只覆盖它紧邻的那个型号名。
+>
+> 故「相邻」不是一个实现细节，它是**语义本身**。
+
+#### 1.1.3　一个必须排除的「第四个 SKU」
+
+档案里有 16 条主张提到 **RTX 6000D**。它不是 PRO 6000 的第四个 SKU，
+而是中国特供的**独立产品**：削减约 17% 计算单元（CUDA 24,064→19,968）、
+显存 448-bit / 84GB、带宽降到 1.57 TB/s [c-6000d-spec][c-6000d-memory]。
+
+把它的数字并进 PRO 6000 的任何一档，都会污染那一档的结论。
+故只提 6000D 而不提 PRO 6000 的 10 条主张，`sku` 判为 `na`。
+
+> **⭐⭐ 判据**
+>
+> 「同一系列的不同型号」与「同一型号的不同配置」是两件事，
+> 而它们的名字可能只差一个字母。前者要分开统计，后者要合并统计。
+
 
 ### 1.2　第二个问题：这是性能结论还是容量结论？
 
@@ -746,7 +797,7 @@ SDXL FP16 负载下（`WS` 版），整机平均功耗 **918.5 W**、峰值 **1,
 >
 > 上一版本文的 SKU 纪律是**事后加的散文**——227 条旧主张不带 SKU 字段。
 > 本轮把它变成了字段：`claims.csv` 新增 `sku` 列，校验器每次运行都报告
-> `sku_unspecified` 的当前值（现为 **280**）。
+> `sku_unspecified` 的当前值（现为 **244**）。
 >
 > 关键差别不在「多了一列」，而在**这个数字从此会出现在每次通过的输出里**：
 > 它无法再被忘记，也无法在无人察觉的情况下变大。
