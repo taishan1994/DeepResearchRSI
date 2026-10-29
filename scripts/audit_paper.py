@@ -111,12 +111,20 @@ def main(argv: list[str] | None = None) -> int:
     evidence = {r["evidence_id"]: r for r in read_csv(slug_dir / "evidence.csv")}
 
     def num_variants(v: float) -> set[str]:
-        out = {f"{v:g}"}
+        # ⚠️ 必须包含「原样去掉尾零」的形式。
+        # `f"{v:g}"` 只保留 6 位有效数字，18354.95 会变成 18355，
+        # 于是证据里逐字出现的 18354.95 反而匹配不上——
+        # 这不是数据错，是变体集漏了最基本的一种写法。
+        out = {f"{v:g}", f"{v!r}"}
+        # 去尾零原样：18354.95 / 673.0 -> 673
+        raw = f"{v:.6f}".rstrip("0").rstrip(".")
+        out.add(raw)
         if v == int(v):
             out.add(str(int(v)))
             out.add(f"{int(v):,}")
         else:
             out.add(f"{v:,.3f}".rstrip("0").rstrip("."))
+            out.add(f"{v:,}")
         out.add(f"{abs(v):g}")
         return out
 
