@@ -94,6 +94,37 @@ ResearchRun ──> Brief / Plan / Trace / Report ────────┘
 **不变量 C2**：系统推断不得写成来源事实；必须填 `derivation` 并在报告中标注。
 **不变量 C3**：冲突主张并列呈现，不强裁决；`confidence=disputed` 时报告必须展示双方。
 
+## Paper — 论文
+
+`Paper` 不是一个新的事实容器，而是对已有 `Claim` 的**一次有选择的呈现**。
+它不引入新的证据，只决定哪些主张进入正文、以什么顺序、配哪张图。
+
+| 字段 | 说明 |
+|---|---|
+| `paper_id` | `paper-<slug>` |
+| `slug` | 指向 `research/<slug>/` |
+| `sections[]` | 章节：编号、标题、正文文件、引用的 claim_id |
+| `figures[]` | 图：类型、标题、数据文件、引用的 claim_id |
+| `tables[]` | 表：标题、数据文件、引用的 claim_id |
+
+### 为什么 Paper 不是第五种实体
+
+`Source -> Document -> Evidence -> Claim` 是一条**证据链**，每一层都在增加信息。
+`Paper` 不增加信息，它只**减少**信息——从 2,238 条主张里选出 23 条。
+
+把它放在证据链之外，是为了防止一种失败模式：**把论文当成新的一层事实来源**。
+一旦允许「论文里写了就算数」，引用闭合就断了。
+
+### 不变量
+
+- **P1（引用闭合）**：`Paper` 引用的每个 `claim_id` 必须存在。
+- **P2（数值可回溯）**：`paper/data/*.csv` 里每个数值，必须能在对应 claim 的
+  `statement`、`derivation` 或其任一 `evidence.quote` 里找到。
+- **P3（无凭空图表）**：`paper.json` 声明的每张图/表，其产物文件必须真实存在且非空。
+
+P1–P3 由 `scripts/audit_paper.py` 实现，可放进 CI。
+
+
 ## ResearchRun — 一次研究运行
 
 | 字段 | 说明 |

@@ -156,3 +156,49 @@ python scripts/_repair_csv.py <目标.csv>
 - 写 CSV 时统一 `quoting=csv.QUOTE_ALL, lineterminator="\n"`，编码 `utf-8-sig`。
 - 脚本报错时**不要**用 `git checkout -- <csv>` 回滚：会把未提交的相邻工作一起丢掉。先 `git status` 确认范围。
 - 本目录是工具，**不属于研究产物**。提交时 `git add research/`（或明确路径），**不要** `git add scripts/`，否则会把临时草稿一起提交。
+
+## 论文层（r257 新增）
+
+研究档案本身不是交付物；交付物是论文。这一层把 `research/<slug>/` 的
+CSV 渲染成一份可提交的文稿，并保证「论文里的每个数字都能回到一条主张」。
+
+| 脚本 | 作用 |
+|---|---|
+| `render_paper.py` | 读 `paper.json` + `paper/data/*.csv`，生成 `figures/*.png` 与 `tables/*.md` |
+| `render_paper_pdf.py` | 把 `PAPER.md` 排成中文 PDF（嵌入宋体/黑体，含中文禁则断行） |
+| `audit_paper.py` | 校验引用闭合、图表落地、数值可回溯到 claim -> evidence |
+| `build_paper.py` | 一条命令跑完上面三步，并在最后做一致性校验 |
+
+### 为什么需要一个独立的 paper 层
+
+研究档案里的 `REPORT.md` 是**流水账**：它按发现顺序追加，包含大量自我更正、
+撤回与旁支。论文是**有选择的呈现**：它必须对读者负责，只保留能支撑论点的材料。
+
+两者不能是同一份文件。但两者必须共享同一批证据——否则论文就会开始生产
+档案里没有的数字。`paper/` 目录的存在，就是为了让这种「共享」变成机器可检的：
+
+```
+paper/data/*.csv   每一行都有 cite 列 -> claims.csv 里的一个 claim_id
+paper.json         每张图/表声明 cites  -> 同上
+audit_paper.py     顺着 claim -> evidence_ids -> quote 逐层核对数值
+```
+
+### 三处硬约束
+
+1. **数字不许凭空出现**。`render_paper.py` 在出图前校验 `cite` 列，
+   缺一条就拒绝生成。
+2. **图不许静默变成方块**。`render_paper.py` 把 matplotlib 的
+   missing-glyph 警告升级为硬错误——中文字体缺失会直接报错而不是悄悄出图。
+3. **PDF 不许越界**。`render_paper_pdf.py` 按显示宽度断行，
+   中英混排留 12% 余量，实测 0 处越出右边距。
+
+### 用法
+
+```bash
+# 全量重建（图 -> 表 -> PDF -> 校验）
+python scripts/build_paper.py research/rtx-pro-6000/paper
+
+# 只校验，不写文件（可放进 CI）
+python scripts/build_paper.py research/rtx-pro-6000/paper --check
+```
+

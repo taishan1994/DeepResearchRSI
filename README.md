@@ -57,7 +57,15 @@ python tests/test_schemas.py
 
 | 任务 | 主题 | 规模 |
 |---|---|---|
-| [rtx-pro-6000](./research/rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **447 来源 / 2997 证据 / 2233 主张（1484 高置信、9 争议）**，71 个子问题 |
+| [rtx-pro-6000](./research/rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **447 来源 / 3002 证据 / 2238 主张（1882 高置信、9 争议）**，70 个子问题 |
+
+> 📄 **论文**：`research/rtx-pro-6000/paper/` 下有一份 11 页综述
+> [PAPER.pdf](./research/rtx-pro-6000/paper/PAPER.pdf)
+> （中文，4 图 2 表，引用 23 条主张），由
+> `python scripts/build_paper.py research/rtx-pro-6000/paper` 从同一批 CSV 生成。
+> 论文层是 r257 新增的：它不新增事实，只对已有主张做有选择的呈现，
+> 并由 `scripts/audit_paper.py` 校验「每个数字都能回到一条主张及其证据」。
+
 
 该报告的几个结论值得单独一提：
 
