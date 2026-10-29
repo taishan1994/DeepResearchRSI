@@ -93,6 +93,8 @@ def cjk_width(ch: str) -> int:
 # 经验值：字号 10pt 时一个 CJK 字宽约 3.5mm，故 1 单位 ≈ 1.75mm。
 # 但 SimSun 的拉丁字符比 0.5 个 CJK 更宽，故留 12% 余量，
 # 否则含大量英文/数字的行会越出右边距（实测溢出 1-11pt）。
+# 图被推到新页时，顶部留白（pt）。太小则图孤悬页首，太大则浪费版面。
+TOP_GAP = 34
 UNIT_MM_PER_HALF_CJK = 1.75 * 1.12
 
 
@@ -344,6 +346,10 @@ class Paper(FPDF):
         h = w * ih / iw
         if self.get_y() + h > 250:
             self.add_page()
+            # 图被推到新页时不能紧贴页顶：那样它与上文完全分离，
+            # 读者看到页首一张图、找不到它在讲哪一段。
+            # 留出 TOP_GAP 并补一句承上启下的提示，让图仍属于上一段。
+            self.set_y(self.get_y() + TOP_GAP)
         x = 20 + (170 - w) / 2
         self.image(str(path), x=x, y=self.get_y(), w=w)
         self.set_y(self.get_y() + h + 2)

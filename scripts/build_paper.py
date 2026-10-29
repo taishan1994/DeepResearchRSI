@@ -7,6 +7,7 @@
         -> render_paper_pdf.py  排成 PAPER.pdf
         -> audit_paper.py       校验引用闭合、图表落地、数值可回溯（防造假）
         -> check_paper.py       校验论文内部自洽：编号、自述数字、术语（防自相矛盾）
+        -> check_layout.py      校验 PDF 的物理形态：空白页、图注分离、越界（防能读没法看）
 
 设计原则：**校验在生成之后、报告之前**。若 audit 失败，脚本以非零码退出，
 即使 PDF 已经写出来了——因为一份引用不闭合的 PDF 比没有 PDF 更危险。
@@ -43,15 +44,17 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"缺少 paper.json：{paper_dir}")
 
     steps: list[tuple[str, list[str]]] = []
+    pdf = str(paper_dir / "PAPER.pdf")
     if args.check:
         steps.append(("render_paper.py", [str(paper_dir), "--check"]))
-        steps.append(("audit_paper.py", [str(paper_dir)]))
-        steps.append(("check_paper.py", [str(paper_dir)]))
     else:
         steps.append(("render_paper.py", [str(paper_dir)]))
         steps.append(("render_paper_pdf.py", [str(paper_dir)]))
-        steps.append(("audit_paper.py", [str(paper_dir)]))
-        steps.append(("check_paper.py", [str(paper_dir)]))
+
+    # 四道校验，按「造假 -> 自相矛盾 -> 排版」的顺序，先重后轻。
+    steps.append(("audit_paper.py", [str(paper_dir)]))
+    steps.append(("check_paper.py", [str(paper_dir)]))
+    steps.append(("check_layout.py", [pdf]))
 
     failed = []
     for script, sargs in steps:
