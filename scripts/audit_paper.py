@@ -87,8 +87,19 @@ def main(argv: list[str] | None = None) -> int:
         if f"figures/{name}" not in text:
             problems.append(f"B 正文没有插入图：{name}")
     for tab in spec.get("tables", []):
-        if f"tables/{tab['table_id']}.md" not in text and \
-           tab["table_id"].replace("-", " ") not in text:
+        # 表格可以两种方式进入正文：
+        #   (a) 用 <!-- tables/tab-N.md --> 占位，由脚本内联；
+        #   (b) 正文里直接写了这张表的内容（首行表头与 tables/tab-N.md 一致）。
+        # 只检查路径会漏掉 (b)，故这里加上「表内容是否已内联」的判据。
+        by_path = f"tables/{tab['table_id']}.md" in text
+        by_label = tab["table_id"].replace("-", " ") in text
+        by_content = False
+        tab_file = paper_dir / "tables" / f"{tab['table_id']}.md"
+        if tab_file.is_file():
+            rows = [r for r in tab_file.read_text(encoding="utf-8-sig").split("\n") if r.strip()]
+            if rows and rows[0].strip() in text:
+                by_content = True
+        if not (by_path or by_label or by_content):
             problems.append(f"B 正文可能没有引用表：{tab['table_id']}")
 
     # C. 关键数字可回溯：对 paper/data/*.csv 里每一行的 (value, cite) 对，
