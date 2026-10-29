@@ -5,7 +5,8 @@
     paper/data/*.csv + paper.json
         -> render_paper.py      生成 figures/*.png 与 tables/*.md
         -> render_paper_pdf.py  排成 PAPER.pdf
-        -> audit_paper.py       校验引用闭合、图表落地、数值可回溯
+        -> audit_paper.py       校验引用闭合、图表落地、数值可回溯（防造假）
+        -> check_paper.py       校验论文内部自洽：编号、自述数字、术语（防自相矛盾）
 
 设计原则：**校验在生成之后、报告之前**。若 audit 失败，脚本以非零码退出，
 即使 PDF 已经写出来了——因为一份引用不闭合的 PDF 比没有 PDF 更危险。
@@ -45,10 +46,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         steps.append(("render_paper.py", [str(paper_dir), "--check"]))
         steps.append(("audit_paper.py", [str(paper_dir)]))
+        steps.append(("check_paper.py", [str(paper_dir)]))
     else:
         steps.append(("render_paper.py", [str(paper_dir)]))
         steps.append(("render_paper_pdf.py", [str(paper_dir)]))
         steps.append(("audit_paper.py", [str(paper_dir)]))
+        steps.append(("check_paper.py", [str(paper_dir)]))
 
     failed = []
     for script, sargs in steps:
