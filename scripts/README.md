@@ -170,7 +170,7 @@ CSV 渲染成一份可提交的文稿，并保证「论文里的每个数字都�
 | `check_paper.py` | 校验论文**自身**一致：编号连续、图表被引用、自述数字属实、术语统一、交叉引用有效 |
 | `check_layout.py` | 校验 PDF 的**物理形态**：每页字数、图注同页、表格行不跨页、不越右边距、无缺字 |
 | `sync_paper_counts.py` | 把正文里的自述数字（「引用了 N 条主张」）与档案同步 |
-| `build_paper.py` | 一条命令跑完上面全部，并在最后做一致性校验 |
+| `build_paper.py` | 一条命令跑完上面全部**加档案层校验**，并在最后做一致性校验 |
 
 ### 四道校验各防什么
 
@@ -218,7 +218,7 @@ audit_paper.py     顺着 claim -> evidence_ids -> quote 逐层核对数值
 ### 用法
 
 ```bash
-# 全量重建（图 -> 表 -> PDF -> 校验）
+# 全量重建（档案校验 -> 图 -> 表 -> PDF -> 三道论文层校验）
 python scripts/build_paper.py research/rtx-pro-6000/paper
 
 # 只校验，不写文件（可放进 CI）

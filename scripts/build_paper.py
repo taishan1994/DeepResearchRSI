@@ -51,7 +51,16 @@ def main(argv: list[str] | None = None) -> int:
         steps.append(("render_paper.py", [str(paper_dir)]))
         steps.append(("render_paper_pdf.py", [str(paper_dir)]))
 
-    # 四道校验，按「造假 -> 自相矛盾 -> 排版」的顺序，先重后轻。
+    # 四道校验，按「档案 -> 造假 -> 自相矛盾 -> 排版」的顺序，先根后叶。
+    #
+    # ⚠️ 第一道（validate_research.py）此前是漏的。后果具体可见：
+    # REPORT.md 里写了方括号包的 c-xxx 作占位说明，被 validate_research
+    # 判为「引用了不存在的主张」，但这个错误从未在构建时暴露——
+    # 因为 build_paper 只跑论文层的三道，从不看档案层。
+    # ⭐ 论文层的三道都以档案为前提，前提坏了它们照样说 OK。
+    slug_dir = paper_dir.parent
+    if (slug_dir / "claims.csv").is_file():
+        steps.append(("validate_research.py", [str(slug_dir)]))
     steps.append(("audit_paper.py", [str(paper_dir)]))
     steps.append(("check_paper.py", [str(paper_dir)]))
     steps.append(("check_layout.py", [pdf]))
