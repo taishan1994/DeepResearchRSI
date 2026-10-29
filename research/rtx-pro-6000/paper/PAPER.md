@@ -94,34 +94,6 @@ H100 SXM5 的 3,352 GB/s 是这张卡 1,792 GB/s 的 1.87 倍。
 Procyon 的原始记录只写「PRO 6000」，MLPerf 的配置表只写「RTX Pro 6000」。
 把它们标成三个 SKU 中的任何一个，都会是编造。
 
-#### 1.1.4　欠账清单
-
-| claim_id | claim_type | sku | 陈述摘要 |
-|---|---|---|---|
-| c-1m-feasible | measurement | unspecified | 百万 token上下文在 RTX PRO 6000 上已可端到端跑通：DeepSeek V4 Flash 在 lla |
-| c-gn-70b-capacity-domain | measurement | unspecified | LM Studio 的 Llama 3.3 70B Q4_K_S 测试中 PRO 6000 比 5090 提升 92 |
-| c-ix-paradox | derivation | unspecified | 这里有一个必须说清的**悖论**：RTX PRO 6000 的 **$/chip/hr 最低（0.68，是 GB30 |
-| c-ix-perdollar | measurement | unspecified | SemiAnalysis InferenceX 的每美元数据给出比本报告此前引用更完整的图景：Qwen 3.5 39 |
-| c-llamacpp-decode-parity | measurement | unspecified | 在 llama.cpp 单流 decode 下，RTX PRO 6000 与 RTX 5090 接近持平——因为两者 |
-| c-llamacpp-prefill | measurement | unspecified | llama.cpp 上 RTX PRO 6000 的 prefill 吞吐：Qwen3.5-35B-A3B-Q8_0 |
-| c-omni3-vs-l40-median | derivation | unspecified | ⭐ RTX PRO 6000 相对 L40 Ada 的中位加速比为 1.09×、胜率 78%；p10 为 0.95、 |
-| c-slac-h100-vs-rtx | measurement | unspecified | ⭐ SLAC 的逐路径规格对比给出了一个比「谁更快」更实用的框架：FP32 上 RTX PRO 6000 约 125 |
-| c-slac-power-favors-h100 | measurement | unspecified | ⚠️ 但机架密度下功耗倾向 H100：约 1.5 倍性能每瓦。即 RTX PRO 6000 在「每美元性能」上胜出， |
-| c-sr-96gb-unique | measurement | unspecified | 96 GB 的不可替代性在 120B 模型上得到直接验证：RTX 5090 无法加载或执行 120B 模型、甚至常处 |
-| c-sr-blender-narrow | measurement | unspecified | 在 StorageReview 的受控并排测试中，PRO 6000 相对 RTX 5090 的 Blender 4. |
-| c-sr-int8-saturates | measurement | unspecified | INT8 量化推理上 PRO 6000 与 RTX 5090 基本持平（79；064 对 79；272，5090 略 |
-| c-sr-renderer-split | derivation | unspecified | 同一批评测中，PRO 6000 在 Blender（+6.3%）、LuxMark（+1.7%~5.0%）、Geekb |
-| c-sr-token-vs-score | derivation | unspecified | Procyon 文本生成的 token 速率与总分给出了不同的图景：PRO 6000 相对 5090 的 token |
-| c-sr-vray-loses | measurement | unspecified | V-Ray 6 上 RTX 5090 以 14；764 vpaths 领先 PRO 6000 的 12；128，领先 |
-| c-the-bonsai-readme-has-no-pro-6000-data | measurement | unspecified | ⚠️⚠️⚠️ **这份 24；840 字节的 README 里，「96 GB」「RTX PRO」「5090」「409 |
-| c-vgpu-l40s-56 | measurement | unspecified | NVIDIA 宣称 RTX PRO 6000 相对 L40S 最高 5.6 倍加速（Llama 3 70B），分项为 |
-
-*表 4　本文引用中 SKU 未指明的主张（欠账清单）。*
-
-这 17 条不是「没查」，而是「查了、原始记录里就没有」。
-把 `unspecified` 硬填成某个 SKU 会制造不存在的精度，
-而把它隐藏起来则会让读者以为每个数字都能定位到具体产品。
-
 #### 1.1.2　SKU 判定的四条规则，以及它们各自的失败
 
 把「是哪个 SKU」变成字段之后，剩下的问题是**怎么判**。这件事我做了四版，
@@ -168,6 +140,34 @@ Procyon 的原始记录只写「PRO 6000」，MLPerf 的配置表只写「RTX Pr
 >
 > 「同一系列的不同型号」与「同一型号的不同配置」是两件事，
 > 而它们的名字可能只差一个字母。前者要分开统计，后者要合并统计。
+
+#### 1.1.4　欠账清单
+
+| claim_id | claim_type | sku | 陈述摘要 |
+|---|---|---|---|
+| c-1m-feasible | measurement | unspecified | 百万 token上下文在 RTX PRO 6000 上已可端到端跑通：DeepSeek V4 Flash 在 lla |
+| c-gn-70b-capacity-domain | measurement | unspecified | LM Studio 的 Llama 3.3 70B Q4_K_S 测试中 PRO 6000 比 5090 提升 92 |
+| c-ix-paradox | derivation | unspecified | 这里有一个必须说清的**悖论**：RTX PRO 6000 的 **$/chip/hr 最低（0.68，是 GB30 |
+| c-ix-perdollar | measurement | unspecified | SemiAnalysis InferenceX 的每美元数据给出比本报告此前引用更完整的图景：Qwen 3.5 39 |
+| c-llamacpp-decode-parity | measurement | unspecified | 在 llama.cpp 单流 decode 下，RTX PRO 6000 与 RTX 5090 接近持平——因为两者 |
+| c-llamacpp-prefill | measurement | unspecified | llama.cpp 上 RTX PRO 6000 的 prefill 吞吐：Qwen3.5-35B-A3B-Q8_0 |
+| c-omni3-vs-l40-median | derivation | unspecified | ⭐ RTX PRO 6000 相对 L40 Ada 的中位加速比为 1.09×、胜率 78%；p10 为 0.95、 |
+| c-slac-h100-vs-rtx | measurement | unspecified | ⭐ SLAC 的逐路径规格对比给出了一个比「谁更快」更实用的框架：FP32 上 RTX PRO 6000 约 125 |
+| c-slac-power-favors-h100 | measurement | unspecified | ⚠️ 但机架密度下功耗倾向 H100：约 1.5 倍性能每瓦。即 RTX PRO 6000 在「每美元性能」上胜出， |
+| c-sr-96gb-unique | measurement | unspecified | 96 GB 的不可替代性在 120B 模型上得到直接验证：RTX 5090 无法加载或执行 120B 模型、甚至常处 |
+| c-sr-blender-narrow | measurement | unspecified | 在 StorageReview 的受控并排测试中，PRO 6000 相对 RTX 5090 的 Blender 4. |
+| c-sr-int8-saturates | measurement | unspecified | INT8 量化推理上 PRO 6000 与 RTX 5090 基本持平（79；064 对 79；272，5090 略 |
+| c-sr-renderer-split | derivation | unspecified | 同一批评测中，PRO 6000 在 Blender（+6.3%）、LuxMark（+1.7%~5.0%）、Geekb |
+| c-sr-token-vs-score | derivation | unspecified | Procyon 文本生成的 token 速率与总分给出了不同的图景：PRO 6000 相对 5090 的 token |
+| c-sr-vray-loses | measurement | unspecified | V-Ray 6 上 RTX 5090 以 14；764 vpaths 领先 PRO 6000 的 12；128，领先 |
+| c-the-bonsai-readme-has-no-pro-6000-data | measurement | unspecified | ⚠️⚠️⚠️ **这份 24；840 字节的 README 里，「96 GB」「RTX PRO」「5090」「409 |
+| c-vgpu-l40s-56 | measurement | unspecified | NVIDIA 宣称 RTX PRO 6000 相对 L40S 最高 5.6 倍加速（Llama 3 70B），分项为 |
+
+*表 4　本文引用中 SKU 未指明的主张（欠账清单）。*
+
+这 17 条不是「没查」，而是「查了、原始记录里就没有」。
+把 `unspecified` 硬填成某个 SKU 会制造不存在的精度，
+而把它隐藏起来则会让读者以为每个数字都能定位到具体产品。
 
 
 ### 1.2　第二个问题：这是性能结论还是容量结论？
@@ -328,34 +328,14 @@ TPOT **5.63 ms 对 12.82 ms**（快 2.3 倍）。
 
 #### 成本层：买得起不等于用得起
 
-| 芯片 | 每芯片每小时成本（美元） | 每百万 token 成本（美元） | 该交互性下的并发数 |
-|---|---|---|---|
-| RTX PRO 6000 | 0.68 | 0.19 | 10 |
-| MI325X | 1.1 | 未给出 | 未给出 |
-| H100 | 1.17 | 未给出 | 未给出 |
-| H200 | 1.22 | 未给出 | 未给出 |
-| B200 | 1.73 | 未给出 | 未给出 |
-| GB300 | 2.31 | 0.02 | 约 2983 |
+这是三种相反结论里最尖锐的一种：**按芯片成本排它最低，按 token 成本排它最高。**
 
-*表 5　买得起不等于用得起：每芯片成本与每百万 token 成本。*
+具体数字、并发差异与全部八个指标见 **§9**——那一章专门处理成本，
+因为这里若展开，就会与那里重复同一组数。
 
-这是本文最反直觉的一组数字 [c-ix-paradox]：
-RTX PRO 6000 的**每芯片每小时成本 $0.68 是所列芯片中最低的**：
-只有 GB300（$2.31）的 **29%**、H100（$1.17）的 58%、B200（$1.73）的 39%。
-
-**而它的每百万 token 成本是 $0.19，是 GB300（$0.02）的约 9.5 倍。**
-
-原因不在芯片，在**并发**：同一交互性（56 tok/s/user）下，
-GB300 NVL72 能跑到约 **2,983** 并发，而 RTX PRO 6000 约 **10**。
-
-> **⭐⭐⭐⭐⭐ 判据**
+> **⭐⭐⭐ 判据**
 >
-> **低芯片成本无法弥补低并发。**
->
-> 故「这个卡每小时 $0.68，很便宜」与「这个卡每百万 token $0.19，很贵」
-> 两句同时成立，而它们描述的是同一张卡。
->
-> **判据是：成本比的分子必须是「每单位产出」，而不是「每单位时间」。**
+> **成本比的分子必须是「每单位产出」，而不是「每单位时间」。**
 > 这不是定价策略的差别，是**分母选错**的差别。
 
 #### 功耗层：两个指标指向不同的卡
@@ -724,7 +704,7 @@ fp8 KV、block 256）上，五个逐步改动的版本 [c-df-rtx6k-baseline]：
 
 - 32K 上下文、768-token 基准三次：19.97 / 21.18 / 23.31，**均值 21.49 tok/s**
 - 64K 上下文、同样基准：**16–17 tok/s**（降 **23%**）
-- 而通过 Open WebUI 流式做 **1500–2700 token 的持续生成**时：**掉到约 6–9 tok/s**
+- 而通过 Open WebUI 流式做 **1,500–2,700 token 的持续生成**时：**掉到约 6–9 tok/s**
 
 **降幅 58%–72%，远大于上下文的 23%。**
 
@@ -816,7 +796,7 @@ DeepSeek-V4-Flash 在 llama.cpp 上成功生成了第 **1,048,573** 个 token，
 两个独立来源给出了同一个值：
 
 - Bonsai 2 27B README：**FP16 KV cache 64 KiB per token**（100K ≈ 6.3 GiB）
-- 本报告 §4.15 的压缩记录：**18.3 KiB/活跃 token、相对 BF16 3.50×** ⇒ 18.3 × 3.50 = **64.05 KiB**
+- 本档案的压缩记录（见 §6）：**18.3 KiB/活跃 token、相对 BF16 3.50×** ⇒ 18.3 × 3.50 = **64.05 KiB**
 
 两者相差 **0.08%** [c-two-independent-models-agree-on-64-kib-per-token]。同一张表还给了「相对 FP8 1.75×」⇒ 18.3 × 1.75 = **32.02 KiB**，即 FP8 恰为 FP16 的一半。三个精度构成一条等比链：**FP16 64 / FP8 32 / 压缩 18.3 KiB**。
 
@@ -970,6 +950,18 @@ V-Ray 6 上 RTX 5090 以 14,764 vpaths 领先 `WS` 版的 12,128 [c-sr-vray-lose
 
 *图 13　每百万 token 成本：随交互性要求上升，而对照卡恒定。*
 
+| 芯片 | 每芯片每小时成本（美元） | 每百万 token 成本（美元） | 该交互性下的并发数 |
+|---|---|---|---|
+| RTX PRO 6000 | 0.68 | 0.19 | 10 |
+| MI325X | 1.1 | 未给出 | 未给出 |
+| H100 | 1.17 | 未给出 | 未给出 |
+| H200 | 1.22 | 未给出 | 未给出 |
+| B200 | 1.73 | 未给出 | 未给出 |
+| GB300 | 2.31 | 0.02 | 约 2983 |
+
+*表 5　买得起不等于用得起：每芯片成本与每百万 token 成本。*
+按芯片逐行对照，可以看到「每芯片每小时」这一列它最低，而「每百万 token」这一列只有对照卡给了数、且相差一个量级。
+
 图 13 把三组柱子并排，可以看到对照卡的三根完全等高，而这张卡的三根逐级抬升。
 
 同一份来源、同一个模型（Qwen 3.5 397B-A17B）、同一精度（FP4），
@@ -1100,7 +1092,7 @@ L2 缓存相对 RTX A6000 是 21.3 倍 [c-omni3-vs-l40-median][c-vgpu-l40s-56][c
 故「A 模型比 B 模型快」这句话，连「同一个模型」内部都要先问是预填还是解码。
 
 **11. 「长输出慢」比「长上下文慢」严重得多。** 上下文 32K 到 64K 只降 23%，
-而持续生成从 768 token 拉到 1500-2700 token 会掉到 6-9 tok/s，降幅 58%-72%
+而持续生成从 768 token 拉到 1,500-2,700 token 会掉到 6-9 tok/s，降幅 58%-72%
 [c-long-sustained-gen-degrades]。而多数基准只测短输出，故这个现象在基准里不可见。
 
 **12. 全部数字最高只到「测量级」。** 本文没有一条结论达到复现级——因为没有任何一条曾在第二台机器、同一 SKU 上被独立重测。
