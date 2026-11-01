@@ -18,6 +18,7 @@
   L3  表格行不跨页（表现为某页字数异常少且以表格碎片开头）
   L4  越界：任何文字不得超出页面右边界
   L5  字体嵌入与缺字
+  L6  行宽填充率（每行应排到接近右边界）
 
 用法：
     python scripts/check_layout.py research/rtx-pro-6000/paper/PAPER.pdf
@@ -165,6 +166,51 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f'  L5 无缺字；嵌入字体 {len(fonts)} 种：'
               f'{", ".join(sorted(f.split("+")[-1] for f in fonts))}')
+
+    # ---------- L6 行宽填充率 ----------
+    # 只看正文（10pt），且只统计「同段内非末行」：下一行左端相同、行距正常。
+    # 段末行天然不满宽，把它算进来会让指标永远偏低。
+    fills: list[float] = []
+    for pg in pages:
+        rows = []
+        for b in pg['page'].get_text('dict')['blocks']:
+            if 'lines' not in b:
+                continue
+            for ln in b['lines']:
+                txt = ''.join(sp['text'] for sp in ln['spans']).strip()
+                if not txt or not ln['spans']:
+                    continue
+                sz = ln['spans'][0]['size']
+                if abs(sz - 10) > 0.6:          # 只算正文，排除标题与图注
+                    continue
+                rows.append((round(ln['bbox'][1], 1), round(ln['bbox'][0], 1),
+                             round(ln['bbox'][2], 1), round(sz, 1), txt))
+        rows.sort()
+        for i, (y, x0, x1, sz, txt) in enumerate(rows):
+            if len(txt) < 20:                   # 太短的多为列表项与公式行
+                continue
+            if i + 1 >= len(rows):
+                continue
+            ny, nx0, _nx1, _nsz, _nt = rows[i + 1]
+            same_para = abs(nx0 - x0) < 1.5 and 0 < ny - y < sz * 2.4
+            if same_para:
+                fills.append(x1)
+
+    if len(fills) >= 20:
+        fills.sort()
+        med = fills[len(fills) // 2]
+        ratio = med / RIGHT_LIMIT
+        detail = (f'同段非末行 {len(fills)} 条，右端中位 {med:.1f} pt'
+                  f'（边界 {RIGHT_LIMIT:.1f}，填充率 {ratio * 100:.1f}%）')
+        if ratio < 0.90:
+            problems.append(('FAIL', f'L6 行宽填充率过低：{detail}。'
+                                     '多行为源码手动折行，未按版心宽度重排'))
+        elif ratio < 0.95:
+            problems.append(('WARN', f'L6 行宽偏窄：{detail}'))
+        else:
+            print(f'  L6 行宽填充正常：{detail}')
+    else:
+        print(f'  L6 正文行样本不足（{len(fills)} 条），跳过')
 
     # ---------- 报告 ----------
     print()

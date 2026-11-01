@@ -95,6 +95,13 @@ def cjk_width(ch: str) -> int:
 # 否则含大量英文/数字的行会越出右边距（实测溢出 1-11pt）。
 # 图被推到新页时，顶部留白（pt）。太小则图孤悬页首，太大则浪费版面。
 TOP_GAP = 34
+
+# 版心右边界（mm）。折行宽度一律由「右边界 - 起点」推出，
+# 避免各处各写一个宽度常数而导致错位。
+RIGHT_MM = 190.0
+MM2PT = 72 / 25.4
+# ⚠️ 这个常量已不用于正文折行（见 wrap_measured 的注释）。
+# 仍保留是因为 wrap_title 等仍以「单位」为单位做语义断行。
 UNIT_MM_PER_HALF_CJK = 1.75 * 1.12
 
 
@@ -131,6 +138,50 @@ def wrap_cjk(text: str, max_units: int) -> list[str]:
             else:
                 cur.append(ch)
                 width += w
+        if cur:
+            lines.append("".join(cur))
+    return lines
+
+
+def wrap_measured(pdf, text: str, size: float, max_mm: float) -> list[str]:
+    """按**实测字符串宽度**折行，而不是按估算的单位数。
+
+    为什么必须实测：SimSun 里汉字宽、拉丁窄，比例随内容浮动。
+    用「半个汉字宽 × 1.12 余量」去估，纯中文段落会白留 12% 的右边距
+    （实测每行少排约 5 个汉字），而英文密集的段落仍然可能溢出。
+    ⭐ 一个对所有输入都用同一个假设的余量，既不够保守也不够激进。
+
+    `pdf` 需已 set_font 到目标字体与字号。
+
+    ⚠️ 单位：本项目的 FPDF 用 `unit="mm"`，故 `get_string_width` 返回 **mm**。
+    参数因此叫 `max_mm` 而不是 `max_pt`——上一版叫 max_pt 却传 pt 值进来，
+    比的是「67mm > 481」，等于不折行，于是每行都溢出到页面外。
+    ⭐ 单位错误不会报错，只会静默地让判断永远为假。
+    """
+    if getattr(pdf, "unit", "mm") != "mm":
+        raise ValueError(f"wrap_measured 假定 unit='mm'，实际 {pdf.unit!r}")
+    lines: list[str] = []
+    for para in text.split("\n"):
+        para = para.rstrip()
+        if not para:
+            lines.append("")
+            continue
+        cur: list[str] = []
+        for ch in para:
+            trial = "".join(cur) + ch
+            if cur and pdf.get_string_width(trial) > max_mm:
+                # 禁则：不能起行的字符随上一行留下，不能收尾的字符挪到下一行
+                if ch in NO_LINE_START:
+                    moved = cur.pop()
+                    lines.append("".join(cur))
+                    cur = [moved, ch]
+                    continue
+                while cur and cur[-1] in NO_LINE_END:
+                    cur.pop()
+                lines.append("".join(cur))
+                cur = [ch]
+            else:
+                cur.append(ch)
         if cur:
             lines.append("".join(cur))
     return lines
@@ -186,6 +237,11 @@ class Paper(FPDF):
         self.add_font("CJK", "B", font_bold)
         self.set_auto_page_break(True, margin=18)
         self.set_margins(20, 18, 20)
+        # fpdf2 的 cell() 默认左右各留 1mm 内边距（c_margin）。
+        # 折行时按版心满宽计算，绘制时却从 20mm+1mm 起排，
+        # 于是每行实际可用宽度比折行假设少 1mm，累积成溢出。
+        # 归零后：文字起点严格对齐 20mm，折行宽度即真实可用宽度。
+        self.c_margin = 0
         self._figures_dir = Path(".")
 
     def header(self) -> None:
@@ -231,8 +287,10 @@ class Paper(FPDF):
 
     def body(self, text: str, size: float = 10, indent: float = 0) -> None:
         self.set_font("CJK", "", size)
-        width_units = body_units(size, indent)
-        for ln in wrap_cjk(text, width_units):
+        # 宽度由起点推出，单位 mm（与 get_string_width 一致）。
+        # 减 0.28mm 约 0.8pt，吸收舍入，不足以少排一个汉字（约 3.5mm）。
+        max_mm = RIGHT_MM - (20 + indent) - 0.28
+        for ln in wrap_measured(self, text, size, max_mm):
             if ln == "":
                 self.ln(size * 0.42)
             else:
@@ -251,8 +309,9 @@ class Paper(FPDF):
         self.set_font("CJK", "", 10)
         self.set_x(22)
         self.cell(4, 5.2, "·")
-        width_units = body_units(10, 6)
-        lines = wrap_cjk(text, width_units)
+        # 起点是 26mm（与下面 set_x(26) 一致），不是 20mm+6。
+        max_mm = RIGHT_MM - 26 - 0.28
+        lines = wrap_measured(self, text, 10, max_mm)
         for i, ln in enumerate(lines):
             self.set_x(26 if i == 0 else 26)
             self.cell(0, 5.2, ln, new_x="LMARGIN", new_y="NEXT")
@@ -262,9 +321,10 @@ class Paper(FPDF):
         y0 = self.get_y()
         self.set_font("CJK", "", 9.6)
         self.set_text_color(45, 45, 45)
-        width_units = body_units(9.6, 8)
+        # 起点是 26mm（与下面 set_x(26) 一致）。
+        max_mm = RIGHT_MM - 26 - 0.28
         for ln in lines:
-            for piece in wrap_cjk(ln, width_units):
+            for piece in wrap_measured(self, ln, 9.6, max_mm):
                 if piece == "":
                     self.ln(2.4)
                 else:
@@ -421,13 +481,25 @@ def parse_blocks(md: str):
         elif s.startswith("# "):
             yield ("h1", inline_clean(s[2:]))
         elif s.startswith("> "):
-            buf = []
+            # 引用块内同样：连续的非空行属于同一段，须合并后再折行。
+            # 空引用行（单独的 >）表示段间空行，保留为独立分隔。
+            buf: list[str] = []
+            acc: list[str] = []
+
+            def flush() -> None:
+                if acc:
+                    buf.append("".join(acc))
+                    acc.clear()
+
             while i < len(lines) and (lines[i].startswith("> ") or lines[i].strip() == ">"):
-                if lines[i].strip() == ">":
-                    buf.append("")
+                body = lines[i][2:] if lines[i].startswith("> ") else ""
+                if body.strip():
+                    acc.append(inline_clean(body))
                 else:
-                    buf.append(inline_clean(lines[i][2:]))
+                    flush()
+                    buf.append("")
                 i += 1
+            flush()
             yield ("quote", buf)
             continue
         elif s.strip() == "---":
@@ -437,7 +509,22 @@ def parse_blocks(md: str):
         elif re.match(r"^\d+\.\s", s):
             yield ("bullet", inline_clean(re.sub(r"^\d+\.\s", "", s)))
         elif s.strip():
-            yield ("body", inline_clean(s))
+            # Markdown 语义：同一段落内换行不是换行，是空格。
+            # 源码里为便于编辑而手动折的行，必须在渲染时接回一整段，
+            # 否则每行都按源码宽度截断，右边参差不齐。
+            buf = [inline_clean(s)]
+            i += 1
+            while i < len(lines):
+                nxt = lines[i].rstrip()
+                if (not nxt.strip()
+                        or nxt.startswith(("#", "|", ">", "```", "- ", "!["))
+                        or nxt.strip() == "---"
+                        or re.match(r"^\d+\.\s", nxt)):
+                    break
+                buf.append(inline_clean(nxt))
+                i += 1
+            yield ("body", "".join(buf))
+            continue
         else:
             yield ("blank", None)
         i += 1
