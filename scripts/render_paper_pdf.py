@@ -187,6 +187,68 @@ def wrap_measured(pdf, text: str, size: float, max_mm: float) -> list[str]:
     return lines
 
 
+# 拉丁字母与数字序列在折行时不可分割：一个英文单词/型号不应被拦腰截断。
+LATIN_RUN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._\-/]*")
+
+
+def _split_tokens(text: str) -> list[str]:
+    """把一行切成「不可分单元」：拉丁词整体是一个单元，中文逐字。
+
+    ⭐ 这是中英混排折行的关键区别：中文可以在任意字间断，
+    拉丁词不行。逐字符折行会把 measurement 切成 measure/ment。
+    """
+    tokens: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        m = LATIN_RUN.match(text, i)
+        if m:
+            tokens.append(m.group(0))
+            i = m.end()
+        else:
+            tokens.append(text[i])
+            i += 1
+    return tokens
+
+
+def wrap_measured_words(pdf, text: str, size: float, max_mm: float) -> list[str]:
+    """词感知折行：拉丁词不拆，中文逐字断，保留中文禁则。
+
+    `pdf` 需已 set_font 到目标字体与字号；单位 mm（与 get_string_width 一致）。
+    """
+    if getattr(pdf, "unit", "mm") != "mm":
+        raise ValueError(f"wrap_measured_words 假定 unit='mm'，实际 {pdf.unit!r}")
+    lines: list[str] = []
+    for para in text.split("\n"):
+        para = para.rstrip()
+        if not para:
+            lines.append("")
+            continue
+        cur: list[str] = []
+        cur_w = 0.0
+        for tok in _split_tokens(para):
+            w = pdf.get_string_width(tok)
+            if cur and cur_w + w > max_mm:
+                # 禁则：标点不能起行；开括号不能收尾
+                if tok and tok[0] in NO_LINE_START and len(cur) > 1:
+                    moved = cur.pop()
+                    lines.append("".join(cur))
+                    cur = [moved, tok]
+                    cur_w = pdf.get_string_width(moved) + w
+                    continue
+                while len(cur) > 1 and cur[-1] and cur[-1][-1] in NO_LINE_END:
+                    cur.pop()
+                lines.append("".join(cur))
+                cur = [tok]
+                cur_w = w
+            else:
+                cur.append(tok)
+                cur_w += w
+        if cur:
+            lines.append("".join(cur))
+    return lines
+
+
 # 标题断行时优先在这些位置切开：全角空格、冒号、破折号、斜杠
 TITLE_BREAKS = "　：:｜|/、，,（）()—–-·"
 
@@ -290,7 +352,7 @@ class Paper(FPDF):
         # 宽度由起点推出，单位 mm（与 get_string_width 一致）。
         # 减 0.28mm 约 0.8pt，吸收舍入，不足以少排一个汉字（约 3.5mm）。
         max_mm = RIGHT_MM - (20 + indent) - 0.28
-        for ln in wrap_measured(self, text, size, max_mm):
+        for ln in wrap_measured_words(self, text, size, max_mm):
             if ln == "":
                 self.ln(size * 0.42)
             else:
@@ -311,7 +373,7 @@ class Paper(FPDF):
         self.cell(4, 5.2, "·")
         # 起点是 26mm（与下面 set_x(26) 一致），不是 20mm+6。
         max_mm = RIGHT_MM - 26 - 0.28
-        lines = wrap_measured(self, text, 10, max_mm)
+        lines = wrap_measured_words(self, text, 10, max_mm)
         for i, ln in enumerate(lines):
             self.set_x(26 if i == 0 else 26)
             self.cell(0, 5.2, ln, new_x="LMARGIN", new_y="NEXT")
@@ -324,7 +386,7 @@ class Paper(FPDF):
         # 起点是 26mm（与下面 set_x(26) 一致）。
         max_mm = RIGHT_MM - 26 - 0.28
         for ln in lines:
-            for piece in wrap_measured(self, ln, 9.6, max_mm):
+            for piece in wrap_measured_words(self, ln, 9.6, max_mm):
                 if piece == "":
                     self.ln(2.4)
                 else:
@@ -341,13 +403,48 @@ class Paper(FPDF):
         ncol = max(len(r) for r in rows)
         avail = 210 - 40
         # 按内容宽度分配列宽
+        # 列宽按「该列最长单元格的实测宽度」分配，而不是按汉字数估算。
+        # ⚠️ 表头（第 0 行）常常是拉丁词（measurement / derivation），
+        # 按汉字数估算会把它算窄，于是表头自身被折成三行。
+        self.set_font("CJK", "", 8.2)
+        # 每列的「理想宽度」取该列最长单元格的实测宽度，但**封顶**：
+        # 摘要列有 237 字，若按理想宽度归一化，其余列会被压到几毫米。
+        # ⚠️ 列宽不该由最长内容决定——长内容本来就该折行；
+        # 短内容（型号名、计数）折行反而不可读。
+        CAP_MM = 42.0
         weights = []
         for c in range(ncol):
-            w = max((sum(cjk_width(ch) for ch in r[c]) if c < len(r) else 1)
-                    for r in rows)
-            weights.append(max(w, 4))
+            widest = 0.0
+            for r in rows:
+                if c < len(r) and r[c]:
+                    widest = max(widest, self.get_string_width(r[c]))
+            weights.append(min(max(widest, 8.0), CAP_MM))
         total = sum(weights)
         widths = [avail * w / total for w in weights]
+        # 再保证每列不低于「该列最长单词」的宽度，让 measurement、
+        # c-slac-power-favors-h100 这类标识符不至于被拆开。
+        need = []
+        for c in range(ncol):
+            longest_word = 0.0
+            for r in rows:
+                if c < len(r) and r[c]:
+                    for tok in _split_tokens(r[c]):
+                        longest_word = max(longest_word, self.get_string_width(tok))
+            need.append(longest_word + 1.2)
+        for _ in range(6):                       # 迭代几轮即可收敛
+            deficit = 0.0
+            for c in range(ncol):
+                if widths[c] < need[c]:
+                    deficit += need[c] - widths[c]
+                    widths[c] = need[c]
+            if deficit <= 0:
+                break
+            donors = [c for c in range(ncol) if widths[c] > need[c] + 1.0]
+            pool = sum(widths[c] - need[c] for c in donors)
+            if pool <= 0:
+                break
+            for c in donors:
+                widths[c] -= deficit * (widths[c] - need[c]) / pool
         self.set_font("CJK", "", 8.2)
         # fpdf2 的 multi_cell 在页面底部会自行分页，于是同一行表格的内容
         # 被拆到两页、每页只剩一个词。表格行的分页必须由我们决定，
@@ -366,10 +463,13 @@ class Paper(FPDF):
             cells = [(r[c] if c < len(r) else "") for c in range(ncol)]
             lines_per_cell = []
             for c, cell in enumerate(cells):
-                # 多留 2 个半角位余量：fpdf2 自身折行更保守，
-                # 估少了会溢出行高、把内容推到页外。
-                units = max(int(widths[c] / ((8.2 / 10.0) * UNIT_MM_PER_HALF_CJK)) - 2, 4)
-                lines_per_cell.append(wrap_cjk(cell, max(units, 4)))
+                # 按实测宽度折行。之前用「半个汉字宽」估算再减 2 个单位，
+                # 对拉丁文本严重低估：'measurement' 11 个字母只算 5.5 个单位，
+                # 减 2 后每行只放三四个字母，于是它被切成 measu/remen/t。
+                # ⚠️ 单元格左右各留 0.5mm 内边距，这是真实需要的，不是估算余量。
+                max_mm = widths[c] - 1.0
+                lines_per_cell.append(
+                    wrap_measured_words(self, cell, 8.2, max_mm) if cell else [""])
             nlines = max(len(x) for x in lines_per_cell)
             # 整行放不下就换页，绝不让一行跨页
             if self.get_y() + nlines * 4.6 > 280:

@@ -19,6 +19,7 @@
   L4  越界：任何文字不得超出页面右边界
   L5  字体嵌入与缺字
   L6  行宽填充率（每行应排到接近右边界）
+  L7  表格与正文的拉丁词不被切断（measurement 不能变成 measure/ment）
 
 用法：
     python scripts/check_layout.py research/rtx-pro-6000/paper/PAPER.pdf
@@ -211,6 +212,31 @@ def main(argv: list[str] | None = None) -> int:
             print(f'  L6 行宽填充正常：{detail}')
     else:
         print(f'  L6 正文行样本不足（{len(fills)} 条），跳过')
+
+    # ---------- L7 表格文字完整性 ----------
+    # ⚠️ 这里曾经用「按 x 坐标聚类成列，再比较相邻行」判拉丁词是否被切断，
+    # 结果在 30 页上误报 47 处——因为不同表格的单元格左端恰好对齐，
+    # 聚类会把两张表的行混在一列里。
+    # ⭐ 失败原因：**用几何位置去推断语义归属**，而 X 坐标不足以区分「同一格的两行」
+    # 与「两张表的不同格」。
+    # 改为可靠判据：表格里不应出现「以连字符开头」的碎片行
+    #（c-1m-feasible 被切成 c-1m-feasib / le 时，第二行会以字母开头且极短）。
+    # 但更强的保证在数据层：sync_paper_counts.py 已断言不截断，
+    # 且 LaTeX 版用 check_latex.py 的 X5 做全文完整性对账。
+    # 故此处只保留一个低误报的信号：极短的行尾碎片。
+    frag = []
+    for pg in pages:
+        for b in pg['page'].get_text('dict')['blocks']:
+            for ln in b.get('lines', []):
+                txt = ''.join(sp['text'] for sp in ln['spans']).strip()
+                # 1-2 个纯小写字母的行，几乎一定是被切开的词尾
+                if re.fullmatch(r'[a-z]{1,2}', txt):
+                    frag.append((pg['no'], txt))
+    if frag:
+        sample = '；'.join(f'p{p} {t!r}' for p, t in frag[:5])
+        problems.append(('WARN', f'L7 疑似 {len(frag)} 处单词碎片：{sample}'))
+    else:
+        print('  L7 无单词碎片')
 
     # ---------- 报告 ----------
     print()

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import io
 import re
 import sys
 from pathlib import Path
@@ -55,12 +56,19 @@ def main(argv: list[str] | None = None) -> int:
     t2 = re.sub(r'这 \d+ 条不是「没查」', f'这 {len(uns)} 条不是「没查」', t2)
 
     # 重写欠账清单
-    rows = ['claim_id,claim_type,sku,陈述摘要']
+    # ⚠️ 不要用 replace(',', '；') 去规避 CSV 分隔符：它会把千分位逗号
+    # （79,064）也换掉，把数字读成两个数。用 csv.writer 做标准转义。
+    # ⚠️ 也不要截断陈述：表格能放多少行是渲染问题，不是数据问题。
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator='\n')
+    w.writerow(['claim_id', 'claim_type', 'sku', '陈述摘要'])
     md = [TABLE_HEAD, TABLE_SEP]
     for cid in uns:
-        st = cl[cid]['statement'].replace(',', '；').replace('\n', ' ')[:58]
-        rows.append(f"{cid},{cl[cid]['claim_type']},unspecified,{st}")
+        st = ' '.join(cl[cid]['statement'].split())      # 只压空白，不截断
+        w.writerow([cid, cl[cid]['claim_type'], 'unspecified', st])
         md.append(f'| {cid} | {cl[cid]["claim_type"]} | unspecified | {st} |')
+    csv_text = buf.getvalue()
+    rows = csv_text.rstrip('\n').split('\n')
 
     m = TABLE_RE.search(t2)
     if m:
@@ -77,7 +85,6 @@ def main(argv: list[str] | None = None) -> int:
         print('已是最新，未写文件')
         return 0
 
-    csv_text = '\n'.join(rows) + '\n'
     assert '\ufffd' not in csv_text
     (D / 'tab4_sku_debt.csv').write_text(csv_text, encoding='utf-8', newline='\n')
 

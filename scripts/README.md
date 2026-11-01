@@ -171,6 +171,9 @@ CSV 渲染成一份可提交的文稿，并保证「论文里的每个数字都�
 | `check_layout.py` | 校验 PDF 的**物理形态**：每页字数、图注同页、表格行不跨页、不越右边距、无缺字 |
 | `sync_paper_counts.py` | 把正文里的自述数字（「引用了 N 条主张」）与档案同步 |
 | `build_paper.py` | 一条命令跑完上面全部**加档案层校验**，并在最后做一致性校验 |
+| `md_to_tex.py` | 把 `PAPER.md` 转成 LaTeX 正文（LaTeX 版的事实源仍是 `PAPER.md`） |
+| `check_latex.py` | LaTeX 版 PDF 的版式校验：溢界、填充率、内容完整性、缺字 |
+| `build_paper_latex.py` | 一条命令出 LaTeX 版 PDF（xelatex 两遍 + 版式校验） |
 
 ### 四道校验各防什么
 
