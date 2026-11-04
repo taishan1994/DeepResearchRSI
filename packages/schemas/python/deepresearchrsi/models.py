@@ -89,6 +89,10 @@ class Claim:
     derivation: Optional[str] = None
     notes: Optional[str] = None
     sku: Sku = "na"
+    # 主题无关的维度标注，替代写死的 sku。
+    # 例：{"precision": "fp16", "batch": "1"}。
+    # 校验器会把值为 "unspecified" 的维度计入欠账统计（与 sku 口径一致）。
+    facets: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.claim_id.startswith("c-"):

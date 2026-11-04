@@ -240,52 +240,104 @@ def test_validator_rejects_bad_source_type() -> None:
 
 
 def test_report_header_counts_match_data() -> None:
-    """REPORT.md 末尾声明的计数必须与实际 CSV 行数一致（防止静默漂移）。"""
+    """REPORT.md 末尾声明的计数必须与实际 CSV 行数一致（防止静默漂移）。
+
+    ⚠️ 旧实现只查 rtx-pro-6000。改为遍历**所有**归档：
+       新增归档时自动纳入，不需要改测试。
+    """
     import re as _re
-    target = ROOT / "research" / "rtx-pro-6000"
-    if not target.is_dir():
+
+    research = ROOT / "research"
+    if not research.is_dir():
         print("  (skip: archive absent)")
         return
-    stats = validate_research_dir(target)
-    report = (target / "REPORT.md").read_text(encoding="utf-8")
-    m = _re.search(
-        r"sources=(\d+), evidence=(\d+), claims=(\d+), claims_high=(\d+)", report
-    )
-    assert m, "REPORT.md missing validation-result line"
-    got = tuple(int(x) for x in m.groups())
-    want = (stats["sources"], stats["evidence"], stats["claims"], stats["claims_high"])
-    assert got == want, f"header counts {got} != actual {want}"
+    archives = sorted(p for p in research.iterdir()
+                      if p.is_dir() and (p / "claims.csv").exists())
+    if not archives:
+        print("  (skip: archive absent)")
+        return
+    for target in archives:
+        stats = validate_research_dir(target)
+        report = (target / "REPORT.md").read_text(encoding="utf-8")
+        m = _re.search(
+            r"sources=(\d+), evidence=(\d+), claims=(\d+), claims_high=(\d+)", report
+        )
+        assert m, f"{target.name}/REPORT.md missing validation-result line"
+        got = tuple(int(x) for x in m.groups())
+        want = (stats["sources"], stats["evidence"], stats["claims"],
+                stats["claims_high"])
+        assert got == want, (
+            f"{target.name}/REPORT.md header counts {got} != actual {want}；"
+            f"跑 python scripts/sync_report_counts.py --apply 修复"
+        )
 
 
 def test_docs_quote_real_counts() -> None:
-    """顶层 README / research/README / evals/cases README 若引用规模数字，必须与实际一致。"""
+    """顶层 README / research/README / evals/cases README 若引用规模数字，必须与实际一致。
+
+    ⚠️ 旧实现硬编码只取 rtx-pro-6000 的三个计数，然后在**全文**里用
+       (\\d+)\\s*(来源|证据|主张) 扫一遍，要求每个数字都等于该归档的值。
+       只要新增第二个归档，表格里另一行的数字就会被拿去和 rtx-pro-6000 比，
+       于是必然误报（本次就是这样：声明 36 来源，实际 447）。
+       正确做法是**按 slug 逐行配对**：只比该行自己那三个数。
+    """
     import csv as _csv
     import re as _re
-    target = ROOT / "research" / "rtx-pro-6000"
-    if not target.is_dir():
+
+    research = ROOT / "research"
+    if not research.is_dir():
         print("  (skip: archive absent)")
         return
 
-    with (target / "sources.csv").open(encoding="utf-8-sig") as fh:
-        n_src = sum(1 for _ in _csv.DictReader(fh))
-    with (target / "evidence.csv").open(encoding="utf-8-sig") as fh:
-        n_ev = sum(1 for _ in _csv.DictReader(fh))
-    with (target / "claims.csv").open(encoding="utf-8-sig") as fh:
-        n_cl = sum(1 for _ in _csv.DictReader(fh))
+    def counts(slug: str) -> dict[str, int] | None:
+        d = research / slug
+        if not (d / "claims.csv").exists():
+            return None
+        out = {}
+        for kind, name in (("来源", "sources"), ("证据", "evidence"), ("主张", "claims")):
+            with (d / f"{name}.csv").open(encoding="utf-8-sig") as fh:
+                out[kind] = sum(1 for _ in _csv.DictReader(fh))
+        return out
 
-    # 匹配形如 "136 来源" / "872 证据" / "573 主张" 的声明
-    pattern = _re.compile(r"(\d+)\s*(来源|证据|主张)")
-    actual = {"来源": n_src, "证据": n_ev, "主张": n_cl}
+    # 只匹配 research/README.md 里那种带 slug 的表格行：
+    #   | [slug](./slug/REPORT.md) | 主题 | **N 来源 / N 证据 / N 主张…** |
+    row_re = _re.compile(
+        r"^\|\s*\[(?P<slug>[a-z0-9-]+)\]\(\./(?P=slug)/REPORT\.md\)\s*\|"
+        r"\s*(?P<topic>[^|]*)\|(?P<scale>[^|]*)\|",
+        _re.MULTILINE,
+    )
+    num_re = _re.compile(r"(\d+)\s*(来源|证据|主张)")
 
-    for rel in ("README.md", "research/README.md", "evals/cases/README.md"):
+    checked = 0
+    for rel in ("research/README.md", "README.md", "evals/cases/README.md"):
         f = ROOT / rel
         if not f.exists():
             continue
         text = f.read_text(encoding="utf-8")
-        for num, kind in pattern.findall(text):
-            got = int(num)
-            want = actual[kind]
-            assert got == want, f"{rel}: 声明 {got} {kind}，实际 {want}"
+        matched_any = False
+        for m in row_re.finditer(text):
+            actual = counts(m.group("slug"))
+            if actual is None:
+                continue
+            matched_any = True
+            checked += 1
+            for num, kind in num_re.findall(m.group("scale")):
+                got = int(num)
+                want = actual[kind]
+                assert got == want, (
+                    f"{rel}: 行 [{m.group('slug')}] 声明 {got} {kind}，实际 {want}"
+                )
+        # 退路：文件里若完全没有 slug 表格行，才用旧的全文扫描（单归档场景）
+        if not matched_any and "rtx-pro-6000" in text:
+            actual = counts("rtx-pro-6000")
+            if actual:
+                for num, kind in num_re.findall(text):
+                    got = int(num)
+                    want = actual[kind]
+                    assert got == want, f"{rel}: 声明 {got} {kind}，实际 {want}"
+
+    if not checked:
+        print("  (skip: 无可配对的归档表格行)")
 
 
 def test_brief_matches_report_appendix() -> None:

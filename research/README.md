@@ -20,7 +20,9 @@ research/<slug>/
 
 | slug | 主题 | 规模 |
 |---|---|---|
-| [rtx-pro-6000](./rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **447 来源 / 2997 证据 / 2233 主张（1484 高置信）/ 9 争议** |
+| [rtx-pro-6000](./rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **447 来源 / 3002 证据 / 2238 主张（1882 高置信）/ 9 争议** |
+| [cuda-kernel-gen](./cuda-kernel-gen/REPORT.md) | CUDA Kernel 自动生成前沿进展（2025-02 ～ 2026-11，98 篇） | **36 来源 / 19 证据 / 19 主张（15 高置信）/ 0 争议** |
+| [cuda-kernel-rl](./cuda-kernel-rl/REPORT.md) | CUDA Kernel 强化学习：奖励设计的演进（2025-01 ～ 2026-10，13 篇核心） | **20 来源 / 37 证据 / 23 主张（15 高置信）/ 0 争议** |
 
 ## 新建任务
 

@@ -31,6 +31,34 @@ Embedding 可以重建，摘要可以重写，但"你在什么时候看到了什
 
 这些由 `scripts/validate_research.py` 在 CI 中机器校验。
 
+### 实现状态（2026-11-03 补记）
+
+契约写于 2026-10-27，实现长期只有「字段非空」检查：
+
+```python
+if not quote:       报错（信息里写「不变量 E1」）
+if not fetched_at:  报错（信息里写「不变量 S1」）
+```
+
+「非空」既不能证明 quote 是原文子串（E1），也不能证明时间戳带时区（S1）；
+D1 则完全没有实现。错误信息里挂着不变量编号，读起来像是验过了。
+
+现已实现在 `packages/schemas/python/deepresearchrsi/invariants.py`：
+
+| 不变量 | 判定方式 |
+|---|---|
+| S1 | 正则要求 `Z` 或 `±HH:MM` 结尾，再用 `datetime.fromisoformat` 解析 |
+| D1 | 同一 `document_id` 出现多个 `content_hash` 且无版本列区分即报错 |
+| E1 | 读 `documents/<document_id>.txt`，quote 须为其子串（允许空白归一，不允许改写） |
+
+**E1 的覆盖率必须单独统计。** 没有文档快照时，检查退化为「无法校验」，
+此时输出 `e1_unverifiable` 并打印醒目的 `[!]` 警告，**不得记为通过**。
+否则一个没有任何快照的归档会安静地显示 `[OK]`，而它几千条证据的 E1
+其实一条都没验过——这比报错更危险。
+
+`rtx-pro-6000`（3002 条证据）当前就是这种情况：`e1_checked=0`。
+补快照属于 `services/ingestion` 的范围，尚未做。
+
 ## 后果
 
 **正面**

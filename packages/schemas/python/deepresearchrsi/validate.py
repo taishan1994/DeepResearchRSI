@@ -17,6 +17,8 @@ import json
 import re
 import sys
 from datetime import date, datetime
+
+from . import invariants
 from pathlib import Path
 
 CLAIM_REF_RE = re.compile(r"\[(c-[a-z0-9-]+)\]")
@@ -53,7 +55,6 @@ TRUST_TIERS = {"primary", "secondary", "tertiary"}
 
 class ValidationError(Exception):
     pass
-
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
     if not path.exists():
@@ -96,8 +97,6 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
         source_ids.add(sid)
         if not (row.get("url") or "").strip():
             errors.append(f"sources.csv[{sid}]: url 为空")
-        if not (row.get("fetched_at") or "").strip():
-            errors.append(f"sources.csv[{sid}]: fetched_at 为空（不变量 S1）")
         _parse_date(row.get("published_at", ""), where=f"sources.csv[{sid}].published_at")
         # 枚举校验：与 json/source.schema.json 保持一致
         stype = (row.get("source_type") or "").strip()
@@ -189,6 +188,36 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
             )
         elif sku == "unspecified":
             sku_unspecified += 1
+
+        # facets：主题无关的维度标注，替代写死的 sku。
+        # 约定：facets 里出现 unspecified 同样计入欠账统计（与 sku 口径一致），
+        # 这样换主题后「没写明条件的断言有多少」依然可测。
+        raw_facets = (row.get("facets") or "").strip()
+        if raw_facets:
+            try:
+                parsed = json.loads(raw_facets)
+            except json.JSONDecodeError:
+                errors.append(
+                    f"claims.csv[{cid}]: facets 不是合法 JSON（{raw_facets[:40]!r}）"
+                )
+                parsed = None
+            # 只有成功解析且确实是对象时才继续校验内部；
+            # 解析失败已在上面报错，不再重复报「必须是对象」。
+            if isinstance(parsed, dict):
+                for k, v in parsed.items():
+                    if not re.fullmatch(r"[a-z][a-z0-9_]*", str(k)):
+                        errors.append(
+                            f"claims.csv[{cid}]: facets 键 {k!r} 不合规"
+                            "（须为小写字母开头的 [a-z0-9_]）"
+                        )
+                    if not isinstance(v, str) or not v:
+                        errors.append(
+                            f"claims.csv[{cid}]: facets[{k!r}] 须为非空字符串"
+                        )
+                    elif v == "unspecified":
+                        sku_unspecified += 1
+            elif parsed is not None:
+                errors.append(f"claims.csv[{cid}]: facets 必须是 JSON 对象")
 
     report_path = root / "REPORT.md"
     if report_path.exists():
@@ -367,6 +396,30 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
             "（不变量 C1；请补一手证据，或将置信度降为 medium）"
         )
 
+    # ---------------- ADR-0002 的内容完整性不变量：S1 / D1 / E1 ----------------
+    # 这三条原先只检查「字段非空」，与 ADR 写明的语义不符：
+    #   S1 要求「必填且带时区」——非空不保证带时区
+    #   D1 要求「改版新增记录、不覆盖」——原先完全没实现
+    #   E1 要求「quote 是原文子串」——非空不代表是原文
+    # 实现放在 invariants.py，此处只做汇总，避免本文件继续膨胀。
+    inv_errors, s1_ok = invariants.check_s1_timezone(sources)
+    errors.extend(inv_errors)
+
+    d1_errors, d1_docs = invariants.check_d1_versions(root)
+    errors.extend(d1_errors)
+
+    e1_errors, e1_checked, e1_unverifiable = invariants.check_e1_substring(
+        root, evidence
+    )
+    errors.extend(e1_errors)
+
+    stats_extra["s1_with_tz"] = s1_ok
+    stats_extra["d1_documents"] = d1_docs
+    stats_extra["e1_checked"] = e1_checked
+    # e1_unverifiable 单独统计：没有快照不是「通过」，而是「没查」。
+    # 把它混进通过数会把缺口伪装成合格。
+    stats_extra["e1_unverifiable"] = e1_unverifiable
+
     if errors:
         raise ValidationError("\n".join(f"  - {e}" for e in errors))
 
@@ -379,6 +432,29 @@ def validate_research_dir(path: str | Path) -> dict[str, int]:
     }
     stats.update(stats_extra)
     return stats
+
+
+def format_coverage_warnings(stats: dict[str, int]) -> list[str]:
+    """把「检查未执行 / 未覆盖」翻译成人能看懂的警告行。
+
+    单独成函数，是因为 validate.py 的 main 与 scripts/validate_research.py
+    都要用它。各写一份必然漂移，而这里漂移的后果是
+    「一个归档默默不检查却显示 OK」——不该有两套说法。
+    """
+    out: list[str] = []
+    checked = stats.get("e1_checked", 0)
+    unchecked = stats.get("e1_unverifiable", 0)
+    if checked == 0 and unchecked > 0:
+        out.append(
+            f"[!] E1 未执行：{unchecked} 条证据没有可比对的文档快照。"
+        )
+        out.append("    这不等于通过——quote 是否为原文子串尚未验证。")
+        out.append("    补快照：见 services/ingestion 与 ADR-0002。")
+    elif unchecked:
+        out.append(
+            f"[!] E1 部分未覆盖：{unchecked} 条证据无快照（已校验 {checked} 条）"
+        )
+    return out
 
 
 def main(argv: list[str]) -> int:
@@ -395,6 +471,12 @@ def main(argv: list[str]) -> int:
         else:
             detail = ", ".join(f"{k}={v}" for k, v in stats.items())
             print(f"[OK]   {arg}  ({detail})")
+            # 「无法校验」必须显式喊出来，不能只在统计串里当一个小数字。
+            # 否则一个没有任何快照的归档会安静地显示 [OK]，
+            # 而它几千条证据的 E1 其实一条都没验过——
+            # 这正是「把缺口伪装成合格」，比报错更危险。
+            for w in format_coverage_warnings(stats):
+                print("       " + w)
     return 1 if failed else 0
 
 

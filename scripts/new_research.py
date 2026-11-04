@@ -47,6 +47,9 @@ subquestions:
 SOURCES_HEADER = "source_id,url,source_type,publisher,title,published_at,updated_at,fetched_at,language,trust_tier,access,license,notes\n"
 EVIDENCE_HEADER = "evidence_id,document_id,source_id,quote,locator,stance,extracted_by\n"
 CLAIMS_HEADER = "claim_id,statement,claim_type,as_of,confidence,evidence_ids,counter_evidence_ids,derivation,notes\n"
+# documents.csv 记录快照元数据。D1 要求改版时新增记录而非覆盖，
+# 故 content_hash 是这一行的身份，不是「当前值」。
+DOCUMENTS_HEADER = "document_id,source_id,content_hash,parser_version,byte_size,snapshot\n"
 
 REPORT_TMPL = """\
 # {title}
@@ -89,6 +92,10 @@ def main() -> int:
         return 1
 
     (target / "notes").mkdir(parents=True)
+    # documents/ 放正文快照，供不变量 E1 校验「quote 是原文子串」。
+    # 不预先建目录的话，新研究会一路 [OK] 而 E1 从未执行
+    # （rtx-pro-6000 就是这样：3002 条证据，0 条验过）。
+    (target / "documents").mkdir(parents=True)
     today = date.today().isoformat()
 
     (target / "brief.yaml").write_text(
@@ -103,6 +110,7 @@ def main() -> int:
     (target / "sources.csv").write_text(SOURCES_HEADER, encoding="utf-8")
     (target / "evidence.csv").write_text(EVIDENCE_HEADER, encoding="utf-8")
     (target / "claims.csv").write_text(CLAIMS_HEADER, encoding="utf-8")
+    (target / "documents.csv").write_text(DOCUMENTS_HEADER, encoding="utf-8")
     (target / "REPORT.md").write_text(
         REPORT_TMPL.format(title=args.title or args.slug, today=today), encoding="utf-8"
     )

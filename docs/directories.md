@@ -80,12 +80,22 @@ GET  /evidence/{id}              证据片段与来源元数据
 research/<slug>/
 ├── brief.yaml        研究简报（问题、范围、截止时点、交付物、子问题）
 ├── sources.csv       来源登记表（ID、URL、类型、日期、抓取时间、可信度）
+├── documents.csv     文档快照登记（content_hash / parser_version，供 D1）
+├── documents/        正文快照，每份一个 .txt（供 E1 校验 quote 是否为原文子串）
 ├── evidence.csv      证据表（ID、所属文档、来源、原文片段、定位、立场）
 ├── claims.csv        主张表（ID、主张、类型、置信度、支持/反驳证据）
 ├── REPORT.md         最终报告
 ├── run.json          运行轨迹（查询、抓取成败、预算消耗、stop_reason）
 └── notes/            过程笔记、原始摘录（非交付物，见其 README）
 ```
+
+**`documents/` 与 `documents.csv` 是 2026-11-03 补的。** ADR-0002 一直要求
+`Document` 存快照与 `content_hash`，但目录结构里没有对应位置，
+于是两个真实归档都没有快照——`rtx-pro-6000` 的 3002 条证据，
+E1（quote 是原文子串）一条都没验证过，校验却一直显示 `[OK]`。
+
+没有快照时 E1 退化为「无法校验」，校验器会打印醒目的 `[!]` 警告，
+**不记为通过**。这是有意的：把缺口伪装成合格比报错更危险。
 
 字段定义见 `docs/data-model.md`。目录由 `scripts/new_research.py` 生成，引用闭合性由 `scripts/validate_research.py` 检查。
 

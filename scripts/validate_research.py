@@ -15,7 +15,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "packages" / "schemas" / "python"))
 
-from deepresearchrsi.validate import ValidationError, validate_research_dir  # noqa: E402
+from deepresearchrsi.validate import (  # noqa: E402
+    ValidationError,
+    format_coverage_warnings,
+    validate_research_dir,
+)
 
 
 def _targets(argv: list[str]) -> list[Path]:
@@ -54,6 +58,8 @@ def main(argv: list[str]) -> int:
         else:
             detail = ", ".join(f"{k}={v}" for k, v in stats.items())
             print(f"[OK]   {_label(target)}  ({detail})")
+            for w in format_coverage_warnings(stats):
+                print("       " + w)
     print(f"\n{len(targets) - failed}/{len(targets)} 通过")
     return 1 if failed else 0
 
