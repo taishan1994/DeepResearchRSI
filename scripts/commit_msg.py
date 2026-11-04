@@ -104,20 +104,71 @@ kernel 生成的方法谱系。核心判断：进展集中在生成质量，而�
 
 MESSAGES = {"framework": FRAMEWORK, "archives": ARCHIVES}
 
-TOOL = """\\
+TOOL = """\
 chore(scripts): 加提交信息辅助脚本，避免 PowerShell 写入 BOM
 
 Windows PowerShell 的 Out-File -Encoding utf8 会写 BOM（EF BB BF），
 git commit -F 把它当成标题首字符，于是 git log --oneline 显示的
 标题前有个不可见字符，复制去搜索也匹配不上。
 
-本轮实际踩到：第一次提交的标题成了 ﻿feat(framework): ...，
+本轮实际踩到：第一次提交的标题前面多了 BOM，
 用 git reset --soft + 本脚本重写了一遍。
 
 用 Python 以 utf-8（无 BOM）+ LF 写文件，再交给 git commit -F。
 """
 
 MESSAGES["tool"] = TOOL
+
+DOCS = """\
+docs: 新增自我进化记录与经验手册，并给数字加校验
+
+## 两份文档的分工
+
+docs/EVOLUTION.md 回答「这个系统实际怎么变的」——按阶段记录触发了什么、
+加了什么机制、代价是什么。是历史，只写发生过的。
+
+docs/LESSONS.md 回答「这些经验能不能迁移」——上篇做项目的通用做法，
+下篇自我改进的做法。每条都注明出处。
+
+两份都有「三次没起作用」的章节：只记成功会失真。
+
+## EVOLUTION 的核心事实
+
+314 个提交、5 天、其中 64 个（20.4%）是在推翻自己上一轮的结论。
+这个比例是最值得看的数：若长期接近 0，更可能的解释不是严谨，
+而是没有检查。
+
+五个阶段按「当时在解决什么问题」划分：
+能产出但不可审计 → 读原始材料发现结论站不住 → 把教训变成不变量
+→ 把检查器本身当代码测 → 把流程接进构建。
+
+## 顺手核出一件必须写明的事
+
+services/ 与 apps/ 下**只有 README，没有代码**（0 个 .py/.ts 文件）。
+README 描述的是设计蓝图，真实运行的是 scripts/（3977 行非空）+
+packages/（1039 行）+ tests/（1337 行）。
+
+故 EVOLUTION.md 第 6 节明确写了这个差距，并说明「自我进化」是流程层面的
+（人根据踩坑改脚本），不是系统自动搜索策略。services/evolution/ 是空壳。
+
+## 新增校验
+
+scripts/evolution_stats.py     从 git 历史算统计，写入 evolution-stats.json
+scripts/check_docs.py          校验两份文档里的数字与实测一致（14 项）
+scripts/selftest_check_docs.py 对 check_docs 做 4 个反例注入测试
+
+## check_docs 自己踩的一个坑
+
+第一版只验覆盖率自洽（e1_checked / 证据数），于是把表里的 e1_checked
+改成任意值、同时改百分比与它自洽，检查照样通过——等于让文档自己
+给自己作证。改为真正调 validate 取 e1_checked 后才抓得住。
+
+反例验证时还踩了第二个坑：用 PowerShell here-string 做替换，反引号
+被吞掉导致替换静默失败，我把「注入错误后仍通过」误读成检查器有漏洞。
+改为 Python 文件后替换与断言同进程，替换失败会断言失败。
+"""
+
+MESSAGES["docs"] = DOCS
 
 
 def main() -> int:

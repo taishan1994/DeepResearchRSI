@@ -17,6 +17,8 @@
 
 详细设计见 [ARCHITECTURE.md](./ARCHITECTURE.md) · [docs/](./docs/README.md) · [ADR](./docs/adr/)
 
+**这个系统是怎么变的**：[自我进化记录](./docs/EVOLUTION.md)（五个阶段、七条判据、三次没起作用的改进） · [经验手册](./docs/LESSONS.md)（可复用的做法与它们的出处）
+
 ## 目录一览
 
 ```text

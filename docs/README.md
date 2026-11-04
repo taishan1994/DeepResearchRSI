@@ -9,7 +9,21 @@
 | [directories.md](./directories.md) | 目录职责与边界，API 端点草案 |
 | [data-model.md](./data-model.md) | 实体字段、不变量、评测指标映射 |
 | [roadmap.md](./roadmap.md) | 四阶段实现路线与验收门槛 |
+| [EVOLUTION.md](./EVOLUTION.md) | **自我进化记录**：五个阶段、七条判据、三次失败 |
+| [LESSONS.md](./LESSONS.md) | **经验手册**：可复用的做法与它们的出处 |
 | [adr/](./adr/) | 架构决策记录 |
+
+### 关于 EVOLUTION 与 LESSONS 的区别
+
+这两份容易混，分工如下：
+
+- **EVOLUTION.md** 回答「这个系统实际怎么变的」——按阶段记录触发了什么、
+  加了什么机制、代价是什么，并附可复现的统计（`scripts/evolution_stats.py`）。
+  它是**历史**，只写发生过的。
+- **LESSONS.md** 回答「这些经验能不能迁移」——上篇是做项目的通用做法，
+  下篇是自我改进的做法。每条都注明出处，没有出处的建议不收。
+
+两份都有「三次没起作用」的章节。只记成功会失真。
 
 ## 架构决策记录（ADR）
 
