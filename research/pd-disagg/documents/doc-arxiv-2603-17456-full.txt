@@ -1,0 +1,1781 @@
+Multi-stage Flow Scheduling for LLM Serving 
+
+ Yijun Sun 1  Xudong Liao 1  Songrun Xie 1  Hao Chen 2  Han Tian 3 
+ Wenxue Li 1  Yiming Zhang 2  Kai Chen 1 
+
+ 1 iSING Lab, Hong Kong University of Science and Technology 
+ 2 Shanghai Jiao Tong University   3 University of Science and Technology of China 
+
+ © none 
+
+ Abstract. 
+
+ Meeting stringent Time-To-First-Token (TTFT) requirements is crucial for LLM applications. To improve efficiency, modern LLM serving systems adopt disaggregated architectures with diverse parallelisms, introducing complex multi-stage workflows involving reusable KV-block retrieval, collective communication, and P2D transfer. Flows from dependent stages overlap within and across requests on shared bottleneck links, making TTFT highly susceptible to network contention and necessitating stage-aware scheduling. Unfortunately, most existing works schedule flows in a stage-agnostic manner, leading to uncoordinated contention that constitutes a primary cause of SLO violations. 
+
+ In this paper, we present MFS, a holistic m ulti-stage f low s cheduling mechanism designed to maximize TTFT SLO attainment. At its core, MFS approximates the Least-Laxity-First (LLF) scheduling policy without requiring precise knowledge of a request’s remaining slack. It achieves this through a Defer-and-Promote principle implemented through a Reverse Multi-Level Queue (RMLQ) structure. By dynamically promoting task precedence as effective laxity diminishes, MFS prioritizes flows with less laxity while preventing requests with loose SLOs from prematurely consuming network bandwidth. We implement MFS as a pluggable module integrated into vLLM, and evaluate it on a 8-server, 32-GPU testbed as well as through large-scale simulations. Our results demonstrate that MFS effectively outperforms state-of-the-art baselines, improving the TTFT SLO attainment by 1.2 × \times –2.4 × \times . 
+
+ 1. Introduction 
+
+ The rapid advancement of large language models (LLMs) has spawned a wide range of use cases, including interactive chatbots ( Zheng et al., 2023 ; Chiang et al., 2023 ; OpenAI, 2025 ) , code assistants ( Liu et al., 2024b ; Zhong and Wang, 2024 ) , and agentic systems ( Talebirad and Nadiri, 2023 ; He et al., 2025 ; Yu et al., 2024 ) .
+Modern serving systems must sustain massive request volumes while adhering to heterogeneous service-level objectives (SLOs) ( Zhang et al., 2025b ; Patke et al., 2024 ; Hong et al., ; Chen et al., 2025 ; Shen and Sen, 2025 ) to meet stringent performance expectations.
+Among these metrics, time-to-first-token (TTFT) remains particularly critical, as it governs both the responsiveness required for interactive users ( Wang et al., 2024 ; Ethiraj et al., 2025 ) and the strict timing constraints of agentic pipelines ( LiteLLM, 2025 ; Langfuse, 2025 ; notdiamond.ai, 2025 ) .
+Violations of TTFT targets often trigger repetitive request retries ( Medium, 2025b ; Medium, 2025a ) , leading to unnecessary resource consumption ( Qin et al., 2024 ) and significant revenue loss ( Ranganathan et al., 2025 ) . 
+
+ Figure 1 . Illustration of difference between Multi-stage Flow Scheduling and prior stage-agnostic scheduling. 
+
+ Modern LLM serving systems typically adopt disaggregated prefill–decode architectures with KV-cache reuse ( Zhong et al., 2024 ; Patel et al., 2024 ; Strati et al., 2024 ; Hu et al., 2024b ; Qin et al., 2025 ; Hu et al., 2024a ; Gao et al., 2024 ; Yao et al., 2025 ) and leverage diverse forms of parallelism ( Lepikhin et al., 2020 ; Aminabadi et al., 2022 ; Liu et al., 2024a ; Zhang et al., 2025a ) to improve efficiency. Despite their promise, they still suffer from substantial communication overhead during the prefill phase. Specifically, generating the first token involves multi-stage communication: (1) remote retrieval of reusable KV-blocks, (2) collective communication for the synchronization of intermediate activations, and (3) Prefill-to-Decode (P2D) transfer. Flows from different stages frequently overlap and contend for shared network fabrics, which leads to intra-request contention , where different communication phases within the same request interfere with each other, and inter-request contention , where communication from different batches or prefill units competes for shared links. Such contention significantly inflates prefill TTFT latency and heightens the risk of system-wide SLO violations. 
+
+ Unfortunately, prior works fail to meet end-to-end deadlines under contention (Figure 1 ), largely because they treat flow in stage-agnostic manner (i.e., without awareness of their stage dependencies). Traditional flow scheduling schemes (e.g., Fair Sharing ( Alizadeh et al., 2010 ; Zhu et al., 2015 ) , SJF ( Alizadeh et al., 2013 ; Hong et al., 2012 ; Bai et al., 2015 ; Li et al., 2024 ) , EDF ( Wilson et al., 2011 ; Vamanan et al., 2012 ; Hong et al., 2012 ) , etc.) operate on individual flows without holistic view. Even coflow-based approaches ( Chowdhury et al., 2014 ; Chowdhury and Stoica, 2015 ; Zhang et al., 2016 ; Zhao et al., 2015 ; Agarwal et al., 2018 ; Wan et al., 2025 ) fall short: while they manage data-parallel flows as a group, they ignore the inherent dependencies across stages. Consequently, these schemes may over-prioritize early-stage communication or starve latency-critical downstream stages, ultimately degrading TTFT SLO attainment. 
+
+ To this end, we ask: Can we schedule multi-stage communication holistically in LLM serving systems to maximize overall TTFT SLO attainment? 
+
+ When exploring the design space, we note distinct efforts that optimize isolated stages, targeting either collective communication ( Rajasekaran et al., 2024 ; Cao et al., 2024 ; Xu et al., 2025 ; Cao et al., 2025 ; Si et al., 2025 ) or KV-cache transfers ( Strati et al., 2024 ; Liu et al., 2024d ; Chen et al., 2024 ; Qin et al., 2025 ) . However, these specialized solutions remain insufficient. The reason is that they often pursue conflicting optimization objectives, naively combining them can inadvertently amplify network contention. 
+
+ We answer this question affirmatively with MFS, a holistic multi-stage communication scheduler that jointly orchestrates dependent communication stages to maximize TTFT SLO attainment. Our key insight is that the global TTFT deadline can be gradually translated into explicit flow-level deadlines as prefill execution progresses. Leveraging this insight, MFS approximates the Least-Laxity-First (LLF) policy under uncertainty and realizes a Defer-and-Promote principle via a Reverse Multi-Level Queue (RMLQ). By dynamically promoting task precedence based on diminishing effective slack, MFS prioritizes genuinely critical stages while preventing requests with loose SLOs from prematurely consuming network bandwidth. 
+
+ Although our insight is straightforward,
+translating it into an efficient, real-world system requires addressing several non-trivial challenges. First, how to schedule last-stage communications with explicit deadline without incurring excessive prioritization? Second, how to schedule early-stage flows governed by implicit TTFT bound under uncertain laxity? Third, how to ensure MFS’s compatibility with emerging collective communication and KV-cache libraries? 
+
+ For the first challenge, we employ a lazy promotion strategy leveraging Minimal Link Utilization (MLU) as the trigger. P2D flows initialize in low-priority queues and are promoted only when their MLU exceeds a predefined threshold. This ensures that P2D flows receive only the minimum bandwidth for just-in-time completion, preserving bandwidth headroom for early-stage communications. To avoid priority thrashing, promotions occur only at layer granularity. This approach enables effective coarse-grained prioritization while facilitating practical implementation on commodity switches with hardware priorities queues and lightweight packet tagging, thereby eliminating the risk of packet re-ordering. 
+
+ To address the second issue, we utilize a two-tier scheduling strategy. For intra-request contention within a single prefill unit, we prioritize collective communication that unblock subsequent computation, while elevating KV-cache transfers only when they threaten to stall the next layer’s execution. For inter-request contention across the prefill cluster, we order units based on TTFT deadlines and apply feasibility checks to prune infeasible communication tasks to avoid blocking. This design prevents premature promotion when laxity is unclear, while keeping early-stage communication aligned with downstream TTFT requirements. 
+
+ Finally, to ensure compatibility, MFS integrates with existing stacks (e.g., NCCL ( NVIDIA, 2025b ) , Mooncake ( kimi, 2025 ) ) via lightweight task adapters. These adapters intercept tasks for precise host-side prioritization in software queues, while mapping priorities to DSCP values for robust traffic isolation on switches. By employing hybrid priority enforcement, MFS ensures seamless integration and effective contention resolution using standard network primitives. 
+
+ We build a MFS prototype and evaluate it on a 8-server testbed with 32 NVIDIA 3090 GPUs ( NVIDIA, 2025a ) , 16 Mellanox NICs ( NVIDIA, 2025c ) , all connected to a single Top-of-Rack (ToR) switch. We implement MFS as a pluggable module into NCCL and Mooncake, and integrate it with the vLLM inference engine. Using this prototype, we successfully demonstrated the benefits of MFS on the state-of-the-art LLM ( 54 ) . 
+
+ To evaluate the performance of MFS at scale, we further perform large-scale simulations using four representative real-world MoE models ( 53 ; 24 ; Databriks, ; Qwen Team, Technical report ) .
+Our results reveal that MFS significantly outperforms state-of-the-art scheduling schemes, improving the TTFT SLO attainment rate by 1.2 × \times -2.4 × \times compared to baselines.
+We also observe that MFS cutting down non-overlapped collective completion time by 50 % \% and also improving the request earliness greatly. 
+
+ 2. Background and Motivation 
+
+ 2.1. LLM Serving and TTFT 
+
+ Figure 2 . Illustration of LLM serving at scale. 
+
+ Large language models have become the foundation of modern AI services. These models are inherently autoregressive: the system first processes the entire prompt to generate the first token (the prefill stage), and then produces subsequent tokens iteratively using the accumulated KV cache (the decode stage). Performance is typically characterized by Time-to-First-Token (TTFT) for the prefill phase and Time-Between-Tokens (TBT) for the decode phase. 
+
+ TTFT is a critical service-level objective (SLO) for many LLM applications. In interactive scenarios like chatbots and voice assistants, users expect an immediate initial response, and some studies indicate noticeable disengagement when latency exceeds a few hundred milliseconds and abandonment beyond seconds ( Vijaya Kumar et al., 2025 ; Liu et al., 2025 ; Kim et al., 2025 ) . TTFT is also vital for automatic agentic frameworks, which rely on strict timeouts ( Langfuse, 2025 ; LiteLLM, 2025 ) for fault tolerance. A delayed first token triggers costly remedial actions such as service retries ( Medium, 2025b ; Medium, 2025a ) or provider switching ( notdiamond.ai, 2025 ) . A recent report from Microsoft ( Ranganathan et al., 2025 ) reveals that the delayed first token is one of the primary source ( ∼ 40 % \sim 40\% ) of service failure (reported as timeout error), leading to revenue loss, higher support costs, and reputational risk. 
+
+ As depicted in Fig. 2 , modern production systems ( Qin et al., 2024 ; Liu et al., 2024a ) scale out to clusters comprising thousands of nodes interconnected with high-bandwidth links, where each node contains multiple xPUs (e.g., GPUs, TPUs, NPUs). Nodes are organized into individual serving units, each dedicated to host one model replica. Models are deployed using a combination of tensor ( Narayanan et al., 2021 ) , pipeline ( Narayanan et al., 2019 ; Zheng et al., 2022 ) , sequence ( Liu et al., 2023 ; Wu et al., 2024 ; Yang et al., 2024 ) , and expert parallelism ( Lepikhin et al., 2020 ; Aminabadi et al., 2022 ; Liu et al., 2024a ; Zhang et al., 2025a ) . To further optimize efficiency, recent work ( Zhong et al., 2024 ; Patel et al., 2024 ; Strati et al., 2024 ; Hu et al., 2024b ) proposes prefill–decode disaggregation , which assigns prefill tasks to compute-optimized devices and decode tasks to memory-rich devices, thereby accommodating their heterogeneous resource demands. In addition, KV cache reuse ( Qin et al., 2025 ; Hu et al., 2024a ; Gao et al., 2024 ; Yao et al., 2025 ) has been introduced to amortize prefill costs across requests by transferring cached contexts between nodes. 
+
+ Figure 3 . An example illustrating communication contention in LLM serving systems: KV cache transfers (Stage 1 & 3) and parallelism communication (Stage 2) compete for the same link bandwidth. 
+
+ Figure 4 . Illustration of two primary forms of contention in LLM serving systems. 
+
+ 2.2. Contention Across Multi-Stage Communication 
+
+ Generating the first token in existing production systems (Fig. 2 ) consists of multi-stage communications: 
+
+ ∙ \bullet 
+
+ Stage 1: KV-cache reuse : fetches reusable KV-cache blocks from remote prefill unit; 
+
+ ∙ \bullet 
+
+ Stage 2: Collective communication : exchanges intermediate activations across devices via model parallelism; 
+
+ ∙ \bullet 
+
+ Stage 3: Prefill-to-Decode (P2D) transfer : delivers the full KV-cache history to the decode unit 1 1 
+ 1 
+
+ Mainstream open-source serving frameworks ( vLLM Team, 2025 ; SGLang Team, 2025 ; NVIDIA and Dynamo Authors, 2025 ) explicitly incorporate Stage 3 latency into the TTFT metric. . 
+
+ Prior literature has highlighted the substantial overhead of individual stages, noting that collective communication (e.g, all-to-all, etc.) occupy 40–60% of end-to-end latency ( Li et al., 2023 ; Zhang et al., 2025a ; Li et al., 2025a ; Yang et al., 2024 ) and KV-cache movement contributes a non-trivial share ( Liu et al., 2024d ; Qin et al., 2024 ; Chen et al., 2024 ; Li et al., 2025b ; Yoon et al., 2025 ) . In this paper, we further identify a critical yet underexplored problem: collective communication and KV-cache movement frequently overlap in time and contend for shared network bandwidth. Fig. 3 illustrates the spatial location of contention: KV-cache transfers (Stage 1&3) and collective communication (Stage 2) traverse shared physical interconnects. This spatial co-location creates two primary forms of contention, as shown in Fig. 4 : 
+
+ • 
+
+ Intra-request contention occurs when communication flows interfere within a single request. Specifically, layer-wise KV-cache transfers (Stage 1&3) compete directly with the ongoing collective communication on other layers (Stage 2) for shared link bandwidth. 
+
+ • 
+
+ Inter-request contention arises when concurrent requests from different prefill units interfere, resulting in frequent link competition in the switch links. Moreover, driven by skewed block popularity, multiple prefill units may converge on a single remote victim unit to fetch “hot” KV blocks, causing contention between the victim unit’s local collective communication (Stage 2) and remote KV-cache fetching on its NIC bandwidth (Stages 1&3). 
+
+ (a) Impact of contention on end-to-end TTFT. 
+
+ (b) Impact of contention on all-to-all latency. 
+
+ Figure 5 . [Testbed] Impact of communication contention on Mixtral 8x7B model. 
+
+ To quantify the performance degradation caused by such interference, we conduct measurements on a 16-GPU prefill cluster (50 Gbps/GPU) hosting two serving instances ( T ​ P = 1 , E ​ P = 8 TP=1,EP=8 ). We use QwenB-agent, an agent workload from production-derived Qwen traces ( Alibaba-Edu, 2025 ) , with average sequence length 1k tokens, 65% prompt reuse, and per-GPU request rate 1 req/s; the full testbed setup is described in Sec. 6.2 . We evaluate the impact of contention on two metrics: end-to-end TTFT and collective communication time (CCT) of All-to-All operations (aggregating Dispatch and Combine phases). Specifically, we perform a comparative analysis between an ideal baseline ( w/o contention ) and a realistic serving scenario ( w/ contention ). Fig. 5(a) illustrates the TTFT distribution. The results reveal that, under contention, the overall TTFT is prolonged by nearly 50 % 50\% . We attribute this inflation primarily to the latency degradation in All-to-All communication on the critical path, whose CCT nearly doubles ( 1.8 × 1.8\times ) due to contention with concurrent KV-cache operations (as shown in Fig. 5(b) ). This substantial slowdown confirms that network contention is a major source of performance variability in the prefill phase. 
+
+ 2.3. Limitation of Existing Work 
+
+ The previous analysis identifies unmanaged multi-stage communication contention as a primary source of TTFT violations. We categorize existing approaches into two groups: recent system-level communication optimizations and conventional scheduling algorithms. As detailed below, they both fall short in coordinating such contention due to the lack of a holistic view of multi-stage dependencies. 
+
+ Stage-agnostic flow scheduling. Conventional datacenter scheduling disciplines manage flows or coflows individually to optimize network metrics, such as flow/coflow completion time or deadline satisfaction. However, these objectives are misaligned with end-to-end application goals (e.g., TTFT attainment), because TTFT is jointly determined by flows across multiple interdependent stages. Consequently, these approaches inevitably over-prioritize slack-rich flows while starving the critical transfers required to unlock downstream computation, ultimately degrading TTFT SLO attainment. 
+
+ Specialized optimization for isolated stages. 
+We notice some distinct efforts optimize isolated stages, specifically targeting collective communication via algorithm synthesis ( Shah et al., 2023 ; Liu et al., 2024c ; Kim et al., 2024 ; Cao et al., 2025 ) , parameter tuning ( Xu et al., 2025 ) , and overlapping ( Liu et al., 2024a ; Zhang et al., 2025a ; Zheng et al., 2025a ; Zheng et al., 2025b ) , or KV-cache transfers via pipelined prefetching ( Patel et al., 2024 ; Qin et al., 2025 ) and block coalescing ( Strati et al., 2024 ; Chen et al., 2024 ; Li et al., 2025b ) . However, these mechanisms often pursue conflicting objectives. Many achieve speedups by increasing communication concurrency to hide latency, yet none coordinates this concurrency across communication types. As a result, even with these optimizations, collective communication and KV-cache transfers often interfere with one another, which instead amplifies contention. 
+
+ 3. Methodology 
+
+ 3.1. Problem Formulation 
+
+ Simplified Abstraction. Without loss of generality, we consider a single prefill request processing through L L sequential Transformer layers. The communication workload for each layer can be generally abstracted as Multi-stage Flow (MsFlow). An MsFlow consists of three temporally dependent stages, where each stage constitutes a set of flow (or coflow) governed by the layer’s lifecycle, which is detailed below: 
+
+ ∙ \bullet 
+
+ Stage 1: Initialization. Involves KV-cache reuse to transfer prerequisite states. This loosely coupled flow often overlaps with prior layer’s computation to hide latency. 
+
+ ∙ \bullet 
+
+ Stage 2: Execution. Consists of collective communication (e.g., alltoall) that strictly blocks the subsequent computation. 
+
+ ∙ \bullet 
+
+ Stage 3: Completion. Handles the P2D transfer of results to decoding workers. This dictates the final token availability without blocking the current prefill computation. 
+
+ For a single request, MsFlows collectively share one TTFT deadline and may partially overlap subject to layer dependency (e.g., Stage 2 of layer l l must complete before computing layer l + 1 l+1 ) 
+
+ Contention dynamics. Contention arises when concurrent MsFlows compete for shared network bandwidth. Recall Fig 4 , intra-request contention occurs between MsFlows of different layers within the same request, while inter-request contention arises between MsFlows of distinct requests. Both cases simply reduce to contention between heterogeneous stages. 
+
+ Overall Objective. The goal is to meet end-to-end TTFT deadline (SLO attainment) rather than optimizing individual flow latencies. Specifically, we must orchestrate the dependent MsFlows to ensure that all L L MsFlows are completed within the deadline constraint. To achieve this, an ideal scheduler must balance two complementary objectives tailored to the specific semantics of MsFlow stages: 
+
+ (i) 
+
+ Minimizing Non-overlapped communication Latency. For early stages (1&2), completing too late directly prolongs the current layer’s execution time, postponing the release of the subsequent layer. 
+
+ (ii) 
+
+ Minimizing Earliness. For the final Stage 3, completing too early yields no gain for meeting deadline but exacerbates potential network contention. 
+
+ 3.2. Key Observation and Scheduling Principle 
+
+ Figure 6 . Comparison of scheduling policies for intra-request contention (ingress). 
+(a) Ingress port contention during Layer-1 execution.
+(b)-(c) FS/SJF/EDF delays the start of Layer-2 ( T = 3 T=3 ).
+(d) The Defer-and-Promote strategy advances the Layer-2 start time to T = 2 T=2 (-33%). 
+
+ Figure 7 . Comparison of scheduling policies for intra-request contention (egress). 
+(a) Egress port contention during Layer-2 execution.
+(b)-(c) FS/SJF/EDF delays the end of Layer-2 ( T = 4 T=4 ).
+(d) The Defer-and-Promote strategy reduces the Layer-2 finish time to T = 3 T=3 (-25%). 
+
+ Table 1 . An inter-request contention example. 
+
+ Req ID | 
+ Flow ID | 
+ Flow Size | 
+ Remain time | 
+ Deadline | 
+
+ 1 | 
+ A | 
+ 2 | 
+ 9 | 
+ 18 | 
+
+ 2,3 | 
+ B | 
+ 4 | 
+ 6 | 
+ 12 | 
+
+ 4 | 
+ C | 
+ 3 | 
+ 0 | 
+ 7 | 
+
+ (a) Fair Share 
+
+ (b) Shortest Job First 
+
+ (c) Earliest Deadline First 
+
+ (d) Defer-and-Promote 
+
+ Figure 8 . Comparison of scheduling policies for inter-request contention. 
+The red vertical lines denote hard deadlines, and gray bars are subsequent durations.
+(a) Fair Share and (b) SJF fail to protect the urgent Flow-B due to lack of deadline awareness,
+while (c) EDF completes flows with explicit but loose deadlines unnecessarily early.
+(d) Defer-and-Promote strategically defers non-urgent flows to minimize earliness,
+and promotes them only when necessary to achieve just-in-time completion . 
+
+ Achieving optimality is theoretically intractable ( Bettati and Liu, 1990 ; Bettati and Liu, 1992 ) . To derive an effective heuristic, we first look into the execution dynamics of prefill. Our analysis reveals a structural property of request deadlines that motivates scheduling principle presented in this section. 
+
+ Key observation. 
+In the prefill stage, request deadlines progressively materialize into flow-level deadlines as the prefill pipeline advances. 
+
+ Recalling Sec. 3.1 , for the initial stages (1&2), the flow-level deadline is implicit, since it jointly determined by TTFT and duration of downstream tasks. As execution reaches the final stage, this constraint materializes: the global TTFT directly dictates the token return time, becoming an explicit flow-level bound. We borrow the concept of laxity (defined as the remaining budget before triggering deadline violation) from real-time systems to represent flow-level urgency. The distinct laxity reveals a scheduling opportunity: we can safely defer last-stage flows (possessing deterministic laxity) to yield bandwidth for early-stage flows whose laxity is uncertain. 
+
+ Scheduling principle: Defer-and-Promote . Leveraging the observation above, our key principle is to defer non-urgent transfer until the latest safe moment, promoting priority only as necessary , so as to minimize interference while ensuring timely completion. This principle translates into two concrete rules: 
+
+ • 
+
+ Principle #1 (Last stage flows with Explicit-deadline) are initially deferred to yield bandwidth but gradually promoted to guarantee compliance. 
+
+ • 
+
+ Principle #2 (Early stage flows with implicit-deadline) are deferred based on relative laxity and promoted as the laxity diminishes to mitigate the violation risks. 
+
+ Why this works. 
+By deferring non-urgent flows and selectively promoting them when necessary, the scheduler balances short-term efficiency with long-term deadline guarantees.
+This strategy improves TTFT SLO attainment along two axes:
+(i) minimizing the non-overlapping communication latency to shorten the prefill makespan, and
+(ii) regulating earliness to prioritize tighter requests under contention. 
+
+ To see why Defer-and-Promote benefits the prefill DAG makespan, consider the consider the contention scenarios in Fig 7 -(a) (ingress) and Fig 7 -(a) (egress). Fair Sharing indiscriminately dilutes Stage 2 throughput; SJF (Fig. 7 -(c), 7 -(c)) preferentially prioritizes KV-movement flows (flow size typically smaller); and EDF over-prioritizes Stage 3 due to explicit deadlines (Fig. 7 -(c)) and degenerates into Fair Sharing when deadlines are implicit (Fig. 7 -(b)). Consequently, all three policies inflate the non-overlapped communication latency and stall computation. Defer-and-Promote resolves this by strategically deferring Stage 3 (higher laxity) to protect Stage 2, which demonstrating a significant reduction in makespan (Fig. 7 -(d), 7 -(d)). 
+
+ Defer-and-Promote maximizes attainment under inter-request contention by strictly prioritizing truly urgent requests. Consider Table 1 as an example, where each request has an end-to-end TTFT constraint and implicit remaining time determined by downstream tasks. As illustrated in Fig. 8 , three flows with varying sizes and deadlines contend for a bottleneck link. Unlike standard policies (e.g., FS, SJF, EDF) that often misjudge urgency, Defer-and-Promote prioritizes Collective Communication, as deferral would immediately stall the execution pipeline. It strategically defers other traffic: Stage 1 flows are promoted only when they threaten to stall the pipeline, while last-stage flows are delayed until their explicit deadlines. 
+
+ 4. Design 
+
+ 4.1. Design Challenges 
+
+ While the Defer-and-Promote principle is conceptually simple, realizing it in LLM serving is challenging in practice. MFS must make priority assignments in the dark , steering flows without precise laxity through a discrete multi level queue (e.g., finite switch queues). Specifically, we identify the following two challenges. 
+
+ C-1: Scheduling flows with explicit deadlines without excessive prioritization. 
+Even when flows carry explicit deadlines (e.g., P2D transfers), determining when to switch from defer to promote is non-trivial under discrete priority levels. Promoting too early wastes scarce bottleneck bandwidth, while promoting too late risks deadline misses. The challenge lies in striking the right balance for just-in-time completion given finite priority classes. 
+
+ C-2: Scheduling implicit-deadline flows without precise laxity. 
+The absence of precise laxity traps the scheduler in an error-prone dilemma. On one hand, underestimating laxity incurs unintended execution stalls, as mistakenly deferring Stage 2 flows immediately idles the GPU and inflates request latency. On the other hand, overestimating laxity results in priority inversion, squandering scarce bandwidth on deferrable work and starving truly urgent requests. 
+
+ Figure 9 . Design overview. 
+
+ 4.2. Overview 
+
+ Figure 9 illustrates MFS’s core abstraction: the Reverse Multi-Level Queue (RMLQ) . To realize the Defer-and-Promote principle, RMLQ inverts the classic MLFQ paradigm (which demotes flows over time); instead, it initializes flows in low-priority queues to enforce deferral, promoting them strictly when diminishing laxity necessitates immediate execution. 
+
+ At a high level, MFS schedules all multi-stage communication through a shared RMLQ substrate, while applying separate rules (initial priority and promotion pace) for different stages. For last stage flows with explicit deadlines, MFS employs Minimal Link Utilization (MLU), promoting a flow only when the remaining bandwidth is just insufficient to meet its deadline, thereby avoiding premature over-prioritization. For early stage flows with implicit deadline, MFS speculate relative urgency via Relative Layer Index (RLI). Flows begin at lower tiers climb up when it threaten to stall computation. Finally, to resolve potential cross-stage contention, MFS reserves the highest priority level for deadline-explicit flows to avoid violations, and prioritizes deadline-implicit flows in the remaining levels to opportunistically exploit available bandwidth. 
+
+ The rest of this section is organized as follows. § 4.3 introduces scheduling flows with explicit deadlines. § 4.4 describes the strategy for implicit deadlines. Finally, § 4.5 combines these components to present the complete RMLQ arbitration logic. 
+
+ 4.3. Scheduling with Explicit Deadline 
+
+ To address C-1, we need to ensure the last-stage communication task is judiciously deferred—neither excessively prioritized nor starved—while strictly guaranteeing the request deadline. The challenge lies in mapping continuous urgency levels derived from these deadlines onto K K discrete priority queues. Consequently, the scheduler needs a mechanism to approximate continuous deadline-derived urgency using coarse-grained priority levels, which requires determining how to quantify urgency, when to trigger promotion, and at what granularity to apply scheduling decisions (e.g., per-packet or per-layer). 
+
+ Specifically, consider an L L -layer model serving a batch of request. At each layer ℓ \ell , the P2D stage emits a set of flows. Flows within the same request r r inherit its TTFT deadline D r D_{r} , while flows from different requests are scheduled independently. We assume there are K priority queues P i ​ ( 1 ≤ i ≤ K ) P_{i}(1\leq i\leq K) where P 1 P_{1} has the highest priority. We denote the threshold for promoting the priority from P j P_{j} to P j − 1 P_{j-1} as τ j \tau_{j} ( 2 ≤ j ≤ K 2\leq j\leq K ). we define τ K = + ∞ \tau_{K}=+\infty ensuring that even the extreme loose flows are captured in the lowest-priority queue. 
+
+ Urgency metric. We define Minimal Link Utilization (MLU) : MLU i ​ ( t ) = Size r ​ e ​ m ​ ( t ) Time r ​ e ​ m ​ ( t ) ⋅ B ⋅ ( 1 − ρ ) \mathrm{MLU}_{i}(t)=\frac{\textit{Size}_{rem}(t)}{\textit{Time}_{rem}(t)\cdot B\cdot(1-\rho)} , where B ⁡ ( 1 − ρ ) B(1-\rho) represents the effective bandwidth after accounting traffic load ρ \rho . This metric represents the minimal share of the residual link capacity required to satisfy the deadline. Crucially, MLU i ​ ( t ) > 1 \mathrm{MLU}_{i}(t)>1 signifies an infeasible overload state; values approaching 1 1 signal critical urgency requiring exclusive service, while lower values imply sufficient slack for deferral. By contrast, purely deadline-based metrics (e.g., EDF) are ill-suited since they suffer from the domino effect under overload ( Buttazzo et al., 1995 ) and further degrade when constrained to discrete priority levels ( Buttazzo, 2005 ) . 
+
+ Optimizing promotion threshold. Deriving the globally optimal thresholds that minimize deadline miss rates is computationally intractable (NP-hard). Therefore, we seek a robust, practical approximation by minimizing the relative quantization error introduced when mapping continuous urgency to discrete levels. When a flow with urgency v ∈ [ U m ​ i ​ n , U m ​ a ​ x ] v\in[U_{min},U_{max}] is mapped to a discrete priority level τ k \tau_{k} , it incurs a relative error of ϵ ≈ | v − τ k | v \epsilon\approx\frac{|v-\tau_{k}|}{v} . Our intuition here is to minimize the worst-case relative error across all threshold. ∏ k = 1 K r k = u 2 u 1 ⋅ u 3 u 2 ⋅ ⋯ ⋅ u K u K − 1 = u K u 1 = U max U min \prod_{k=1}^{K}r_{k}=\frac{u_{2}}{u_{1}}\cdot\frac{u_{3}}{u_{2}}\cdot\dots\cdot\frac{u_{K}}{u_{K-1}}=\frac{u_{K}}{u_{1}}=\frac{U_{\max}}{U_{\min}} . Mathematically, this minimum is achieved if and only if all ratios are equal ( r k ≡ r r_{k}\equiv r ). This necessitates a geometric progression for threshold generation (where r = ( U max / U min ) 1 K − 1 r=(U_{\max}/U_{\min})^{\frac{1}{K-1}} ). Since the precise bounds U max U_{\max} and U min U_{\min} are often unknown or dynamic in practice, we approximate this geometric spacing by configuring the promotion threshold as Q i = E − i ⋅ U Q_{i}=E^{-i}\cdot U ( 1 ≤ i ≤ K − 1 1\leq i\leq K-1 ), where parameters E E and U U are set empirically (e.g., E = 4 , U = 0.5 E=4,U=0.5 ) to yield robust performance. 
+
+ Promotion behavior. 
+Fine-grained promotion decision may adversely introduce practical concerns in network scheduling. In particular, if promotion is applied at a fine granularity (e.g., per packet), a single message may be fragmented across multiple priority queues. This can lead to packet reordering, where later packets overtake earlier ones, triggering costly transport-layer recovery and reducing effective throughput. To avoid this issue, we restrict promotion to layer boundaries, ensuring priority atomicity at the message level. Crucially, this coarser granularity does not compromise scheduling expressiveness, as the substantial depth of modern LLMs ( L > K L>K , e.g, L=64 and K=8/16) provides ample room for priority adjustments. Additionally, we enforce a monotonic promotion policy (i.e., only allowing promotion). This prevents priority oscillation and reinforces the Defer-and-Promote principle, ensuring that flows are conservatively maintained in lower tiers until urgency strictly necessitates promotion. 
+
+ 4.4. Scheduling with Implicit Deadlines 
+
+ To address the lack of precise laxity under implicit deadlines (Challenge C-2), MFS exploits structural determinism to infer relative urgency within requests, and resolves residual contention across requests using robust arbitration mechanisms. 
+
+ 4.4.1. Intra-request Scheduling with Structural Determinism 
+
+ While precise laxity is elusive due to dynamic scheduling shifts, the relative laxity within request is deterministic: flows blocking immediate execution strictly more urgent than lookahead transfers that enable future progress. 
+
+ We quantify this using the Relative Layer Index , defined as RLI = L target − L curr \text{RLI}=L_{\text{target}}-L_{\text{curr}} , where L curr L_{\text{curr}} is the index of the currently executing layer and L target L_{\text{target}} is the target layer index where the data is consumed. A smaller RLI indicates a tighter safe deferral window. MFS resolves contention by strictly prioritizing flows with the smallest RLI. We apply it to resolve two representative contention cases detailed below. 
+
+ Case I: Collective vs. KV Reuse. When collective i \text{collective}^{i} competes with reuse j \text{reuse}^{j} ( j > i j>i ), the collective targets the current layer ( L target = i L_{\text{target}}=i ), yielding RLI ​ ( coll ) = 0 \text{RLI}(\text{coll})=0 . In contrast, the reuse targets layer j j with RLI ​ ( reuse ) > 0 \text{RLI}(\text{reuse})>0 . We therefore enforce collective i ≻ reuse j \text{collective}^{i}\succ\text{reuse}^{j} to avoid execution stalls. 
+
+ Case II: Inter-KV Reuse Contention. Under multi-layer lookahead, flows reuse j \text{reuse}^{j} and reuse k \text{reuse}^{k} ( L curr < j < k L_{\text{curr}}<j<k ) often contend. Comparing their urgency, layer j j represents a nearer deadline, implying RLI ​ ( j ) < RLI ​ ( k ) \text{RLI}(j)<\text{RLI}(k) . Prioritizing the smaller RLI effectively delays the onset of the earliest execution stall. Thus, we enforce reuse j ≻ reuse k \text{reuse}^{j}\succ\text{reuse}^{k} . 
+
+ In summary, MFS unifies these decisions by strictly prioritizing flows with the smallest RLI. Theorem 1 formalizes the optimality of this structural ordering. 
+
+ Theorem 1. Assuming an ideal computation model without preemption overhead, the prefill makespan is minimized by a schedule that strictly prioritizes flows with the smallest RLI. 
+
+ Proof sketch. Intuitively, prioritizing a high-RLI flow during a stall wastes the opportunity to overlap it with subsequent computation. We prove this via an exchange argument: shifting any flow with a larger RLI out of a stall interval into a later overlapped region strictly reduces the current blocking duration without violating future dependencies. We provide the detailed proof in Appendix. 
+
+ 4.4.2. Robust Inter-request Scheduling 
+
+ With intra-request contention resolved by RLI (§ 4.4.1 ), the remaining challenge is breaking ties across requests when competing flows have similar RLI and simultaneously threaten execution. The scheduler must protect requests with high SLO violation risks under imprecise laxity. However, synchronous batch execution exacerbates the impact of scheduling pitfalls, allowing errors to propagate to all batched peers. Our intuition is not to recover exact laxity, but to make scheduling decisions robust to estimation errors , prioritizing requests/batches where delays would most severely hurt SLO attainment. 
+
+ Scheduling pitfalls under imprecise laxity. 
+We identify two representative failure cases arising from misjudging laxity: 
+
+ • 
+
+ The Piggyback effect. In batches with mixed deadlines, a small number of extremely tight requests can dominate the inferred batch-level urgency. Consequently, loose requests in the same batch inherit elevated priority, preempting other batches that are globally more urgent. 
+
+ • 
+
+ The Black Hole effect. Proximity to a deadline does not guarantee feasibility. Under overload, a batch may appear urgent while carrying a workload that exceeds available bandwidth. Prioritizing such batches wastes resources on inevitable failures, blocking other viable batches. 
+
+ We define the Robust Effective Deadline ( R ​ E ​ D RED ) to quantify urgency while counteracting the Piggyback effect. We partition a batch into tight and loose sub-batches at the maximal deadline gap. With D min T D^{T}_{\text{min}} and D min L ​ o D^{Lo}_{\text{min}} representing the minimum deadline of each sub-batch, we define R ​ E ​ D = f ⋅ D min T + ( 1 − f ) ⋅ D min L ​ o RED=f\cdot D^{T}_{\text{min}}+(1-f)\cdot D^{Lo}_{\text{min}} , where f f is the proportion of tight requests. When tight requests are rare (small f f ), R ​ E ​ D RED naturally shifts towards the loose deadline ( D min L ​ o D^{Lo}_{\min} ), preventing outliers from hijacking the batch priority. 
+
+ Complementing RED-based ordering, we employ overload control to mitigate the Black Hole effect. The intuition is to prevent doomed or excessively heavy requests from blocking viable ones. We perform a worst-case feasibility check by accumulating estimated computation and communication delays. We iteratively prune the requests contributing the most to the cumulative delay to restore feasibility for the remainder of the batch. 
+
+ The full algorithm, detailed in the Appendix, synthesizes these strategies. Triggered upon batch arrival and departure, it outputs two key results: (1) an ordered sequence σ \sigma derived from RED, and (2) a set of pruned requests ℋ \mathcal{H} identified as infeasible. We deliberately avoid fine-grained per-layer updates to prevent the scheduler from over-reacting to transient load estimation jitter. 
+
+ 4.5. Putting Everything Together 
+
+ MFS schedules all traffic through a unified RMLQ substrate. We classify flows according to stage feature and apply distinct rules for initial priority assignment and subsequent promotion. 
+
+ • 
+
+ For last stage flows with explicit deadline, we calculate the MLU defined in§ 4.3 to determine the initial priority level. For promotion, MFS updates priority at layer boundaries while the request is computing, and switches to periodic updates at fixed intervals after computation finishes. 
+
+ • 
+
+ For early stage flows with implicit deadline, priority assignment relies on the RLI defined in§ 4.4.1 . Stage 1 flows are initialized based on RLI and promoted incrementally at layer boundaries to align with computation progress. Stage 2 flows directly enter the high priority queue. 
+
+ Arbitration. MFS strictly reserves the highest priority for the most urgent last-stage flows. Within the remaining priority levels, MFS adopts a hierarchical policy: it grants precedence to early-stage flows over last-stage flows to opportunistically exploit available bandwidth; to break ties among early-stage flows sharing the same RLI, MFS adheres to the rank determined by the inter-request scheduling (§ 4.4.2 ). 
+
+ 5. Implementation 
+
+ We implement MFS in approximately 10,000 lines of code. MFS employ two-tier control plane composed of local daemons and a centralized coordinator. Local daemons maintain scheduling context and enforce scheduling decisions, while reporting request-level statistics to the coordinator upon scheduling and completion events. The coordinator operates at request granularity, aggregating these summaries to perform inter-node tie-breaking, and disseminates the resulting decisions back to local daemons for enforcement. 
+
+ System Integration and Compatibility. 
+We implement MFS as a pluggable module that integrates transparently with NCCL and Mooncake. Each node runs a lightweight local daemon that interfaces with runtimes via lock-free MPSC queues over shared memory, enabling low-latency intra-node signaling. By intercepting low-level network primitives (e.g., RDMA Verbs), MFS redirects work requests from the library’s proxy threads to the local daemon, which orchestrates task execution according to our scheduling logic. The interaction between the runtime and the scheduler is governed by three standardized primitives: (1) submit registers tasks with metadata, (2) permit gates transmission by granting specific priorities, and (3) completion updates the internal state upon hardware signals. Requests can be pruned by modifying their metadata to suppress communication. 
+
+ Priority enforcement. Commodity hardware typically exposes a limited number of priority classes ( K ≪ L K\ll L ), making direct mapping infeasible. In practice, collective traffic is typically confined to a regional serving unit, whereas KV-cache traffic spans the network across racks. We employ a hybrid priority queue tailored for such traffic. Specifically, MFS enforces strict priority at the host via software queues (arbitration logic in § 4.5 ), while leveraging DSCP-based hardware priorities to isolate KV-cache traffic within the network fabric. For flows with explicit deadlines, we calculate MLU threshold derived from K K and the current network load ρ \rho , and assign DSCP tags according to this threshold. For flows with implicit deadlines, we map their RLI to the physical queue range [ 0 , K − 1 ] [0,K-1] by capping the RLI value at K − 1 K-1 . 
+
+ 6. Evaluation 
+
+ 6.1. Experiments setup 
+
+ Testbed setup. 
+The testbed consists of 8 servers, each equipped with 4 NVIDIA GeForce RTX 3090 GPUs, 40 CPU cores (Intel(R) Xeon(R) Gold 5218R CPU @ 2.10GHz), 128GB RAM, and two ConnectX-5 100Gbps NIC. The servers are connected via NVIDIA SN2700 Ethernet switches. Within each server, the GPUs communicate via PCIe Gen 3.0. All servers run Ubuntu 22.04 with CUDA 12.8, PyTorch 2.8.0, and NCCL 2.28. we configure a prefill cluster comprising 16 GPUs, while decode workers are provisioned separately. For simplicity, we limit the decode output length to one token, since it does not affect TTFT. 
+
+ Simulation setup. 
+Our simulator is built upon Vidur ( Agrawal et al., 2024 ) and the flow-level simulator flowsim ( TL-System, 2024 ) . We extend Vidur to support the Mixtral model with expert and sequence parallelism, as well as PD disaggregation with KV-cache reuse. The simulation workflow begins with offline profiling of operator latencies via Vidur profiler. At runtime, we employ a unified event-driven mechanism: Vidur simulates the LLM serving behavior to generate computation and communication tasks, while flowsim parser the communication task and trigger the underlying network events. Crucially, both computation events and network events are processed within a single event queue to ensure correctness. By default, we simulate a 256-server cluster with a 1:1 prefill-decode worker ratio, managed by a KV-cache aware scheduler similar to Dynamo ( NVIDIA, 2026 ) . Each server hosts eight GPUs interconnected via NVSwitch (900 GB/s) and eight NICs, connected via a 1:1 fat-tree network with link bandwidth 200Gbps. The latency profiles are calibrated based on NVIDIA A100 GPU. 
+
+ Metrics. 
+We primarily evaluate Time-to-First-Token (TTFT) and its Service Level Objective (SLO) attainment rate. Following the methodology in ( Patke et al., 2024 ; Hong et al., ; Stojkovic et al., 2025 ) , we define the SLO threshold as 3 × 3\times the TTFT measured under low-load conditions by default. We also evaluate microbenchmarks such as the collective completion time (CCT) and request earliness to help interpret the observed performance gains. 
+
+ 6.2. Testbed Experiments 
+
+ (a) Normalized TTFT. 
+
+ (b) Normalized CCT. 
+
+ Figure 10 . [Testbed] Mixtral-8x7B 
+
+ (a) Mixtral-8x22B 
+
+ (b) DBRX 
+
+ (c) Qwen3-Coder 
+
+ (d) Grok2 
+
+ Figure 11 . [Simulation] Performance on conversation workload (QwenA)
+
+ (a) Mixtral-8x22B 
+
+ (b) DBRX 
+
+ (c) Qwen3-Coder 
+
+ (d) Grok2 
+
+ Figure 12 . [Simulation] Performance on agent workload (QwenB) 
+
+ Model and workload. 
+In the testbed experiment, We evaluate the Mistral 8x7B ( 54 ) MoE model (FP16, top- k k =2), configured with a tensor parallelism (TP) degree of 1 and expert parallelism (EP) of 8. For the workload, we utilize two production traces derived from Qwen ( Alibaba-Edu, 2025 ) . QwenA-Conv represents a conversation workload with an average sequence length of 2k tokens and a 50% prompt reuse rate. QwenB-agent represents an agent workload , characterized by an average length of 1k tokens and a higher reuse rate of 65%. Request arrivals follow a Poisson process, where we vary the requests per second (RPS) to modulate system load. Due to testbed capacity limits, we clip the first 512 requests of each trace as a warm-up phase and use the subsequent 1024 requests for evaluation. 
+
+ Figure 10 reports how MFS on QwenA-Conv and QwenB-Agent workload. We configure vLLM with 8192 batched tokens and set the per-GPU request rate to one request per second. MFS significantly reduces TTFT across both workloads, optimizing the mean TTFT by 20.7% (1.26×) on QwenA-Conv and 32.3% (1.48×) on QwenB-Agent. The TTFT reduction is primarily driven by faster completion of computation-blocking collectives. As shown by the all-to-all completion time (CCT), MFS shortens stage-2 communication by 31.9% (1.47×) on QwenA-Conv and 43.1% (1.76×) on QwenB-Agent. These collectives lie directly on the critical path of prefill execution: delaying them immediately stalls GPU computation and inflates end-to-end latency. 
+
+ 6.3. Large-Scale Simulations 
+
+ In the large-scale simulations, we expand the evaluation scope to cover a diverse spectrum of production-grade architectures and workloads. 
+
+ • 
+
+ We examine a comprehensive set of mainstream MoE models with expert parallelism, ranging from architectures with large but few experts (e.g., Mixtral 8x22B ( 53 ) and Grok-2 ( 24 ) , configured with TP=4, EP=8) to models with small but many experts (e.g., DBRX ( Databriks, ) with TP=2, EP=16, and Qwen3-Coder ( Qwen Team, Technical report ) with TP=1, EP=32). These models are deployed with 32-GPU instance utilizing a hybrid parallelism strategy. We evaluate these MoE models using Qwen conversation and agent traces to represent typical interactive behaviors. 
+
+ • 
+
+ We further assess the effectiveness of MFS on dense models with sequence parallelism ( Liu et al., 2023 ) . We evaluate the Llama ( Meta, 2025 ) model configured with a 1M token context window. In this setup, the model is deployed on 16-GPU instance using TP=4 and SP=4. We pair this model with the Mooncake dataset ( Qin et al., 2024 ) to simulate real-world conversation and agent workloads characterized by similar reuse ratios ( ∼ 40 % \sim 40\% , ∼ 65 % \sim 65\% ) and extended context lengths ( ∼ 15 ​ k \sim 15k , ∼ 9 ​ k \sim 9k ). 
+
+ Baselines. We compare MFS against four classic flow scheduling policies: 
+
+ • 
+
+ Fair Sharing enforces max-min fairness among concurrent flows by allocating bandwidth equally, regardless of flow sizes or deadlines. 
+
+ • 
+
+ Shortest Job First (SJF) minimizes average flow completion time by strictly prioritizing flows with smaller flow sizes. 
+
+ • 
+
+ Earliest Deadline First (EDF) prioritizes flows with explicit deadlines. Since application-level deadlines do not directly translate to individual network flow deadlines, it applies fair sharing for flows with implicit deadlines. 
+
+ • 
+
+ Karuna ( Chen et al., 2016 ) allocates the minimum required bandwidth to flows with deadlines to ensure on-time completion, while scheduling the remaining flows using SJF. 
+
+ End-to-End TTFT SLO Attainment. We evaluate the end-to-end TTFT SLO attainment under varying request rates across diverse models and workloads. As shown in Fig 11 , 12 , and 13 , MFS consistently outperforms state-of-the-art baselines across all scenarios. 
+
+ Figure 11 details the performance of MFS on conversation workloads for diverse MoE models. Specifically, under high request rates, MFS achieves 1.4 × 1.4\times – 1.8 × 1.8\times higher SLO attainment for Mixtral (Fig. 11(a) ), Qwen Coder (Fig. 11(c) ) and Grok (Fig. 11(d) ), and up to 2.4 × 2.4\times for DBRX (Fig. 11(b) ). Furthermore, MFS can sustain 1.17 × 1.17\times – 1.46 × 1.46\times higher request rates than the strongest baseline (Karuna) while maintaining the similar SLO attainment. In conversation workload, a small fraction of tail requests necessitates large KV-cache movements, which precipitate contention across Stage 1 to Stage 3 under high load. MFS outperform baselines significantly since it successfully coordinates multi-stage contention. Among the baselines, Karuna performs relatively better because it happens to defer non-urgent Stage 3 traffic and provides partial relief; however, without explicit multi-stage coordination, it eventually succumbs to contention as other baselines. 
+
+ Figure 12 details the performance of MFS on agent workloads for diverse MoE models. Focusing on the mid-to-high load regime, MFS achieves 1.4 × 1.4\times – 1.7 × 1.7\times higher SLO attainment for Grok-2 and Mixtral, and reaches 2.0 × 2.0\times for DBRX and Qwen-Coder. Furthermore, MFS sustains 1.2 × 1.2\times higher request rates for Grok-2, ∼ 1.3 × \sim 1.3\times for Mixtral and Qwen-Coder, and up to 1.4 × 1.4\times for DBRX compared to the Karuna. Compared to conversation traces, agent requests have shorter prompt length but exhibit higher average reuse rates, with multiple concurrent requests sharing identical prefixes. This pattern induces severe one-to-many sender-side contention, which primarily concentrates on Stage 1 and Stage 2 as multiple workers simultaneously contend for the same cached states. MFS effectively mitigates this contention by protecting urgent flows without requiring precise laxity. Notably, the performance gap between Karuna and other baselines narrows in this scenario. When contention is not dominated by Stage 3 traffic, Karuna falls back to SJF (deadline is implicit) to schedule Stage 1 and Stage 2 flows; however, being unaware of stage semantics, this approach still exposes tight requests to SLO violations as other baselines. 
+
+ (a) Conversation workload 
+
+ (b) Agent workload 
+
+ Figure 13 . [simulation] llama3-8B (Mooncake dataset) 
+
+ Figure 13 details the performance of MFS on two representative long-context workloads using the Llama3-8B model with Sequence Parallelism (SP). For the Mooncake dataset, the conversation and agent workloads follow request patterns similar to those in the Qwen experiments (e.g., reuse ratios, access patterns), but feature significantly longer context lengths. In the conversation workload (Fig. 13 a), MFS demonstrates robust performance under increasing load, achieving 1.3 × 1.3\times – 1.6 × 1.6\times higher SLO attainment against Karuna. This advantage is further amplified in the agent workload(Fig. 13 b), where MFS attains 1.4 × 1.4\times – 1.9 × 1.9\times higher SLO attainment and supports up to 1.15 × 1.15\times higher per-gpu request rates given tight SLO budget. 
+
+ Breaking down the performance gains. We further conduct micro-benchmarks to analyze the source of the gains. As shown in Figure 14 and Figure 15 , MFS successfully (i) minimizes Collective Completion Time (the non-overlapping communication latency) to shorten the prefill makespan, and (ii) regulates earliness to protect truly urgent requests under contention. 
+
+ Figure 14 breaks down the performance gains that lead to the 2.2 × 2.2\times higher SLO attainment achieved by MFS on the DBRX model.
+The first source of improvement comes from reduced execution time during the prefill phase. Specifically, MFS lowers the average CCT of expert parallel by 52 % 52\% (Figure 14(a) ). This reduction is mainly attributed to our stage-aware policy, which protects flows that block computation while deferring non-critical traffic to exploit available slack for overlap.
+As a result, MFS significantly shortens the prefill makespan by lowering the effective communication overhead. 
+
+ (a) Normalized CCT. 
+
+ (b) Normalized earliness. 
+
+ Figure 14 . [Simulation] Breakdown on DBRX (Qwen-A, Rate=0.7) 
+
+ (a) Normalized CCT. 
+
+ (b) Normalized earliness 
+
+ Figure 15 . [Simulation] Breakdown on Llama3 (Mooncake-Conv, Rate=0.5) 
+
+ Beyond latency reduction, MFS further improves SLO attainment by better prioritizing truly urgent requests under contention.
+We characterize this effect using earliness of request, where large positive values indicate unnecessary early completion that can block urgent requests, while negative values correspond to deadline misses.
+As shown in Figure 14(b) , Karuna exhibits the smallest non-negative earliness, but at the cost of a high violation risk, as it conservatively allocates near-minimal rates and fails to exploit available bandwidth.
+In contrast, other baselines show much larger non-negative earliness, indicating that they schedule flows without effectively prioritizing urgency.
+MFS reduces the non-negative portion of earliness by 42 % 42\% comparing with FS, SJF, EDF. By deferring Stage 3 flows to complete just-in-time and regulating early-stage traffic with a RED-based ording, MFS preserves resources for turely urgent requests. MFS adopts a priority-based scheduling that can exploit available bandwidth when no higher-priority flows are pending. 
+
+ We observe a similar trend in Figure 15 .
+Across both micro-benchmarks, MFS consistently achieves higher SLO attainment by simultaneously reducing the collective completion time of sequence parallel (Figure 15(a) ) and regulating earliness under contention (Figure 15(b) ).
+These results indicate that the performance gains of MFS are robust across models and are not tied to a specific workload or architecture. 
+
+ 7. Discussion 
+
+ Additional parallelism. While MFS primarily focuses on Expert Parallelism and Sequence Parallelism, we acknowledge other strategies not explicitly covered in our evaluation. Tensor Parallelism, widely adopted in serving, is typically confined to intra-node fabrics (e.g., NVLink) without directly contending for inter-node bandwidth. Similarly, we do not explicitly discuss Pipeline Parallelism, as the prefill stage is usually latency-sensitive (requiring low or zero PP degrees ( Zhong et al., 2024 ) ), and its communication volume is orders of magnitude smaller than KV cache movement or collective communications ( Liao et al., 2025 ) . Should these flows appear on the shared network, they would be identified as Stage 2 traffic and remain compatible with our analysis. This observation extends to emerging parallelism strategies, which may introduce novel communication patterns with enhanced overlapping capabilities, yet still block dependent computation if delayed. 
+
+ Hybrid model deployment. 
+In practice, service providers often deploy a tiered model portfolio, consisting of a single large flagship model alongside multiple smaller models serving diverse workloads ( OpenAI, 2025 ) .
+In such settings, network contention primarily arises from concurrent KV cache transfers (Stage 1 and Stage 3) across different models, as collective communication is typically confined within isolated racks or dedicated pods ( Liu et al., 2024a ) .
+While MFS is not explicitly evaluated under multi-model deployment, its scheduling principle remains applicable to KV cache traffic on shared networks.
+While promising, the holistic orchestration of such multi-model contention landscapes remains an under-explored design space. 
+
+ Applicability to scale-up fabrics. While MFS focuses on scale-out networks, its design principles could be extended to scale-up domains (e.g., NVL ( NVIDIA, 2024 ) , UB ( Zuo et al., 2025 ) ,etc.). Contention between collective and KV Cache movement remains when multiple serving instance deployed together. MFS’s scheduling policy can be effectively adapted to such architectures by leveraging hardware-level isolation mechanisms (e.g., virtual channels or traffic classes), which could be exploited to enable differentiated prioritization. 
+
+ Compatibility with GPU-initiated collective communication. While emerging GPU-initiated communication ( NVIDIA Corporation, 2024 ; DeepSeek-AI, 2024 ) optimizes small-message latency for the decoding phase, it remains uncommon in prefill deployments due to strict hardware prerequisites and marginal gains for large-volume transfers. Nevertheless, even in such environments, MFS ensures compatibility via CPU-assisted variants (e.g., host-side doorbells), while this method may introduce negligible latency overhead compared to a fully GPU-initiated execution ( Potluri et al., 2024 ) . 
+
+ 8. Related Work. 
+
+ Flow and co-flow scheduling. 
+Traditional flow scheduling optimizes per-flow metrics such as average flow completion time ( Alizadeh et al., 2010 ; Zhu et al., 2015 ; Alizadeh et al., 2013 ; Hong et al., 2012 ; Bai et al., 2015 ; Li et al., 2017 ; Li et al., 2024 ) or deadline satisfaction ( Wilson et al., 2011 ; Vamanan et al., 2012 ; Hong et al., 2012 ; Zhang et al., 2015 ) using policies like SJF and EDF.
+Coflow scheduling ( Chowdhury et al., 2014 ; Chowdhury and Stoica, 2015 ; Zhang et al., 2016 ; Zhao et al., 2015 ; Susanto et al., 2016 ; Agarwal et al., 2018 ; Wan et al., 2025 ) extends this abstraction by grouping related flows and optimizing Coflow Completion Time for data-parallel workloads, while mixed-flow scheduling ( Chen et al., 2016 ) considers the coexistence of deadline-sensitive and best-effort traffic. In contrast, MFS explicitly accounts for multi-stage dependencies to schedule flows toward end-to-end TTFT attainments. 
+
+ Optimization for individual stages. Prior research focuses on optimizing specific communication phases in isolation. For collective communication, efforts improve performance by algorithms synthesis ( Shah et al., 2023 ; Cao et al., 2025 ) , resolving potential contention ( Cao et al., 2024 ; Rajasekaran et al., 2024 ) , or enhancing overlap through system-level pipelining ( Zhang et al., 2025a ; Zheng et al., 2025a ; Hong et al., 2025 ) ,. In parallel, other works optimize KV cache transfers by hiding latency via prefetching ( Qin et al., 2025 ; Patel et al., 2024 ) , improving efficiency via block coalescing ( Li et al., 2025b ; Chen et al., 2024 ) and multi-path transmission ( Wu et al., 2026 ) , or reducing data volume by trading off model quality ( Liu et al., 2024d ) . However, these approaches treat each stage in isolation, overlooking the potential contention between collective communication and KV cache transfers. 
+
+ LLM serving systems. Recent advancements in LLM serving have evolved along two complementary dimensions. Architecturally, systems adopt prefill-decode disaggregation ( Zhong et al., 2024 ; Patel et al., 2024 ) and KV-cache reuse ( Qin et al., 2025 ; Gao et al., 2024 ) to improve throughput and avoid redundant computation. On the orchestration front, numerous request schedulers ( Jiang et al., 2025 ; Stojkovic et al., 2025 ; Chen et al., 2025 ; Hong et al., ; Zhang et al., 2025b ) have been proposed to maximize SLO attainment. However, these systems primarily focus on optimizing compute efficiency under ideal network assumptions. MFS is orthogonal to these approaches. It bridges the gap by addressing the network contention that they overlook. 
+
+ 9. Conclusion 
+
+ This paper presented MFS, a holistic multi-stage flow scheduling framework for LLM serving that targets end-to-end TTFT SLO attainment. MFS is built on the observation that request-level deadlines progressively materialize into explicit flow level deadline as prefill execution. At its core, MFS realizes a Defer-and-Promote scheduling principle that approximates Least-Laxity-First behavior without requiring precise laxity estimation. Through a prototype implementation and extensive evaluation, we show that MFS consistently improves TTFT SLO attainment across diverse models and workloads. 
+
+ References 
+
+ Agarwal et al. (2018) 
+ S. Agarwal, S. Rajakrishnan, A. Narayan, R. Agarwal, D. Shmoys, and A. Vahdat 
+
+ Sincronia: near-optimal network design for coflows .
+
+ In Proceedings of the 2018 Conference of the ACM Special Interest Group on Data Communication ,
+
+ pp. 16–29 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Agrawal et al. (2024) 
+ A. Agrawal, N. Kedia, J. Mohan, A. Panwar, N. Kwatra, B. S. Gulavani, R. Ramjee, and A. Tumanov 
+
+ Vidur: a large-scale simulation framework for llm inference .
+
+ Proceedings of Machine Learning and Systems 6 , pp. 351–366 .
+
+ Cited by: Appendix B ,
+ §6.1 .
+
+ Alibaba-Edu (2025) 
+ Alibaba-Edu 
+
+ Qwen-bailian anonymous dataset: production-derived LLM usage traces .
+
+ Note: https://github.com/alibaba-edu/qwen-bailian-usagetraces-anon Accessed: 2026-02-06 
+
+ Cited by: §2.2 ,
+ §6.2 .
+
+ Alizadeh et al. (2010) 
+ M. Alizadeh, A. Greenberg, D. A. Maltz, J. Padhye, P. Patel, B. Prabhakar, S. Sengupta, and M. Sridharan 
+
+ Data center tcp (dctcp) .
+
+ In Proceedings of the ACM SIGCOMM 2010 Conference ,
+
+ pp. 63–74 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Alizadeh et al. (2013) 
+ M. Alizadeh, S. Yang, M. Sharif, S. Katti, N. McKeown, B. Prabhakar, and S. Shenker 
+
+ PFabric: minimal near-optimal datacenter transport .
+
+ ACM SIGCOMM Computer Communication Review 43 ( 4 ), pp. 435–446 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Aminabadi et al. (2022) 
+ R. Y. Aminabadi, S. Rajbhandari, A. A. Awan, C. Li, D. Li, E. Zheng, O. Ruwase, S. Smith, M. Zhang, J. Rasley, et al. 
+
+ Deepspeed-inference: enabling efficient inference of transformer models at unprecedented scale .
+
+ In SC22: International Conference for High Performance Computing, Networking, Storage and Analysis ,
+
+ pp. 1–15 .
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Bai et al. (2015) 
+ W. Bai, L. Chen, K. Chen, D. Han, C. Tian, and H. Wang 
+
+ { \{ information-Agnostic } \} flow scheduling for commodity data centers .
+
+ In 12th USENIX Symposium on Networked Systems Design and Implementation (NSDI 15) ,
+
+ pp. 455–468 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Bettati and Liu (1992) 
+ R. Bettati and J. W. Liu 
+
+ End-to-end scheduling to meet deadlines in distributed systems. .
+
+ In ICDCS ,
+
+ pp. 452–459 .
+
+ Cited by: §3.2 .
+
+ Bettati and Liu (1990) 
+ R. Bettati and J. W. Liu 
+
+ Algorithms for end-to-end scheduling to meet deadlines .
+
+ In Proceedings of the Second IEEE Symposium on Parallel and Distributed Processing 1990 ,
+
+ pp. 62–67 .
+
+ Cited by: §3.2 .
+
+ Buttazzo (2005) 
+ G. C. Buttazzo 
+
+ Rate monotonic vs. edf: judgment day .
+
+ Real-Time Systems 29 ( 1 ), pp. 5–26 .
+
+ Cited by: §4.3 .
+
+ Buttazzo et al. (1995) 
+ G. Buttazzo, M. Spuri, and F. Sensini 
+
+ Value vs. deadline scheduling in overload conditions .
+
+ In Proceedings 16th IEEE Real-Time Systems Symposium ,
+
+ pp. 90–99 .
+
+ Cited by: §4.3 .
+
+ Cao et al. (2024) 
+ J. Cao, Y. Guan, K. Qian, J. Gao, W. Xiao, J. Dong, B. Fu, D. Cai, and E. Zhai 
+
+ Crux: gpu-efficient communication scheduling for deep learning training .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ pp. 1–15 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Cao et al. (2025) 
+ J. Cao, S. Shi, J. Gao, W. Liu, Y. Yang, Y. Xu, Z. Zheng, Y. Guan, K. Qian, Y. Liu, et al. 
+
+ SyCCL: exploiting symmetry for efficient collective communication scheduling .
+
+ In Proceedings of the ACM SIGCOMM 2025 Conference ,
+
+ pp. 645–662 .
+
+ Cited by: §1 ,
+ §2.3 ,
+ §8 .
+
+ Chen et al. (2016) 
+ L. Chen, K. Chen, W. Bai, and M. Alizadeh 
+
+ Scheduling mix-flows in commodity datacenters with karuna .
+
+ In Proceedings of the 2016 ACM SIGCOMM Conference ,
+
+ pp. 174–187 .
+
+ Cited by: 4th item ,
+ §8 .
+
+ Chen et al. (2024) 
+ S. Chen, R. Jiang, D. Yu, J. Xu, M. Chao, F. Meng, C. Jiang, W. Xu, and H. Liu 
+
+ KVDirect: distributed disaggregated llm inference .
+
+ arXiv preprint arXiv:2501.14743 .
+
+ Cited by: §1 ,
+ §2.2 ,
+ §2.3 ,
+ §8 .
+
+ Chen et al. (2025) 
+ S. Chen, Z. Jia, S. Khan, A. Krishnamurthy, and P. B. Gibbons 
+
+ SLOs-serve: optimized serving of multi-slo llms .
+
+ arXiv preprint arXiv:2504.08784 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Chiang et al. (2023) 
+ W. Chiang, Z. Li, Z. Lin, Y. Sheng, Z. Wu, H. Zhang, L. Zheng, S. Zhuang, Y. Zhuang, J. E. Gonzalez, et al. 
+
+ Vicuna: an open-source chatbot impressing gpt-4 with 90%* chatgpt quality .
+
+ See https://vicuna. lmsys. org (accessed 14 April 2023) 2 ( 3 ), pp. 6 .
+
+ Cited by: §1 .
+
+ Chowdhury and Stoica (2015) 
+ M. Chowdhury and I. Stoica 
+
+ Efficient coflow scheduling without prior knowledge .
+
+ ACM SIGCOMM Computer Communication Review 45 ( 4 ), pp. 393–406 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Chowdhury et al. (2014) 
+ M. Chowdhury, Y. Zhong, and I. Stoica 
+
+ Efficient coflow scheduling with varys .
+
+ In Proceedings of the 2014 ACM conference on SIGCOMM ,
+
+ pp. 443–454 .
+
+ Cited by: §1 ,
+ §8 .
+
+ [20] 
+ Databriks 
+
+ Introducing dbrx: a new state-of-the-art open llm .
+
+ Note: https://www.databricks.com/blog/introducing-dbrx-new-state-art-open-llm 
+
+ Cited by: §1 ,
+ 1st item .
+
+ DeepSeek-AI (2024) 
+ DeepSeek-AI 
+
+ DeepEP: An Efficient Expert-Parallel Communication Library .
+
+ Note: https://github.com/deepseek-ai/DeepEP GitHub repository, Accessed: 2026-02-07 
+
+ Cited by: §7 .
+
+ Ethiraj et al. (2025) 
+ V. Ethiraj, A. David, S. Menon, and D. Vijay 
+
+ Toward low-latency end-to-end voice agents for telecommunications using streaming asr, quantized llms, and real-time tts .
+
+ arXiv preprint arXiv:2508.04721 .
+
+ Cited by: §1 .
+
+ Gao et al. (2024) 
+ B. Gao, Z. He, P. Sharma, Q. Kang, D. Jevdjic, J. Deng, X. Yang, Z. Yu, and P. Zuo 
+
+ { \{ cost-Efficient } \} large language model serving for multi-turn conversations with { \{ cachedattention } \} .
+
+ In 2024 USENIX Annual Technical Conference (USENIX ATC 24) ,
+
+ pp. 111–126 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §8 .
+
+ [24] 
+ Grok .
+
+ Note: https://x.ai/news/grok-2 
+
+ Cited by: §1 ,
+ 1st item .
+
+ He et al. (2025) 
+ J. He, C. Treude, and D. Lo 
+
+ LLM-based multi-agent systems for software engineering: literature review, vision, and the road ahead .
+
+ ACM Transactions on Software Engineering and Methodology 34 ( 5 ), pp. 1–30 .
+
+ Cited by: §1 .
+
+ Hong et al. (2012) 
+ C. Hong, M. Caesar, and P. B. Godfrey 
+
+ Finishing flows quickly with preemptive scheduling .
+
+ ACM SIGCOMM Computer Communication Review 42 ( 4 ), pp. 127–138 .
+
+ Cited by: §1 ,
+ §8 .
+
+ [27] 
+ K. Hong, X. Li, L. Chen, Q. Mao, G. Dai, X. Ning, S. Yan, Y. Liang, and Y. Wang 
+
+ SOLA: optimizing slo attainment for large language model serving with state-aware scheduling .
+
+ In Eighth Conference on Machine Learning and Systems ,
+
+ Cited by: §1 ,
+ §6.1 ,
+ §8 .
+
+ Hong et al. (2025) 
+ K. Hong, X. Li, M. Liu, Q. Mao, T. Wu, Z. Huang, L. Chen, Z. Wang, Y. Zhang, Z. Zhu, et al. 
+
+ FlashOverlap: a lightweight design for efficiently overlapping communication and computation .
+
+ arXiv preprint arXiv:2504.19519 .
+
+ Cited by: §8 .
+
+ Hu et al. (2024a) 
+ C. Hu, H. Huang, J. Hu, J. Xu, X. Chen, T. Xie, C. Wang, S. Wang, Y. Bao, N. Sun, et al. 
+
+ Memserve: context caching for disaggregated llm serving with elastic memory pool .
+
+ arXiv preprint arXiv:2406.17565 .
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Hu et al. (2024b) 
+ C. Hu, H. Huang, L. Xu, X. Chen, J. Xu, S. Chen, H. Feng, C. Wang, S. Wang, Y. Bao, et al. 
+
+ Inference without interference: disaggregate llm inference for mixed downstream workloads .
+
+ arXiv preprint arXiv:2401.11181 .
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Jiang et al. (2025) 
+ Y. Jiang, F. Fu, X. Yao, T. Wang, B. Cui, A. Klimovic, and E. Yoneki 
+
+ Thunderserve: high-performance and cost-efficient llm serving in cloud environments .
+
+ arXiv preprint arXiv:2502.09334 .
+
+ Cited by: §8 .
+
+ Kim et al. (2024) 
+ H. Kim, J. Ryu, and J. Lee 
+
+ Tccl: discovering better communication paths for pcie gpu clusters .
+
+ In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 ,
+
+ pp. 999–1015 .
+
+ Cited by: §2.3 .
+
+ Kim et al. (2025) 
+ K. Kim, G. Shams, and K. Kim 
+
+ From seconds to sentiments: differential effects of chatbot response latency on customer evaluations .
+
+ International Journal of Human–Computer Interaction , pp. 1–17 .
+
+ Cited by: §2.1 .
+
+ kimi (2025) 
+ kimi 
+
+ Mooncake transfer engine .
+
+ Note: https://github.com/kvcache-ai/Mooncake/tree/main/mooncake-transfer-engine 
+
+ Cited by: §1 .
+
+ Langfuse (2025) 
+ Langfuse 
+
+ How to configure retries and timeouts when fetching prompts? .
+
+ Note: https://langfuse.com/faq/all/error-handling-and-timeouts 
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Lepikhin et al. (2020) 
+ D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N. Shazeer, and Z. Chen 
+
+ Gshard: scaling giant models with conditional computation and automatic sharding .
+
+ arXiv preprint arXiv:2006.16668 .
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Li et al. (2025a) 
+ J. Li, S. Tripathi, L. Rastogi, Y. Lei, R. Pan, and Y. Xia 
+
+ Optimizing mixture-of-experts inference time via model deployment and communication scheduling .
+
+ IEEE Transactions on Networking 34 , pp. 2478–2497 .
+
+ Cited by: Appendix B ,
+ §2.2 .
+
+ Li et al. (2023) 
+ J. Li, Y. Jiang, Y. Zhu, C. Wang, and H. Xu 
+
+ Accelerating distributed { \{ moe } \} training and inference with lina .
+
+ In 2023 USENIX Annual Technical Conference (USENIX ATC 23) ,
+
+ pp. 945–959 .
+
+ Cited by: §2.2 .
+
+ Li et al. (2025b) 
+ W. Li, G. Jiang, X. Ding, Z. Tao, C. Hao, C. Xu, Y. Zhang, and H. Wang 
+
+ FlowKV: a disaggregated inference framework with low-latency kv cache transfer and load-aware scheduling .
+
+ arXiv preprint arXiv:2504.03775 .
+
+ Cited by: §2.2 ,
+ §2.3 ,
+ §8 .
+
+ Li et al. (2024) 
+ W. Li, X. He, Y. Liu, K. Li, K. Chen, Z. Ge, Z. Guan, H. Qi, S. Zhang, and G. Liu 
+
+ Flow scheduling with imprecise knowledge .
+
+ In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) ,
+
+ pp. 95–111 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Li et al. (2017) 
+ Z. Li, W. Bai, K. Chen, D. Han, Y. Zhang, D. Li, and H. Yu 
+
+ Rate-aware flow scheduling for commodity data center networks .
+
+ In IEEE INFOCOM 2017-IEEE Conference on Computer Communications ,
+
+ pp. 1–9 .
+
+ Cited by: §8 .
+
+ Liao et al. (2025) 
+ X. Liao, Y. Sun, H. Tian, X. Wan, Y. Jin, Z. Wang, Z. Ren, X. Huang, W. Li, K. F. Tse, et al. 
+
+ Mixnet: a runtime reconfigurable optical-electrical fabric for distributed mixture-of-experts training .
+
+ In Proceedings of the ACM SIGCOMM 2025 Conference ,
+
+ pp. 554–574 .
+
+ Cited by: §7 .
+
+ LiteLLM (2025) 
+ LiteLLM 
+
+ Stream-timeout .
+
+ Note: https://docs.litellm.ai/docs/proxy/timeout 
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Liu et al. (2024a) 
+ A. Liu, B. Feng, B. Xue, B. Wang, B. Wu, C. Lu, C. Zhao, C. Deng, C. Zhang, C. Ruan, et al. 
+
+ Deepseek-v3 technical report .
+
+ arXiv preprint arXiv:2412.19437 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §2.3 ,
+ §7 .
+
+ Liu et al. (2024b) 
+ F. Liu, Y. Liu, L. Shi, H. Huang, R. Wang, Z. Yang, L. Zhang, Z. Li, and Y. Ma 
+
+ Exploring and evaluating hallucinations in llm-powered code generation .
+
+ arXiv preprint arXiv:2404.00971 .
+
+ Cited by: §1 .
+
+ Liu et al. (2023) 
+ H. Liu, M. Zaharia, and P. Abbeel 
+
+ Ring attention with blockwise transformers for near-infinite context .
+
+ arXiv preprint arXiv:2310.01889 .
+
+ Cited by: §2.1 ,
+ 2nd item .
+
+ Liu et al. (2025) 
+ K. Liu, X. Zhou, and L. Li 
+
+ M2LLM: a multi-dimensional optimization framework for llm inference on mobile devices .
+
+ IEEE Transactions on Parallel and Distributed Systems .
+
+ Cited by: §2.1 .
+
+ Liu et al. (2024c) 
+ X. Liu, B. Arzani, S. K. R. Kakarla, L. Zhao, V. Liu, M. Castro, S. Kandula, and L. Marshall 
+
+ Rethinking machine learning collective communication as a multi-commodity flow problem .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ pp. 16–37 .
+
+ Cited by: §2.3 .
+
+ Liu et al. (2024d) 
+ Y. Liu, H. Li, Y. Cheng, S. Ray, Y. Huang, Q. Zhang, K. Du, J. Yao, S. Lu, G. Ananthanarayanan, et al. 
+
+ Cachegen: kv cache compression and streaming for fast large language model serving .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ pp. 38–56 .
+
+ Cited by: §1 ,
+ §2.2 ,
+ §8 .
+
+ Medium (2025a) 
+ Medium 
+
+ Robust llm api strategies .
+
+ Note: https://ai.gopubby.com/robust-llm-api-strategies-retries-fallbacks-in-python-caf9efa96908 
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Medium (2025b) 
+ Medium 
+
+ Stream api and timeouts .
+
+ Note: https://diverger.medium.com/speeding-up-your-openai-llm-applications-f0e011f2f0d6 
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Meta (2025) 
+ Meta 
+
+ Llama .
+
+ Note: https://huggingface.co/meta-llama 
+
+ Cited by: 2nd item .
+
+ [53] 
+ Mixtral 8x22B .
+
+ Note: https://huggingface.co/mistralai/Mixtral-8x22B-Instruct-v0.1 
+
+ Cited by: §1 ,
+ 1st item .
+
+ [54] 
+ Mixtral-8x7B-Instruct-v0.1 .
+
+ Note: https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1 
+
+ Cited by: §1 ,
+ §6.2 .
+
+ Narayanan et al. (2019) 
+ D. Narayanan, A. Harlap, A. Phanishayee, V. Seshadri, N. R. Devanur, G. R. Ganger, P. B. Gibbons, and M. Zaharia 
+
+ PipeDream: generalized pipeline parallelism for dnn training .
+
+ In Proceedings of the 27th ACM symposium on operating systems principles ,
+
+ pp. 1–15 .
+
+ Cited by: §2.1 .
+
+ Narayanan et al. (2021) 
+ D. Narayanan, M. Shoeybi, J. Casper, P. LeGresley, M. Patwary, V. Korthikanti, D. Vainbrand, P. Kashinkunti, J. Bernauer, B. Catanzaro, et al. 
+
+ Efficient large-scale language model training on gpu clusters using megatron-lm .
+
+ In Proceedings of the international conference for high performance computing, networking, storage and analysis ,
+
+ pp. 1–15 .
+
+ Cited by: §2.1 .
+
+ notdiamond.ai (2025) 
+ notdiamond.ai 
+
+ Fallbacks-and-timeout .
+
+ Note: https://docs.notdiamond.ai/docs/fallbacks-and-timeouts 
+
+ Cited by: §1 ,
+ §2.1 .
+
+ NVIDIA Corporation (2024) 
+ NVIDIA Corporation 
+
+ NVSHMEM documentation: using the NVSHMEM InfiniBand GPUDirect Async transport .
+
+ NVIDIA Corporation .
+
+ Note: Release 3.0.6, Accessed: 2026-02-07 
+
+ External Links: Link 
+
+ Cited by: §7 .
+
+ NVIDIA and Dynamo Authors (2025) 
+ NVIDIA and Dynamo Authors 
+
+ Disaggregated serving design document .
+
+ Note: https://github.com/ai-dynamo/dynamo/blob/main/docs/design_docs/disagg_serving.md Accessed: 2026-02-06 
+
+ Cited by: footnote 1 .
+
+ NVIDIA (2024) 
+ NVIDIA 
+
+ NVIDIA GB200 NVL72: A Revolutionary Liquid-Cooled Rack Scale Solution .
+
+ Note: https://www.nvidia.com/en-us/data-center/gb200-nvl72/ Accessed: 2026-02-07 
+
+ Cited by: §7 .
+
+ NVIDIA (2025a) 
+ NVIDIA 
+
+ GeForce rtx 3090 family .
+
+ Note: https://www.nvidia.com/en-us/geforce/graphics-cards/30-series/rtx-3090-3090ti/ 
+
+ Cited by: §1 .
+
+ NVIDIA (2025b) 
+ NVIDIA 
+
+ NVIDIA collective communication library (nccl) .
+
+ Note: https://github.com/NVIDIA/nccl 
+
+ Cited by: §1 .
+
+ NVIDIA (2025c) 
+ NVIDIA 
+
+ NVIDIA mellanox connectx-5 .
+
+ Note: https://www.nvidia.cn/networking/ethernet/connectx-5/ 
+
+ Cited by: §1 .
+
+ NVIDIA (2026) 
+ NVIDIA 
+
+ Dynamo: a datacenter scale distributed inference serving framework .
+
+ GitHub .
+
+ Note: https://github.com/ai-dynamo/dynamo Accessed: 2026-02-06 
+
+ Cited by: §6.1 .
+
+ OpenAI (2025) 
+ OpenAI 
+
+ ChatGPT .
+
+ Note: https://openai.com/index/chatgpt/ 
+
+ Cited by: §1 ,
+ §7 .
+
+ Patel et al. (2024) 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, Í. Goiri, S. Maleki, and R. Bianchini 
+
+ Splitwise: efficient generative llm inference using phase splitting .
+
+ In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) ,
+
+ pp. 118–132 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §2.3 ,
+ §8 ,
+ §8 .
+
+ Patke et al. (2024) 
+ A. Patke, D. Reddy, S. Jha, H. Qiu, C. Pinto, C. Narayanaswami, Z. Kalbarczyk, and R. Iyer 
+
+ Queue management for slo-oriented large language model serving .
+
+ In Proceedings of the 2024 ACM Symposium on Cloud Computing ,
+
+ pp. 18–35 .
+
+ Cited by: §1 ,
+ §6.1 .
+
+ Potluri et al. (2024) 
+ S. Potluri, P. Markthub, and M. G. Venkata 
+
+ Enhancing application portability and compatibility across new platforms using NVIDIA Magnum IO NVSHMEM 3.0 .
+
+ Note: https://developer.nvidia.com/blog/enhancing-application-portability-and-compatibility-across-new-platforms-using-nvidia-magnum-io-nvshmem-3-0/ Accessed: 2026-02-07 
+
+ Cited by: §7 .
+
+ Qin et al. (2025) 
+ R. Qin, Z. Li, W. He, J. Cui, F. Ren, M. Zhang, Y. Wu, W. Zheng, and X. Xu 
+
+ Mooncake: trading more storage for less computation—a { \{ kvcache-centric } \} architecture for serving { \{ llm } \} chatbot .
+
+ In 23rd USENIX Conference on File and Storage Technologies (FAST 25) ,
+
+ pp. 155–170 .
+
+ Cited by: §1 ,
+ §1 ,
+ §2.1 ,
+ §2.3 ,
+ §8 ,
+ §8 .
+
+ Qin et al. (2024) 
+ R. Qin, Z. Li, W. He, M. Zhang, Y. Wu, W. Zheng, and X. Xu 
+
+ Mooncake: a kvcache-centric disaggregated architecture for llm serving .
+
+ arXiv preprint arXiv:2407.00079 .
+
+ Cited by: Appendix B ,
+ §1 ,
+ §2.1 ,
+ §2.2 ,
+ 2nd item .
+
+ Qwen Team (Technical report) 
+ Qwen Team 
+
+ Qwen3-coder-next technical report .
+
+ Technical report 
+
+ Note: Accessed: 2026-02-03 
+
+ External Links: Link 
+
+ Cited by: §1 ,
+ 1st item .
+
+ Rajasekaran et al. (2024) 
+ S. Rajasekaran, M. Ghobadi, and A. Akella 
+
+ { \{ cassini } \} : { \{ network-Aware } \} job scheduling in machine learning clusters .
+
+ In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) ,
+
+ pp. 1403–1420 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Ranganathan et al. (2025) 
+ B. Ranganathan, M. Zhang, and K. Wu 
+
+ Enhancing reliability in ai inference services: an empirical study on real production incidents .
+
+ arXiv preprint arXiv:2511.07424 .
+
+ Cited by: §1 ,
+ §2.1 .
+
+ SGLang Team (2025) 
+ SGLang Team 
+
+ P/d disaggregation optimization .
+
+ Note: https://docs.sglang.ai/advanced_features/pd_disaggregation.html Accessed: 2026-02-06 
+
+ Cited by: footnote 1 .
+
+ Shah et al. (2023) 
+ A. Shah, V. Chidambaram, M. Cowan, S. Maleki, M. Musuvathi, T. Mytkowicz, J. Nelson, O. Saarikivi, and R. Singh 
+
+ { \{ taccl } \} : Guiding collective algorithm synthesis using communication sketches .
+
+ In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) ,
+
+ pp. 593–612 .
+
+ Cited by: §2.3 ,
+ §8 .
+
+ Shen and Sen (2025) 
+ H. Shen and T. Sen 
+
+ AccelGen: heterogeneous slo-guaranteed high-throughput llm inference serving for diverse applications .
+
+ arXiv preprint arXiv:2503.13737 .
+
+ Cited by: §1 .
+
+ Si et al. (2025) 
+ M. Si, P. Balaji, Y. Chen, C. Chu, A. Gangidi, S. Hasan, S. Iyengar, D. Johnson, B. Liu, J. Ren, et al. 
+
+ Collective communication for 100k+ gpus .
+
+ arXiv preprint arXiv:2510.20171 .
+
+ Cited by: §1 .
+
+ Stojkovic et al. (2025) 
+ J. Stojkovic, C. Zhang, Í. Goiri, J. Torrellas, and E. Choukse 
+
+ Dynamollm: designing llm inference clusters for performance and energy efficiency .
+
+ In 2025 IEEE International Symposium on High Performance Computer Architecture (HPCA) ,
+
+ pp. 1348–1362 .
+
+ Cited by: §6.1 ,
+ §8 .
+
+ Strati et al. (2024) 
+ F. Strati, S. Mcallister, A. Phanishayee, J. Tarnawski, and A. Klimovic 
+
+ D \ \backslash ’ej \ \backslash avu: kv-cache streaming for fast, fault-tolerant generative llm serving .
+
+ arXiv preprint arXiv:2403.01876 .
+
+ Cited by: §1 ,
+ §1 ,
+ §2.1 ,
+ §2.3 .
+
+ Susanto et al. (2016) 
+ H. Susanto, H. Jin, and K. Chen 
+
+ Stream: decentralized opportunistic inter-coflow scheduling for datacenter networks .
+
+ In 2016 IEEE 24th International Conference on Network Protocols (ICNP) ,
+
+ pp. 1–10 .
+
+ Cited by: §8 .
+
+ Talebirad and Nadiri (2023) 
+ Y. Talebirad and A. Nadiri 
+
+ Multi-agent collaboration: harnessing the power of intelligent llm agents .
+
+ arXiv preprint arXiv:2306.03314 .
+
+ Cited by: §1 .
+
+ TL-System (2024) 
+ TL-System 
+
+ FlowSim .
+
+ GitHub .
+
+ Note: https://github.com/TL-System/FlowSim Accessed: 2024-05-20 
+
+ Cited by: §6.1 .
+
+ Vamanan et al. (2012) 
+ B. Vamanan, J. Hasan, and T. Vijaykumar 
+
+ Deadline-aware datacenter tcp (d2tcp) .
+
+ ACM SIGCOMM Computer Communication Review 42 ( 4 ), pp. 115–126 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Vijaya Kumar et al. (2025) 
+ A. Vijaya Kumar, G. Antichi, and R. Singh 
+
+ Aqua: network-accelerated memory offloading for llms in scale-up gpu domains .
+
+ In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 ,
+
+ pp. 48–62 .
+
+ Cited by: §2.1 .
+
+ vLLM Team (2025) 
+ vLLM Team 
+
+ Prefill/decode disaggregation in vLLM .
+
+ Note: https://docs.vllm.ai/en/stable/features/disagg_prefill.html Accessed: 2026-02-06 
+
+ Cited by: footnote 1 .
+
+ Wan et al. (2025) 
+ X. Wan, X. Yang, K. Xu, X. Liao, Y. Jin, Y. Sun, Z. Ren, H. Tian, and K. Chen 
+
+ Coflow scheduling for llm training .
+
+ In Proceedings of the ACM SIGCOMM 2025 Conference ,
+
+ pp. 1232–1234 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Wang et al. (2024) 
+ Z. Wang, S. Li, Y. Zhou, X. Li, R. Gu, N. Cam-Tu, C. Tian, and S. Zhong 
+
+ Revisiting slo and goodput metrics in llm serving .
+
+ arXiv preprint arXiv:2410.14257 .
+
+ Cited by: §1 .
+
+ Wilson et al. (2011) 
+ C. Wilson, H. Ballani, T. Karagiannis, and A. Rowtron 
+
+ Better never than late: meeting deadlines in datacenter networks .
+
+ ACM SIGCOMM Computer Communication Review 41 ( 4 ), pp. 50–61 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Wu et al. (2024) 
+ B. Wu, S. Liu, Y. Zhong, P. Sun, X. Liu, and X. Jin 
+
+ Loongserve: efficiently serving long-context large language models with elastic sequence parallelism .
+
+ In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles ,
+
+ pp. 640–654 .
+
+ Cited by: §2.1 .
+
+ Wu et al. (2026) 
+ Y. Wu, S. Chen, Y. Zhong, R. Huang, Y. Tan, W. Zhang, L. Zhang, S. Zhou, Y. Liu, S. Zhou, et al. 
+
+ DualPath: breaking the storage bandwidth bottleneck in agentic llm inference .
+
+ arXiv preprint arXiv:2602.21548 .
+
+ Cited by: §8 .
+
+ Xu et al. (2025) 
+ G. Xu, Z. Le, Y. Chen, Z. Lin, Z. Jin, Y. Miao, and C. Li 
+
+ { \{ autoccl } \} : Automated collective communication tuning for accelerating distributed and parallel { \{ dnn } \} training .
+
+ In 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) ,
+
+ pp. 667–683 .
+
+ Cited by: §1 ,
+ §2.3 .
+
+ Yang et al. (2024) 
+ A. Yang, J. Yang, A. Ibrahim, X. Xie, B. Tang, G. Sizov, J. Reizenstein, J. Park, and J. Huang 
+
+ Context parallelism for scalable million-token inference .
+
+ arXiv preprint arXiv:2411.01783 .
+
+ Cited by: §2.1 ,
+ §2.2 .
+
+ Yao et al. (2025) 
+ J. Yao, H. Li, Y. Liu, S. Ray, Y. Cheng, Q. Zhang, K. Du, S. Lu, and J. Jiang 
+
+ CacheBlend: fast large language model serving for rag with cached knowledge fusion .
+
+ In Proceedings of the Twentieth European Conference on Computer Systems ,
+
+ pp. 94–109 .
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Yoon et al. (2025) 
+ D. Yoon, Y. Min, H. Kim, S. H. Noh, and J. Kim 
+
+ TraCT: disaggregated llm serving with cxl shared memory kv cache at rack-scale .
+
+ arXiv preprint arXiv:2512.18194 .
+
+ Cited by: §2.2 .
+
+ Yu et al. (2024) 
+ Y. Yu, Z. Yao, H. Li, Z. Deng, Y. Jiang, Y. Cao, Z. Chen, J. Suchow, Z. Cui, R. Liu, et al. 
+
+ Fincon: a synthesized llm multi-agent system with conceptual verbal reinforcement for enhanced financial decision making .
+
+ Advances in Neural Information Processing Systems 37 , pp. 137010–137045 .
+
+ Cited by: §1 .
+
+ Zhang et al. (2015) 
+ H. Zhang, K. Chen, W. Bai, D. Han, C. Tian, H. Wang, H. Guan, and M. Zhang 
+
+ Guaranteeing deadlines for inter-datacenter transfers .
+
+ In Proceedings of the Tenth European Conference on Computer Systems ,
+
+ pp. 1–14 .
+
+ Cited by: §8 .
+
+ Zhang et al. (2016) 
+ H. Zhang, L. Chen, B. Yi, K. Chen, M. Chowdhury, and Y. Geng 
+
+ CODA: toward automatically identifying and scheduling coflows in the dark .
+
+ In Proceedings of the 2016 ACM SIGCOMM Conference ,
+
+ pp. 160–173 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Zhang et al. (2025a) 
+ S. Zhang, N. Zheng, H. Lin, Z. Jiang, W. Bao, C. Jiang, Q. Hou, W. Cui, S. Zheng, L. Chang, et al. 
+
+ Comet: fine-grained computation-communication overlapping for mixture-of-experts .
+
+ arXiv preprint arXiv:2502.19811 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §2.2 ,
+ §2.3 ,
+ §8 .
+
+ Zhang et al. (2025b) 
+ W. Zhang, Z. Wu, Y. Mu, B. Liu, M. Lee, and F. Lai 
+
+ Tempo: application-aware llm serving with mixed slo requirements .
+
+ In arXiv preprint arXiv:2504.20068 ,
+
+ Cited by: §1 ,
+ §8 .
+
+ Zhao et al. (2015) 
+ Y. Zhao, K. Chen, W. Bai, M. Yu, C. Tian, Y. Geng, Y. Zhang, D. Li, and S. Wang 
+
+ Rapier: integrating routing and scheduling for coflow-aware data center networks .
+
+ In 2015 IEEE Conference on Computer Communications (INFOCOM) ,
+
+ pp. 424–432 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Zheng et al. (2023) 
+ L. Zheng, W. Chiang, Y. Sheng, S. Zhuang, Z. Wu, Y. Zhuang, Z. Lin, Z. Li, D. Li, E. Xing, et al. 
+
+ Judging llm-as-a-judge with mt-bench and chatbot arena .
+
+ Advances in neural information processing systems 36 , pp. 46595–46623 .
+
+ Cited by: §1 .
+
+ Zheng et al. (2022) 
+ L. Zheng, Z. Li, H. Zhang, Y. Zhuang, Z. Chen, Y. Huang, Y. Wang, Y. Xu, D. Zhuo, E. P. Xing, et al. 
+
+ Alpa: automating inter-and { \{ intra-operator } \} parallelism for distributed deep learning .
+
+ In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) ,
+
+ pp. 559–578 .
+
+ Cited by: §2.1 .
+
+ Zheng et al. (2025a) 
+ S. Zheng, W. Bao, Q. Hou, X. Zheng, J. Fang, C. Huang, T. Li, H. Duanmu, R. Chen, R. Xu, et al. 
+
+ Triton-distributed: programming overlapping kernels on distributed ai systems with the triton compiler .
+
+ arXiv preprint arXiv:2504.19442 .
+
+ Cited by: §2.3 ,
+ §8 .
+
+ Zheng et al. (2025b) 
+ S. Zheng, J. Fang, X. Zheng, Q. Hou, W. Bao, N. Zheng, Z. Jiang, D. Wang, J. Ye, H. Lin, et al. 
+
+ Tilelink: generating efficient compute-communication overlapping kernels using tile-centric primitives .
+
+ arXiv preprint arXiv:2503.20313 .
+
+ Cited by: §2.3 .
+
+ Zhong and Wang (2024) 
+ L. Zhong and Z. Wang 
+
+ Can llm replace stack overflow? a study on robustness and reliability of large language model code generation .
+
+ In Proceedings of the AAAI conference on artificial intelligence ,
+
+ Vol. 38 , pp. 21841–21849 .
+
+ Cited by: §1 .
+
+ Zhong et al. (2024) 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang 
+
+ { \{ distserve } \} : Disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ pp. 193–210 .
+
+ Cited by: Appendix B ,
+ §1 ,
+ §2.1 ,
+ §7 ,
+ §8 .
+
+ Zhu et al. (2015) 
+ Y. Zhu, H. Eran, D. Firestone, C. Guo, M. Lipshteyn, Y. Liron, J. Padhye, S. Raindel, M. H. Yahia, and M. Zhang 
+
+ Congestion control for large-scale rdma deployments .
+
+ ACM SIGCOMM Computer Communication Review 45 ( 4 ), pp. 523–536 .
+
+ Cited by: §1 ,
+ §8 .
+
+ Zuo et al. (2025) 
+ P. Zuo, H. Lin, J. Deng, N. Zou, X. Yang, Y. Diao, W. Gao, K. Xu, Z. Chen, S. Lu, et al. 
+
+ Serving large language models on huawei cloudmatrix384 .
+
+ arXiv preprint arXiv:2506.12708 .
+
+ Cited by: §7 .
+
+ Appendix A Proof for Theorem 1 
+
+ In this section, we provide the formal proof for the optimality of the Smallest-RLI-First policy stated in Theorem 1. 
+
+ A.1. Problem Setup and Definitions 
+
+ We model the prefill process as a sequence of alternating communication and computation stages across layers ℓ = 1 , … , N \ell=1,\dots,N .Let L curr ​ ( t ) L_{\text{curr}}(t) denote the layer index being computed or waiting to be computed at time t t .For any communication flow f f , let L target ​ ( f ) L_{\text{target}}(f) be the layer where the data is consumed. The Relative Layer Index is defined as RLI ​ ( f , t ) = L target ​ ( f ) − L curr ​ ( t ) \text{RLI}(f,t)=L_{\text{target}}(f)-L_{\text{curr}}(t) .We adopt the assumptions stated in the theorem: 
+
+ (i) 
+
+ Ideal Computation: Computation for layer ℓ \ell starts immediately once its dependencies (flows with L target = ℓ L_{\text{target}}=\ell ) are met and runs for duration C ℓ C_{\ell} without interruption. 
+
+ (ii) 
+
+ Fluid Model: Communication flows are infinitely divisible, allowing preemption without overhead. 
+
+ (iii) 
+
+ Dedicated Bandwidth: We focus on a single link constraint (e.g., ingress or egress bottleneck). 
+
+ A.2. Proof of Optimality 
+
+ Objective. Minimizing the prefill makespan is equivalent to minimizing the completion time of the final computation layer. Since the total volume of computation is fixed, this is equivalent to minimizing the total duration of Execution Stalls (intervals where the GPU is idle waiting for data). Interval Classification. We partition the timeline [ 0 , T ] [0,T] into two types of intervals based on the state of the system: 
+
+ • 
+
+ Stall Intervals ( ℐ stall \mathcal{I}_{\text{stall}} ): Time periods where the GPU is idle because a flow f f with RLI ​ ( f , t ) = 0 \text{RLI}(f,t)=0 (i.e., targeting the current layer) is pending. 
+
+ • 
+
+ Overlap Intervals ( ℐ overlap \mathcal{I}_{\text{overlap}} ): Time periods where the GPU is actively performing computation. During these intervals, the link is available to transmit flows with RLI ​ ( f , t ) > 0 \text{RLI}(f,t)>0 (i.e., future layers). 
+
+ The Exchange Argument. Suppose there exists an optimal schedule 𝒮 ∗ \mathcal{S}^{*} that minimizes the makespan but violates the Smallest-RLI-First rule. This implies that at some time t ∈ ℐ stall t\in\mathcal{I}_{\text{stall}} , the schedule assigns bandwidth to a flow y y with a larger RLI while a flow x x with a smaller RLI is pending.Specifically, since t t is a stall interval, there must be some pending flow x x with RLI ​ ( x ) = 0 \text{RLI}(x)=0 (blocking the current layer). The violation implies 𝒮 ∗ \mathcal{S}^{*} serves flow y y where RLI ​ ( y ) > RLI ​ ( x ) = 0 \text{RLI}(y)>\text{RLI}(x)=0 during [ t , t + δ ] [t,t+\delta] .We construct a new schedule 𝒮 ′ \mathcal{S}^{\prime} by applying an exchange: 
+
+ (1) 
+
+ Swap: In 𝒮 ′ \mathcal{S}^{\prime} , we assign the interval [ t , t + δ ] [t,t+\delta] to flow x x instead of y y . 
+
+ (2) 
+
+ Effect on Stall: By serving x x earlier, the dependency for the current layer L curr L_{\text{curr}} is satisfied δ \delta time units earlier (assuming x x was the bottleneck). This strictly reduces the duration of the current ℐ stall \mathcal{I}_{\text{stall}} and advances the start of the next computation phase (and thus the next ℐ overlap \mathcal{I}_{\text{overlap}} ). 
+
+ (3) 
+
+ Feasibility of y y : Flow y y is displaced from t t . However, since RLI ​ ( y ) > 0 \text{RLI}(y)>0 , flow y y is not required until a future layer. The completion of x x triggers the start of computation C L curr C_{L_{\text{curr}}} , creating a new Overlap Interval. We can safely move the transmission of y y into this newly created Overlap Interval. Since y y ’s deadline is strictly later than x x ’s, this deferral does not violate any dependencies. 
+
+ Conclusion. The constructed schedule 𝒮 ′ \mathcal{S}^{\prime} reduces the cumulative stall duration by transforming a portion of ℐ stall \mathcal{I}_{\text{stall}} into ℐ overlap \mathcal{I}_{\text{overlap}} . Repeating this exchange argument for all violations proves that the schedule strictly prioritizing the smallest RLI (serving RLI = 0 \text{RLI}=0 flows immediately to minimize Stalls, and using Overlap intervals for RLI > 0 \text{RLI}>0 flows) yields the minimum makespan. ∎ 
+
+ Appendix B Full algorithm for Robust inter-request scheduling 
+
+ Algorithm 1 Inter-request Scheduling 
+
+ 1: 
+
+ procedure InterScheduling ( ℬ \mathcal{B} , M M , B B )
+
+ 2: 
+
+ ⊳ \triangleright input ℬ , M \mathcal{B},M : Batches and Traffic Matrices 
+
+ 3: 
+
+ ⊳ \triangleright input B B : Global total drop budget 
+
+ 4: 
+
+ ⊳ \triangleright output σ , ℋ \sigma,\mathcal{H} 
+
+ 5: 
+
+    S ⁡ ( ⋅ ) ← 0 S(\cdot)\leftarrow 0 ⊳ \triangleright Interference from high-priority batches
+
+ 6: 
+
+    𝒫 ← ∅ \mathcal{P}\leftarrow\emptyset ;   ℋ ← ∅ \mathcal{H}\leftarrow\emptyset 
+
+ 7: 
+
+    ⊳ \triangleright Step 1: Sorting via Effective Deadline 
+
+ 8: 
+
+    σ ← SortByRED ​ ( ℬ ) \sigma\leftarrow\textsc{SortByRED}(\mathcal{B}) 
+
+ 9: 
+
+   Precompute load vectors L L from M M 
+
+ 10: 
+
+    for k ← 1 k\leftarrow 1 to | σ | |\sigma| do 
+
+ 11: 
+
+    Let i ← σ ⁡ [ k ] i\leftarrow\sigma[k] 
+
+ 12: 
+
+     𝒫 ← 𝒫 ∪ ℬ i \mathcal{P}\leftarrow\mathcal{P}\cup\mathcal{B}_{i} ⊳ \triangleright Add to candidate pool
+
+ 13: 
+
+     F ^ i ← EstFinishTime ​ ( S , L i ) \widehat{F}_{i}\leftarrow\textsc{EstFinishTime}(S,L_{i}) 
+
+ 14: 
+
+    ⊳ \triangleright Step 2: Feasibility Check 
+
+ 15: 
+
+     while F ^ i > D i L ​ o \widehat{F}_{i}>D^{Lo}_{i} and | ℋ | < B |\mathcal{H}|<B and 𝒫 ≠ ∅ \mathcal{P}\neq\emptyset do 
+
+ 16: 
+
+        u ⋆ ← arg ⁡ max u ⁡ ( S ⁡ ( u ) + L i ​ ( u ) ) u^{\star}\leftarrow\arg\max_{u}(S(u)+L_{i}(u)) ⊳ \triangleright Bottleneck
+
+ 17: 
+
+    ⊳ \triangleright Step 3: selective pruning 
+
+ 18: 
+
+        r ⋆ ← arg ⁡ max r ∈ 𝒫 ​ Load of  ​ r ​  on  ​ u ⋆ r^{\star}\leftarrow\arg\max_{r\in\mathcal{P}}\text{Load of }r\text{ on }u^{\star} 
+
+ 19: 
+
+        ℋ ← ℋ ∪ { r ⋆ } \mathcal{H}\leftarrow\mathcal{H}\cup\{r^{\star}\} ;   𝒫 ← 𝒫 ∖ { r ⋆ } \mathcal{P}\leftarrow\mathcal{P}\setminus\{r^{\star}\} 
+
+ 20: 
+
+        if r ⋆ ∈ ℬ i r^{\star}\in\mathcal{B}_{i} then ⊳ \triangleright Drop request in current batch
+
+ 21: 
+
+         L i ​ ( ⋅ ) ← L i ​ ( ⋅ ) − ℓ r ⋆ ​ ( ⋅ ) L_{i}(\cdot)\leftarrow L_{i}(\cdot)-\ell_{r^{\star}}(\cdot) 
+
+ 22: 
+
+        else ⊳ \triangleright Drop request in higher priority
+
+ 23: 
+
+         S ⁡ ( ⋅ ) ← S ⁡ ( ⋅ ) − ℓ r ⋆ ​ ( ⋅ ) S(\cdot)\leftarrow S(\cdot)-\ell_{r^{\star}}(\cdot) 
+
+ 24: 
+
+        F ^ i ← EstFinishTime ​ ( S , L i ) \widehat{F}_{i}\leftarrow\textsc{EstFinishTime}(S,L_{i}) 
+
+ 25: 
+
+     S ⁡ ( ⋅ ) ← S ⁡ ( ⋅ ) + L i ​ ( ⋅ ) S(\cdot)\leftarrow S(\cdot)+L_{i}(\cdot) ⊳ \triangleright Update
+
+ 26: 
+
+    return σ , ℋ \sigma,\mathcal{H} 
+
+ The overall workflow of the scheduling algorithm is illustrated in Algorithm 1 . In this section, we elaborate on the scheduling logic, providing the comprehensive mathematical formulation of priority assignment and further details on the practical implementation of latency estimation and enforcement. 
+
+ This section details the robust scheduling algorithm designed to handle imprecise laxity and overload. The workflow operates in three phases triggered by batch arrival and departure events. 
+
+ Step 1: Sorting via Robust Effective Deadline. 
+To mitigate the "Piggyback Effect," the scheduler employs the Robust Effective Deadline ( R ​ E ​ D RED ) metric defined in § 4.4.2 . The prioritization process executes in two stages. First, for each batch ℬ \mathcal{B} with n n requests, the system sorts the requests internally by their deadlines d 1 ≤ d 2 ≤ ⋯ ≤ d n d_{1}\leq d_{2}\leq\dots\leq d_{n} . It then performs a linear scan to identify the partition point k ∗ = arg ​ max 1 ≤ k < n ⁡ ( d k + 1 − d k ) k^{*}=\operatorname*{arg\,max}_{1\leq k<n}(d_{k+1}-d_{k}) that yields the maximal inter-request gap. This calculation dynamically separates the outliers (Tight Set) from the majority (Loose Set). Based on this partition, the scheduler computes the R ​ E ​ D RED score using the derived sub-batch deadlines and the outlier ratio f f . Finally, all active batches are organized into a global priority queue sorted by ascending R ​ E ​ D RED values. This ensures that the dispatch order effectively filters out transient urgency spikes from isolated outliers while preserving the priority of genuinely urgent workloads. 
+
+ Step 2: Worst-case Feasibility Check. Following prioritization, we perform an admission control check to prevent the "Black Hole Effect." We estimate the completion time T ^ i \widehat{T}_{i} by strictly accumulating delays under a worst-case assumption (no overlap between batches). Computation latency is treated as deterministic, derived from the static computation graph of the Transformer model and offline profiling on the target hardware ( Agrawal et al., 2024 ; Zhong et al., 2024 ; Qin et al., 2024 ) . Communication latency is estimated by analyzing the batch’s traffic matrix to identify the bottleneck port p ∗ p^{*} in the network fabric; the delay is calculated as the cumulative load on p ∗ p^{*} divided by its bandwidth. For dynamic architectures like Mixture-of-Experts (MoE) where token routing is runtime-dependent, we rely on historical routing statistics. Prior studies ( Li et al., 2025a ) indicate that despite high noise in individual traffic matrices, the end-to-end latency prediction error typically remains within 20%. This level of accuracy is sufficient for our scheduling granularity, allowing us to reliably enforce feasibility against the target deadline ( D min L ​ o D^{Lo}_{\min} ). 
+
+ Step 3: Selective Pruning and Soft Enforcement. If a batch fails the feasibility check (i.e., T ^ i > D min L ​ o \widehat{T}_{i}>D^{Lo}_{\min} ), the system triggers a surgical pruning mechanism. We identify the specific requests within the batch that contribute the maximum load to the bottleneck port p ∗ p^{*} and iteratively remove them from the feasible set until the predicted latency meets the deadline. Crucially, this pruning employs a soft enforcement strategy. Instead of immediately discarding the pruned requests, the scheduler demotes them to a "Scavenger" priority class within a dual-queue system. The Main Queue is serviced with strict priority, while the Scavenger Queue is processed opportunistically only when the network is detected to be idle or when actual runtime latencies are lower than the pessimistic estimates. This hybrid approach ensures system stability under worst-case predictions while maximizing throughput by reclaiming resources when congestion does not materialize. 
+
+ Summary. It is important to emphasize the design hierarchy within this workflow. The RED metric acts as the primary tie-breaker, governing the global dispatch order to maximize service-level objective (SLO) compliance under normal to moderate load. The feasibility check and selective pruning operate strictly as complementary safeguards, activated only during pathological overload to prevent resource exhaustion. This separation of concerns ensures that the scheduler remains stable and predictable—relying on robust prioritization for the vast majority of decisions—while retaining the capability to degrade gracefully only when extreme contention makes it unavoidable.

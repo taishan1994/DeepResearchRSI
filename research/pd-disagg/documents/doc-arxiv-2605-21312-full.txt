@@ -1,0 +1,2391 @@
+Frontier: Towards Comprehensive and Accurate 
+ LLM Inference Simulation 
+
+ Yicheng Feng 1 {}^{\text{1}}  Xin Tan 1 {}^{\text{1}}  Yangtao Deng 1 {}^{\text{1}}  Yimin Jiang 2 {}^{\text{2}}  Yibo Zhu 3 {}^{\text{3}}  Hong Xu 1 {}^{\text{1}} 
+
+ 1 {}^{\text{1}} The Chinese University of Hong Kong    2 {}^{\text{2}} Anuttacon    3 {}^{\text{3}} StepFun 
+
+ Abstract. 
+
+ Modern LLM serving is no longer homogeneous or monolithic. Production systems now combine disaggregated execution, complex parallelism, runtime optimizations, and stateful workloads such as reasoning, agents, and RL rollouts. Simulation is attractive for exploring this growing design space, yet existing simulators lack the architectural completeness and decision-grade fidelity it demands. Their monolithic-replica abstractions are ill-suited to disaggregated serving, while average-case analytical proxies can distort SLA predictions and even reverse optimization conclusions. 
+
+ We present Frontier, a discrete-event simulator for modern LLM inference serving. Frontier features a disaggregated abstraction. It captures the structure and dynamics of modern serving systems by modeling co-location, Prefill-Decode Disaggregation (PDD), and Attention-FFN Disaggregation (AFD) with role-specific cluster workers, incorporating key runtime optimizations (e.g., CUDA Graphs, speculative decoding) within the scheduler-batch-engine loop, and supporting stateful requests for emerging workloads. It further provides accurate and generalizable predictions of computation, communication, and memory costs across diverse serving scenarios with complex workload compositions. On 16-H800 GPU testbed, Frontier achieves an average throughput error below 4%. Compared with state-of-the-art simulators, it reduces end-to-end latency error from 44.9% to 6.4% under co-location and from 51.7% to 2.6% under disaggregation. It scales to over 1K GPUs on commodity CPUs and enables new use cases such as SLA-dependent Pareto frontier exploration, heterogeneous disaggregated allocation, agentic reasoning scheduling validation, and RL post-training reconfiguration. 
+
+ 1. Introduction 
+
+ Inference has become a first-order production cost for LLM service providers amid the explosive growth of token use from not just chatbots, but also coding and computer use agents, which is particularly evident since 2026  ( Agrawal et al., 2026 ; Xu et al., 2026 ) .
+This pressure has driven the evolution of serving systems in multiple fronts: The serving architecture has moved beyond the traditional co-located paradigm, where both the prefill and decode phases execute within a single monolithic engine, to the disaggregated architectures.
+Most notably, Prefill-Decode Disaggregation (PDD) decouples the compute-bound prefill from the memory-bound decode and places them on separate GPU pools
+connected via KV-cache transfers  ( Zhong et al., 2024 ; , 2025 ) .
+Pushing this further, Attention-FFN Disaggregation (AFD) separates the attention
+and feed-forward computations during the decode phase, routing activations between distinct hardware pools  ( StepFun et al., 2025 ; Zhu et al., 2025 ) .
+Alongside these architectural shifts, deployments are heavily augmented with complex parallelism strategies (tensor (TP)  ( Shoeybi et al., 2019 ) , pipeline (PP)  ( Narayanan et al., 2019 ) , data (DP), and expert (EP)  ( Lepikhin et al., 2020 ) parallelism) and diverse runtime optimizations —continuous batching  ( Agrawal et al., 2024b ) , PagedAttention  ( Kwon et al., 2023 ) , CUDA Graphs  ( , 2025 ) , prefix caching  ( Zheng et al., 2024 ) , chunked prefill  ( Agrawal et al., 2023 ) , and speculative decoding  ( Leviathan et al., 2023 ) . 
+
+ The serving workloads are also becoming more diverse at the same time.
+Sparse MoE  ( Li et al., 2023 ; Singh et al., 2023 ; Liu et al., 2024 ) models are widely used that activates a different subset of experts for each token at each layer.
+Reasoning models produce long hidden reasoning chains before yielding the final answer  ( Guo et al., 2025 ) .
+Agentic systems introduce complex tool calls and multi-turn session states  ( Yao et al., 2022 ; Wang et al., 2024 ) .
+Furthermore, RL rollouts for post-training create workload bursts, long decode tails, and shifting phase mixes  ( Tan et al., 2026 ; Zhang et al., 2026 ) .
+Consequently, the interplay of complex workloads, advanced runtime optimizations, and disaggregated serving architectures has made production deployments exceedingly difficult to model, reason, and optimize. 
+
+ As a result, simulation as an essential performance modeling approach has received increasing attention  ( Agrawal et al., 2024a ; Agrawal et al., 2026 ; Xu et al., 2026 ; Cho et al., 2026 ) .
+It provides a cheap and fast way to characterize a serving system without the need for expensive real deployment (at scale)  ( Agrawal et al., 2024a ; Agrawal et al., 2026 ; Xu et al., 2026 ) .
+Existing simulators, however, fall short in two dimensions that we believe make them fundamentally ineffective as a performance modeling tool in many practically crucial scenarios. 
+
+ First, architectural completeness. 
+Most simulators (e.g., Vidur  ( Agrawal et al., 2024a ) , APEX  ( Lin et al., 2024 ) ) lack support for disaggregated serving and many of the runtime optimizations discussed above, and these capabilities are not easy to retrofit.
+The root cause is architectural: they assume a set of homogeneous, monolithic replicas executing uniform operations.
+That abstraction is fundamentally mismatched to disaggregated systems, where different GPU pools execute distinct roles in parallel and interact through explicit data transfer and synchronization.
+Likewise, runtime optimizations are entangled with scheduler-visible state and therefore must be modeled as first-class behavior rather than analytical patches.
+Approaches such as AIConfigurator  ( Xu et al., 2026 ) can therefore incur large errors and even predict the wrong optimization trend ( section   2.2 ).
+More broadly, because serving workloads are stateful and phase-changing  ( Yao et al., 2022 ; Wang et al., 2024 ) , treating inference as an open-loop sequence of regular operator executions is architecturally incomplete. 
+
+ Second, decision-grade fidelity. 
+Existing simulators usually deliver coarse average-case accuracy, but production use demands predictions that remain faithful under realistic serving dynamics  ( Agrawal et al., 2024a ) .
+As discussed, LLM serving workloads are dynamic and stateful: continuous batching, variable-length requests, KV-cache growth, prefill/decode asymmetry, scheduling interference, and memory pressure jointly shape latency, memory usage, and queue evolution.
+In this closed loop, even modest per-operator or per-batch errors can become decision-changing: they can shift time-to-first-token (TTFT)/time-per-output-token (TPOT) or memory estimates across service level agreement (SLA) boundaries, distort the Pareto frontier, and lead to the wrong configuration choice ( section   2.2 ).
+The core problem is that existing inference simulators smooth these dynamics into average-case models, especially for operator runtime and KV-cache budgeting: token-count proxies can cause 32.6 % 32.6\% errors on FlashAttention and 21.0 % 21.0\% on MoE GroupedGEMM, while “total minus weights” memory models overestimate KV-cache budget by up to 27.2 % 27.2\% and throughput by up to 32.4 % 32.4\% ( section   2.2 ). 
+
+ We build Frontier, a discrete-event simulator that addresses both limitations through two complementary design principles:
+(1) for architectural completeness , Frontier abandons the monolithic-replica abstraction.
+A control plane compiles a serving specification into role-specific cluster workers that explicitly model the domain layout and synchronization dependencies of co-located, PDD, and AFD architectures.
+Runtime optimizations are captured as feature-specific adapters inside the scheduler–batch-engine loop, directly updating scheduler-visible state rather than applied as analytical afterthoughts.
+To represent increasingly diverse workloads, Frontier introduces a stateful request abstraction where each request can carry thinking rounds, tool-call delays, per-round token plans, and phase transitions, naturally modeling reasoning, agentic, and RL-rollout workloads.
+(2) for decision-grade fidelity , Frontier introduces a fidelity plane that replaces coarse average-case proxies with calibrated, hardware-aware predictors.
+Operator runtimes, collective costs, transfer delays, and KV-cache budgets are each resolved through profiled models grounded in actual CUDA kernel behavior and memory footprints, closing the error gaps that make average-case approximations decision-changing. 
+
+ We implemented Frontier with roughly 70K LoC in Python.
+On a 16-GPU H800 testbed, we evaluate Frontier across dense and MoE models, serving architectures, and varied workloads.
+Frontier achieves average throughput errors below 4% in both co-located and disaggregated settings with modern runtime optimizations enabled.
+On the SharedGPT trace, Frontier reduces the average end-to-end (E2E) error from 44.9% to 6.4% under co-location, and from 51.7% to 2.6% under PDD/AFD, compared with state-of-the-art simulators. 
+
+ Beyond fidelity, Frontier scales to large-scale clusters (e.g., 1K+ GPUs) even on commodity CPU machines, making it practical to study deployment questions that prior simulators cannot reproduce as configured.
+Under traditional non-reasoning batch serving, Frontier enables SLA-aware Pareto-frontier analysis across co-location, PDD, and AFD, and evaluates heterogeneous PDD/AFD allocations by separating nominal cost reduction from SLA-safe efficiency.
+Under emerging stateful workloads, Frontier supports mechanism studies for multi-round agentic reasoning schedulers and quantifies rollout-tail reconfiguration opportunities for RL post-training ( section   6 ). 
+
+ 2. Background and Motivation 
+
+ | 
+ Frontier | 
+ AC | 
+ LS | 
+ VD | 
+ AP | 
+
+ Architecture | 
+
+ Co-located Serving | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+
+ PDD Serving | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+ ✗ | 
+ ✗ | 
+
+ AFD Serving | 
+ ✓ | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+
+ Parallelism | 
+
+ PP / TP / DP | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+
+ MoE / EP | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+ ✗ | 
+ – | 
+
+ DP Attention | 
+ ✓ | 
+ – | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+
+ Runtime Optimizations | 
+
+ Speculative Decoding / MTP | 
+ ✓ | 
+ – | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+
+ CUDA Graph | 
+ ✓ | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+
+ Prefix Caching | 
+ ✓ | 
+ – | 
+ ✓ | 
+ ✗ | 
+ ✗ | 
+
+ Quantization | 
+ ✓ | 
+ ✓ | 
+ ✗ | 
+ ✗ | 
+ ✓ | 
+
+ Chunked Prefill | 
+ ✓ | 
+ – | 
+ ✗ | 
+ ✓ | 
+ ✗ | 
+
+ Hierarchical Caching | 
+ ✓ | 
+ ✗ | 
+ ✓ | 
+ ✗ | 
+ ✗ | 
+
+ Simulation Features | 
+
+ Op/Mem. Fidelity | 
+ ✓ | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Ex-situ Simulation | 
+ ✓ | 
+ ✓ | 
+ ✓ | 
+ ✗ | 
+ ✓ | 
+
+ Thinking/Reasoning Modeling | 
+ ✓ | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+ ✗ | 
+
+ Table 1. Comparison with representative simulators. AC: AIConfigurator  ( Xu et al., 2026 ) , LS: LLMServingSim2.0  ( Cho et al., 2026 ) , VD: Vidur  ( Agrawal et al., 2024a ) , AP: APEX  ( Lin et al., 2024 ) . ✓ : supported, ✗ : unsupported, –: partial/limited. 
+
+ 2.1. Why Inference Simulation Matters 
+
+ The LLM serving has pushed industry toward aggressive system–model–hardware co-design  ( StepFun et al., 2025 ; Guo et al., 2025 ) .
+The design space is exploding.
+For a 200B-parameter MoE model, plausible configurations
+easily reach 1k+ combinations  ( Xu et al., 2026 ) .
+On a 64-GPU H100 cluster at current cloud pricing,
+sweeping 100 configurations takes 12,800–25,600 GPU-hours and
+costs up to $180,000  ( Agrawal et al., 2026 ; Agrawal et al., 2024a ) .
+In practice, most teams abandon systematic tuning and fall back on
+conservative defaults, leaving 3 3 – 5 × 5\times throughput on the
+table  ( Xu et al., 2026 ; Miao et al., 2022 ; Zheng et al., 2022 ) . 
+
+ A well-built simulator provides value far beyond replacing expensive hardware sweeps.
+By making hardware–software interactions explicit and event-level state observable, it can support Pareto search under SLA constraints,
+policy prototyping and diagnosis, dynamic workload analysis, and pre-deployment validation of heterogeneous placement or disaggregation plans.
+In practice, simulators can help one team map the frontier, another debug an agentic scheduler or RL rollout policy,
+and a third check whether a disaggregated deployment still behaves as intended before rollout. 
+
+ 2.2. Challenges 
+
+ Table  1 summarizes the comparison between Frontier and existing simulators. 1 1 
+ 1 
+
+ In cases of discrepancy between the paper’s claims and the latest open-source repository as of April. 2026, we refer to the latter. 
+Building upon the analysis of existing simulators in section   1 , we identify two primary challenges that must be addressed to realize a practical simulation framework.
+Unless specified, experiments use vLLM v0.10.2 (V1 engine) on an 8 × \times A800 GPU server. 
+
+ A two-panel TPOT bar chart comparing vLLM CUDA Graph and vLLM eager across four workloads in co-location and PD disaggregation modes. Speedup percentages are annotated above the CUDA Graph bars. 
+ Figure 1 . Measured vLLM TPOT with and without CUDA Graph under different workloads (64 requests per workload, mean ISL/OSL, tested on 8 × \times A800-SXM GPUs). Left: co-location. Right: PDD. Percentages show reduction. A two-panel TPOT bar chart comparing vLLM CUDA Graph and vLLM eager across four workloads in co-location and PD disaggregation modes. Speedup percentages are annotated above the CUDA Graph bars. 
+
+ Mode | 
+ ISL/OSL | 
+ Padding | 
+ Inflation | 
+
+ Co-location | 
+ 2048/256 | 
+ 7K | 
+ 22.6% | 
+
+ 256/2048 | 
+ 100K | 
+ 38.7% | 
+
+ 512/512 | 
+ 29K | 
+ 45.8% | 
+
+ 1024/1024 | 
+ 28K | 
+ 22.6% | 
+
+ PDD | 
+ 2048/256 | 
+ 14K | 
+ 42.6% | 
+
+ 256/2048 | 
+ 111K | 
+ 42.5% | 
+
+ 512/512 | 
+ 37K | 
+ 57.2% | 
+
+ 1024/1024 | 
+ 52K | 
+ 40.0% | 
+
+ Table 2. CUDA Graph decode padding overhead.
+ Padding : wasted slots from batch alignment.
+ Inflation : extra vs. useful tokens. 
+
+ A two-panel TPOT bar chart comparing vLLM CUDA Graph and AIConfigurator across four workloads in co-location and PD disaggregation modes. Percentages above AIConfigurator bars show prediction error relative to vLLM CUDA Graph. 
+ Figure 2 . Existing simulators vs. vLLM CUDA Graph. Percentages represent error. A two-panel TPOT bar chart comparing vLLM CUDA Graph and AIConfigurator across four workloads in co-location and PD disaggregation modes. Percentages above AIConfigurator bars show prediction error relative to vLLM CUDA Graph. 
+
+ Challenge 1: How to model the complex runtime behaviors and control flows of advanced serving systems? 
+
+ Completeness first breaks at the serving-architecture level .
+Disaggregated serving architectures (PDD/AFD) can achieve up to a 7.4 × 7.4\times throughput improvement over traditional co-located serving  ( Zhong et al., 2024 ) .
+This leap is driven by a fundamental shift from monolithic execution to role-specific cluster decoupling  ( StepFun et al., 2025 ; Zhu et al., 2025 ) .
+These architectures change the event graph itself: requests traverse role-specific clusters, KV-cache or activation transfers become causal edges, and MoE EP introduces routing-dependent synchronization.
+Existing simulators, however, are typically built around a homogeneous-replica abstraction, where each replica owns the full model path, scheduler state, and local batch execution loop.
+While sufficient for co-located serving, this abstraction cannot express PDD/AFD by simply adding a latency term; it requires role-specific workers, cross-cluster dependencies, and separate parallel domains as first-class execution objects. 
+
+ Figure 3 . Qwen3-30B MoE MTP decode speedup ( verify_tokens = 4 \text{verify\_tokens}{=}4 ). Bars (left axis): vLLM vs. AIConfigurator. Dashed line: prediction error.
+Red × \times : sign-mismatch (measured speedup > 1 >1 , predicted slowdown < 1 <1 ).
+Ground-truth acceptance rates and fixed batch sizes are used to isolate other modeling errors. A two-panel bar chart with an overlaid error line comparing vLLM and AIConfigurator decode speedup across batch sizes 1, 2, 8, 16, 32 at target acceptance ratios 0.2 and 0.8 with verify_tokens=4. Sign-mismatch points are highlighted with red x markers. 
+
+ Figure 4 . Fidelity gaps caused by simplified modeling.
+Left: Relying on coarse proxies (total token count) fails to capture batch heterogeneity, yielding coarse-grained performance estimates.
+Right: Analytical KV-cache modeling overestimates effective memory budget, leading to a cascade of errors from admission control to over-optimistic throughput projection. A side-by-side figure. The left panel is a CDF showing prediction error for linear operators, GroupedGEMM, and attention. The right panel contains two compact bar charts comparing groundtruth and analytical memory budgets and normalized decode throughput for Llama-3.1-8B and Qwen3-30B MoE. Analytical budgeting overestimates memory budget and decode throughput. 
+
+ Completeness also breaks at the runtime-behavior level .
+Runtime optimizations are often treated as optional speedup knobs, but they change scheduler-visible state and batch execution semantics.
+For example, vLLM captures decode CUDA Graphs at fixed batch-size bins { 1 , 2 , 4 , 8 , 16 , 32 , 64 } \{1,2,4,8,16,32,64\} ; a pure-decode step between bins is replayed at the next larger bin, so 33 active requests execute as a 64-slot graph.
+As Figure  1 shows, CUDA Graph reduces decode TPOT by 32.3 % − 46.5 % 32.3\%\mathrm{-}46.5\% under co-location and 37.1 % − 59.7 % 37.1\%\mathrm{-}59.7\% under PDD, but its padding increases decode-token work by 22.6 % − 45.8 % 22.6\%\mathrm{-}45.8\% and 40.0 % − 57.2 % 40.0\%\mathrm{-}57.2\% , respectively (Table  2 ).
+This padding also changes runtime memory usage and KV-cache state for admission, chunking, and preemption.
+Ignoring CUDA Graph therefore yields an eager-style execution path and the workload-insensitive TPOT surface in Figure  2 .
+Analytical shortcuts fail similarly.
+For speculative decoding, even with vLLM’s per-step Qwen3-30B MoE multi-token prediction (MTP)  ( Liu et al., 2024 ) acceptance rates 2 2 
+ 2 
+
+ Since AIConfigurator lacks native support for Qwen’s MTP, we extend it by adapting its default MTP module to the Qwen MoE. , an analytical MTP model deviates by 27.2 % − 66.6 % 27.2\%\mathrm{-}66.6\% and predicts the opposite trend on 4 4 of 5 5 low-acceptance batches (Figure  3 ).
+Its scalar expectation formula flattens the non-linear speedup from event-driven variable commits, causing large cost overestimation under low acceptance rates. 
+
+ Figure 5 . Decision drift from fidelity gaps on Llama-3.1-8B over 16 H800 GPUs (co-location).
+The simulator-selected best configuration lies inside the frozen SLA region,
+but the corresponding vLLM ground-truth point moves outside the SLA because overly optimistic comp-op and KV-cache budget predictions underestimate request latency.
+Note that we maintain feature parity in this evaluation by disabling vLLM optimizations unsupported by APEX. A scatter plot of P95 TTFT and P95 TPOT. APEX candidates inside the frozen SLA region are shown as blue circles, the simulator-selected best point is shown as a star, and the vLLM ground-truth point is shown as a red triangle outside the SLA. A red arrow shows the drift from the simulator-selected point to the vLLM ground-truth point. 
+
+ Challenge 2: How to accurately model the computation and memory dynamics within a closed-loop serving system? 
+
+ LLM inference serving is a closed-loop system: execution cost shapes memory state, memory constrains admission, and admission governs queueing and future batch composition.
+Within this loop, modest per-event errors can accumulate into different operating regimes.
+We find that fidelity breaks at two levels—per-operator runtime prediction and engine-level memory accounting—both of which are necessary for decision-grade simulation. 
+
+ At the operator level, the key challenge is generalization: batch composition is determined online by the scheduler, making the execution space infeasible to profile exhaustively.
+Existing simulators therefore rely on predictors fitted from primary operator profiles  ( Agrawal et al., 2024a ; Xu et al., 2026 ; Cho et al., 2026 ; Lin et al., 2024 ) , using coarse proxy features such as total token count while ignoring per-request variance within a batch.
+As shown in Figure  4 (left), this leads to substantial errors under dynamic workloads; for example, Vidur’s token-count predictor has a mean error of 32.6 % 32.6\% for FlashAttention  ( Dao, 2024 ) ( 0.151 0.151  ms predicted vs. 0.224 0.224  ms measured), with similarly large errors for MoE GroupedGEMM due to data-dependent router load distributions.
+Such errors compound across layers and decode steps: even 0.1 0.1  ms per operator can add tens of milliseconds per request, exceeding the margins between competing serving configurations. 
+
+ At the engine level, memory fidelity determines how the scheduler admits, chunks, and preempts requests.
+The KV-cache budget is the residual GPU memory after allocating weights, activation buffers, CUDA Graph capture regions, and framework-internal overheads; approximating it as “total minus weights” shifts the scheduler’s operating point.
+In our scheduler-isolation replay (Figure  4 , right), the analytical budgeting used by most existing simulators overestimates the available KV-cache budget by 8.1 % 8.1\% for Llama-3.1-8B and 27.2 % 27.2\% for Qwen3-30B MoE.
+Since the scheduler uses this budget to bound concurrent decode slots, this initialization error inflates simulated decode throughput by 23.6 % 23.6\% and 32.4 % 32.4\% , respectively—enough to alter capacity planning decisions. 
+
+ Overall, per-component errors propagate through the closed-loop dynamics into decision-grade failures.
+As Figure  5 shows, optimistic operator-runtime and KV-cache budget predictions can lead the simulator to select a “best” configuration that violates the SLA on the real system—precisely the failure mode simulation is meant to prevent. 
+
+ 3. Frontier Design 
+
+ Frontier is a discrete-event simulator designed for LLM serving. It features a disaggregated abstraction that separates hardware-aware prediction from the control and execution planes.
+This decomposition is grounded in a key observation: production serving
+engines (e.g., vLLM  ( Kwon et al., 2023 ) ,
+SGLang  ( Zheng et al., 2024 ) ) share a common control-flow
+skeleton—admission, batching, execution, completion—yet differ mainly
+in the scheduling policies they apply and the operator backends they invoke.
+Frontier exploits this shared structure: it can integrate framework-specific
+scheduling policies and operator backends without modifying the simulation core. 
+
+ 3.1. Simulator Overview 
+
+ System architecture. 
+Figure  6 shows the system architecture. Frontier is organized into
+four modules.
+➀  Workload and Config. It defines the serving scenario—model,
+serving architecture, parallelism, runtime options, and request workloads.
+➁  Fidelity Plan. It provides calibrated per-operator,
+communication, and memory-capacity (KV-cache budget) predictions that the execution plane 
+queries on demand.
+➂  Control Plane. It provides disaggregation primitives and dependency-based control flow. It translates these specifications into a functional simulation and coordinates its execution.
+➃  Execution Plane. It enables feature-specific execution flows, advancing requests through scheduling, batching, runtime adaptation, and cross-cluster transfers. 
+
+ System workflow. 
+The workflow involves four steps. 
+
+ Configuration and compilation. 
+The user specifies the serving scenario—model, hardware, serving
+architecture, parallelism, runtime features, and request
+workloads—through CLI parameters, alongside calibrated profiles
+consumed by the Fidelity Plane. The Simulation Compiler in the
+Control Plane reads these inputs and instantiates the simulation
+topology. Two abstractions map the simulation to a real serving
+deployment: a Cluster Worker represents a logical device group
+serving a specific role (e.g., a prefill cluster, a decode cluster, or
+a co-located cluster), and each contains multiple Replica
+Workers , each of which models a serving replica spanning GPUs
+under the configured parallelism. 
+
+ Event-driven simulation loop. 
+Each Cluster Worker is driven by a per-cluster discrete-event engine
+that maintains a priority event queue and advances events in timestamp
+order. For disaggregated serving architectures, the per-cluster
+drivers run in parallel (one thread per cluster) and coordinate
+through inter-cluster event queues. Once initialization completes,
+the workload generator injects request arrival events into the cluster queues, triggering the simulation loop. 
+
+ Per-iteration request processing. 
+When a request arrival fires, the Replica Worker’s Scheduler decides
+admission and batch composition; Runtime Adapters then reshape the
+batch before execution (§ 3.3 ). The Batch
+Engine queries the Fidelity Plane for per-operator runtime predictions
+(both computation and communication), producing the iteration’s
+completion time (§ 3.4 ). For disaggregated
+systems, batch completion triggers a cross-cluster transfer event; the
+downstream cluster resumes processing only after the transfer
+completes. 
+
+ Metrics and output. 
+A Metric Tracker records each request’s history across its entire
+lifecycle—spanning admission, batching, iteration execution, and
+cross-cluster transfers. When the simulation finishes, the simulator
+outputs per-request latencies, batch traces, TTFT/TPOT breakdowns,
+throughput, E2E makespan, and memory utilization reports. 
+
+ 3.2. Control Plane 
+
+ The Control Plane compiles a user-level serving specification into a runnable simulation by instantiating workers, binding communication domains, wiring cross-stage event dependencies, and setting Execution Plane capacity constraints. 
+
+ Input compilation. 
+The Simulation Compiler resolves the model, hardware, serving architecture,
+runtime features, workload generator, and backend choices into typed
+simulation objects. Co-location yields a monolithic cluster; PDD
+yields prefill and decode clusters; AFD splits decode into attention
+and FFN (MoE) clusters.
+Table  3 lists two
+representative configurations. 
+
+ Figure 6 . Frontier system architecture. 
+
+ Parallel primitives. 
+Production engines expose parallelism through different and often
+implicit vocabularies; a simulator that compiles all of them onto a
+single backend needs a parallelism expression that is both
+ explicit —no coupling hidden inside the runtime—and
+ expressive enough to subsume every framework’s sharding
+semantics without ambiguity. Frontier introduces a two-domain
+decomposition for this purpose: a replica is parameterized by the
+pipeline size pp \mathrm{pp} together with an attention sharding
+tuple
+ ( tp attn , dp attn ) (\mathrm{tp}_{\mathrm{attn}},\mathrm{dp}_{\mathrm{attn}}) and an
+FFN sharding tuple
+ ( tp ffn , ep ffn ) (\mathrm{tp}_{\mathrm{ffn}},\mathrm{ep}_{\mathrm{ffn}}) , where
+ ep ffn \mathrm{ep}_{\mathrm{ffn}} degenerates to dp ffn \mathrm{dp}_{\mathrm{ffn}} 
+on dense models. This decomposition is the unit at which the Fidelity Plane
+and the communication backend are queried.
+Each serving architecture maps these two domains onto a distinct set
+of cluster roles , denoted in sans-serif throughout:
+co-location uses a single cluster 𝖢 \mathsf{C} hosting both domains;
+PDD uses a prefill cluster 𝖯 \mathsf{P} and a decode cluster
+ 𝖣 \mathsf{D} , each independently hosting both domains; AFD uses a prefill cluster 𝖯 \mathsf{P} , an attention cluster 𝖠 \mathsf{A} , and an FFN cluster 𝖥 \mathsf{F} , each
+hosting a single domain. Whenever a role c c hosts both domains,
+the two sharding products must span the same device set: 
+
+ (1) | 
+ | 
+ tp attn ⋅ dp attn = tp ffn ⋅ ep ffn , c ∈ { 𝖢 , 𝖯 , 𝖣 } . \mathrm{tp}_{\mathrm{attn}}\cdot\mathrm{dp}_{\mathrm{attn}}\;=\;\mathrm{tp}_{\mathrm{ffn}}\cdot\mathrm{ep}_{\mathrm{ffn}},\quad c\in\{\mathsf{C},\,\mathsf{P},\,\mathsf{D}\}. | 
+ | 
+
+ The per-replica world size of each cluster role is then 
+
+ (2) | 
+ | 
+ W R c = { pp ⋅ tp attn ⋅ dp attn , c ∈ { 𝖢 , 𝖯 , 𝖣 , 𝖠 } , pp ⋅ tp ffn ⋅ ep ffn , c = 𝖥 , \vskip-5.0ptW_{R}^{\,c}\;=\;\begin{cases}\mathrm{pp}\cdot\mathrm{tp}_{\mathrm{attn}}\cdot\mathrm{dp}_{\mathrm{attn}},&c\in\{\mathsf{C},\,\mathsf{P},\,\mathsf{D},\,\mathsf{A}\},\\[2.0pt]
+\mathrm{pp}\cdot\mathrm{tp}_{\mathrm{ffn}}\cdot\mathrm{ep}_{\mathrm{ffn}},&c=\mathsf{F},\end{cases}\vskip-5.0pt | 
+ | 
+
+ where the two branches agree on 𝖢 / 𝖯 / 𝖣 \mathsf{C}/\mathsf{P}/\mathsf{D} by
+Eq.  1 . Each role c c instantiates N R c N_{R}^{\,c} 
+replicas (the deployment pod count), so the total simulated system
+size is ∑ c N R c ⋅ W R c \sum_{c}N_{R}^{\,c}\cdot W_{R}^{\,c} . At initialization,
+every active parallel axis is registered as a domain group with the
+Comm. Backend, so that a later collective query (attention
+all-reduce, FFN all-to-all, etc.) resolves to a backend-native group
+of the correct shape. 
+
+ Model | 
+ Hardware | 
+ Engine Backend | 
+ Serving Config | 
+
+ Chunked 
+
+ Prefill 
+ | 
+
+ Speculative 
+
+ Decoding 
+ | 
+ Other Runtime Features | 
+ … | 
+
+ Name | 
+
+ Param. 
+
+ Size 
+ | 
+ GPU | 
+ Topo. | 
+ Runtime | 
+
+ Attn. 
+
+ Backend 
+ | 
+
+ Comm. 
+
+ Backend 
+ | 
+
+ Sys. 
+
+ Arch. 
+ | 
+
+ Parallel 
+
+ Param. 
+ | 
+
+ Batch Size 
+
+ Cap 
+ | 
+
+ Max Batch 
+
+ Tokens 
+ | 
+
+ GPU Mem. 
+
+ Util. 
+ | 
+
+ Token 
+
+ Thresh. 
+ | 
+
+ Accept 
+
+ Ratio 
+ | 
+
+ Verify 
+
+ Tokens 
+ | 
+
+ MoE 
+
+ Routing 
+ | 
+
+ CUDA 
+
+ Graph 
+ | 
+
+ Prefix 
+
+ Cache 
+ | 
+
+ Thinking 
+
+ Mode 
+ | 
+
+ Tool 
+
+ Call 
+ | 
+ Quant. | 
+
+ Hier. 
+
+ Cache 
+ | 
+ … | 
+
+ Llama 3.1 | 
+ 405B | 
+
+ 512 × \times H100 
+
+ 512 × \times H20 
+ | 
+ Fat-tree | 
+ vLLM | 
+ FlashInfer | 
+ HTSim | 
+ PDD | 
+
+ P: pp16/tp8/dp2 
+
+ D: pp16/tp8/dp6 
+ | 
+ 256 | 
+ 16K | 
+ 0.90 | 
+ 2K | 
+ 30% | 
+ 16 | 
+ Balanced | 
+ ✓ | 
+ ✓ | 
+ – | 
+ – | 
+ FP8 | 
+
+ CPU 
+
+ offload 
+ | 
+ … | 
+
+ Qwen3 | 
+ 235B | 
+
+ 1024 × \times H800 
+
+ 1024 × \times H20 
+ | 
+ Fat-tree | 
+ SGLang | 
+ Triton | 
+ ASTRA-Sim | 
+ AFD | 
+
+ P: pp8/tp8/dp8/ep64 
+
+ A: pp8/tp8/dp4 
+
+ F: pp8/tp8/dp32/ep256 
+ | 
+ 512 | 
+ 8K | 
+ 0.85 | 
+ 1K | 
+ 25% | 
+ 4 | 
+ Skew | 
+ ✓ | 
+ ✓ | 
+ depth 4 | 
+
+ p95 
+
+ 200ms 
+ | 
+ FP16 | 
+
+ CPU 
+
+ offload 
+ | 
+ … | 
+
+ Table 3 . Representative simulator configurations. Column names follow the corresponding Frontier configuration fields. 
+
+ Dependency definition. 
+The Control Plane materializes five classes of cross-stage dependency
+as explicit events, so that queueing and
+synchronization follow directly from the event graph.
+ (i) Pipeline stages. 
+Within a replica, the p ​ p pp stages form a strict chain: a stage-end
+event on stage s s schedules stage s + 1 s{+}1 , with one microbatch of lag
+between adjacent stages.
+ (ii) PDD KV-cache transfer. 
+Prefill completion of a request emits a KVCacheTransferStart 
+event to the decode cluster; the matching End event admits the
+request into decode scheduling. Transfer latency is queried from the
+Fidelity Plane using KV-cache size, link topology, and current transfer
+concurrency.
+ (iii) AFD activation transfer. 
+Every decode iteration emits paired M2NTransferStart /
+ End events between the attention and FFN clusters.
+ (iv) MoE EP synchronization. 
+For every MoE layer, Frontier emits per-rank
+ AllToAllCombineReady events and only fires the combine
+collective once the slowest rank has reported ready; straggler waits
+therefore arise from per-rank prediction rather than from a separate
+imbalance model.
+In the Appendix ( section   A.3 ), we detail the workflows and dependencies
+of disaggregated architectures (PDD and AFD). 
+
+ Agentic Reasoning. 
+Frontier introduces a stateful request abstraction for
+new workloads such as reasoning, tool-using agents, and RL rollouts.
+The Control Plane treats multi-round thinking/reasoning as a per-request event chain.
+Under reasoning, a request carries (a) a number of
+ reasoning rounds to execute, (b) a tool-execution
+latency attached to each inter-round tool call, and (c) a per-round
+plan of prefill/decode token counts. Each intermediate round runs
+as an ordinary prefill → \to decode cycle; on completion it emits a
+ ThinkingRequeue event that re-admits the request after
+the tool-execution delay, with session affinity to the same
+replica so that the KV cache populated in the previous round can be
+served as a prefix-cache hit. The final round produces the
+user-facing response. 
+
+ Runtime invariants. 
+Before any batch is formed, the Control Plane fixes the capacity
+envelope used during execution (details in  section   3.4 ).
+It also records runtime contracts later used by admission, chunking, and preemption, including CUDA Graph capture sizes, prefix-cache eligibility, and speculative-decoding token allowances.
+Memory safety is enforced both at initialization and during execution: the KV-cache Manager aborts launch if weights do not fit or the resolved KV-cache block count is zero, while the Scheduler checks block availability against a watermark before each admission and triggers preemption instead of overcommitting capacity. 
+
+ 3.3. Execution Plane 
+
+ The Execution Plane advances the request lifecycle within each
+replica: admission, batch composition, and per-iteration cost
+resolution.
+It schedules workloads under control-plane constraints and supports runtime optimization via an adapter. 
+
+ Scheduler. 
+Frontier implements the Scheduler as a standalone module, following production engines such as vLLM  ( Kwon et al., 2023 ) and SGLang  ( Zheng et al., 2024 ) , while keeping their scheduling logic unchanged.
+Only the I/O layer is rewired—
+the request queue is fed by simulated arrivals, the batches are
+consumed by the DES event loop, and memory
+pressure is read from a simulated KV-cache block counter. Preserving
+the mechanism is what lets Frontier reproduce engine-specific behavior
+under pressure (e.g., vLLM watermark preemption  ( , 2025 ) , SGLang’s
+admission rules  ( , 2025 ) ).
+We provide additional simulation results on large-scale clusters
+comparing SGLang- and vLLM-v1-style schedulers in the Appendix ( section   B.4 ). 
+
+ Runtime adapters. 
+Frontier carves out Runtime Adapters as an abstraction
+through which advanced engine features are supported.
+An adapter is a feature-specific rule attached to the Scheduler–Batch
+Engine loop.
+Each adapter declares how one optimization changes a
+well-defined slice of the loop: (i) the scheduler-visible
+state (e.g., which prompt blocks count as already computed),
+(ii) the batch shape the Batch Engine queries the Fidelity Plane
+with (e.g., the padded size under CUDA Graph), or (iii)  per-request progress (e.g., how many decode tokens commit per step).
+We describe two in detail; the remaining ones follow the same pattern. 
+
+ CUDA Graph. 
+Captured graphs remove per-kernel launch overhead only for captured batch shapes.
+The adapter pads each decode batch to the next larger captured size, then queries the Fidelity Plane with the kernel-only measurement family provided by the computation operator lib ( section   3.4 ).
+Non-graph executions use the launch-inclusive family instead.
+This models CUDA Graph’s coupled effects: padding increases compute work, while graph replay removes launch overhead.
+A scalar speedup factor cannot capture both. 
+
+ Speculative decoding (MTP). 
+The adapter maintains per-request state (planned, verified,
+accepted, committed token counts).
+For MTP, each decode step becomes a draft → \to verify
+ → \to commit cycle in which the verify phase is a prefill-like
+forward pass that can share a batch with ordinary decode work.
+Per-request accounting lets different requests within the same
+batch carry different speculative depths and different acceptance
+outcomes, which is a prerequisite for capturing the batch-shape
+variance that shapes tail latency under speculative workloads. 
+
+ Other runtime features use the same interface. Prefix caching marks
+matched block hashes as already computed before admission and updates
+the cache when full blocks complete; chunked prefill caps long-prompt
+progress by the iteration token budget. 
+
+ 3.4. Fidelity Plane 
+
+ The Fidelity Plane is a runtime-estimation layer queried by the Execution Plane for every batch iteration and cross-cluster transfer.
+It has three components: a Compute Operator Library that predicts per-op runtime, a Memory-Capacity Model that enforces batch-admission constraints, and a Comm. Backend that estimates collective-communication costs. 
+
+ Compute operator library. 
+Frontier classifies every modeled operator by what determines its runtime and selects a tailored prediction strategy for each class: 
+
+ (i) 
+
+ Token-count operators (linear op family, e.g., GEMM, element-wise, norm).
+Their runtime is primarily determined by the number of tokens processed within the operator’s effective TP slice.
+The feature set reduces to num_tokens , with the TP slice resolved based on whether the operator is replicated or sharded. For this class, Frontier fits either a linear-regression or a small random-forest predictor, which is configurable per operator. 
+
+ (ii) 
+
+ Sequence-dependent operators (attention op family).
+Their runtime varies non-linearly with the per-request sequence-length distribution inside a batch, rather than just aggregate totals.
+Frontier employs random-forest regressors over richer feature vectors. The features include aggregate counts (batch size, total tokens) and distributional statistics of per-request lengths (min, max, and percentiles of prefill and decode lengths). This design captures how kernel partitioning and tile scheduling react non-linearly to length heterogeneity, addressing why single length regressions (e.g., Vidur) diverge from measured latency under chunked prefill. 
+
+ (iii) 
+
+ Routing-dependent operators (MoE op family).
+Their runtime heavily depends on how tokens are dynamically assigned to experts.
+Handled similarly by random-forest regressors, the feature vectors for MoE ops combine load-balance statistics (variance and max of token-to-expert counts), expert-selection ratio, expert count, and model dimensions. This ensures that workload skew at the expert level is faithfully preserved rather than averaged away. 
+
+ We use separate profiling and training subsystems for these predictors.
+Profiling runs operators on real GPUs in a single-GPU sharded mode.
+It materializes each per-rank slice locally and stubs out collectives, making collection independent of simulated cluster scale.
+Training then fits the predictors.
+Each kernel is measured in two modes: kernel-only for GPU-side duration and launch-inclusive for host-side launch overhead. 
+
+ Memory capacity. 
+Frontier estimates the per-replica KV-cache block budget that admission
+control relies on. It does so through a vLLM-style dummy profile
+run: the per-rank sharded model is instantiated with dummy weights
+and executed for one sized forward pass, and the PyTorch allocator
+snapshot yields three quantities—weight memory, torch peak
+increase, and non-torch residency (e.g., NCCL workspace
+buffers  ( , 2025 ) )—all measured on a single representative rank. Because
+the sharded forward runs in a single-GPU process, simulating a
+thousand-GPU deployment requires only one GPU to obtain the per-
+rank footprint; under pipeline parallelism, Frontier takes the
+worst-case slice across PP stages as the representative rank.
+The KV-cache Manager then derives the KV-cache block budget by subtracting
+parameter memory (computed analytically from the weight shard) and
+the profiled non-KV-cache overhead (torch peak increase plus non-torch
+residency, beyond weights) from the requested GPU budget. The
+Scheduler (§ 3.3 ) consumes this budget for
+admission, chunked-prefill partitioning, and watermark-triggered
+preemption. 
+
+ Comm. backend. 
+Frontier integrates existing network simulation tools (ASTRA-Sim  ( Won et al., 2023 ) and HTSim  ( , 2025 ) ) as pluggable backends.
+It dynamically selects the backend based on the domain scale to balance simulation accuracy and cost. 
+
+ The Fidelity Plane composes flexibly with Runtime Adapters in the Execution Plane to support a variety of runtime optimizations.
+For CUDA Graph, the adapter switches the Fidelity Plane’s measurement mode (kernel-only vs. launch-inclusive) based on whether the current batch shape hits a capture bin, accurately reflecting the captured graph’s speedup.
+For chunked prefill, the Fidelity Plane’s profiling subsystem supplies per-operator performance data across input shapes parameterized by chunk length, ensuring its performance impact is modeled correctly. 
+
+ 4. Implementation 
+
+ Frontier is implemented in about 70K LoC of Python code, retaining Vidur’s  ( Agrawal et al., 2024a ) 
+foundational modules and DES utilities while refactoring the
+simulator out of its monolithic-replica execution path. The core engineering
+work is a cluster- and global-level execution stack: role-specific cluster
+workers, global orchestration, cross-cluster event queues, and concrete paths
+for KV-cache transfer, M2N transfer, comm. backend calls, and runtime adapters.
+In addition, the Sim. Compiler ingests model definitions in the
+HuggingFace config format  ( , 2025 ) .
+The compute operator library exposes a uniform predictor interface
+calibrated against the runtime APIs of mainstream serving stacks, covering
+PyTorch  ( Paszke et al., 2019 ) , vLLM, and FlashInfer  ( Ye et al., 2025 ) ;
+per-operator predictors are fitted once and reused across deployments.
+The comm. backend is realized as a pluggable adapter behind a collective interface, with implementations over
+ASTRA-Sim  ( Won et al., 2023 ) and HTSim  ( , 2025 ) , selectable per cluster without touching the simulator core.
+Frontier surfaces 808 typed CLI options organized into four orthogonal groups—workload, hardware, serving and runtime, and system metrics. 
+
+ 5. Evaluation 
+
+ Setup. Experiments are conducted on two servers, each hosting 8 × \times H800-SXM GPUs (400 GB/s NVLink, 400 Gb/s NDR IB per GPU).
+For fidelity evaluations, we use two MoE models—Qwen3-30B MoE  ( , 2025 ) and Step3-316B  ( StepFun et al., 2025 ) (MFA, 56 layers, 48+1 experts, top-3 routing)—and one dense model, Llama3.1-8B  ( , 2025 ) .
+We use vLLM v0.10.2 with the V1 engine as the ground truth. 3 3 
+ 3 
+
+ Due to the absence of a publicly available AFD implementation, we use an in-house implementation for AFD calibration. 
+We evaluate four online workload patterns by input sequence length (ISL) and output sequence length (OSL): (1) prefill-heavy (2048/256); (2) decode-heavy (256/2048); (3) balanced (1024/1024); and (4) a SharedGPT trace  ( , 2025 ) .
+System performance is assessed with request-level TTFT and TPOT (reported at P95 unless stated otherwise), throughput, and workload-level E2E makespan.
+We provide fidelity results for other GPU types (H20) in the Appendix ( sections   A.1 and  A.2 ). 
+
+ Baselines. 
+We compare Frontier with four open-source simulators as mentioned in  section   2 : 
+
+ • 
+
+ AIConfigurator  ( Xu et al., 2026 ) : The SOTA simulator from NVIDIA, combining an op database with an analytical workflow. 
+
+ • 
+
+ Vidur  ( Agrawal et al., 2024a ) : Microsoft’s discrete-event simulator, lacking support for MoE and disaggregated architectures. 
+
+ • 
+
+ LLMServingSim2.0  ( Cho et al., 2026 ) : A simulator primarily focused on heterogeneous hardware systems. 
+
+ • 
+
+ Apex  ( Lin et al., 2024 ) : An emulator searching for optimal plans, lacking support for disagg. architectures and EP (limited). 
+
+ 5.1. Operator and Mem. Fidelity 
+
+ Figure 7 . Per-operator relative-error CDF on H800 for attention, and MoE kernels under BF16 (left) and FP8 (right). Vidur is undefined for MoE ops, and its baseline cannot be evaluated under FP8. 
+
+ Figure 8 . Available KV-cache blocks over time under co-location (Qwen3-30B MoE, SharedGPT trace), with a max gap of 294 blocks (115.6 MB; Δ ​ MB = 0.393 ​ Δ ​ B \Delta\mathrm{MB}=0.393\Delta B , where Δ ​ B \Delta B is the block gap). 
+
+ Mode | 
+ Parallel | 
+ vLLM | 
+ Δ \Delta Frontier | 
+ Δ \Delta Analytical | 
+
+ Co-loc. | 
+ (1,8,1,8) | 
+ 31k | 
+ +7 (0.02%) | 
+ +4.4k (14.10%) | 
+
+ (4,2,1,2) | 
+ 58.0k | 
+ +1.0k (1.76%) | 
+ +12.5k (21.38%) | 
+
+ Disagg. | 
+ (2,2,2,4) | 
+ 27.0k | 
+ +0.5k (1.89%) | 
+ +7.6k (27.95%) | 
+
+ (1,4,1,4) | 
+ 12.0k | 
+ -1 (0.01%) | 
+ +4.6k (39.73%) | 
+
+ Table 4 . Initial KV-cache block budget accuracy for Qwen3-30B MoE. Parallel: (PP,TP,DP,EP). Frontier uses profiled runtime non-KV-cache memory overhead in the KV-cache manager, while the analytical baseline omits the runtime profile. Percentages are relative errors to vLLM. 
+
+ Operator accuracy. 
+Figure  7 reports the relative-error CDF of per-operator latency prediction on H800 under BF16 and FP8, covering the attention, and MoE GroupedGEMM kernels that dominate the batch runtime.
+Under BF16, Frontier reaches p50/p95 errors of 3.5 % / 14.2 % 3.5\%/14.2\% on attention, 3.3 % / 6.4 % 3.3\%/6.4\% on linear, and 1.4 % / 5.3 % 1.4\%/5.3\% on GroupedGEMM, whereas Vidur’s token-only attention predictor, fit on the same population, reaches a p50/p95 of 55.4 % / 376.1 % 55.4\%/376.1\% and is undefined for GroupedGEMM; FP8 shifts the Frontier attention p95 further down to 8.8 % 8.8\% , a regime Vidur does not support.
+The residual is consistent with the classification in § 3.4 : attention latency is shaped by the per-request length distribution inside a batch and GroupedGEMM by expert-level routing load, so a token-aggregate regressor cannot separate compositions that diverge at the kernel’s partitioning and tile-scheduling level. 
+
+ Figure 9 . Decode throughput. +CG bars stack eager throughput with the CUDA Graph gain; top labels show total +CG/eager speedup. 
+
+ Arch. | 
+ Workload | 
+ E-vLLM | 
+ CG-vLLM | 
+ Δ \Delta Frontier | 
+
+ Co-loc. | 
+ Prefill-heavy | 
+ 294.8k | 
+ 307.3k | 
+ -6.9k (2.25%) | 
+
+ Decode-heavy | 
+ 294.8k | 
+ 420.5k | 
+ -10.7k (2.55%) | 
+
+ SharedGPT | 
+ 69.6k | 
+ 84.2k | 
+ +0.3k (0.40%) | 
+
+ Disagg. | 
+ Prefill-heavy | 
+ 147.5k | 
+ 150.1k | 
+ -1.2k (0.80%) | 
+
+ Decode-heavy | 
+ 147.5k | 
+ 167.9k | 
+ +0.6k (0.37%) | 
+
+ SharedGPT | 
+ 34.9k | 
+ 42.9k | 
+ -30 (0.07%) | 
+
+ Table 5 . Compute-participating token accounting on Qwen3-30B MoE. E: eager; CG: CUDA Graph. Eager Δ \Delta Frontier is +0 (0%) for all rows; CG Δ \Delta Frontier is the signed delta to vLLM. 
+
+ Figure 10 . Cumulative prefix-cache hit ratio over time on Qwen3-30B MoE under co-location and PDD. 
+
+ VL | 
+ AR | 
+ TTFT (%) | 
+ TPOT (%) | 
+ Thpt. (%) | 
+ E2E (%) | 
+
+ 2 | 
+ 0.3 | 
+ 5.48 | 
+ 4.37 | 
+ 0.77 | 
+ 5.01 | 
+
+ 0.7 | 
+ 2.75 | 
+ 1.92 | 
+ 1.88 | 
+ 2.40 | 
+
+ 8 | 
+ 0.3 | 
+ 0.84 | 
+ 0.00 | 
+ 5.12 | 
+ 6.45 | 
+
+ 0.7 | 
+ 4.43 | 
+ 1.26 | 
+ 3.53 | 
+ 5.57 | 
+
+ 32 | 
+ 0.3 | 
+ 4.14 | 
+ 6.18 | 
+ 4.23 | 
+ 9.32 | 
+
+ 0.7 | 
+ 6.40 | 
+ 3.25 | 
+ 2.05 | 
+ 11.28 | 
+
+ Table 6 . Speculative decoding (MTP) fidelity on Qwen3-30B MoE under SharedGPT. Values are relative errors in percent. VL: verify length; AR: forced acceptance ratio. 
+
+ Figure 11 . End-to-end fidelity on a 16-card H800 testbed for co-location and PDD across prefill-heavy, decode-heavy, balanced, and SharedGPT workloads. Panels report TTFT, TPOT, throughput, and E2E makespan for both Llama3.1-8B (dense) and Qwen3-30B MoE; dashed bars indicate simulators that do not support the serving architecture or model family. All data are normalized against the ground truth (vLLM), represented by the black line (y=1.0). 
+
+ Memory (KV-cache budget) accuracy. 
+Figure  8 and Table  4 report the initial and time-varying per-rank KV-cache block budget on Qwen3-30B MoE under co-location and PDD.
+Frontier keeps the initial block budget within 1.89 % 1.89\% of vLLM across all four ( p ​ p , t ​ p , d ​ p , e ​ p ) (pp,tp,dp,ep) configurations, whereas the analytical baseline shared by most prior simulators over-reports the admissible budget by 14.10 % 14.10\% – 39.73 % 39.73\% ; along the SharedGPT replay the block-availability curve of Frontier overlaps the vLLM curve through admission, preemption, and release events, and the simulated makespan lies within 7.6 % 7.6\% of the measurement.
+The gap stems from the KV-cache manager’s treatment of other memory overhead: parameter memory is one of several occupants of the device budget, and omitting the runtime footprint of activation scratch, NCCL workspace, and CUDA Graph capture regions inflates the admissible block count that the scheduler later consumes for admission, chunking, and watermark-triggered preemption.
+The Frontier overhead residual is not uniform across configurations: it concentrates on pipeline-parallel layouts where a single representative-rank profile misses the PP-worst slice, so the direct tightening path is per-stage reprofiling rather than refining the analytical formula. 
+
+ 5.2. Runtime Optimization Fidelity 
+
+ CUDA Graph. 
+Figure  9 and Table  5 report decode throughput and compute-participating token counts for Qwen3-30B MoE under vLLM’s full_decode_only capture path on SharedGPT.
+Frontier matches vLLM’s decode speedup within 1.7 % 1.7\% under co-location and 6.1 % 6.1\% under PDD, preserving the 2.86 2.86 – 3.05 × 3.05\times envelope; its padded token count tracks vLLM within 2.55 % 2.55\% across prefill-heavy, decode-heavy, and SharedGPT workloads.
+AIConfigurator, which omits graph-capture modeling, instead produces a workload-insensitive TPOT surface that structurally diverges from measurements (§ 2.2 ).
+The residual reflects CUDA Graph’s coupled effects: batch quantization inflates compute-participating tokens while graph replay removes launch overhead, so the Fidelity Plane must switch to kernel-only timings in sync with padding—a coupling no scalar speedup factor can reproduce.
+The 6.1 % 6.1\% PDD residual comes from the decode-side padding tail under a sparse capture-bin ladder, suggesting denser capture-bin coverage rather than a new modeling primitive. 
+
+ Prefix cache. 
+Figure  10 reports cumulative prefix hit ratios on Qwen3-30B MoE under co-location and PDD with vLLM’s block-hash prefix cache enabled.
+Frontier matches vLLM’s final hit ratios exactly: 36.98 % 36.98\% under co-location and 37.11 % 37.11\% under PDD.
+The match comes from modeling prefix caching as a block-hash index that marks matched prefix blocks as already computed, thereby reshaping scheduler-visible admission state without storing KV tensors.
+This replays vLLM’s block-level hit/miss sequence and admission behavior while avoiding token-level KV-cache bookkeeping, which is orthogonal to admission-shape fidelity. 
+
+ Speculative decoding. 
+Table  6 reports p95 fidelity of Frontier on Qwen3-30B MoE MTP under SharedGPT for verify-token lengths { 2 , 8 , 32 } \{2,8,32\} and forced acceptance ratios { 0.3 , 0.7 } \{0.3,0.7\} .
+Across the six configurations, Frontier keeps TTFT, TPOT, throughput, and E2E p95 errors within 11.28 % 11.28\% , with five below 10 % 10\% .
+Among existing simulators, only AIConfigurator provides limited support for MTP.
+AIConfigurator’s analytical MTP path instead incurs an average 46.9 % 46.9\% decode throughput error and flips the trend on low-acceptance (AR=0.3) batches.
+This gap comes from event-level MTP modeling: Frontier tracks per-request planned, verified, accepted, and committed tokens, and models MTP as a draft → \to verify → \to commit cycle sharing a batch with ordinary decode.
+It therefore preserves per-request speculative-depth and acceptance variance within a batch, which governs tail latency but is lost in static analytical speedup models. 
+
+ 5.3. End-to-End Fidelity 
+
+ Co-location. 
+Under co-location (Figure  11 , left), Frontier tracks vLLM within 9.37 % 9.37\% across 32 32 cases spanning Llama3.1-8B and Qwen3-30B MoE, with TPOT-p95 and E2E makespan inside 6.4 % 6.4\% in all but one case, whereas Vidur (dense-only) errors range from 2.9 % 2.9\% to 45.5 % 45.5\% .
+While effective for TensorRT-LLM on H200  ( Xu et al., 2026 ) , AIConfigurator prediction accuracy degrades under vLLM and H800.
+It produces E2E-makespan errors up to 170.0 % 170.0\% on decode-heavy dense and 135.3 % 135.3\% on balanced MoE.
+Vidur’s accuracy collapses on MoE because its operator library has no GroupedGEMM class and cannot express routing-dependent runtime, while AIConfigurator’s decode-heavy makespan over-prediction is the compounded consequence of missing CUDA-graph and speculative paths (§ 2.2 ) once they are composed across hundreds of decode steps.
+Frontier remains within this envelope because the event-driven execution plane keeps the closed loop of per-iteration cost, KV-cache block capacity, and admission-watermark preemption intact; small per-operator errors bounded in § 5.1 therefore do not amplify through the feedback path into the qualitatively different regimes that static models exhibit. 
+
+ PDD. 
+Under PDD (Figure  11 , right; t ​ p = 4 , d ​ p = 2 tp{=}4,dp{=}2 for dense and t ​ p = 4 , d ​ p = 2 , e ​ p = 8 tp{=}4,dp{=}2,ep{=}8 for MoE), Frontier keeps all 32 32 metric entries within 10.99 % 10.99\% of vLLM, with 29 29 of 32 32 inside 9 % 9\% and 20 20 of 32 32 inside 3 % 3\% ; Vidur and Apex do not support PDD and therefore cannot be placed on this axis, while AIConfigurator reaches 200.0 % 200.0\% E2E-makespan error on both dense and MoE decode-heavy.
+The AIConfigurator collapse is architectural: its homogeneous-replica model cannot represent the cross-cluster KV-cache transfer dependency, so a missing arc in the event graph translates into a multiplicative makespan error that no post-hoc scalar can close (§ 2.2 ).
+Frontier holds because the control plane materializes PDD as explicit cross-cluster KV-cache transfer events, and the fidelity plane resolves each transfer against KV-cache size, link topology, and transfer concurrency (§ 3.2 ), preserving the strict prefill → \to transfer → \to decode ordering that governs queueing.
+We found the worst case is MoE prefill-heavy TTFT at 10.99 % 10.99\% , which falls in the regime where chunked-prefill residuals interact with expert-routing imbalance at admission; tightening it requires extending the wide-chunk token buckets in the operator profile rather than new control-plane primitives. 
+
+ Figure 12 . AFD fidelity on Step3-316B (16 H800 GPUs) against the ground truth across prefill-heavy, decode-heavy, and balanced workloads. AFD-TP and AFD-EP report throughput (decode toks/s). 
+
+ AFD. 
+We evaluate two AFD decode-FFN layouts on Step3-316B with decode-attention fixed at d ​ p = 8 dp{=}8 : FFN-TP shards expert weights with t ​ p = 8 tp{=}8 and no EP, while FFN-EP enables expert parallelism with e ​ p = 8 ep{=}8 .
+On both AFD-TP and AFD-EP (Figure  12 ), Frontier holds TPOT within 6.4 % 6.4\% and throughput within 7.0 % 7.0\% across prefill-heavy, decode-heavy, and balanced workloads, and reproduces decode-heavy TPOT to within 1.0 % 1.0\% on AFD-EP.
+Architectural fidelity follows from the cluster-role decomposition of § 3.2 : AFD is realized as a prefill cluster plus separate attention and FFN clusters with a paired attention-to-FFN transfer per decode iteration, and every MoE layer gates its combine collective on the slowest rank so routing-induced stragglers arise from per-rank prediction rather than a separate imbalance model.
+Because AFD was calibrated in an offline setting, we focus the main comparison on throughput-oriented metrics, where decode iteration cost and cross-cluster transfer dominate sustained serving behavior. 
+
+ Figure 13 . Frontier projects throughput–generation-speed Pareto frontiers
+across co-location, PDD, and AFD on 256 × 256{\times} H800 GPUs. The dashed
+line marks a 50 50  toks/s/user SLA; stars mark the best frontier point
+for each architecture under that SLA. Two-panel Pareto frontier plots comparing co-location,
+PDD, and AFD under TTFT thresholds of 3000\,ms and 500\,ms.
+The x-axis is generation speed, inverse p95 TPOT, the y-axis is
+throughput, the shaded region satisfies the generation-speed SLA, and
+stars mark per-architecture best frontier points. 
+
+ 6. Use Cases 
+
+ We demonstrate Frontier through four use cases in two groups.
+The first group (§ 6.1 ,
+§ 6.2 ) is
+ resource configuration tuning for non-reasoning batch serving:
+tuning the serving architecture and parallelism configuration for a given cluster (§ 6.1 ), and tuning the
+GPU placement across heterogeneous GPU types
+(§ 6.2 ).
+The second group (§ 6.3 ,
+§ 6.4 ) is what-if validation
+of new optimizations under emerging reasoning and RL rollout workloads:
+validating a new scheduling algorithm
+(§ 6.3 ), and validating a dynamic
+parallelism reconfiguration strategy
+(§ 6.4 ).
+To the best of our knowledge, none of the four cases can be
+reproduced as configured by any prior simulator . 
+
+ 6.1. Optimal Configuration via Pareto Frontiers 
+
+ Problem. 
+Given fixed cluster resources, which serving architecture and parallelism
+configuration is optimal under a given SLA constraint? 
+
+ Scenario. 
+Pareto frontiers are the operator interface for architecture selection:
+given a TTFT constraint, they show the maximum throughput reachable at each
+generation-speed target. Measuring this surface on a live 256 256 -GPU
+cluster is impractical, since each point can change the parallelism
+layout, cluster split, batching limit, memory budget, and load level.
+We run the search ex-situ for a Llama-3.3-70B  ( , 2025 ) batch-inference
+workload on 256 H800 GPUs, comparing co-location, PDD, and AFD with
+vLLM-style scheduler, CUDA Graph, and chunked prefill. Across the three
+serving architectures, the full sweep contains 483,536 483{,}536 candidate
+configurations under the 256-GPU budget. Static memory filtering skips
+ 65,190 65{,}190 OOM-infeasible cases before execution.
+The final figures summarize 496 cases that satisfy the SLA. 
+
+ Simulation. 
+Figure  13 asks which serving architecture
+delivers the most throughput once generation speed must exceed
+ 50 50  toks/s/user; the shaded region is feasible and the stars mark
+the best frontier point at this SLA. The three curves expose different
+failure modes. Co-location keeps all work in one scheduler and one
+KV-cache budget, so prefill and decode compete for batch slots; once
+p95 TPOT must stay near 20 20  ms (i.e., 50 50  toks/s/user), decode batches shrink and throughput
+is capped. PDD removes that interference by giving prefill and decode
+separate clusters, which makes it strong when TTFT is loose and most
+GPUs can be kept on decode. AFD further separates decode-attention from
+decode-FFN; it pays activation transfer between the two decode clusters,
+but isolates the latency-sensitive attention path from FFN batching and
+keeps the prefill path short. 
+
+ The best-config markers quantify this tradeoff. Under the loose
+TTFT constraint (TTFT ≤ 3000 \leq 3000  ms), PDD is best: the SLA frontier point
+reaches 137.4 137.4 K toks/s on the P : D = 112 : 144 \mathrm{P{:}D}=112{:}144 split, where
+more GPUs are assigned to decode. AFD reaches 116.2 116.2 K toks/s with
+ P : DA : DF = 120 : 80 : 56 \mathrm{P{:}DA{:}DF}=120{:}80{:}56 , while co-location reaches only
+ 27.7 27.7 K toks/s. When TTFT tightens to 500 500  ms, the optimum shifts:
+AFD remains at 116.2 116.2 K toks/s with p95 TTFT 115.9 115.9  ms, whereas PDD
+drops to 100.7 100.7 K toks/s at P : D = 144 : 112 \mathrm{P{:}D}=144{:}112 and p95 TTFT
+ 211 211  ms because the prefill pool must grow at the expense of decode
+capacity. Without Frontier that jointly models disaggregation,
+parallelism, runtime state, and SLA filtering, this decision would be
+made on the wrong frontier: PDD would appear universally preferable
+under the loose-SLA view, but AFD is the correct choice under sub-second
+TTFT. 
+
+ 6.2. Heterogeneous GPUs for Disaggregated Serving 
+
+ Figure 14 . Heterogeneous Qwen3-235B-A22B  ( , 2025 ) allocation exposes which PDD and AFD role assignments convert hardware discounts into cost efficiency. 
+
+ Problem. 
+In a disaggregated serving architecture, how does the use of heterogeneous GPUs affect the performance-cost tradeoff? 
+
+ Scenario. 
+It is known that PDD and AFD can improve serving efficiency. Here we explore another degree of freedom which is common in practice: heterogeneous GPU fleets.
+We consider a cluster of fixed scale with 1024 GPUs, serving Qwen3-235B-A22B MoE  ( , 2025 ) along with the runtime optimizations specified in section   6.1 .
+By assigning different GPUs to different roles (P/D/A/F), how does this further improve the cost-performance tradeoff? 
+
+ Simulation. 
+Let Price ⁡ ( g ) = ∑ r N r ​ p ​ ( g ⁡ ( r ) ) \mathrm{Price}(g){=}\sum_{r}\!N_{r}\,p(g(r)) denote the cluster’s total
+hourly spend under an allocation scheme g g , where N r N_{r} is the number of GPUs
+assigned to role r r and p ⁡ ( ⋅ ) p(\cdot) maps each GPU type to its public cloud
+price (H800: $ 3.49 3.49 /hr, H20: $ 1.59 1.59 /hr)  ( , 2025 ) .
+Against the all-H800 baseline g 0 g_{0} , we report two scores for a candidate allocation: 
+
+ | 
+ SR ⁡ ( g ) = Price ⁡ ( g 0 ) Price ⁡ ( g ) , CE ⁡ ( g ) = T ⁡ ( g ) / Price ⁡ ( g ) T ⁡ ( g 0 ) / Price ⁡ ( g 0 ) , \mathrm{SR}(g)=\frac{\mathrm{Price}(g_{0})}{\mathrm{Price}(g)},\quad\mathrm{CE}(g)=\frac{T(g)\,/\,\mathrm{Price}(g)}{T(g_{0})\,/\,\mathrm{Price}(g_{0})}, | 
+ | 
+
+ where T T is aggregated token throughput.
+ SR ⁡ ( g ) \mathrm{SR}(g) is the normalized spend ratio: higher is better, with
+ SR ⁡ ( g ) > 1 \mathrm{SR}(g){>}1 meaning g g is cheaper than g 0 g_{0} on the bill.
+ CE ⁡ ( g ) \mathrm{CE}(g) is cost efficiency, i.e. throughput-per-dollar relative to g 0 g_{0} : higher is
+better, with CE ⁡ ( g ) > 1 \mathrm{CE}(g){>}1 meaning g g delivers more tokens per
+dollar than g 0 g_{0} .
+Each valid allocation scheme must satisfy three constraints:
+(1) hardware–workload alignment : Frontier uses per-role stage metrics and matched GPU-type counterfactuals to classify each role’s bottleneck under the current workload; compute-bound roles must use H800, while H20 is allowed only when the role is not compute-limited.
+(2) SLA constraints: P95 TTFT and TPOT shall stay within the SLA thresholds; and
+(3) positive throughput-per-dollar ROI: even when SLA is met, a placement
+that merely saves cost while noticeably reducing total throughput is not
+deployment-worthy. We require CE ⁡ ( g ) > 1.08 \mathrm{CE}(g){>}1.08 , i.e., at least
+8% more tokens per dollar than the all-H800 baseline, absorbing
+measurement variance and ensuring genuine operational value. 
+
+ These representative PDD and AFD placements lead to two findings
+(Figure  14 ).
+First, heterogeneity does
+not always pay off . Pushing the P:D capacity split toward decode in
+PDD amplifies the H20 hourly discount: SR ⁡ ( g ) \mathrm{SR}(g) climbs to
+ 1.69 1.69 at P:D = 2 : 6 \text{P:D}{=}2{:}6 and the nominal CE ⁡ ( g ) \mathrm{CE}(g) reaches
+ 1.65 1.65 as the expanded decode pool boosts token generation throughput.
+However, P capacity collapses, a long queueing tail
+dominates P95 TTFT, and the candidate is rejected at Gate 2; the price
+saving is invalidated by an SLA-violating queueing tail. Second,
+ heterogeneous savings are gated by different bottlenecks in the
+two disaggregated designs . PDD reaches its accepted point by
+downgrading the whole D role at P:D = 1 : 1 \text{P:D}{=}1{:}1 
+( SR ⁡ ( g ) = 1.37 \mathrm{SR}(g){=}1.37 , CE ⁡ ( g ) = 1.33 \mathrm{CE}(g){=}1.33 ); pushing the split
+toward decode keeps amplifying the nominal discount but starves
+P, so the candidate is rejected by queue-driven SLA
+violation. AFD, in contrast, fixes P:A:F = 4 : 4 : 4 \text{P:A:F}{=}4{:}4{:}4 and asks
+which decode sub-role to downgrade: placing H20 on A
+passes at SR ⁡ ( g ) = 1.16 \mathrm{SR}(g){=}1.16 , CE ⁡ ( g ) = 1.12 \mathrm{CE}(g){=}1.12 , while the
+symmetric swap (H20 on F) is rejected at Gate 1 because
+the FFN role is compute-bound and regresses on H20
+( CE ⁡ ( g ) = 1.05 \mathrm{CE}(g){=}1.05 ). A price-only or fused-decode analysis would
+favor rejected placements, either because they maximize bill savings or
+because they cannot express attention/FFN role-GPU-type mismatch.
+Frontier’s disaggregated cost-performance modeling ties GPU-type choice to role
+bottlenecks and SLA outcomes, separating raw price reduction from
+deployment-grade cost efficiency. 
+
+ 6.3. Scheduling Algorithm Validation for Stateful Reasoning 
+
+ Figure 15 . Phase-aware scheduling for multi-round reasoning. 
+
+ Problem. 
+Given a fixed resource configuration, can a new scheduling algorithm
+that exploits cross-round request state improve latency over existing
+priority policies? 
+
+ Scenario. 
+Multi-round agentic reasoning workloads no longer behave like a single prompt
+followed by a single decode stream. Taking a coding agent such as
+Claude Code  ( , 2025 ) as an example, each request progresses through two
+phases: internal planning and final response generation .
+During planning, the agent runs multiple thinking rounds marked by
+ <thinking> tags  ( Guo et al., 2025 ) ; each round may issue tool calls such as code
+execution or calculation, whose observations seed the next round until
+planning terminates and the visible response is produced. The resulting
+traffic is long-context and long-tailed  ( Tan et al., 2026 ) : the number of thinking
+rounds varies sharply across sessions, and per-round prefill spans a
+wide range. The essential modeling requirement is therefore not merely
+longer contexts, but request-state and event modeling: the simulator
+must preserve round history, tool-call delay, requeue events, and
+prefix-cache continuity as part of the same session. This changes the
+scheduling problem from prioritizing isolated requests to scheduling
+stateful, multi-event sessions whose final answer latency depends on
+hidden planning history. Since short-job-first scheduling is effective
+in non-reasoning serving—for example, FastServe  ( Wu et al., 2023 ) uses a
+skip-join multi-level feedback queue (MLFQ)  ( Corbató et al., 1962 ) to prioritize short requests—we ask whether such
+mechanisms remain effective once the reasoning state is made explicit.
+We use aTTFT to denote answer-visible TTFT, measured from
+session arrival to completion of the final answer-round prefill, i.e.,
+the first user-visible token boundary. We define hidden planning
+throughput as the hidden planning-token rate over the fixed trace. 
+
+ Simulation. 
+We employ Frontier for an algorithmic exploration.
+We model Llama-3.1-405B-FP8  ( , 2025 ) on 1024 × 1024{\times} H800 GPUs under a PDD architecture,
+with chunked prefill, prefix caching, CUDA Graph, quantization (FP8) and CPU offloading
+enabled to reflect a realistic deployment. The trace is prefill-heavy
+and long-tailed as the scenario describes:
+per-round prefill spans 4K–32K tokens while per-round decode stays at ∼ \sim 0.2K.
+Plugging FastServe’s skip-join MLFQ into
+this setting yields only a 1.45% p95 aTTFT improvement and degrades
+hidden planning throughput by 2.3%. The reason is that its priority is
+decided from the current round’s observable size and ignores
+cross-round history; a heavy-tail session whose final answer round looks
+small is therefore treated like an ordinary short request. Guided by
+this diagnosis, we deploy a phase-aware scheduler that classifies
+sessions by both current-round size and accumulated planning history,
+achieving a 30.4% p95 aTTFT reduction and 23.2% hidden-planning-throughput
+improvement (Figure  15 ).
+We provide more details in the Appendix ( sections   B.1 , B.2 and  B.3 ).
+With Frontier, we enable rapid, low-cost design and validation of scheduling
+algorithms for advanced scenarios like stateful reasoning—without
+deploying large-scale GPU clusters or modifying a production serving stack. 
+
+ 6.4. Dynamic Parallelism Reconfig. for RL Rollouts 
+
+ Figure 16 . Performance gains from dynamic reconfiguration. 
+
+ Problem. 
+Given a fixed scheduling logic, can dynamically switching the parallelism
+layout mid-workload reduce end-to-end makespan? 
+
+ Scenario. 
+Agentic RL rollouts exhibit a phase transition that is invisible to
+steady-state serving benchmarks  ( Tan et al., 2026 ; Zhang et al., 2026 ) . At the start of a rollout
+batch, the trainer launches many trajectories in parallel, so the
+inference cluster is bound by burst throughput and rewards high replica
+concurrency. Once most short trajectories terminate, a heavy-tail
+subset continues decoding alone and dictates when the trainer can
+advance to the next gradient step. Recent work addresses this
+asymmetry by reconfiguring parallelism online as the active set
+shrinks  ( Tan et al., 2026 ) . The benefit depends on both
+when to switch and how much reconfiguration cost the switch incurs.
+We ask whether Frontier can prototype such reconfiguration policies
+and expose their system-level impact ahead of deployment. 
+
+ Simulation. 
+We employ Frontier for a dynamic reconfiguration exploration.
+We retain the model, cluster scale, and runtime features from the
+previous use case ( section   6.3 ), and drive a co-located deployment with a
+ 4,000 4{,}000 -trajectory burst whose heavy-tail fraction is 5 % 5\% . The policy
+is realized in Frontier as a time-sliced layout switch. The baseline pins
+ Layout A —a high-DP configuration
+( DP = 32 , PP = 16 , TP = 2 \text{DP}{=}32,\text{PP}{=}16,\text{TP}{=}2 ) that maximizes batch
+parallelism—throughout the rollout. The dynamic policy begins with
+Layout A and switches to Layout B 
+( DP = 8 , PP = 16 , TP = 8 \text{DP}{=}8,\text{PP}{=}16,\text{TP}{=}8 ) once the
+active-trajectory count drops below 10 % 10\% of the batch, paying a
+profiled reconfiguration cost on transition, including weight reshard
+and KV-cache rematerialization. As
+Figure  16 shows, the dynamic policy reduces
+rollout makespan from 528.8 ​ s 528.8\,\text{s} to 259.1 ​ s 259.1\,\text{s} and improves
+effective decode throughput by 2.04 × 2.04\times . The gain is
+phase-matched parallelism: Layout A absorbs the dense burst, while
+re-sharding from replica-wide DP to wider TP after the tail emerges
+shortens per-trajectory decode latency once spare replicas no longer
+translate into utilization. With Frontier, such phase-adaptive policies can
+be rapidly prototyped and validated before deployment, avoiding the
+hardware cost of repeatedly sweeping thousand-GPU layouts and the
+engineering cost of implementing layout switching directly in a
+production serving stack. 
+
+ 7. Discussion 
+
+ Currently, Frontier is primarily developed and calibrated around vLLM. As outlined in section   3 , its design natively supports extending simulation capabilities to other mainstream frameworks (e.g., SGLang  ( Zheng et al., 2024 ) and TensorRT-LLM  ( , 2025 ) ), which we leave for future work. For precision calibration, since GPU execution dominates the overall latency ( ∼ \sim 90%)  ( Agrawal et al., 2026 ) , we follow Vidur’s methodology to model the remaining CPU overhead by combining testbed measurements with a prediction mechanism (Fidelity Plane). However, this approach for CPU overhead prediction may still lack robustness.
+As CPU overhead fluctuates with system scales and architectural updates, a potentially more accurate approach for CPU simulation would employ CUDA API interception—similar to Revati  ( Agrawal et al., 2026 ) —to enable full CPU-side replay.
+Nevertheless, the usability and scalability of this approach across diverse hardware, CUDA versions, and dynamic runtime optimizations (e.g., CUDA Graphs) remain debatable.
+Developing a robust yet accurate simulation scheme capable of adapting to diverse inference frameworks and technological advancements represents a promising future direction.
+Furthermore, during calibration, we observed that beyond standard warmup, profiling tools easily introduce intrusive overhead. Therefore, we strictly isolate the measurement of fine-grained metrics (e.g., operator execution, batch scheduling) from system-level metrics (e.g., TTFT, TPOT, throughput) to prevent statistical contamination and ensure reliable calibration. 
+
+ 8. Related Work 
+
+ We discuss related work other than those covered in section   2 . 
+
+ GPU simulation. 
+GPU computation simulators like SCALE-sim  ( Samajdar et al., 2018 ) and Accel-Sim  ( Khairy et al., 2020 ) focus on instruction-level modeling.
+Frontier can integrate these into the op library to support operation modeling for future hardware. 
+
+ Training simulators. 
+Simulators for LLM training  ( Feng et al., 2024 ; Duan et al., 2024 ; Won et al., 2023 ) model training with a focus on optimizing parallelism strategies and resource utilization.
+However, they do not capture the dynamics of inference workloads and complex runtime behavior, which are critical for LLM serving. 
+
+ 9. Conclusion 
+
+ We present Frontier, a discrete-event simulator for LLM serving.
+By jointly modeling architectural heterogeneity, runtime behavior, and workload statefulness, Frontier enables accurate, scalable evaluation of complex serving designs.
+Results show that Frontier reliably predicts performance across diverse configurations and supports large-scale design-space exploration on commodity hardware, providing a practical foundation for studying modern LLM serving systems. 
+
+ References 
+
+ Agrawal et al. (2024a) 
+ A. Agrawal, N. Kedia, J. Mohan, A. Panwar, N. Kwatra, B. S. Gulavani, R. Ramjee, and A. Tumanov 
+
+ Vidur: a large-scale simulation framework for llm inference .
+
+ Proceedings of Machine Learning and Systems 6 , pp. 351–366 .
+
+ Cited by: §1 ,
+ §1 ,
+ §1 ,
+ §2.1 ,
+ §2.2 ,
+ Table 1 ,
+ §4 ,
+ 2nd item .
+
+ Agrawal et al. (2024b) 
+ A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. Gulavani, A. Tumanov, and R. Ramjee 
+
+ Taming { \{ throughput-latency } \} tradeoff in { \{ llm } \} inference with { \{ sarathi-serve } \} .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ pp. 117–134 .
+
+ Cited by: §1 .
+
+ Agrawal et al. (2023) 
+ A. Agrawal, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, and R. Ramjee 
+
+ Sarathi: efficient llm inference by piggybacking decodes with chunked prefills .
+
+ arXiv preprint arXiv:2308.16369 .
+
+ Cited by: §1 .
+
+ Agrawal et al. (2026) 
+ A. Agrawal, M. Yadav, S. Kumar, A. Agrawal, G. Ghai, S. Bera, E. Pinto, S. Gambhira, M. Adain, K. Sohrab, C. Antonanzas, and A. Tumanov 
+
+ Revati: transparent gpu-free time-warp emulation for llm serving .
+
+ External Links: 2601.00397 ,
+ Link 
+
+ Cited by: §1 ,
+ §1 ,
+ §2.1 ,
+ §7 .
+
+ Cho et al. (2026) 
+ J. Cho, H. Choi, G. Heo, and J. Park 
+
+ LLMServingSim 2.0: a unified simulator for heterogeneous and disaggregated llm serving infrastructure .
+
+ arXiv preprint arXiv:2602.23036 .
+
+ Cited by: §1 ,
+ §2.2 ,
+ Table 1 ,
+ 3rd item .
+
+ [6] 
+ (2025) 
+
+ Claude code .
+
+ Note: Website https://code.claude.com/ 
+
+ Cited by: §6.3 .
+
+ [7] 
+ (2025) 
+
+ Cloudgpu .
+
+ Note: Website https://cloudgpu.app/ 
+
+ Cited by: §6.2 .
+
+ Corbató et al. (1962) 
+ F. J. Corbató, M. Merwin-Daggett, and R. C. Daley 
+
+ An experimental time-sharing system .
+
+ In Proceedings of the May 1-3, 1962, spring joint computer conference ,
+
+ pp. 335–344 .
+
+ Cited by: §6.3 .
+
+ Dao (2024) 
+ T. Dao 
+
+ Flashattention-2: faster attention with better parallelism and work partitioning .
+
+ In International Conference on Learning Representations ,
+
+ Vol. 2024 , pp. 35549–35562 .
+
+ Cited by: §2.2 .
+
+ Duan et al. (2024) 
+ J. Duan, X. Li, P. Xu, X. Zhang, S. Yan, Y. Liang, and D. Lin 
+
+ Proteus: simulating the performance of distributed dnn training .
+
+ IEEE Transactions on parallel and distributed systems 35 ( 10 ), pp. 1867–1878 .
+
+ Cited by: §8 .
+
+ [11] 
+ (2025) 
+
+ Dynamo .
+
+ Note: Website https://www.nvidia.com/en-us/ai/dynamo/ 
+
+ Cited by: §1 .
+
+ Feng et al. (2024) 
+ Y. Feng, Y. Chen, K. Chen, J. Li, T. Wu, P. Cheng, C. Wu, W. Wang, T. Ho, and H. Xu 
+
+ Echo: simulating distributed training at scale .
+
+ arXiv preprint arXiv:2412.12487 .
+
+ Cited by: §8 .
+
+ Guo et al. (2025) 
+ D. Guo, D. Yang, H. Zhang, J. Song, R. Zhang, R. Xu, Q. Zhu, S. Ma, P. Wang, X. Bi, et al. 
+
+ Deepseek-r1: incentivizing reasoning capability in llms via reinforcement learning .
+
+ arXiv preprint arXiv:2501.12948 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §6.3 .
+
+ [14] 
+ (2025) 
+
+ Htsim network simulator .
+
+ Note: Website https://github.com/Broadcom/csg-htsim 
+
+ Cited by: §3.4 ,
+ §4 .
+
+ [15] 
+ (2025) 
+
+ Huggingface .
+
+ Note: Website https://huggingface.co/ 
+
+ Cited by: §4 .
+
+ Khairy et al. (2020) 
+ M. Khairy, Z. Shen, T. M. Aamodt, and T. G. Rogers 
+
+ Accel-sim: an extensible simulation framework for validated gpu modeling .
+
+ In 2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA) ,
+
+ pp. 473–486 .
+
+ Cited by: §8 .
+
+ Kwon et al. (2023) 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica 
+
+ Efficient memory management for large language model serving with pagedattention .
+
+ In Proceedings of the 29th symposium on operating systems principles ,
+
+ pp. 611–626 .
+
+ Cited by: §1 ,
+ §3.3 ,
+ §3 .
+
+ Lepikhin et al. (2020) 
+ D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N. Shazeer, and Z. Chen 
+
+ Gshard: scaling giant models with conditional computation and automatic sharding .
+
+ arXiv preprint arXiv:2006.16668 .
+
+ Cited by: §1 .
+
+ Leviathan et al. (2023) 
+ Y. Leviathan, M. Kalman, and Y. Matias 
+
+ Fast inference from transformers via speculative decoding .
+
+ External Links: 2211.17192 ,
+ Link 
+
+ Cited by: §1 .
+
+ Li et al. (2023) 
+ J. Li, Y. Jiang, Y. Zhu, C. Wang, and H. Xu 
+
+ Accelerating distributed { \{ moe } \} training and inference with lina .
+
+ In 2023 USENIX Annual Technical Conference (USENIX ATC 23) ,
+
+ pp. 945–959 .
+
+ Cited by: §1 .
+
+ Lin et al. (2024) 
+ Y. Lin, W. Kwon, R. Pineda, and F. N. Paravecino 
+
+ APEX: an extensible and dynamism-aware simulator for automated parallel execution in llm serving .
+
+ arXiv preprint arXiv:2411.17651 .
+
+ Cited by: §1 ,
+ §2.2 ,
+ Table 1 ,
+ 4th item .
+
+ Liu et al. (2024) 
+ A. Liu, B. Feng, B. Xue, B. Wang, B. Wu, C. Lu, C. Zhao, C. Deng, C. Zhang, C. Ruan, et al. 
+
+ Deepseek-v3 technical report .
+
+ arXiv preprint arXiv:2412.19437 .
+
+ Cited by: §1 ,
+ §2.2 .
+
+ [23] 
+ (2025) 
+
+ Llama-3.1-405b-fp8 .
+
+ Note: Website https://huggingface.co/meta-llama/Llama-3.1-405B-FP8 
+
+ Cited by: §6.3 .
+
+ [24] 
+ (2025) 
+
+ Llama-3.1-8b .
+
+ Note: Website https://huggingface.co/meta-llama/Llama-3.1-8B 
+
+ Cited by: §5 .
+
+ [25] 
+ (2025) 
+
+ Llama-3.3-70b-instruct .
+
+ Note: Website https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct 
+
+ Cited by: §6.1 .
+
+ Miao et al. (2022) 
+ X. Miao, Y. Wang, Y. Jiang, C. Shi, X. Nie, H. Zhang, and B. Cui 
+
+ Galvatron: efficient transformer training over multiple gpus using automatic parallelism .
+
+ arXiv preprint arXiv:2211.13878 .
+
+ Cited by: §2.1 .
+
+ Narayanan et al. (2019) 
+ D. Narayanan, A. Harlap, A. Phanishayee, V. Seshadri, N. R. Devanur, G. R. Ganger, P. B. Gibbons, and M. Zaharia 
+
+ PipeDream: generalized pipeline parallelism for dnn training .
+
+ In Proceedings of the 27th ACM symposium on operating systems principles ,
+
+ pp. 1–15 .
+
+ Cited by: §1 .
+
+ [28] 
+ (2025) 
+
+ NCCL workspace buffer .
+
+ Note: Website https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/bufferreg.html 
+
+ Cited by: §3.4 .
+
+ [29] 
+ (2025) 
+
+ Nvidia cuda graph .
+
+ Note: Website https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html 
+
+ Cited by: §1 .
+
+ [30] 
+ (2025) 
+
+ Nvidia tensorrt-llm .
+
+ Note: Website https://github.com/NVIDIA/TensorRT-LLM 
+
+ Cited by: §7 .
+
+ Paszke et al. (2019) 
+ A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, et al. 
+
+ Pytorch: an imperative style, high-performance deep learning library .
+
+ Advances in neural information processing systems 32 .
+
+ Cited by: §4 .
+
+ [32] 
+ (2025) 
+
+ Qwen3-235b-a22b .
+
+ Note: Website https://huggingface.co/Qwen/Qwen3-235B-A22B 
+
+ Cited by: Figure 14 ,
+ Figure 14 ,
+ §6.2 .
+
+ [33] 
+ (2025) 
+
+ Qwen3-30b-a3b .
+
+ Note: Website https://huggingface.co/Qwen/Qwen3-30B-A3B 
+
+ Cited by: §5 .
+
+ Samajdar et al. (2018) 
+ A. Samajdar, Y. Zhu, P. Whatmough, M. Mattina, and T. Krishna 
+
+ Scale-sim: systolic cnn accelerator simulator .
+
+ arXiv preprint arXiv:1811.02883 .
+
+ Cited by: §8 .
+
+ [35] 
+ (2025) 
+
+ Sglang admission .
+
+ Note: Website https://github.com/sgl-project/sglang/blob/main/docs/advanced_features/server_arguments.md 
+
+ Cited by: §3.3 .
+
+ [36] 
+ (2025) 
+
+ SharedGPT trace .
+
+ Note: Website https://docs.vllm.ai/en/v0.12.0/benchmarking/cli/ 
+
+ Cited by: §5 .
+
+ Shoeybi et al. (2019) 
+ M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B. Catanzaro 
+
+ Megatron-lm: training multi-billion parameter language models using model parallelism .
+
+ arXiv preprint arXiv:1909.08053 .
+
+ Cited by: §1 .
+
+ Singh et al. (2023) 
+ S. Singh, O. Ruwase, A. A. Awan, S. Rajbhandari, Y. He, and A. Bhatele 
+
+ A hybrid tensor-expert-data parallelism approach to optimize mixture-of-experts training .
+
+ In Proceedings of the 37th International Conference on Supercomputing ,
+
+ pp. 203–214 .
+
+ Cited by: §1 .
+
+ StepFun et al. (2025) 
+ StepFun, :, B. Wang, B. Wang, C. Wan, G. Huang, H. Hu, H. Jia, H. Nie, M. Li, N. Chen, S. Chen, S. Yuan, W. Xie, X. Song, X. Chen, X. Yang, X. Zhang, Y. Yu, Y. Wang, Y. Zhu, Y. Jiang, Y. Zhou, Y. Lu, H. Li, J. Hu, K. M. Lo, A. Huang, B. Jiao, B. Li, B. Chen, C. Miao, C. Lou, C. Hu, C. Xu, C. Yu, C. Yao, D. Lv, D. Shi, D. Sun, D. Huang, D. Hu, D. Pang, E. Liu, F. Zhang, F. Wan, G. Yan, H. Zhang, H. Zhou, H. Wu, H. Guo, H. Chen, H. Zhang, H. Wu, H. Zhang, H. Yan, H. Lv, H. Wei, H. Zhou, H. Wang, H. Wang, H. Li, H. Zhou, H. Wang, H. Guo, J. Wang, J. Gong, J. Xie, J. Zhou, J. Sun, J. Wu, J. Zhang, J. Liu, J. Cheng, J. Luo, J. Yan, J. Yang, J. Hou, J. Zhang, J. Cao, J. Yin, J. Liu, J. Huang, J. Lin, K. Tan, K. Li, K. An, K. Lin, K. Liu, L. Yang, L. Zhao, L. Chen, L. Shi, L. Tan, L. Lin, L. Zhang, L. Chen, L. Huang, L. Shi, L. Gu, M. Chen, M. Ren, M. Li, M. Chen, N. Wang, N. Wu, Q. Han, Q. Zhao, Q. Zhang, Q. Liu, Q. Chen, Q. Wu, Q. He, Q. Tan, Q. Wang, Q. Wu, Q. Liang, Q. Sun, R. Li, R. Miao, R. Wan, R. Guo, S. Zhong, S. Pang, S. Fan, S. Shang, S. Jiang, S. Yang, S. Hao, S. Gao, S. Huang, S. Liu, T. Cao, T. Cheng, T. Peng, W. You, W. Ji, W. Sun, W. Deng, W. He, W. Zheng, X. Chen, X. Kong, X. Luo, X. Yang, X. Liu, X. Ren, X. Han, X. Li, X. Wu, X. Zhao, Y. Wei, Y. Li, Y. Li, Y. Xu, Y. Xu, Y. Shi, Y. Shen, Y. Yang, Y. Yang, Y. Gong, Y. Chen, Y. Yang, Y. Zhang, Y. Zhou, Y. Ding, Y. Fan, Y. Yang, Y. Luo, Y. Peng, Y. Lu, Y. Deng, Y. Yin, Y. Liu, Y. Chen, Y. Zhao, Y. Mou, Y. Li, Y. Ju, Y. Li, Y. Yang, Y. Zhang, Y. Chen, Z. Weng, Z. Xie, Z. Ge, Z. Gong, Z. Lu, Z. Huang, Z. Chang, Z. Huang, Z. Wang, Z. Yang, Z. Wang, Z. Wang, Z. Zhang, B. Jiao, D. Jiang, H. Shum, and X. Zhang 
+
+ Step-3 is large yet affordable: model-system co-design for cost-effective decoding .
+
+ External Links: 2507.19427 ,
+ Link 
+
+ Cited by: §1 ,
+ §2.1 ,
+ §2.2 ,
+ §5 .
+
+ Tan et al. (2026) 
+ X. Tan, Y. Feng, Y. Zhou, Y. Jiang, Y. Zhu, and H. Xu 
+
+ OrchestrRL: dynamic compute and network orchestration for disaggregated rl .
+
+ arXiv preprint arXiv:2601.01209 .
+
+ Cited by: §1 ,
+ §6.3 ,
+ §6.4 .
+
+ [41] 
+ (2025) 
+
+ Vllm watermark .
+
+ Note: Website https://docs.vllm.ai/en/v0.9.0/api/vllm/core/block_manager.html 
+
+ Cited by: §3.3 .
+
+ Wang et al. (2024) 
+ L. Wang, C. Ma, X. Feng, Z. Zhang, H. Yang, J. Zhang, Z. Chen, J. Tang, X. Chen, Y. Lin, et al. 
+
+ A survey on large language model based autonomous agents .
+
+ Frontiers of Computer Science 18 ( 6 ), pp. 186345 .
+
+ Cited by: §1 ,
+ §1 .
+
+ Won et al. (2023) 
+ W. Won, T. Heo, S. Rashidi, S. Sridharan, S. Srinivasan, and T. Krishna 
+
+ Astra-sim2. 0: modeling hierarchical networks and disaggregated systems for large-model training at scale .
+
+ In 2023 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) ,
+
+ pp. 283–294 .
+
+ Cited by: §3.4 ,
+ §4 ,
+ §8 .
+
+ Wu et al. (2023) 
+ B. Wu, Y. Zhong, Z. Zhang, S. Liu, F. Liu, Y. Sun, G. Huang, X. Liu, and X. Jin 
+
+ Fast distributed inference serving for large language models .
+
+ arXiv preprint arXiv:2305.05920 .
+
+ Cited by: §6.3 .
+
+ Xu et al. (2026) 
+ T. Xu, Y. Liu, X. Lu, Y. Zhao, X. Zhou, A. Feng, Y. Chen, Y. Shen, Q. Zhou, X. Chen, I. Sherstyuk, H. Li, R. Thakkar, B. Hamm, Y. Li, X. Huang, W. Wu, A. Shanbhag, H. Kim, C. Chen, and J. Lai 
+
+ AIConfigurator: lightning-fast configuration optimization for multi-framework llm serving .
+
+ External Links: 2601.06288 ,
+ Link 
+
+ Cited by: §1 ,
+ §1 ,
+ §1 ,
+ §2.1 ,
+ §2.2 ,
+ Table 1 ,
+ 1st item ,
+ §5.3 .
+
+ Yao et al. (2022) 
+ S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, and Y. Cao 
+
+ React: synergizing reasoning and acting in language models .
+
+ arXiv preprint arXiv:2210.03629 .
+
+ Cited by: §1 ,
+ §1 .
+
+ Ye et al. (2025) 
+ Z. Ye, L. Chen, R. Lai, W. Lin, Y. Zhang, S. Wang, T. Chen, B. Kasikci, V. Grover, A. Krishnamurthy, et al. 
+
+ Flashinfer: efficient and customizable attention engine for llm inference serving .
+
+ Proceedings of Machine Learning and Systems 7 .
+
+ Cited by: §4 .
+
+ Zhang et al. (2026) 
+ Z. Zhang, Y. Zhong, C. Yang, C. Jin, B. Wu, X. Wei, Y. Liu, and X. Jin 
+
+ Heddle: a distributed orchestration system for agentic rl rollout .
+
+ arXiv preprint arXiv:2603.28101 .
+
+ Cited by: §1 ,
+ §6.4 .
+
+ Zheng et al. (2022) 
+ L. Zheng, Z. Li, H. Zhang, Y. Zhuang, Z. Chen, Y. Huang, Y. Wang, Y. Xu, D. Zhuo, E. P. Xing, et al. 
+
+ Alpa: automating inter-and { \{ intra-operator } \} parallelism for distributed deep learning .
+
+ In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) ,
+
+ pp. 559–578 .
+
+ Cited by: §2.1 .
+
+ Zheng et al. (2024) 
+ L. Zheng, L. Yin, Z. Xie, C. L. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, et al. 
+
+ Sglang: efficient execution of structured language model programs .
+
+ Advances in neural information processing systems 37 , pp. 62557–62583 .
+
+ Cited by: §1 ,
+ §3.3 ,
+ §3 ,
+ §7 .
+
+ Zhong et al. (2024) 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang 
+
+ { \{ distserve } \} : Disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ pp. 193–210 .
+
+ Cited by: §1 ,
+ §2.2 .
+
+ Zhu et al. (2025) 
+ R. Zhu, Z. Jiang, C. Jin, P. Wu, C. A. Stuardo, D. Wang, X. Zhang, H. Zhou, H. Wei, Y. Cheng, et al. 
+
+ MegaScale-infer: serving mixture-of-experts at scale with disaggregated expert parallelism .
+
+ arXiv preprint arXiv:2504.02263 .
+
+ Cited by: §1 ,
+ §2.2 .
+
+ Appendix A Additional Details 
+
+ A.1. H20 Operator Fidelity 
+
+ We use the selected CDF rows from the H20 BF16 and FP8 operator packages,
+with 600 rows per family. Figure  17 reports
+Frontier APE CDFs for attention, linear ops, and MoE of H20 BF16 and FP8 operator. 
+
+ On BF16, Frontier p50/p90 APE is 3.24%/14.20% for attention,
+2.95%/9.58% for linear ops, and 0.93%/3.12% for MoE. On FP8, the
+corresponding p50/p90 values are 2.11%/8.49%, 0.42%/2.29%, and
+2.01%/8.64%. Linear ops stay the tightest curve in both packages.
+Attention keeps the longest BF16 tail, while MoE widens again on FP8. 
+
+ Figure 17 . H20 operator fidelity CDFs. Curves show Frontier absolute percentage error for attention, linear ops, and MoE on the H20 BF16 and FP8. 
+
+ A.2. H20 End-to-End Fidelity 
+
+ Figure  18 summarizes H20 end-to-end fidelity for dense and MoE models under co-location and PDD across prefill-heavy, decode-heavy, hybrid/mixed, and SharedGPT workloads. Each bar averages the relative error over p95 TTFT, p95 TPOT, throughput, and p95 E2E for one workload-architecture pair. All bars stay below 10%; dense co-location peaks at 6.5% on decode-heavy, dense PDD at 6.0% on decode-heavy, MoE co-location at 3.8% on prefill-heavy, and MoE PDD at 7.0% on decode-heavy. 
+
+ Figure 18 . H20 end-to-end fidelity across dense and MoE model families. Bars show the mean relative error for co-location and PDD on the four workloads, averaging p95 TTFT, p95 TPOT, throughput, and p95 E2E within each workload-architecture pair. 
+
+ Figure 19 . Example of three serving architectures in Frontier. 
+
+ A.3. PDD and AFD Scheduling Workflow 
+
+ Frontier operates as a discrete-event simulator (DES). This subsection expands the
+control and execution-plane mechanisms into a concrete workflow-level
+algorithmic description.
+We show the example of three serving architectures of Frontier in Figure  19 .
+Algorithm  1 illustrates
+the scheduling and execution pipelines for both Prefill-Decode Disaggregation (PDD)
+and Attention-FFN Disaggregation (AFD) serving architectures, using an MoE model
+simulation with thinking/reasoning modes enabled as a representative example. 
+
+ From a high-level perspective, the algorithm is modularly structured around role-local
+scheduler ticks. In the initialization phase, roles are compiled and bound to their respective
+parallel domains and hardware resources ( { 𝖯 , 𝖣 } \{\mathsf{P},\mathsf{D}\} for PDD, or
+ { 𝖯 , 𝖠 , 𝖥 } \{\mathsf{P},\mathsf{A},\mathsf{F}\} for AFD). At runtime, an event-driven loop
+processes request admissions and batch formations via runtime_adapter() gates.
+These gates cleanly inject production optimizations (e.g., chunked prefill, speculative decoding)
+into the scheduler-visible state without polluting the core simulation logic. 
+
+ Requests then branch into role-specific execution paths: 
+
+ • 
+
+ 𝖯 \mathsf{P} (Prefill): Completes prompt processing and triggers a request-granular KV-cache transfer to downstream decode roles. 
+
+ • 
+
+ 𝖣 \mathsf{D} (PDD Decode): Executes unified Attention and FFN layers sequentially, emitting a global batch completion event. 
+
+ • 
+
+ 𝖠 \mathsf{A} and 𝖥 \mathsf{F} (AFD Decode): Pipelines per-layer activation transfers ( 𝖠 → 𝖥 \mathsf{A}\to\mathsf{F} and 𝖥 → 𝖠 \mathsf{F}\to\mathsf{A} ). The 𝖥 \mathsf{F} role explicitly manages MoE routing, Expert Parallel (EP) dispatch, and synchronization barriers. 
+
+ For multi-phase reasoning workloads, requests traverse this role graph for each thinking round, re-entering the prefill queue after a simulated tool delay until the final answer is generated. 
+
+ Algorithm 1 PDD/AFD scheduling and execution workflow 
+
+ 1: 
+
+ Compile roles: Instantiate { 𝖯 , 𝖣 } \{\mathsf{P},\mathsf{D}\} (PDD) or { 𝖯 , 𝖠 , 𝖥 } \{\mathsf{P},\mathsf{A},\mathsf{F}\} (AFD); bind each c ∈ 𝒞 c\in\mathcal{C} to domain, Q c Q_{c} , budget, and backend.
+
+ 2: 
+
+ Arrival/re-entry: Enqueue new requests and Thinking re-entries to Q 𝖯 Q_{\mathsf{P}} at time t t . ⊳ \triangleright Preserve session affinity
+
+ 3: 
+
+ for each scheduler tick of role c ∈ 𝒞 c\in\mathcal{C} do 
+
+ 4: 
+
+    Admission: Call runtime_adapter() on state. Admit requests, allocate blocks, and preempt while budget permits.
+
+ 5: 
+
+    Execution: Form batch B B , call runtime_adapter() on shape, query Fidelity Plane, and run through local PP stages.
+
+ 6: 
+
+    if role c = 𝖯 c=\mathsf{P} then 
+
+ 7: 
+
+     Prefill: On completion, retain KV cache and emit request KV-cache transfer start. On end, enqueue r r to 𝖣 \mathsf{D} or 𝖠 \mathsf{A} .
+
+ 8: 
+
+    else if role c = 𝖣 c=\mathsf{D} (PDD) then 
+
+ 9: 
+
+     PDD decode: Execute unified Attention+FFN. Emit GlobalBatchEnd on final layer/token completion.
+
+ 10: 
+
+    else if role c = 𝖠 c=\mathsf{A} (AFD) then 
+
+ 11: 
+
+     AFD attention: For non-final decode layers, emit A → \to F transfer with ( ℓ , stage , lane ) (\ell,\mathrm{stage},\mathrm{lane}) metadata.
+
+ 12: 
+
+    else if role c = 𝖥 c=\mathsf{F} (AFD) then 
+
+ 13: 
+
+     AFD FFN/MoE: Group A → \to F arrivals by stage/lane. Apply padding contracts, route tokens, build EP sub-batches.
+
+ 14: 
+
+     if ep ffn > 1 \mathrm{ep}_{\mathrm{ffn}}>1 then 
+
+ 15: 
+
+       Run pre-dispatch MoE work, wait for EP dispatch collective, then execute expert sub-batches.
+
+ 16: 
+
+        EP sync: Wait for all EP lanes; combine at max i ⁡ t ready i + Δ EP \max_{i}t^{i}_{\mathrm{ready}}+\Delta_{\mathrm{EP}} .
+
+ 17: 
+
+     else 
+
+ 18: 
+
+       Execute expert sub-batches locally without EP synchronization.
+
+ 19: 
+
+     end if 
+
+ 20: 
+
+    Recover raw batches and emit F → \to A transfers. 𝖠 \mathsf{A} advances layer progress or emits GlobalBatchEnd .
+
+ 21: 
+
+    end if 
+
+ 22: 
+
+    Completion: Commit tokens, release resources. Emit ThinkingRequeue if non-final, else export user metrics.
+
+ 23: 
+
+ end for 
+
+ The key property is that disaggregation changes the event graph, not the
+simulator core. PDD inserts a request-granular KV-cache dependency; AFD adds
+per-layer activation ping-pong. Both keep MoE synchronization explicit:
+prefill and PDD decode use in-role sync barriers, while AFD exposes decode-time
+FFN barriers in 𝖥 \mathsf{F} before activations return to 𝖠 \mathsf{A} .
+Runtime optimizations remain modular because adapter gates mutate
+scheduler-visible state, batch shape, or per-request progress exactly where the
+production loop observes those effects. 
+
+ \@ACM@balancefalse 
+
+ Appendix B Agentic Multi-Phase Reasoning 
+
+ Table 7 . Multi-phase reasoning workload. Each cell is
+ ℓ r , r ′ / o r , r ′ \ell_{r,r^{\prime}}/o_{r,r^{\prime}} (new prompt / decode tokens); round 5 is the
+answer-visible round. 
+
+ Template | 
+ r = 1 r{=}1 | 
+ r = 2 r{=}2 | 
+ r = 3 r{=}3 | 
+ r = 4 r{=}4 | 
+ r = 5 r{=}5 | 
+
+ Short | 
+ 4096/96 | 
+ 1024/64 | 
+ 512/64 | 
+ 512/64 | 
+ 256/192 | 
+
+ Heavy tail | 
+ 32768/96 | 
+ 16384/64 | 
+ 8192/64 | 
+ 4096/64 | 
+ 256/192 | 
+
+ B.1. Workload 
+
+ Multi-round requests. 
+We model each agentic request r r as a sequence of R r = 5 R_{r}{=}5 rounds: four
+hidden planning rounds (matching the <thinking> blocks in the
+scenario description) followed by one answer-visible round. Round r ′ r^{\prime} 
+contributes ℓ r , r ′ \ell_{r,r^{\prime}} new prompt tokens (after same-request prefix
+reuse) and o r , r ′ o_{r,r^{\prime}} decode tokens. Following the main definition,
+ aTTFT is the time from request arrival to completion of the
+answer-round prefill. Table  7 lists the
+two templates used in our trace. 
+
+ B.2. Why Skip-Join MLFQ Is Insufficient 
+
+ We use Frontier to realize the skip-join MLFQ comparator against the native
+vLLM scheduler. It yields only marginal gains: p95 aTTFT drops from
+ 20.84 ​ s 20.84\,\text{s} to 20.54 ​ s 20.54\,\text{s} ( − 1.45 % -1.45\% ), p95 aTPOT is
+unchanged, and hidden planning throughput regresses by 2.54 % 2.54\% 
+(Figure  20 ). The blue-bar annotations in the figure
+show the relative change over vLLM. 
+
+ Figure 20 . Skip-join MLFQ on the agentic trace: p95 aTTFT improves
+marginally and hidden planning throughput regresses. Blue-bar
+annotations show the relative change over vLLM. 
+
+ The failure mode is structural: priority is decided on the
+ current round’s observable size, but a heavy-tail request may
+present a small answer round indistinguishable from a true short request.
+Symmetrically, a heavy hidden-prefill continuation can occupy the prefill
+budget ahead of latency-critical answer prefills. This motivates a
+classifier that retains cross-round history . 
+
+ B.3. H2Q-BR: History-Aware Two-Queue Scheduling with Bounded Release 
+
+ Design intent. 
+Skip-join MLFQ improves over FIFO-style admission by letting short
+current-round work bypass long prompt chunks. However, the previous
+section shows that this local view is not enough for agentic sessions:
+a heavy-tail request can later expose a tiny answer-visible round, and a
+running hidden-prefill continuation can keep consuming prefill budget
+before short answer prefills are admitted. H2Q-BR 
+( History-Aware Two-Queue with Bounded Release ) keeps the
+skip-join intuition, but adds session history so that the scheduler can
+distinguish “small now” from “historically small” without using a
+final-round oracle. 
+
+ High-level idea. 
+H2Q-BR follows three simple rules. First, it records compact
+ session_id -scoped history: whether a session has already
+shown long-prompt behavior, how many new prompt tokens it has consumed,
+the current round’s new-prompt increment, and whether a prefill chunk
+spilled across scheduling iterations. Second, it separates work into a
+short queue Q S Q_{S} and a long-history queue Q L Q_{L} . Small requests from
+historically short sessions remain in Q S Q_{S} and are ordered by smaller
+current prompts first; for example, a 256-token answer prefill from a
+short session can bypass a 4096-token hidden prompt. A 32768-token
+hidden prefill enters Q L Q_{L} immediately, and later slices from the same
+session remain in Q L Q_{L} even if the current answer round is only
+256 tokens. Third, H2Q-BR prevents starvation: long-history work normally
+waits behind Q S Q_{S} , but a one-shot carryover release lets an already
+started long prefill make bounded progress, and a liveness quota forces
+the oldest Q L Q_{L} slice after too many consecutive short-queue slices. 
+
+ The policy only changes request order before batch construction. The
+inherited batch builder still enforces token budgets, memory admission,
+chunking, and preemption; H2Q-BR does not replace the execution model. 
+
+ State update and classification. 
+Algorithm  2 starts when a slice arrives or re-enters
+the scheduler. H2Q-BR computes the current-round prompt length as the
+increase in total prefill tokens since the previous completed round,
+then classifies the slice by Eq.  3 . Once a
+session crosses the long-history boundary, the sticky flag keeps later
+rounds in Q L Q_{L} ; there is no round-class oracle and no final-round
+promotion. 
+
+ Classification. 
+
+ (3) | 
+ | 
+ q r = { Q L , z r = 1 ∨ H r > C ∨ ℓ r > L , Q S , otherwise . q_{r}=\begin{cases}Q_{L},&z_{r}{=}1\;\lor\;H_{r}>C\;\lor\;\ell_{r}>L,\\
+Q_{S},&\text{otherwise}.\end{cases} | 
+ | 
+
+ Here z r z_{r} is the sticky long-history flag, H r H_{r} is cumulative served
+new tokens, C C is the service cap, and L L is the long-round threshold.
+The strict ℓ r > L \ell_{r}>L matters: a 4096-token short round stays in Q S Q_{S} ,
+while a 32768-token heavy hidden round enters Q L Q_{L} on arrival. 
+
+ Bounded release. 
+The middle procedure of Algorithm  2 decides whether
+any long-history slice should temporarily outrank Q S Q_{S} . When chunked
+prefill stops before finishing a prompt, H2Q-BR marks the session as
+long-history, sets a one-shot carryover-release flag, and requeues the
+slice in Q L Q_{L} . On a later scheduling pass, it may release at most one
+such carryover request. The release is safe only if the request arrived
+no later than the oldest waiting Q S Q_{S} request; if no Q S Q_{S} request is
+waiting, the oldest pending carryover request is released. This gives
+spilled prefills a bounded path forward without letting them jump ahead
+of older short requests. 
+
+ Ranking and batch construction. 
+Before each scheduling pass, H2Q-BR ranks the combined running and
+waiting sets by 
+
+ (4) | 
+ | 
+ ρ ⁡ ( i ) = { − 2 , i = i rel (release) , − 1 , i = i live (liveness) ,   0 , q r ⁡ ( i ) = Q S ,   1 , q r ⁡ ( i ) = Q L , \rho(i)=\begin{cases}-2,&i=i_{\mathrm{rel}}\quad\text{(release)},\\
+-1,&i=i_{\mathrm{live}}\quad\text{(liveness)},\\
+\;\;0,&q_{r(i)}=Q_{S},\\
+\;\;1,&q_{r(i)}=Q_{L},\end{cases} | 
+ | 
+
+ where i live i_{\mathrm{live}} is the oldest Q L Q_{L} slice forced after the
+short-streak counter reaches B B . Within Q S Q_{S} , the secondary key is
+ ( ℓ r , d i , a i ) (\ell_{r},\,d_{i},\,a_{i}) : smaller prompts first, prefill before decode,
+then earlier arrival. Within normal Q L Q_{L} , decode precedes prefill to
+limit TPOT regression. A released or liveness-forced slice uses the
+negative rank above, then decode-before-prefill and arrival time as
+tie-breakers. After this ordering step, the existing scheduler consumes
+the ordered running and waiting sets exactly as before. The final
+procedure in Algorithm  2 then accounts executed
+tokens, refreshes per-session history, consumes a selected carryover
+credit, and updates the short-streak counter for the next pass. 
+
+ Algorithm 2 H2Q-BR scheduling step 
+
+ 1: 
+
+ Session state ( z r , H r , T r last , c r ) (z_{r},H_{r},T_{r}^{\mathrm{last}},c_{r}) for each session r r . Short streak counter η \eta .
+
+ 2: 
+
+ 3: 
+
+ procedure OnArrivalOrReentry (slice i i , session r r )
+
+ 4: 
+
+   Load session state ( z r , H r , T r last , c r ) (z_{r},H_{r},T_{r}^{\mathrm{last}},c_{r}) from session_id .
+
+ 5: 
+
+    ℓ r ← max ⁡ ( PrefillTokens ​ ( i ) − T r last , 0 ) \ell_{r}\leftarrow\max(\textsc{PrefillTokens}(i)-T_{r}^{\mathrm{last}},0) ⊳ \triangleright Current-round prompt length
+
+ 6: 
+
+    if z r ∨ ( H r > C ) ∨ ( ℓ r > L ) z_{r}\lor(H_{r}>C)\lor(\ell_{r}>L) then 
+
+ 7: 
+
+     q r ← Q L q_{r}\leftarrow Q_{L} ⊳ \triangleright Assign to long-history queue
+
+ 8: 
+
+    else 
+
+ 9: 
+
+     q r ← Q S q_{r}\leftarrow Q_{S} ⊳ \triangleright Assign to short-history queue
+
+ 10: 
+
+    end if 
+
+ 11: 
+
+   Enqueue slice i i to q r q_{r} .
+
+ 12: 
+
+ end procedure 
+
+ 13: 
+
+ 14: 
+
+ procedure BeforeSchedulingPass 
+
+ 15: 
+
+    Bounded Release: 
+
+ 16: 
+
+    if Q S = ∅ Q_{S}=\emptyset then 
+
+ 17: 
+
+     i rel ← i_{\mathrm{rel}}\leftarrow oldest pending carryover slice (with c r ⁡ ( i ) = 1 c_{r(i)}=1 )
+
+ 18: 
+
+    else 
+
+ 19: 
+
+     i rel ← i_{\mathrm{rel}}\leftarrow oldest pending carryover slice (with c r ⁡ ( i ) = 1 c_{r(i)}=1 ) where a i rel ≤ min j ∈ Q S ⁡ a j a_{i_{\mathrm{rel}}}\leq\min_{j\in Q_{S}}a_{j} 
+
+ 20: 
+
+    end if 
+
+ 21: 
+
+    if η ≥ B \eta\geq B and Q L ≠ ∅ Q_{L}\neq\emptyset then 
+
+ 22: 
+
+     i live ← arg ⁡ min i ∈ Q L ⁡ a i i_{\mathrm{live}}\leftarrow\arg\min_{i\in Q_{L}}a_{i} ⊳ \triangleright Force liveness for oldest Q L Q_{L} 
+
+ 23: 
+
+    else 
+
+ 24: 
+
+     i live ← ⊥ i_{\mathrm{live}}\leftarrow\bot 
+
+ 25: 
+
+    end if 
+
+ 26: 
+
+   Rank Running ∪ \cup Waiting by ρ ⁡ ( i ) \rho(i) (Eq.  4 ).
+
+ 27: 
+
+   Apply tie-breakers: ( ℓ r , d i , a i ) (\ell_{r},d_{i},a_{i}) for Q S Q_{S} , and ( d i , a i ) (d_{i},a_{i}) for Q L Q_{L} .
+
+ 28: 
+
+   Pass the ordered queues to the batch builder.
+
+ 29: 
+
+ end procedure 
+
+ 30: 
+
+ 31: 
+
+ procedure OnBatchCompletion 
+
+ 32: 
+
+    for each scheduled slice i i do 
+
+ 33: 
+
+     H r ⁡ ( i ) ← H r ⁡ ( i ) + executed new tokens H_{r(i)}\leftarrow H_{r(i)}+\text{executed new tokens} .
+
+ 34: 
+
+     if round completes then 
+
+ 35: 
+
+       Refresh T r ⁡ ( i ) last T_{r(i)}^{\mathrm{last}} .
+
+ 36: 
+
+     end if 
+
+ 37: 
+
+     if prefill slice i i makes partial progress but is unfinished then 
+
+ 38: 
+
+        z r ⁡ ( i ) ← 1 z_{r(i)}\leftarrow 1 , c r ⁡ ( i ) ← 1 c_{r(i)}\leftarrow 1 , q r ⁡ ( i ) ← Q L q_{r(i)}\leftarrow Q_{L} ⊳ \triangleright Mark carryover
+
+ 39: 
+
+     end if 
+
+ 40: 
+
+     if i = i rel i=i_{\mathrm{rel}} ⊳ \triangleright The selected release slice ran then 
+
+ 41: 
+
+       Clear its carryover flag c r ⁡ ( i ) ← 0 c_{r(i)}\leftarrow 0 .
+
+ 42: 
+
+     end if 
+
+ 43: 
+
+    end for 
+
+ 44: 
+
+    if any Q L Q_{L} slice ran then 
+
+ 45: 
+
+     η ← 0 \eta\leftarrow 0 
+
+ 46: 
+
+    else 
+
+ 47: 
+
+     η ← η + ( number of scheduled  ​ Q S ​  slices ) \eta\leftarrow\eta+(\text{number of scheduled }Q_{S}\text{ slices}) 
+
+ 48: 
+
+    end if 
+
+ 49: 
+
+ end procedure 
+
+ B.4. SGLang Scheduler vs. vLLM v1 Scheduler 
+
+ Policy contrast. 
+The two schedulers differ in what they treat as the first-class unit of
+service. SGLang is prefill-first: when a prompt-prefill batch can be
+formed, it prefers to build that batch before falling back to decode.
+vLLM v1 is running/decode-first: it advances running decode work first
+and then admits waiting requests if budget remains. For example, if a
+latency-sensitive answer prefill arrives while several decode continuations
+are already running, SGLang tries to serve the prefill side first, whereas
+vLLM v1 keeps the running decode stream in front of the queue. 
+
+ Implementation mapping. 
+This contrast appears in sota-infer-engine . In SGLang,
+ sglang/srt/managers/scheduler.py attempts prefill before decode
+fallback. In vLLM v1, vllm/v1/core/sched/scheduler.py schedules
+running requests before waiting requests. In Frontier, the mirror lives
+under frontier/scheduler/replica_scheduler :
+ sglang_style_replica_scheduler.py is the prefill-first wrapper,
+and vllm_v1_engine_replica_scheduler.py is the running-first
+baseline. 
+
+ Figure 21 . Frontier online SharedGPT qps64 scheduler comparison. Panel (a) reports normalized macro metrics, and the bar labels show multipliers relative to vLLM. Panels (b)–(d) retain the micro-scheduling view of batch size, backlog, and prefill/decode mixing over time (s). 
+
+ Runtime setup. 
+To isolate scheduler-policy effects from hardware and model differences, we run Frontier in online co-location mode on a simulated 256-H800 deployment of Qwen3-235B-A22B. Both schedulers use the same vLLM-style parallel semantics ( PP=2 , attn_tp=8 , attn_dp=16 , moe_ep=128 , cluster_num_replicas=1 ), chunked prefill, decode-only CUDA graph capture, disabled prefix caching, and Frontier’s monolithic MoE stage aggregation path. The active workload is sharedgpt_trace replay with 1,024 requests at qps64; this setting was selected because it sustains a saturated queueing regime while still allowing both schedulers to complete cleanly. 
+
+ Figure  21 should be read as a normalized comparison: the labels above the bars in panel (a) report multipliers relative to vLLM, rather than absolute latency scales. In this setting, SGLang remains within 1.06% of vLLM on P95 TTFT, lowers P95 TPOT by 7.15%, but increases P95 E2E by 3.01% and reduces throughput by 2.90%. The figure therefore does not support a simple scalar ranking; instead, it exposes a trade-off between token-level service regularity and completion-oriented efficiency. 
+
+ Interpretation. 
+The micro panels explain this trade-off at the scheduler level. SGLang increases the average non-empty batch size from 183.703 to 264.554 and the P95 non-empty batch size from 471.5 to 923.0, while reducing non-empty decisions from 1,551 to 1,077 and increasing no-op decisions from 3 to 483. The saturation envelope remains similar: both schedulers reach a maximum of 868 waiting requests, and their maximum running-request counts stay close (1,017 for vLLM and 1,021 for SGLang). These counts indicate that the two policies operate under comparable pressure, but allocate that pressure differently across batch construction and admission pacing. 
+
+ The time-series view makes the phase structure more explicit. Between 390–420 s, SGLang’s average batch size is 49 with zero decode share, and between 450–480 s it falls to 15.5 while remaining decode-free; in the same windows, vLLM sustains average batch sizes of 523 and 506.5, with decode shares of 4.0% and 8.5%, respectively. The transition into a decode-dominant regime also occurs later for SGLang: at 480–510 s it reaches an average batch size of 467.450331 with a 96.3902% decode share, whereas vLLM already reaches 92.8177% decode share in the same window and moves into full decode dominance one window earlier. This behavior is consistent with a prefill-first two-phase policy that consolidates prompt service before mixing in decode, while vLLM’s running-request-first ordering admits decode into the service stream earlier. Under the present 256-H800 SharedGPT setting, that difference explains why SGLang can improve TTFT and TPOT yet still exhibit a small E2E and throughput penalty: the policy shifts work into larger prompt-oriented batches, but postpones mixed-phase service and makes the later decode completion burstier.

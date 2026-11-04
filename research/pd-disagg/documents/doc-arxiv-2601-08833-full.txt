@@ -1,0 +1,940 @@
+Revisiting Disaggregated Large Language Model Serving for Performance and Energy Implications 
+
+ Jiaxi Li
+
+ Affiliation:  UIUC 
+ Urbana, Illinois 
+ jiaxili3@illinois.edu
+
+ Yue Zhu
+
+ Affiliation:  IBM Research 
+ Yorktown Heights, New York 
+ Yue.Zhu@ibm.com
+
+ Eun Kyung Lee
+
+ Affiliation:  IBM Research 
+ Yorktown Heights, New York 
+ eunkyung.lee@us.ibm.com
+
+ Klara Nahrstedt
+
+ Affiliation:  UIUC 
+ Urbana, Illinois 
+ klara@illinois.edu
+
+ Abstract 
+
+ Different from traditional Large Language Model (LLM) serving that colocates the prefill and decode stages on the same GPU, disaggregated serving dedicates distinct GPUs to prefill and decode workload. Once the prefill GPU completes its task, the KV cache must be transferred to the decode GPU. While existing works have proposed various KV cache transfer paths across different memory and storage tiers, there remains a lack of systematic benchmarking that compares their performance and energy efficiency. Meanwhile, although optimization techniques such as KV cache reuse and frequency scaling have been utilized for disaggregated serving, their performance and energy implications have not been rigorously benchmarked. In this paper, we fill this research gap by re-evaluating prefill-decode disaggregation under different KV transfer mediums and optimization strategies. Specifically, we include a new colocated serving baseline and evaluate disaggregated setups under different KV cache transfer paths. Through GPU profiling using dynamic voltage and frequency scaling (DVFS), we identify and compare the performance–energy Pareto frontiers across all setups to evaluate the potential energy savings enabled by disaggregation. Our results show that performance benefits from prefill–decode disaggregation are not guaranteed and depend on the request load and KV transfer mediums. In addition, stage-wise independent frequency scaling enabled by disaggregation does not lead to energy saving due to inherently higher energy consumption of disaggregated serving. 
+
+ I Introduction 
+
+ Large Language Models (LLMs) are transformer-based neural networks that process natural language inputs and generate coherent text outputs [ 46 , 34 , 5 ] . They are widely used in real-world applications such as conversation [ 29 , 3 , 28 ] and code generation [ 24 , 16 , 7 ] . LLMs execute a two-stage inference process on GPUs to generate outputs. The compute-intensive prefill stage processes all input tokens in parallel and generates intermediate representations known as the key–value (KV) cache, while the memory-intensive decode stage generates output tokens autoregressively by repeatedly accessing the KV cache [ 46 ] . Two metrics are commonly used to evaluate LLM inference serving performance. Time to First Token (TTFT) evaluates prefill latency, and measures the latency between a request’s submission and the generation of the first output token, while Time per Output Token (TPOT) evaluates decode latency, and measures the average time to generate each subsequent token. LLM inference serving frameworks aim to minimize both TTFT and TPOT to ensure high Quality of Experience (QoE) for users. 
+
+ LLM inference serving has been extensively studied for both performance and energy efficiency [ 22 , 58 , 59 , 6 , 42 , 40 ] . Most existing frameworks [ 22 , 58 ] colocate the prefill and decode stages on the same GPU to minimize KV cache transfer overhead. In contrast, recent studies [ 59 , 6 , 37 , 35 , 14 , 13 , 56 , 48 , 8 , 23 ] advocate disaggregated serving, where individual GPUs are dedicated to either prefill or decode workloads. This design offers two primary benefits: (1) it eliminates the interference that occurs when prefill and decode stages share the same GPU, and (2) it enables independent configuration of prefill and decode GPUs to better satisfy their respective Service Level Objectives (SLOs) on serving performance. However, disaggregation also introduces unavoidable overhead, as the KV cache must be transferred from the prefill GPU to the decode GPU for each request. 
+
+ Existing benchmarking studies [ 59 , 6 ] report that disaggregating prefill and decode into separate GPUs leads to improved LLM serving performance compared to colocated execution. However, these studies have explored only a limited set of experimental setups, while still missing performance analysis under certain scenarios. First, most existing works only utilize high-speed links (e.g., NVLink) to transfer KV cache from the prefill GPU to the decode GPU [ 59 , 37 , 14 , 13 , 48 , 8 ] . Although industry has provided storage solutions that support KV cache transfer via CPU memory offloading [ 37 , 53 , 9 , 11 , 54 , 19 , 50 ] , there remains a lack of benchmarking studies that compare the performance and energy efficiency between different transfer paths. Such analysis is essential for guiding LLM serving strategies on hardware platforms that lack high-speed GPU peer-to-peer interconnects. Second, existing works have tested limited cases of colocated serving baselines. Specifically, using a single NVIDIA A100 GPU, DistServe [ 59 ] reported improved TTFT performance in the prefill-only case than in the colocated case, and similarly better TPOT in the decode-only case. However, in DistServe’s setup, disaggregated serving requires at least two GPUs, one for prefill and one for decode, to realize the claimed latency improvements, whereas the colocated baseline used only a single GPU. Another colocated serving baseline with two GPUs should also be included in the benchmarking study. 
+
+ Moreover, while Dynamic Voltage and Frequency Scaling (DVFS) has proven effective for improving energy efficiency in colocated LLM serving, its potential in the disaggregated setting remains largely unexplored in existing works. Prior works [ 42 , 12 , 20 , 21 , 41 ] have utilized DVFS to profile the inference latency and energy consumption at different GPU frequencies, based on which they constructed the latency-energy Pareto frontier. As illustrated in Figure 5 , these frontiers typically exhibit a U-shaped curve reflecting the trade-off between latency performance and energy consumption. During inference, GPU frequency is set according to the frontier to meet all latency SLOs at the minimal energy usage. However, this approach falls short on processing requests with imbalanced latency SLOs (e.g., tight TTFT but relaxed TPOT). Meeting the TTFT requirement often forces the GPU to run at a higher frequency, which leads to unnecessary energy consumption from overprovisioned TPOT performance. Disaggregated serving could potentially mitigate this inefficiency through independent frequency optimization. By assigning separate GPUs to prefill and decode, each GPU is allowed to operate at a different frequency that satisfies its own SLO with minimal energy cost. 
+
+ To fill the research gap, we conduct extensive benchmarking studies to re-evaluate prefill–decode disaggregation under various experiment setups and optimization strategies. First, we include a new colocated serving baseline that employs two GPUs, with each processing half of the requests in the batch. The baselines are compared against disaggregated serving setups under different KV transfer paths (Section V-A ). Furthermore, we assess the benefits of independent frequency optimization through DVFS. By conducting offline profiling at multiple GPU frequencies, we construct latency–energy Pareto frontiers for both prefill and decode stages. We iterate this for each setup, and compare the results across colocated and disaggregated serving to understand their energy trade-offs (Section V-B ). 
+
+ Our key takeaways from the benchmarking experiments are summarized as follows. 
+
+ • 
+
+ The benefits of prefill–decode disaggregation are not universal and depend on the request load and KV transfer medium. Disaggregation doubles the request load per GPU, resulting in degraded TTFT performance when high-speed interconnects for KV cache transfer are unavailable. However, as number of requests per batch increases, colocated serving suffers from KV cache eviction and recomputation due to limited GPU memory, resulting in degraded TPOT performance. 
+
+ • 
+
+ Independent frequency scaling does not necessarily lead to energy savings. Even with stage-wise frequency scaling, disaggregated serving could still consume more time in the prefill stage than the colocated baseline, resulting in higher overall energy consumption. 
+
+ II Background 
+
+ II-A LLM Inference 
+
+ Large Language Models (LLMs) are transformer-based neural networks with a vast number of parameters, which are capable of handling sophisticated tasks such as conversation [ 29 , 3 , 28 ] , code generation [ 24 , 16 , 7 ] , and summarization [ 57 , 36 ] . To respond to user requests, LLMs undergo an inference process that can be divided into two stages. In the prefill stage, the entire input token sequence is processed in parallel, producing the key–value (KV) cache as the intermediate representation. KV cache contains the key (K) and value (V) tensors generated at each attention layer, which encode the contextual information of the input. In the subsequent decode stage, the model generates output tokens one by one in an autoregressive manner by reusing the stored KV cache. 
+
+ The computational characteristics of the two stages differ significantly. The prefill stage is compute-heavy, and is dominated by large matrix multiplications across the full sequence of input tokens. By contrast, the decode stage is memory-heavy, as each new token generation requires repeatedly looking up the entire KV cache, which must therefore remain in GPU memory throughout the process. 
+
+ To support large-scale deployment, LLMs are served through specialized inference systems that manage scheduling and resource allocation. Their performance and scalability are commonly evaluated using two metrics. Time to First Token (TTFT) is a metric for the prefill stage, which measures the latency from when a request is submitted until the first output token is generated. TTFT reflects the responsiveness of a serving system and is especially important for real-time interactive applications. Time per Output Token (TPOT) evaluates the decode stage, which measures the average time between consecutive output tokens. When TPOT matches or exceeds human reading speed, responses feel smooth and natural, whereas higher TPOT causes pauses that disrupt readability. To ensure acceptable Quality of Experience (QoE), requests may specify SLOs that require the serving system to meet certain latency or throughput targets. 
+
+ II-B Prefill and Decode Disaggregation 
+
+ Conventional LLM inference serving systems colocate the prefill and decode stages on the same GPU or GPU node [ 22 , 58 ] . Recent work, however, has proposed disaggregated serving, in which each GPU worker is dedicated exclusively to either prefill or decode. Studies [ 59 , 6 ] have demonstrated several benefits of this design. First, disaggregation eliminates prefill–decode interference. For example, [ 59 ] observed significant degradation in decode latency when a single prefill request was introduced into a batch of decode workloads, and vice versa. By separating these stages onto different GPU workers, prefill–decode interference is avoided and each device can be fully optimized for its respective workload. Second, disaggregation enables flexible GPU optimization. As requests may impose distinct SLOs for prefill and decode latency, GPU workers can be configured differently—e.g., with stage-specific batching strategies [ 6 ] , parallelism levels [ 59 ] , or frequency scaling policies [ 42 ] —to maximize performance for each stage. 
+
+ However, prefill-decode disaggregation also introduces a new overhead, as the KV cache produced during prefill must be transferred to the decode worker. For recent billion-parameter LLM models, the KV cache can be very large, and transmitting it across GPUs may lead to significant latency increase. To address this, two classes of KV transfer strategies have emerged, depending on the hardware topology of the cluster. In multi-node clusters where prefill and decode are placed on different GPU nodes, KV transfer relies on high-speed interconnects such as RDMA [ 37 , 23 ] or InfiniBand [ 35 ] . In single-node clusters where prefill and decode are disaggregated across GPUs within the same node, KV transfer is mainly realized through GPU peer-to-peer links such as NVLink [ 59 , 37 , 14 , 13 , 56 , 48 , 8 ] or PCIe [ 6 , 14 , 56 , 8 ] . 
+
+ II-C KV Cache Sharing and Reusing 
+
+ Beyond prefill–decode disaggregation, the computation overhead of LLM inference can be further optimized through KV cache sharing and reuse. The KV cache, generated during the prefill stage, stores intermediate context information and can be reused across requests with overlapping input tokens to avoid redundant computation. This technique is particularly effective for workloads with long shared contexts. For example, in retrieval-augmented generation (RAG) scenario, a user prompt is augmented with retrieved documents (e.g., legal texts, news articles, or Wikipedia pages). Although the prompts may differ across users, the retrieved documents are often identical, allowing their KV caches to be reused rather than recomputed. 
+
+ Existing research has mainly explored two strategies for KV cache reuse. The simplest form is prefix matching: when the beginning of a new request exactly matches the beginning of a prior request, the cached KV tensors for those prefix tokens can be reused to avoid redundant computation [ 9 , 58 , 19 , 50 ] . While straightforward, prefix matching often yields limited benefits, as user prompts may diverge in their opening tokens even if they later converge on overlapping content. To overcome this limitation, more recent work has proposed Position-Independent Caching (PIC), which allows reuse of KV cache for matching tokens regardless of their position in the input sequence [ 53 , 11 , 54 , 15 ] . This is often achieved by selectively recomputing cross-attention between reused KV blocks and surrounding tokens [ 53 ] . 
+
+ II-D Energy-efficient LLM Inference 
+
+ Unlike the one-time cost of training, LLM inference dominates resource consumption because it requires continuous GPU computation to serve millions of requests per minute. At datacenter scale, this translates into significant energy demand. For instance, a modern datacenter with 3,000 NVIDIA Blackwell B200 GPUs can draw approximately 86,400 kWh per day [ 10 ] , an amount comparable to the daily electricity usage of a small U.S. town with about 2,800 households [ 1 ] . Such energy demands impose heavy financial burdens on AI companies [ 33 ] , while also raising environmental concerns due to the associated carbon footprint [ 55 ] . Consequently, energy-efficient LLM inference has become an active research focus in both industry and academia. 
+
+ Recent efforts to improve energy efficiency fall into two complementary categories. Workload-optimization approaches [ 43 , 17 , 49 , 44 , 40 ] aim to reduce the amount of computation required per request while preserving the SLOs on accuracy. Techniques used include layer dropping [ 43 ] , model quantization [ 17 ] , and reuse of previously computed results [ 49 , 44 ] . These approaches directly shrink the per-request workload, thereby lowering both compute overhead and energy usage. System-optimization approaches [ 42 , 20 , 21 , 41 , 52 , 51 ] instead focus on adjusting the serving infrastructure. These works tune GPU frequency [ 42 , 20 , 21 , 41 ] , GPU parallelism level [ 42 , 41 ] , batching strategy [ 41 ] , and request routing strategy [ 52 , 51 ] to maximize power efficiency under latency constraints. Rather than reducing the workload itself, system-optimization approaches reduce the energy cost per unit of work performed. 
+
+ III Related Work and Our Motivation 
+
+ Based on benchmarking experiments, existing works report performance gains and energy efficiency from prefill–decode disaggregation compared to colocation [ 59 , 6 , 40 ] . In this section, however, we argue that existing studies have based their benchmarking experiments on specific baseline assumptions, which limits the generalizability of their results across different deployment scenarios. Meanwhile, while existing studies have supported disaggregated LLM serving with various KV transfer paths and optimization techniques such as KV cache reuse and frequency scaling, each approach presents distinct trade-offs. A comprehensive benchmarking study is therefore necessary to systematically evaluate these trade-offs and identify the most effective serving configurations for different deployment scenarios. However, such an analysis is still lacking in existing studies. 
+
+ III-A Unexplored Baseline Configurations 
+
+ Existing works have compared disaggregated serving to a limited case of colocated serving baseline. DistServe [ 59 ] represents a state-of-the-art disaggregated LLM serving framework. In its benchmark study, a single NVIDIA A100 GPU was used to serve a 13B-parameter model under a synthetic workload. Three cases were evaluated for the GPU: prefill-only, decode-only, and colocation. The reported results suggested that dedicating the GPU exclusively to prefill or decode improved TTFT or TPOT compared to the colocated case. Although their results are reasonable, we argue that they are missing one important colocated serving baseline. In their experiment setting, achieving the claimed performance gains from prefill–decode disaggregation requires at least two GPUs—one for prefill and one for decode. By contrast, the original colocated baseline used only a single GPU. To fairly assess disaggregation and colocation under equivalent GPU resources, we propose to include a new colocated baseline in which two GPUs each perform both prefill and decode, with the incoming requests evenly distributed between them. Section V-A and V-B presents a comprehensive evaluation of this new baseline relative to disaggregated alternatives. 
+
+ III-B Benchmarking KV Cache Transfer Paths 
+
+ As discussed in Section II-B , existing intra-node disaggregated serving frameworks [ 59 , 37 , 14 , 13 , 48 , 8 ] primarily rely on high-speed GPU peer-to-peer links for KV cache transfer. While effective, this approach is constrained by hardware availability, as interconnects such as NVLink are not present on all commodity GPUs [ 56 ] . On the other hand, CPU memory and disk are resources that are widely available in modern compute nodes. Based on that, industry has proposed offloading-based solutions to support disaggregated serving. For example, Mooncake [ 37 ] supports prefill-to-decode KV cache transfer via both NVLink and CPU memory offloading. However, to the best of our knowledge, there is no prior work that focuses on benchmarking and comparing the perfofrmance and energy efficiency across different KV transfer paths inside disaggregated serving. We therefore conduct a comprehensive experiment to fill this research gap in Section V-A . Our findings are particularly relevant to GPU cluster operators, as they highlight the trade-off between performance and cost. While NVLink can deliver superior latency performance, its high hardware cost and potential elevated energy consumption may ultimately result in greater overall operating expenses. 
+
+ III-C Benchmarking Disaggregated Frequency Scaling 
+
+ DVFS has been extensively explored for prefill–decode colocated serving and has proven effective in reducing energy consumption [ 42 , 20 , 21 , 41 ] . However, its effectiveness in disaggregated LLM serving remains largely unexplored. 
+
+ DVFS is a hardware-level power-management technique that adjusts a processor’s operating frequency and supply voltage at runtime [ 12 ] . By lowering frequency and voltage, DVFS reduces power consumption at the cost of lower performance on the workload (e.g., higher TTFT or TPOT). Existing works take this opportunity to design energy-efficient SLO-aware LLM inference systems [ 42 , 20 , 21 , 41 ] . In these systems, offline profiling is first used to construct the performance–power Pareto frontiers by measuring serving performance and power consumption across different GPU frequencies. During online serving, the GPU frequency is then selected along the frontiers to satisfy performance SLOs while minimizing energy consumption. However, these approaches may exhibit performance degradation when serving requests with imbalanced SLO requirements between prefill and decode. In real-world scenarios, prefill and decode often operate under different latency constraints. For instance, reducing inference response time (TTFT) always improves user experience, but increasing token generation speed (TPOT) beyond human reading or listening speed provides little additional benefit [ 25 ] . This creates cases where requests demand tight TTFT but only moderate TPOT requirements. In colocated serving, however, GPU frequency scaling affects both stages simultaneously. As a result, the GPU is often configured at a high frequency to meet TTFT constraints, which unnecessarily accelerates TPOT and causes excessive energy consumption due to overprovisioned performance. 
+
+ Prefill–decode disaggregation could potentially address this limitation, as it naturally enables independent frequency optimization. Different frequencies can be assigned to the prefill and decode GPUs so that each stage meets its respective SLO with minimal power consumption. Without violating latency requirements, prefill–decode disaggregation provides the opportunity for more aggressive energy savings. To evaluate this potential, we conduct a comprehensive benchmarking study to measure the performance–power Pareto frontiers of disaggregated serving and compare them against those of colocated serving (Section V-B ). 
+
+ III-D Motivation Summary 
+
+ In summary, prior studies have provided valuable insights on prefill-decode disaggregation but remain incomplete due to unexplored baseline configurations and the absence of a comprehensive benchmarking study that examines the trade-offs among different KV cache transfer paths and optimization techniques. To address this research gap and develop a deeper understanding of the performance and energy implications of prefill–decode disaggregation, we conduct a series of benchmarking experiments aimed at identifying when and which KV transfer paths or optimization techniques are most effective under different scenarios. The details of these experiments are presented in the following sections. 
+
+ IV Benchmark Methodology 
+
+ IV-A Overview 
+
+ Our benchmarking study consists of two main experiments: 
+
+ Experiment 1 (Section V-A ): 
+We benchmark the performance and energy consumption of disaggregated LLM serving under different experimental setups with each differ in KV cache transfer paths, and compare the results with the colocated baselines. We evaluate each experimental setup with increasing request batch sizes that lead to KV caches of varying sizes, and record the resulting performance and energy consumption for each case. Based on that we analyze how the benefits of prefill–decode disaggregation evolve as KV cache size grows. 
+
+ Experiment 2 (Section V-B ): 
+We further evaluate the impact of GPU frequency scaling on performance and energy efficiency between disaggregation and colocation. For each experimental setup, we fix the workload and measure latency and energy consumption at multiple GPU frequency settings. From these measurements, we construct latency–energy Pareto frontiers for both prefill and decode stages. We then compare these frontiers across experimental setups to assess the potential energy-saving benefits in disaggregated serving that are enabled by independent frequency scaling. 
+
+ IV-B Hardware 
+
+ The benchmark experiment is conducted on a cluster node with two NVIDIA A100 GPUs, each with a GPU memory of 40 GB. These two GPUs are connected to the same PCIe bridge that supports PCIe Gen3. These GPUs support a wide range of frequency scaling from 0.21 GHz to 1.41 GHz. The cluster is also equipped with a 18-cores Intel Xeon E5-2697 v4 CPU with base frequency at 2.3 GHz and boost frequency at 3.6 GHz, as well as a Samsung 1 TB DDR4 Memory and a Samsung 3.2 TB NVMe SSD. 
+
+ IV-C Software Stack 
+
+ vLLM [ 47 ] : vLLM is an open-source LLM inference engine widely used in both academia and industry. It introduces PagedAttention [ 22 ] , an optimized memory management system that virtualizes the KV cache storage and organizes it in fixed-size pages to minimize memory fragmentation. It also supports continuous batching to efficiently handle variable sequence lengths. In our experiments, each GPU serves a single vLLM process responsible for executing the main inference pipeline. We further adapt vLLM’s benchmarking utility to generate synthetic datasets and collect performance metrics. 
+
+ LMCache [ 27 ] : LMCache is an open-source KV cache management engine. It introduces CacheGen [ 26 ] for efficient KV cache compression as well as CacheBlend [ 53 ] to support position-independent reuse for KV cache. LMCache also provides vLLM-compatible connectors that enable KV cache transfer between vLLM processes. In our experiments, we adapt these connectors to implement different KV cache transfer paths inside disaggregated LLM serving. 
+
+ IV-D Model and Dataset 
+
+ Llama [ 45 ] is a widely used family of open-source large language models released by Meta AI. In our experiments, we specifically employ Llama-3.2-3B [ 31 ] as the target model for benchmarking. To generate controlled and reproducible workloads, we use synthetic data produced by RandomDataset, a dataset generator released from the vLLM stack, which generates synthetic requests by sampling random token sequences of configurable batch size, input length, and output length. In our setup, we use RandomDataset to generate inference workloads with varying batch sizes, and we set the request rate to infinite so that all requests are dispatched to the GPU worker simultaneously. 
+
+ IV-E Metrics 
+
+ We use Time to First Token ( TTFT ) to evaluate prefill latency and Time per Output Token ( TPOT ) to evaluate decode latency. We also report Prefill Throughput and Decode Throughput respectively. Energy Consumption is obtained by integrating instantaneous power readings over the inference period. We report energy usage across different hardware components. Specifically, instantaneous GPU power is measured by pynvml [ 2 ] , a Python library that provides access to NVIDIA’s Management Library (NVML) [ 32 ] . Instantaneous power by CPU and DRAM is measured by reading the Running Average Power Limit (RAPL) interface [ 39 ] that is supported by Intel processors. We also record the instantaneous total power of the cluster node via reading the Intelligent Platform Management Interface (IPMI) [ 18 ] . For each inference workload, we report energy consumption in joules per token, calculated by dividing the total energy consumed by the total number of tokens processed, including both input and output tokens. 
+
+ IV-F Experimental Configurations Setup 
+
+ co-2gpus represents our new colocated serving baseline. Different from co-1gpu , this baseline utilizes two GPUs, which provides equivalent GPU resources to that of disaggregated serving setups. In this baseline, each GPU serves a vLLM V1 inference engine that performs both prefill and decode locally. With two complete inference processes, the total batch is evenly divided between the two GPUs, with each handling half of the incoming requests to reduce their compute and memory overhead. In this configuration, each GPU allocates 28 GB of memory for KV cache storage. 
+
+ dis-gpu represents the disaggregated serving setup that utilizes GPU peer-to-peer (P2P) communication for KV cache transfer. Specifically, one GPU is dedicated for prefill and the other for decode. P2P KV cache transfer is enabled through a shared PCIe bridge connecting both GPUs within the same node. The software pipeline is implemented using vLLM V1 [ 47 ] and LMCacheConnectorV1 [ 27 ] that orchestrates the inter-GPU communication flow. Underneath, it leverages the NVIDIA Inference Xfer Library (NIXL) [ 30 ] to perform efficient data transfer via the CUDA Inter-Process Communication (cuda_ipc) [ 4 ] transport. This integration allows GPUs to directly access each other’s device memory to achieve higher transfer bandwidth for KV cache exchange. 
+
+ dis-cpu represents the disaggregated serving setup that realizes KV cache transfer through CPU offloading. Similar to dis-gpu , one GPU is for prefill and the other is for decode. After the prefill stage, the KV caches are offloaded to the CPU DRAM. The decode GPU loads them back when it starts generating the output tokens. We utilize vLLM V1 and LMCacheConnectorV1 to orchestrate the software pipeline. The allowable CPU memory used for KV cache storage is set to 125 GB. In addition, a shared Redis [ 38 ] lookup server is deployed between the GPUs, where the prefill GPU updates the lookup table after offloading a KV cache block to CPU DRAM, and the decode GPU queries the table to locate and fetch the required KV cache blocks. 
+
+ dis-disk represents the disaggregated serving setup that transfers KV cache through disk offloading. Similar to other disaggregated baseline, one GPU is responsible for prefill and the other is for decode. After the prefill stage, KV caches are first offloaded to the disk, and then offloaded back to the decode GPU. For a fair comparison to dis-cpu , we force the kernel to bypass the page cache and perform the complete disk access each time when reading or writing KV caches. vLLM V1 and LMCacheConnectorV1 are employed to implement software-level KV cache transfer, with a maximum of 125 GB of disk space allocated for cache storage. The fs_connector [ 47 ] is used to coordinate KV cache storage and retrieval. Acting as middleware running in CPU DRAM, fs_connector receives KV caches from the prefill GPU before writing them to disk and fetches the corresponding caches from disk to offload them back to the decode GPU. 
+
+ V Benchmark Results 
+
+ V-A Experiment 1: Varying Batch Size 
+
+ Fig. 1: TTFT and TPOT performance as batch size increases across different experimental setups. 
+
+ Fig. 2: Prefill and decode throughput as batch size increases across different experimental setups. 
+
+ Fig. 3: Total energy consumption as batch size increases across different experimental setups. 
+
+ Fig. 4: Energy contributed by each hardware component as batch size increases across different experimental setups. 
+
+ We present and analyze the results of Experiment 1, which evaluates the performance and energy consumption of different experimental setups under increasing batch sizes. 
+
+ Figure 1 represents the latency result, with the upper sub-figure showing TTFT in the y-axis and the lower sub-figure showing TPOT in the y-axis. Each request is fixed to include an input token size of 16,384 and an output token size of 256. To investigate how KV cache size affects the serving performance and energy efficiency, we increase the batch size (represented by the x-axis) from 2 to 64, leading to the total size of generated KV cache ranging from 3.5 GB to 112 GB. Each line indicates the latency performance achieved by a specific setup, as indicated in the figure legend. 
+
+ We first observe that for all setups, median TTFT increases as batch size increases. This is expected, as with more concurrent requests sent to the prefill GPU, less computation resources are allocated to each request, leading to higher latency. Also, among the disaggregated setups, dis-gpu achieves the best TTFT because it only passes one PCIe bridge without touching deeper memory tiers. After that comes the CPU offloading based setup ( dis-cpu ), and then the disk offloading based setup ( dis-disk ). To our surprise, for all cases of batch sizes, co-2gpus is achieving the best TTFT performance, which indicates that prefill-decode disaggregation does not always guarantee performance gains. Under equivalent GPU resources, each GPU under the co-2gpus baseline only needs to process half a batch of the requests. Even with prefill-decode interference, the reduced batch size significantly reduces computation overhead, ultimately leading to an improved TTFT compared to disaggregated setups. 
+
+ For TPOT, we notice that only co-2gpus shows a sharp increase when batch size exceeds 32. This is because the total size of the generated KV cache is larger than the allocated GPU memory, causing the previously generated KV cache to be evicted. This part of the KV cache has to be recomputed when the decode stage later requires them, causing a significant delay in token generation. In addition, we observe that dis-disk exhibits a TPOT trend similar to dis-gpu and performs significantly faster than dis-cpu . This result is unexpected, as disk offloading places the KV cache farther from GPU memory and would typically incur higher latency. This phenomenon is currently under investigation. 
+
+ Summarizing the latency results leads to our first takeaway: performance gains from prefill-decode disaggregation highly depends on batch size. Under equivalent GPU resources, disaggregated serving could double the batch size compared to colocated serving, resulting in higher overall TTFT. On the other hand, colocated serving suffers performance degradation at larger batch sizes when the amount of KV cache exceeds allocated GPU memory capacity. 
+
+ Figure 2 shows the throughput result, with the upper sub-figure for prefill and lower sub-figure for decode. We first observe that, across all disaggregated setups, throughput increases with batch size up to 16, beyond which it plateaus as the GPU’s computational capacity becomes saturated. However, due to the aforementioned GPU memory limitation, co-2gpus experiences a significant drop in throughput when the batch size reaches around 32. In addition, similar to latency, dis-gpu achieves the best performance among disaggregated setups because of the shortest transfer path, followed by dis-cpu and dis-disk . 
+
+ Figure 3 shows the total energy consumed by different experimental setups. Across all setups, energy consumption initially decreases and then converges as batch size increases. This behavior arises because static, or standby, energy is amortized over a larger amount of computation as the GPU becomes more fully utilized during inference. For co-2gpus , we also observe a sharp increase in energy consumption when batch size reaches 32, due to KV cache eviction and recomputation. Among disaggregated setups, dis-gpu again achieves the best performance because it takes the least latency to complete the inference workload, and is followed by dis-cpu and dis-disk . 
+
+ To further analyze the energy consumption contributed by each hardware component, we present the energy consumption breakdown in Figure 4 . Each bar in the figure represents the energy consumption of an experimental setup under a batch size. Inside each bar, boxes of different colors indicate the energy consumption contributed by each hardware component, as described in the figure legend. We observe that, as the KV cache transfer path touches deeper memory tiers, it consumes more energy from non-GPU hardwares, including CPU, DRAM, and disk. 
+
+ V-B Experiment 2: Varying GPU Frequency 
+
+ Fig. 5: TTFT-energy and TPOT-energy Pareto frontiers across different experimental setups. The inference workload includes a batch of 16 requests with input size 16,384 and output size 256. 
+
+ We discuss the results of benchmarking experiment 2, which investigates the influence of GPU frequency scaling on performance and energy consumption among different experimental setups. The inference workload is fixed to be a batch of 16 requests with input size 16,384 and output size 256. 
+
+ Figure 5 shows the result, with the left sub-figure for prefill and the right for decode. The x-axis represents the latency performance, with Median TTFT for prefill and Median TPOT for decode. The y-axis indicates the total energy used for processing the inference workload. The labels associated with the lines represent the GPU frequency, measured in GHz. For all setups, we sample the frequency evenly from 0.36 GHz to 1.26 GHz and set to both GPUs, and measure the achieved latency and energy consumption for prefill and decode stages. This results in two latency-energy Pareto frontiers for each setup. 
+
+ We notice that most latency-energy frontiers exhibit a U-curve. As GPU frequency increases, energy consumption decreases initially and increases ultimately. This is because of the marginal latency improvement from GPU frequency. Initially when GPU frequency is low, an increase in GPU frequency leads to a significant reduction in latency. During this period, the reduced latency counters the higher GPU power, and hence leading to decreasing energy consumption. As the GPU frequency approaches a certain threshold (e.g., 0.81 GHz), increasing GPU frequency leads to little improvement in latency. Instead, it increases GPU power and hence results in increasing energy consumption. These U-curve frontiers provide the opportunity to save energy consumption from frequency scaling. Through profiling those frontiers in the offline stage, we can potentially identify and set the GPU to the “sweet spot” frequency that can achieve the lowest GPU power consumption when latency is not constrained. Similarly, under the SLO-aware serving case where constraint is put on latency, we can search along the frontier to locate and set the GPU frequency that can satisfy the latency constraint at the lowest energy consumption. 
+
+ We also notice that disaggregated serving setups consume substantially more energy than the colocated baselines. Even with independent frequency scaling, none of the disaggregated setups could outperform the colocated serving baselines in energy consumption. That leads to our second takeaway, independent frequency scaling does not guarantee energy savings. As discussed in the previous section, colocated serving exhibits better TTFT, and comparable TPOT when batch size is smaller. These improved latency performance ultimately leads to lower energy consumption in both prefill and decode stages. Although independent frequency scaling provides with more choices of TTFT and TPOT combinations, none of those combinations leads to a better energy consumption than that of colocated serving. However, though at the cost of higher energy consumption, we notice that dis-gpu and dis-disk provide improved TPOT than colocated serving, making them potential options for requests with tight TPOT requirements. 
+
+ VI Conclusion 
+
+ In this paper, we argue that existing prefill–decode disaggregated serving frameworks lack a comprehensive evaluation that compares performance and energy efficiency across different KV cache transfer paths. Moreover, although recent serving frameworks have supported optimization techniques such as KV cache reuse and frequency scaling, there remains a lack of systematic benchmarking to assess the performance and energy gains from these techniques under different conditions. To fill this research gap and provide a better understanding of the true performance and energy implications of prefill–decode disaggregation, we conduct a series of benchmarking studies that evaluate multiple experimental setups and optimization strategies. The major takeaways of our experiment are summarized below. 
+
+ • 
+
+ Performance gains from prefill-decode disaggregation depends on the request load and KV transfer medium. Compared to colocated serving, disaggregation doubles the request amount processed per GPU under equivalent GPU resources, resulting in higher overall TTFT when high-speed KV transfer interconnects are unavailable. However, at higher batch sizes, disaggregated serving outperforms colocated serving in TPOT, as colocated serving starts to suffer from cache eviction and recomputation due to limited GPU memory for KV cache. 
+
+ • 
+
+ Independent frequency optimization does not guarantee energy saving. Across all KV transfer paths, disaggregated serving introduces longer prefill latency, which results in higher overall energy consumption compared to colocated serving. Although disaggregation enables independent frequency scaling to provide more choices of TTFT and TPOT combinations, none of the configurations ultimately achieve better energy consumption than the colocated baseline. 
+
+ We hope those takeaways provide insights and guidance for future works that focus on prefill-decode disaggregated LLM inference serving and energy-aware LLM inference serving. 
+
+ References 
+
+ [1] 
+ U.S. E. I. Administration (2024) 
+
+ How much electricity does an american home use? .
+
+ Note: Accessed: 2025-10-27 
+
+ Cited by: §II-D .
+
+ [2] 
+ G. O. Analytics et al. (2025) 
+
+ Pynvml: python utilities for the nvidia management library .
+
+ Note: https://pypi.org/project/pynvml/ Accessed: 2025-11-09 
+
+ Cited by: §IV-E .
+
+ [3] 
+ J. Bang, B. Lee, and P. Park (2023) 
+
+ Examination of ethical principles for llm-based recommendations in conversational ai .
+
+ In 2023 International Conference on Platform Technology and Service (PlatCon) ,
+
+ Vol. , pp. 109–113 .
+
+ External Links: Document 
+
+ Cited by: §I ,
+ §II-A .
+
+ [4] 
+ (2025) 
+
+ CUDA c programming guide .
+
+ Note: https://docs.nvidia.com/cuda/cuda-c-programming-guide/ Accessed: 2025-11-09 
+
+ Cited by: §IV-F .
+
+ [5] 
+ DeepSeek-AI, A. Liu, B. Feng, B. Xue, and et al. (2025) 
+
+ DeepSeek-v3 technical report .
+
+ External Links: 2412.19437 ,
+ Link 
+
+ Cited by: §I .
+
+ [6] 
+ J. Du, H. Zhang, T. Wei, Z. Zheng, K. Wu, Z. Chen, and Y. Lu (2025) 
+
+ EcoServe: enabling cost-effective llm serving with proactive intra- and inter-instance orchestration .
+
+ External Links: 2504.18154 ,
+ Link 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §II-B ,
+ §III .
+
+ [7] 
+ S. Fakhoury, A. Naik, G. Sakkas, S. Chakraborty, and S. K. Lahiri (2024) 
+
+ LLM-based test-driven interactive code generation: user study and empirical evaluation .
+
+ IEEE Transactions on Software Engineering 50 ( 9 ), pp. 2254–2268 .
+
+ External Links: Document 
+
+ Cited by: §I ,
+ §II-A .
+
+ [8] 
+ J. Feng, Y. Huang, R. Zhang, S. Liang, M. Yan, and J. Wu (2025) 
+
+ WindServe: efficient phase-disaggregated llm serving with stream-based dynamic scheduling .
+
+ In Proceedings of the 52nd Annual International Symposium on Computer Architecture ,
+
+ ISCA ’25 , New York, NY, USA , pp. 1283–1295 .
+
+ External Links: ISBN 9798400712616 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §III-B .
+
+ [9] 
+ B. Gao, Z. He, P. Sharma, Q. Kang, D. Jevdjic, J. Deng, X. Yang, Z. Yu, and P. Zuo (2024) 
+
+ Cost-efficient large language model serving for multi-turn conversations with cachedattention .
+
+ In Proceedings of the 2024 USENIX Conference on Usenix Annual Technical Conference ,
+
+ USENIX ATC’24 , USA .
+
+ External Links: ISBN 978-1-939133-41-0 
+
+ Cited by: §I ,
+ §II-C .
+
+ [10] 
+ A. Garreffa (2024) 
+
+ NVIDIA’s full-spec blackwell b200 ai gpu uses 1200 w of power, up from 700 w on hopper h100 .
+
+ Note: https://www.tweaktown.com/news/97059/nvidias-full-spec-blackwell-b200-ai-gpu-uses-1200w-of-power-up-from-700w-on-hopper-h100/index.html Accessed: 2025-10-27 
+
+ Cited by: §II-D .
+
+ [11] 
+ I. Gim, G. Chen, S. Lee, N. Sarda, A. Khandelwal, and L. Zhong (2024) 
+
+ Prompt cache: modular attention reuse for low-latency inference .
+
+ External Links: 2311.04934 ,
+ Link 
+
+ Cited by: §I ,
+ §II-C .
+
+ [12] 
+ H. Guo, H. Gu, Z. Yang, X. Wang, E. K. Lee, N. Chandramoorthy, T. Eilam, D. Chen, and K. Nahrstedt (2022) 
+
+ BoFL: bayesian optimized local training pace control for energy efficient federated learning .
+
+ In Proceedings of the 23rd ACM/IFIP International Middleware Conference ,
+
+ Middleware ’22 , New York, NY, USA , pp. 188–201 .
+
+ External Links: ISBN 9781450393409 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §III-C .
+
+ [13] 
+ K. Hong, L. Chen, Z. Wang, X. Li, Q. Mao, J. Ma, C. Xiong, G. Wu, B. Han, G. Dai, Y. Liang, and Y. Wang (2025) 
+
+ Semi-pd: towards efficient llm serving via phase-wise disaggregated computation and unified storage .
+
+ External Links: 2504.19867 ,
+ Link 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §III-B .
+
+ [14] 
+ C. Hu, H. Huang, L. Xu, X. Chen, C. Wang, J. Xu, S. Chen, H. Feng, S. Wang, Y. Bao, N. Sun, and Y. Shan (2025) 
+
+ ShuffleInfer: disaggregate llm inference for mixed downstream workloads .
+
+ ACM Trans. Archit. Code Optim. 22 ( 2 ).
+
+ External Links: ISSN 1544-3566 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §III-B .
+
+ [15] 
+ J. Hu, W. Huang, W. Wang, H. Wang, T. Hu, Q. Zhang, H. Feng, X. Chen, Y. Shan, and T. Xie (2025) 
+
+ EPIC: efficient position-independent caching for serving large language models .
+
+ External Links: 2410.15332 ,
+ Link 
+
+ Cited by: §II-C .
+
+ [16] 
+ D. Huang, J. M. Zhang, Q. Bu, X. Xie, J. Chen, and H. Cui (2025) 
+
+ Bias testing and mitigation in llm-based code generation .
+
+ ACM Trans. Softw. Eng. Methodol. .
+
+ Note: Just Accepted 
+
+ External Links: ISSN 1049-331X ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §II-A .
+
+ [17] 
+ E. J. Husom, A. Goknil, M. Astekin, L. K. Shar, A. Kåsen, S. Sen, B. A. Mithassel, and A. Soylu (2025) 
+
+ Sustainable llm inference for edge ai: evaluating quantized llms for energy efficiency, output accuracy, and inference latency .
+
+ ACM Trans. Internet Things .
+
+ Note: Just Accepted 
+
+ External Links: Link ,
+ Document 
+
+ Cited by: §II-D .
+
+ [18] 
+ (2019) 
+
+ IPMI overview .
+
+ Note: https://www.ibm.com/docs/en/power8/8001-12C?topic=ipmi-overview Accessed: 2025-11-09 
+
+ Cited by: §IV-E .
+
+ [19] 
+ C. Jin, Z. Zhang, X. Jiang, F. Liu, S. Liu, X. Liu, and X. Jin (2025) 
+
+ RAGCache: efficient knowledge caching for retrieval-augmented generation .
+
+ ACM Trans. Comput. Syst. .
+
+ Note: Just Accepted 
+
+ External Links: ISSN 0734-2071 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §II-C .
+
+ [20] 
+ A. K. Kakolyris, D. Masouros, P. Vavaroutsos, S. Xydis, and D. Soudris (2025) 
+
+ ThrottLL’em: predictive gpu throttling for energy efficient llm inference serving .
+
+ In 2025 IEEE International Symposium on High Performance Computer Architecture (HPCA) ,
+
+ Vol. , pp. 1363–1378 .
+
+ External Links: Document 
+
+ Cited by: §I ,
+ §II-D ,
+ §III-C ,
+ §III-C .
+
+ [21] 
+ A. K. Kakolyris, D. Masouros, S. Xydis, and D. Soudris (2024) 
+
+ SLO-aware gpu dvfs for energy-efficient llm inference serving .
+
+ IEEE Computer Architecture Letters 23 ( 2 ), pp. 150–153 .
+
+ External Links: Document 
+
+ Cited by: §I ,
+ §II-D ,
+ §III-C ,
+ §III-C .
+
+ [22] 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica (2023) 
+
+ Efficient memory management for large language model serving with pagedattention .
+
+ In Proceedings of the 29th Symposium on Operating Systems Principles ,
+
+ SOSP ’23 , New York, NY, USA , pp. 611–626 .
+
+ External Links: ISBN 9798400702297 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §II-B ,
+ §IV-C .
+
+ [23] 
+ R. Li, R. Du, Z. Chu, S. Zhao, C. Han, Z. Shi, Y. Shao, H. Han, L. Huang, Z. Liu, and S. Liu (2025) 
+
+ Taming the chaos: coordinated autoscaling for heterogeneous and disaggregated llm inference .
+
+ External Links: 2508.19559 ,
+ Link 
+
+ Cited by: §I ,
+ §II-B .
+
+ [24] 
+ F. Liu, Y. Liu, L. Shi, H. Huang, R. Wang, Z. Yang, L. Zhang, Z. Li, and Y. Ma (2024) 
+
+ Exploring and evaluating hallucinations in llm-powered code generation .
+
+ External Links: 2404.00971 ,
+ Link 
+
+ Cited by: §I ,
+ §II-A .
+
+ [25] 
+ J. Liu, J. Chung, Z. Wu, F. Lai, M. Lee, and M. Chowdhury (2024) 
+
+ Andes: defining and enhancing quality-of-experience in llm-based text streaming services .
+
+ External Links: 2404.16283 ,
+ Link 
+
+ Cited by: §III-C .
+
+ [26] 
+ Y. Liu, H. Li, Y. Cheng, S. Ray, Y. Huang, Q. Zhang, K. Du, J. Yao, S. Lu, G. Ananthanarayanan, M. Maire, H. Hoffmann, A. Holtzman, and J. Jiang (2024) 
+
+ CacheGen: kv cache compression and streaming for fast large language model serving .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ ACM SIGCOMM ’24 , New York, NY, USA , pp. 38–56 .
+
+ External Links: ISBN 9798400706141 ,
+ Link ,
+ Document 
+
+ Cited by: §IV-C .
+
+ [27] 
+ (2025) 
+
+ LMCache: an efficient kv‐cache layer for large language model inference and serving .
+
+ Note: https://github.com/LMCache/LMCache Accessed: 2025‐10‐27 
+
+ Cited by: §IV-C ,
+ §IV-F .
+
+ [28] 
+ A. Mahmood, J. Wang, B. Yao, D. Wang, and C. Huang (2025) 
+
+ User interaction patterns and breakdowns in conversing with llm-powered voice assistants .
+
+ International Journal of Human-Computer Studies 195 , pp. 103406 .
+
+ External Links: ISSN 1071-5819 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §II-A .
+
+ [29] 
+ J. Nie, H. Shao, Y. Fan, Q. Shao, H. You, M. Preindl, and X. Jiang (2024) 
+
+ LLM-based conversational ai therapist for daily functioning screening and psychotherapeutic intervention via everyday smart devices .
+
+ External Links: 2403.10779 ,
+ Link 
+
+ Cited by: §I ,
+ §II-A .
+
+ [30] 
+ NIXL: nvidia inference xfer library (nixl) .
+
+ Note: https://github.com/ai-dynamo/nixl Accessed: 2025-11-09 
+
+ Cited by: §IV-F .
+
+ [31] 
+ NousResearch (2025) 
+
+ Hermes 3 – llama-3.2 3b .
+
+ Hugging Face .
+
+ Note: https://huggingface.co/NousResearch/Hermes-3-Llama-3.2-3B Accessed: 2025-11-09 
+
+ Cited by: §IV-D .
+
+ [32] 
+ NVIDIA management library (nvml) .
+
+ Note: https://developer.nvidia.com/management-library-nvml Accessed: 2025-11-09 
+
+ Cited by: §IV-E .
+
+ [33] 
+ D. Oberhaus (2025) 
+
+ How ai could be raising your energy bill .
+
+ Harvard Magazine .
+
+ Note: Accessed: 2025-10-27 
+
+ Cited by: §II-D .
+
+ [34] 
+ OpenAI, J. Achiam, S. Adler, S. Agarwal, L. Ahmad, I. Akkaya, and et al. (2024) 
+
+ GPT-4 technical report .
+
+ External Links: 2303.08774 ,
+ Link 
+
+ Cited by: §I .
+
+ [35] 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, I. Goiri, S. Maleki, and R. Bianchini (2024) 
+
+ Splitwise: efficient generative llm inference using phase splitting .
+
+ In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) ,
+
+ Vol. , pp. 118–132 .
+
+ External Links: Document 
+
+ Cited by: §I ,
+ §II-B .
+
+ [36] 
+ X. Pu, M. Gao, and X. Wan (2023) 
+
+ Summarization is (almost) dead .
+
+ External Links: 2309.09558 ,
+ Link 
+
+ Cited by: §II-A .
+
+ [37] 
+ R. Qin, Z. Li, W. He, J. Cui, F. Ren, M. Zhang, Y. Wu, W. Zheng, and X. Xu (2025) 
+
+ Mooncake: trading more storage for less computation — a KVCache-centric architecture for serving LLM chatbot .
+
+ In 23rd USENIX Conference on File and Storage Technologies (FAST 25) ,
+
+ Santa Clara, CA , pp. 155–170 .
+
+ External Links: ISBN 978-1-939133-45-8 ,
+ Link 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §III-B .
+
+ [38] 
+ (2025) 
+
+ Redis – an in-memory data structure store .
+
+ Note: https://redis.io/ Accessed: 2025-11-09 
+
+ Cited by: §IV-F .
+
+ [39] 
+ (2022) 
+
+ Running average power limit energy reporting / cve-2020-8694, cve-2020-8695 / intel-sa-00389 .
+
+ Note: https://www.intel.com/content/www/us/en/developer/articles/technical/software-security-guidance/advisory-guidance/running-average-power-limit-energy-reporting.html Accessed: 2025-11-09 
+
+ Cited by: §IV-E .
+
+ [40] 
+ T. Shi, Y. Wu, S. Liu, and Y. Ding (2024) 
+
+ GreenLLM: disaggregating large language model serving on heterogeneous gpus for lower carbon emissions .
+
+ External Links: 2412.20322 ,
+ Link 
+
+ Cited by: §I ,
+ §II-D ,
+ §III .
+
+ [41] 
+ J. Stojkovic, E. Choukse, C. Zhang, I. Goiri, and J. Torrellas (2024) 
+
+ Towards greener llms: bringing energy-efficiency to the forefront of llm inference .
+
+ External Links: 2403.20306 ,
+ Link 
+
+ Cited by: §I ,
+ §II-D ,
+ §III-C ,
+ §III-C .
+
+ [42] 
+ J. Stojkovic, C. Zhang, I. Goiri, J. Torrellas, and E. Choukse (2025) 
+
+ DynamoLLM: designing llm inference clusters for performance and energy efficiency .
+
+ In 2025 IEEE International Symposium on High Performance Computer Architecture (HPCA) ,
+
+ Vol. , pp. 1348–1362 .
+
+ External Links: Document 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §II-D ,
+ §III-C ,
+ §III-C .
+
+ [43] 
+ C. Tian, X. Qin, and L. Li (2024) 
+
+ GreenLLM: towards efficient large language model via energy-aware pruning .
+
+ In 2024 IEEE/ACM 32nd International Symposium on Quality of Service (IWQoS) ,
+
+ Vol. , pp. 1–2 .
+
+ External Links: Document 
+
+ Cited by: §II-D .
+
+ [44] 
+ Y. Tian, D. Sun, Y. Ding, and S. Liu (2025) 
+
+ EmbAdvisor: adaptive cache management for sustainable llm serving .
+
+ External Links: 2505.23970 ,
+ Link 
+
+ Cited by: §II-D .
+
+ [45] 
+ H. Touvron, T. Lavril, G. Izacard, X. Martinet, M. Lachaux, T. Lacroix, B. Rozière, N. Goyal, E. Hambro, F. Azhar, A. Rodriguez, A. Joulin, E. Grave, and G. Lample (2023) 
+
+ LLaMA: open and efficient foundation language models .
+
+ External Links: 2302.13971 ,
+ Link 
+
+ Cited by: §IV-D .
+
+ [46] 
+ A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin (2017) 
+
+ Attention is all you need .
+
+ In Advances in Neural Information Processing Systems , I. Guyon, U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (Eds.) ,
+
+ Vol. 30 , pp.  .
+
+ Cited by: §I .
+
+ [47] 
+ vLLM Project (2025) 
+
+ VLLM: a high-throughput and memory-efficient inference and serving engine for large language models .
+
+ Note: https://github.com/vllm-project/vllm Accessed: 2025-10-27 
+
+ Cited by: §IV-C ,
+ §IV-F ,
+ §IV-F .
+
+ [48] 
+ C. Wang, P. Zuo, Z. Chen, Y. Liang, Z. Yu, and M. Yang (2025) 
+
+ Prefill-decode aggregation or disaggregation? unifying both for goodput-optimized llm serving .
+
+ External Links: 2508.01989 ,
+ Link 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §III-B .
+
+ [49] 
+ D. Wang, B. Liu, R. Lu, Z. Zhang, and S. Zhu (2025) 
+
+ StoreLLM: energy efficient large language model inference with permanently pre-stored attention matrices .
+
+ In Proceedings of the 16th ACM International Conference on Future and Sustainable Energy Systems ,
+
+ E-Energy ’25 , New York, NY, USA , pp. 398–406 .
+
+ External Links: ISBN 9798400711251 ,
+ Link ,
+ Document 
+
+ Cited by: §II-D .
+
+ [50] 
+ J. Wang, J. Han, X. Wei, S. Shen, D. Zhang, C. Fang, R. Chen, W. Yu, and H. Chen (2025) 
+
+ KVCache cache in the wild: characterizing and optimizing kvcache cache at a large cloud provider .
+
+ In Proceedings of the 2025 USENIX Conference on Usenix Annual Technical Conference ,
+
+ USENIX ATC ’25 , USA .
+
+ External Links: ISBN 978-1-939133-48-9 
+
+ Cited by: §I ,
+ §II-C .
+
+ [51] 
+ G. Wilkins, S. Keshav, and R. Mortier (2024) 
+
+ Hybrid heterogeneous clusters can lower the energy consumption of llm inference workloads .
+
+ In Proceedings of the 15th ACM International Conference on Future and Sustainable Energy Systems ,
+
+ e-Energy ’24 , New York, NY, USA , pp. 506–513 .
+
+ External Links: ISBN 9798400704802 ,
+ Link ,
+ Document 
+
+ Cited by: §II-D .
+
+ [52] 
+ G. Wilkins, S. Keshav, and R. Mortier (2025) 
+
+ Offline energy-optimal llm serving: workload-based energy models for llm inference on heterogeneous systems .
+
+ SIGENERGY Energy Inform. Rev. 4 ( 5 ), pp. 113–119 .
+
+ External Links: Link ,
+ Document 
+
+ Cited by: §II-D .
+
+ [53] 
+ J. Yao, H. Li, Y. Liu, S. Ray, Y. Cheng, Q. Zhang, K. Du, S. Lu, and J. Jiang (2025) 
+
+ CacheBlend: fast large language model serving for rag with cached knowledge fusion .
+
+ In Proceedings of the Twentieth European Conference on Computer Systems ,
+
+ EuroSys ’25 , New York, NY, USA , pp. 94–109 .
+
+ External Links: ISBN 9798400711961 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §II-C ,
+ §IV-C .
+
+ [54] 
+ L. Yu, J. Lin, and J. Li (2025) 
+
+ Stateful large language model serving with pensieve .
+
+ In Proceedings of the Twentieth European Conference on Computer Systems ,
+
+ EuroSys ’25 , New York, NY, USA , pp. 144–158 .
+
+ External Links: ISBN 9798400711961 ,
+ Link ,
+ Document 
+
+ Cited by: §I ,
+ §II-C .
+
+ [55] 
+ A. Zewe (2025) 
+
+ Explained: generative ai’s environmental impact .
+
+ MIT News .
+
+ Note: Accessed: 2025-10-27 
+
+ Cited by: §II-D .
+
+ [56] 
+ H. Zhang, T. Wei, Z. Zheng, J. Du, Z. Chen, and Y. Lu (2025) 
+
+ TD-pipe: temporally-disaggregated pipeline parallelism architecture for high-throughput llm inference .
+
+ External Links: 2506.10470 ,
+ Link 
+
+ Cited by: §I ,
+ §II-B ,
+ §III-B .
+
+ [57] 
+ Y. Zhang, H. Jin, D. Meng, J. Wang, and J. Tan (2025) 
+
+ A comprehensive survey on process-oriented automatic text summarization with exploration of llm-based methods .
+
+ External Links: 2403.02901 ,
+ Link 
+
+ Cited by: §II-A .
+
+ [58] 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng (2025) 
+
+ SGLang: efficient execution of structured language model programs .
+
+ In Proceedings of the 38th International Conference on Neural Information Processing Systems ,
+
+ NIPS ’24 , Red Hook, NY, USA .
+
+ External Links: ISBN 9798331314385 
+
+ Cited by: §I ,
+ §II-B ,
+ §II-C .
+
+ [59] 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang (2024) 
+
+ DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ Santa Clara, CA , pp. 193–210 .
+
+ External Links: ISBN 978-1-939133-40-3 ,
+ Link 
+
+ Cited by: §I ,
+ §I ,
+ §II-B ,
+ §II-B ,
+ §III-A ,
+ §III-B ,
+ §III .

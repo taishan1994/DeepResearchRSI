@@ -1,0 +1,49 @@
+\section{引言}
+
+大模型推理被分成两个阶段：\textbf{prefill} 一次性把整个输入 prompt 送进模型，
+产出第一个 token 并建立 KV cache；\textbf{decode} 逐 token 自回归生成，
+每步只算一个 token，却要读全部权重与已积累的 KV cache。
+
+这两个阶段的资源画像恰好相反。prefill 是计算密集的——它把成百上千个 token
+并行送进同一批矩阵乘，受 FLOPS 限制；decode 是内存带宽受限的——它每步只做
+一个 token 的运算，却要把整个模型权重和 KV cache 从显存搬到计算单元。
+Sarathi-Serve 把这件事说得最直白：prefill 处理一个 prompt 的全部 token
+因而计算受限，decode 每请求每次只处理一个 token 因而带宽受限
+\texttt{[c-profile]}。
+
+既然两阶段要的东西不同，把它们放到不同的卡上、按各自的偏好分别配置，
+似乎就该更快。这就是 \textbf{PD 分离}（prefill-decode disaggregation）。
+
+但分离有代价：KV cache 必须从 prefill 实例搬到 decode 实例。
+同一份 KV，经同机 NVLink 传是 0.6\,ms，经跨机 RDMA 传是 10\,ms，
+差 16.7 倍\texttt{[c-transfer]}。也就是说，分离是赚是赔，
+取决于「两阶段配置差异带来的收益」能否盖过「KV 搬运的成本」。
+
+本文的主张是：\textbf{PD 分离的收益不是一个固定倍数，而是一个差的函数}。
+文献里报告的加速倍数（从一点几倍到数倍不等），都是这个差在特定模型、
+特定拓扑、特定负载下的取值，不能当作分离的固有属性\texttt{[c-formula]}。据此可以给出一条判据，
+而不是一套推荐配置。
+
+\subsection{本文做了什么}
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=2pt,topsep=3pt]
+  \item 按「收益侧 / 成本侧」两侧拆解分离，给出两阶段的量化差异与
+        KV 传输的三档实测（第 \ref{sec:why}、\ref{sec:transfer} 节）。
+  \item 梳理切分与调度的三条路线，指出其中两条互斥、第三条可叠加
+        （第 \ref{sec:split} 节）。
+  \item 按模型的 KV 结构（MLA / GQA / MHA）、上下文长度、负载形态
+        给出差异化做法，并明确说明为什么不存在统一配置
+        （第 \ref{sec:model} 节）。
+  \item 主动搜集使分离失效或转负的条件，包括一篇明确报告
+        「聚合优于分离」的反例（第 \ref{sec:boundary} 节）。
+\end{enumerate}
+
+\subsection{方法说明}
+
+本文的证据来自 46 篇论文全文与 17 份官方工程文档快照，共 63 个来源、
+27 条证据、6 条主张。每条引文都是快照的原文子串（E1 不变量，
+27/27 全部校验通过，无「未校验」条目）。文中所有数字由脚本从证据文本
+正则抽取并写入 \texttt{analysis.json}，可逐项回溯到 \texttt{evidence\_id}。
+
+需要说明的是：本文\textbf{没有}做端到端复现实验。所有量化结论都是
+对已发表结果的整理与再计算，不是新的测量。

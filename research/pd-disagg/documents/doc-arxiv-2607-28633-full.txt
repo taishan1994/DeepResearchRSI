@@ -1,0 +1,631 @@
+Topology-Aware Data Movement for Disaggregated GPU Inference 
+
+ Sanjeev Rao Ganjihal
+
+ Affiliation:  Independent Researcher
+
+ Abstract 
+
+ Disaggregated LLM inference creates a datacenter networking problem that no existing system solves correctly.
+When prefill and decode run on separate GPU pools, the KV cache must be transferred between them.
+For a 70B model this is 2.6 GB per request, exceeding 100 GB/s aggregate at production scale.
+Yet DistServe, Splitwise, and Mooncake all use uniform RDMA, ignoring that bandwidth between two GPUs varies by 72 × \times depending on their physical relationship: 900 GB/s via NVLink within a domain, 50 GB/s via InfiniBand across nodes, 12.5 GB/s via TCP across datacenters. 
+
+ We design a topology-aware transfer orchestrator that discovers interconnect hierarchy at startup and selects optimal transport per transfer.
+Three mechanisms work together:
+(1) pipelined layer-by-layer transfer that overlaps transmission with ongoing prefill, hiding 60 to 85 percent of latency behind computation;
+(2) NVLink domain-aware placement for Mixture-of-Experts models that co-optimizes expert dispatch with KV cache locality;
+and (3) CXL 3.0 memory expanders as a shared overflow tier providing 6 × \times capacity at 86 × \times lower latency than NVMe. 
+
+ Full evaluation requires multi-node clusters with heterogeneous interconnects and CXL 3.0 hardware that is beyond academic resources and not yet available in GPU clouds.
+We present analytical bandwidth models, component implementations, and projected analysis across three architectures showing 3 to 18 × \times transfer latency reduction over uniform RDMA. 
+
+ 1 Introduction 
+
+ Modern GPU clusters expose hierarchical interconnect topologies where available bandwidth varies by 72 × \times across levels.
+Within an NVLink domain, eight H100 GPUs share 900 GB/s bidirectional bandwidth.
+Across nodes on the same InfiniBand fabric, bandwidth drops to 50 GB/s.
+Across datacenters over TCP, it falls to 12.5 GB/s.
+This heterogeneity has been largely invisible to application software because most GPU workloads move data once (model weights at startup) and compute in place. 
+
+ Disaggregated LLM inference changes this.
+The prefill phase of autoregressive generation is compute-bound: it processes the entire prompt in parallel, saturating GPU FLOPS.
+The decode phase is memory-bandwidth-bound: it generates one token at a time, reading the full key-value (KV) cache at each step.
+Running both on the same GPU wastes either compute or bandwidth.
+Recent systems  [ 1 , 2 , 3 , 4 ] separate prefill and decode onto dedicated pools.
+This creates a new, recurring, high-bandwidth data movement pattern: after every prefill completes, the KV cache must be transferred to a decode worker before generation can begin. 
+
+ This transfer is substantial.
+For Llama-3-70B with Grouped Query Attention and a 4K-token prompt, the KV cache is 2.6 GB per request.
+At 100 requests per second, aggregate transfer demand reaches 260 GB/s.
+For DeepSeek-V3 with Multi-head Latent Attention, the per-request cache is 250 MB (64 × \times compression), but at higher concurrency the aggregate still exceeds 100 GB/s. 
+
+ No existing disaggregated system exploits interconnect topology for this transfer.
+DistServe  [ 1 ] uses a fixed RDMA protocol regardless of GPU placement.
+Splitwise  [ 2 ] co-locates prefill and decode on the same machine, avoiding the transfer problem but constraining scheduling flexibility.
+Mooncake  [ 3 ] introduces a distributed KV store with centralized placement decisions that do not consider physical topology.
+NVIDIA Dynamo  [ 4 ] supports disaggregation in production but does not publish topology-aware transport selection. 
+
+ Using RDMA for a transfer that could use NVLink wastes 18 × \times available bandwidth.
+Conversely, attempting NVLink for cross-node transfers fails entirely.
+The correct transport depends on the physical relationship between source and destination GPUs, which changes with every request. 
+
+ Contributions. 
+
+ We present TopKV, a topology-aware KV cache transfer orchestrator for disaggregated inference.
+TopKV makes three contributions: 
+
+ 1. 
+
+ Topology-aware transport selection. 
+TopKV discovers the GPU interconnect graph at startup via hardware queries (nvidia-smi topology matrix, lspci, RDMA capability probes, and Kubernetes node labels).
+For each KV cache transfer, it selects the highest-bandwidth transport: NVLink for same-domain, PCIe for same-node cross-domain, RDMA for cross-node, and TCP as fallback.
+The system implements five transport modes with production-grade orchestration including retry logic, concurrency limits, and integrity verification. 
+
+ 2. 
+
+ NVLink domain-aware MoE routing. 
+For Mixture-of-Experts models with hundreds of distributed experts ( e.g. DeepSeek-V3 with 256 experts), TopKV co-optimizes expert dispatch with KV cache placement.
+An expert registry tracks activation rates, compute latency, and queue depth per expert across NVLink domains.
+Three routing strategies (cache-affinity, expert-locality, load-balance) minimize cross-domain traffic while maintaining load balance. 
+
+ 3. 
+
+ CXL 3.0 overflow tier. 
+TopKV integrates CXL 3.0 Type 3 memory expanders as a KV cache overflow tier, modeled at 150 ns read latency and 64 GB/s bandwidth per endpoint.
+Four endpoints per node provide 512 GB of additional capacity (6 × \times over 80 GB HBM) at 86 × \times lower latency than NVMe. 
+
+ Frontiers Track. 
+
+ Full end-to-end evaluation of TopKV requires multi-node GPU clusters with NVLink, InfiniBand RDMA, and CXL 3.0 fabric.
+This hardware exceeds academic resources: an 8-node DGX H100 cluster costs over $200K/month to rent, GPU cloud providers do not expose NVLink topology to tenants, and CXL 3.0 Type 3 memory expanders (Samsung CMM-D, Micron CZ120) are in early sampling with no cloud availability.
+We present a complete system design, production-quality implementation, and analytical performance models grounded in published hardware specifications.
+Section  5 details what we can validate and what requires scale hardware. 
+
+ 2 Background and Motivation 
+
+ 2.1 Prefill/Decode Asymmetry 
+
+ The autoregressive generation process in transformer-based LLMs consists of two phases with fundamentally different hardware requirements. 
+
+ Prefill. 
+Given an input prompt of n n tokens, the prefill phase computes attention across all n n tokens in parallel.
+For each layer l l with h h attention heads and head dimension d h d_{h} , the computation produces key and value projections and computes Softmax ​ ( Q ​ K ⊤ / d h ) ​ V \text{Softmax}(QK^{\top}/\sqrt{d_{h}})V .
+The arithmetic intensity is O ⁡ ( n ⋅ h ⋅ d h ) O(n\cdot h\cdot d_{h}) FLOPs per byte, placing prefill in the compute-bound regime for prompt lengths above approximately 256 tokens on H100 GPUs. 
+
+ Decode. 
+Each generated token attends over the full KV cache but performs only O ⁡ ( h ⋅ d h ) O(h\cdot d_{h}) FLOPs per head, yielding arithmetic intensity near 1 op/byte.
+On an H100 SXM (1,979 TFLOPS FP16, 3,350 GB/s HBM bandwidth), decode utilizes less than 0.2% of available compute. 
+
+ This asymmetry motivates disaggregation: dedicate high-FLOPS GPUs (H100 SXM, TP8) to prefill and bandwidth-optimized GPUs to decode. 
+
+ 2.2 The KV Cache Transfer Problem 
+
+ Disaggregation introduces a data movement bottleneck.
+For a model with L L layers, h k ​ v h_{kv} KV heads, and head dimension d h d_{h} , the KV cache for a sequence of length s s is: 
+
+ | 
+ KV bytes = 2 ⋅ L ⋅ h k ​ v ⋅ d h ⋅ s ⋅ b p \text{KV}_{\text{bytes}}=2\cdot L\cdot h_{kv}\cdot d_{h}\cdot s\cdot b_{p} | 
+ | 
+ (1) | 
+
+ where b p b_{p} is bytes per element (2 for FP16).
+Table  1 shows sizes for representative models. 
+
+ Table 1: KV cache sizes for 4K-token sequences (FP16). 
+
+ Model 
+ Layers 
+ KV Heads 
+ Head Dim 
+ 4K Size 
+
+ Llama-3-70B (GQA) 
+ 80 
+ 8 
+ 128 
+ 2.6 GB 
+
+ DeepSeek-V3 (MLA) 
+ 61 
+ 1 (latent) 
+ 512 
+ 0.25 GB 
+
+ Mixtral-8x22B (GQA) 
+ 56 
+ 8 
+ 128 
+ 1.8 GB 
+
+ At 50 GB/s (400 Gbps RDMA), transferring 2.6 GB takes 52 ms, directly added to time-to-first-token (TTFT).
+For applications targeting sub-200ms TTFT, this represents 26% of the latency budget.
+At 900 GB/s (NVLink), the same transfer takes 2.9 ms: an 18 × \times improvement. 
+
+ 2.3 Interconnect Topology Heterogeneity 
+
+ Modern GPU clusters have hierarchical interconnect topologies with bandwidth varying by over 72 × \times across levels.
+Table  2 summarizes the hierarchy for DGX H100 clusters. 
+
+ Table 2: Interconnect bandwidth in a DGX H100 cluster. 
+
+ Topology Level 
+ Interconnect 
+ BW 
+ Latency 
+
+ Same NVLink domain 
+ NVLink 4.0 
+ 900 GB/s 
+ < < 1 μ \mu s 
+
+ Same NVSwitch (NVL72) 
+ NVSwitch 
+ 7.2 TB/s 
+ ∼ \sim 1 μ \mu s 
+
+ Same node, cross-domain 
+ PCIe Gen5 
+ 128 GB/s 
+ ∼ \sim 2 μ \mu s 
+
+ Cross-node, same fabric 
+ IB NDR 
+ 50 GB/s 
+ ∼ \sim 5 μ \mu s 
+
+ Cross-datacenter 
+ TCP/IP 
+ 12.5 GB/s 
+ ∼ \sim 100 μ \mu s 
+
+ Existing disaggregated systems do not exploit this topology.
+DistServe uses a single RDMA transport regardless of GPU placement.
+Splitwise avoids cross-node transfers by co-locating phases but constrains scheduling.
+Mooncake’s distributed KV store makes placement decisions based on capacity, not interconnect proximity. 
+
+ 2.4 MoE Routing Compounds the Problem 
+
+ Mixture-of-Experts (MoE) models add complexity.
+DeepSeek-V3 uses 256 routed experts with 8 active per token, distributed across GPUs using either WideEP (experts spread for load balance) or DeepEP (experts replicated for locality).
+The choice of expert parallelism directly affects KV cache transfer patterns.
+A router that places a request on a node for expert locality may inadvertently require a cross-rack KV transfer, negating the routing benefit.
+No existing system co-optimizes expert routing and KV cache transfer. 
+
+ 3 Design 
+
+ TopKV is a Kubernetes-native orchestration layer that manages the lifecycle of disaggregated inference: request routing, prefill execution, KV cache transfer, and decode execution.
+Three principles guide its design:
+(1) every transfer decision considers the physical interconnect between source and destination;
+(2) workers dynamically assume prefill or decode roles based on demand;
+(3) for MoE models, expert dispatch and KV cache placement are optimized jointly. 
+
+ 3.1 System Architecture 
+
+ TopKV comprises four components: 
+
+ KV Relay Orchestrator manages the prefill-to-transfer-to-decode lifecycle.
+It maintains a registry of active transfers, handles retries (2 attempts with 100 ms exponential backoff), and enforces concurrency limits (default: 100 concurrent transfers).
+Transfers complete asynchronously: the prefill worker is freed immediately to accept the next request. 
+
+ KV Cache Transfer Manager performs data movement.
+It implements five transport modes (NVLink, NVSwitch, PCIe, RDMA, TCP) via a TransferSink interface with BandwidthThrottledSink wrappers that model real transport bandwidth. 
+
+ Topology Manager discovers and caches the GPU interconnect topology at startup, including NVLink domain membership, NVSwitch fabric connectivity, PCIe hierarchy, and RDMA availability. 
+
+ Adaptive Decoder Pool manages dynamic role conversion between prefill and decode workers using token velocity tracking and rush hour detection. 
+
+ 3.2 Topology Discovery 
+
+ At startup, TopKV discovers the cluster interconnect through three mechanisms: 
+
+ Hardware probing. 
+The topology detector runs nvidia-smi topo -m to parse the NVLink connectivity matrix, lspci -tv to extract the PCIe switch hierarchy, and probes RDMA capabilities via InfiniBand device enumeration.
+NVLink connections are classified by link count and generation: NVLink 4.0 on Hopper provides 50 GB/s per link, yielding 900 GB/s aggregate for 18 links.
+PCIe fallback bandwidths are derived from bridge type: PIX (31.5 GB/s through a single PCIe bridge), PHB (31.5 GB/s through a host bridge), NODE (15.75 GB/s same NUMA), or SYS (7.88 GB/s cross-socket). 
+
+ Kubernetes node labels. 
+GPU nodes are labeled with NVLink domain IDs ( e.g. topology.kubernetes.io/nvlink-domain: nvl8-node0 ), GPU counts, and RDMA capability flags.
+The topology manager aggregates these into a map[string]*NVLinkDomain indexed by domain ID.
+Each domain records GPU count, aggregate bandwidth, per-GPU bandwidth, assigned pods, and health status. 
+
+ Instance registration. 
+When worker pods register with the orchestrator, they report GPU indices, NVLink availability, NVSwitch presence, and RDMA capabilities.
+Domains are classified by type: NVL72 (72-GPU rack-scale, 130 TB/s aggregate, 1.8 TB/s per GPU), NVL8 (8-GPU per node, 1.44 TB/s aggregate, 180 GB/s per GPU), or NoDomain. 
+
+ 3.3 Transport Selection 
+
+ When a KV cache transfer is initiated between source instance s s and target instance t t , the transfer manager selects transport according to Algorithm  1 . 
+
+ Algorithm 1 Transport Selection 
+
+ 1: 
+
+ source instance s s , target instance t t 
+
+ 2: 
+
+ transport mode m m 
+
+ 3: 
+
+ if manual override configured then 
+
+ 4: 
+
+    return configured mode
+
+ 5: 
+
+ end if 
+
+ 6: 
+
+ if HasNVLink ​ ( s , t ) \textsc{HasNVLink}(s,t) then ⊳ \triangleright Same NVLink domain
+
+ 7: 
+
+    return nvlink ⊳ \triangleright 450 GB/s unidirectional
+
+ 8: 
+
+ end if 
+
+ 9: 
+
+ if IsSameNode ​ ( s , t ) \textsc{IsSameNode}(s,t) then ⊳ \triangleright Same node, cross-domain
+
+ 10: 
+
+    return pcie ⊳ \triangleright 32 GB/s
+
+ 11: 
+
+ end if 
+
+ 12: 
+
+ if HasRDMA ​ ( ) \textsc{HasRDMA}() then ⊳ \triangleright Cross-node, RDMA available
+
+ 13: 
+
+    return rdma ⊳ \triangleright 25 GB/s
+
+ 14: 
+
+ end if 
+
+ 15: 
+
+ return tcp ⊳ \triangleright Fallback: 10 GB/s
+
+ HasNVLink ( s , t ) (s,t) checks that both instances are registered in the same NVLink domain by comparing node names and verifying both report HasNVLink = true .
+ IsSameNode ( s , t ) (s,t) compares node IP addresses.
+ HasRDMA ( ) () checks cluster-level RDMA availability. 
+
+ Each mode has a corresponding bandwidth model derived from published specifications:
+NVLink at 450 GB/s unidirectional (NVLink 4.0, 18 links);
+PCIe at 32 GB/s (Gen4 x16 practical throughput);
+RDMA at 25 GB/s (400 Gbps InfiniBand NDR, accounting for protocol overhead);
+TCP at 10 GB/s (100 Gbps Ethernet with gRPC framing). 
+
+ 3.4 KV Cache Serialization 
+
+ The serialization format uses a fixed 128-byte header containing an 8-byte magic number ( KVCACHE1 ), request ID, model ID, tensor dimensions (sequence length, number of layers, KV heads, head dimension), tensor sizes, and CRC-64 checksums for both key and value tensors.
+Key and value tensors follow the header contiguously in layout [ layers ] ​ [ seq_len ] ​ [ kv_heads ] ​ [ head_dim ] [\text{layers}][\text{seq\_len}][\text{kv\_heads}][\text{head\_dim}] , enabling single-DMA transfers on RDMA and NVLink paths.
+Checksum failures trigger automatic retry. 
+
+ 3.5 Adaptive Decoder Pool 
+
+ Static partitioning of GPUs into prefill and decode pools wastes capacity because demand varies over time.
+The Adaptive Decoder Pool (ADP) dynamically adjusts the ratio. 
+
+ Token velocity tracking. 
+ADP tracks the token arrival rate using an exponential moving average (EMA) over a configurable sliding window, where the smoothing factor balances responsiveness to traffic spikes against stability during steady-state operation. 
+
+ Rush hour detection. 
+ADP detects sustained high demand using three signals: prefill queue depth growth rate, token velocity spike magnitude, and P99 TTFT deviation from target.
+Rush hour triggers when at least two signals simultaneously exceed their respective thresholds, which are tuned per deployment. 
+
+ Role conversion. 
+When rush hour is detected, ADP identifies idle decode workers and converts them to prefill role.
+Conversion drains in-flight decode sequences, reconfigures the worker, and re-registers it in the prefill pool.
+The target conversion time is 10 seconds, versus 5 minutes for cold-starting a new GPU container.
+A configurable maximum prevents over-converting the decode pool. 
+
+ 3.6 NVLink Domain-Aware MoE Routing 
+
+ For MoE models, TopKV maintains an expert registry indexed by expert ID, pod IP, and NVLink domain ID.
+Each expert entry tracks activation rate, compute latency, network latency, queue depth, and health status. 
+
+ Three routing strategies are available: 
+
+ Cache-affinity: route to the GPU where the KV cache already resides.
+Minimizes KV transfer but may require cross-domain expert dispatch. 
+
+ Expert-locality: route to the NVLink domain where the most frequently activated experts reside.
+Minimizes all-to-all dispatch latency but may require cross-domain KV transfer. 
+
+ Load-balance: distribute based on per-expert load factors computed as a weighted combination of activation rate, normalized compute latency, and queue depth.
+Experts whose load factor exceeds a configurable straggler threshold are deprioritized. 
+
+ The router selects between strategies using a cost model that weighs estimated KV transfer time, expert dispatch time, and queue depth at the target. 
+
+ 3.7 CXL 3.0 Overflow Tier 
+
+ GPU HBM capacity limits concurrent decode sequences.
+An H100 with 80 GB HBM holds KV caches for approximately 30 concurrent 4K-token sequences of Llama-3-70B after model weights consume 35 GB.
+TopKV models CXL 3.0 Type 3 memory expanders as an overflow tier.
+Recent work on eBPF-based observability for CXL pooling systems  [ 13 ] confirms that CXL memory pools are entering production, motivating first-class support in inference serving. 
+
+ Each endpoint provides 128 GB of DDR5 at 150 ns read latency and 64 GB/s bandwidth.
+Four endpoints per node provide 512 GB of additional KV cache capacity: 6 × \times over HBM.
+The performance model uses measured CXL specifications from the CXL consortium and Samsung CMM-D datasheets, with EMA-based updates when real measurements become available. 
+
+ Table  3 compares KV cache overflow tiers. 
+
+ Table 3: KV cache overflow tier comparison. 
+
+ Tier 
+ Capacity 
+ Read Latency 
+ Bandwidth 
+
+ HBM3 (on-GPU) 
+ 80 GB 
+ 10 ns 
+ 3,350 GB/s 
+
+ CXL 3.0 Type 3 
+ 512 GB 
+ 150 ns 
+ 64 GB/s 
+
+ PCIe NVMe 
+ 2+ TB 
+ 13,000 ns 
+ 7 GB/s 
+
+ CXL provides 86 × \times lower latency than NVMe at 9 × \times higher bandwidth, making it viable for decode-phase KV cache access where each token reads a small fraction of the total cache. 
+
+ 4 Implementation 
+
+ TopKV is implemented as a Kubernetes controller with the following components. 
+
+ Orchestrator. 
+The KVRelayOrchestrator runs as a singleton per namespace.
+It starts two background goroutines: a completion handler processing transfer results from a buffered channel (1,000 entries), and a metrics exporter publishing Prometheus counters for transfer counts, per-mode breakdowns, latency percentiles, and throughput. 
+
+ Transfer Manager. 
+The KVCacheTransferManager implements five transport modes via the TransferSink interface.
+Each mode wraps a BandwidthThrottledSink that accurately models transport bandwidth for latency estimation and capacity planning.
+The transport selection logic ( selectTransferMode() ) implements Algorithm  1 . 
+
+ Topology Detection. 
+Hardware topology detection comprises multiple components:
+ NVLinkDetector parses nvidia-smi topo -m output into a bandwidth adjacency matrix;
+ PCIeDetector parses lspci -tv to extract switch hierarchy and GPU BDF addresses;
+ InfiniBandDetector enumerates RDMA devices and fabric types;
+ NUMADetector maps GPU-to-NUMA-node affinity.
+All detectors support three execution modes: local command execution, remote via kubectl exec , and mock mode for testing. 
+
+ MoE Router. 
+The MoEAwareRouter maintains an expert registry indexed three ways: by expert ID, by pod IP, and by domain ID.
+It implements all three routing strategies and computes per-expert load factors for straggler detection. 
+
+ Adaptive Decoder Pool. 
+The ConvertibleDecoderPool implements token velocity tracking via EMA, rush hour detection with configurable thresholds, and worker role conversion.
+Chunked prefill support (512-token chunks, 30% decode slot reservation) allows converted workers to handle prefill tasks without fully abandoning decode capacity. 
+
+ Limitations of current implementation. 
+The transport modes model bandwidth via throttled sinks rather than invoking actual CUDA IPC or ibverbs system calls.
+The CXL tier is a performance model, not a hardware driver.
+Pipelined layer-by-layer transfer is modeled analytically (overlap estimation between compute and transfer time) but not implemented as actual concurrent execution.
+These limitations are consistent with the Frontiers Track: the system design is complete and the implementation validates orchestration logic, but hardware integration awaits access to multi-node GPU clusters with heterogeneous interconnects. 
+
+ 5 Analysis 
+
+ We present analytical models grounded in published hardware specifications, validated against the component-level implementation. 
+
+ 5.1 Transfer Latency Model 
+
+ For a KV cache of size S S bytes transferred via transport mode m m with bandwidth B m B_{m} : 
+
+ | 
+ T transfer ​ ( S , m ) = S B m + L m T_{\text{transfer}}(S,m)=\frac{S}{B_{m}}+L_{m} | 
+ | 
+ (2) | 
+
+ where L m L_{m} is the per-transfer setup latency (connection establishment, memory registration). 
+
+ Table  4 shows projected transfer latencies for Llama-3-70B (2.6 GB KV cache) across transport modes. 
+
+ Table 4: Projected KV transfer latency for Llama-3-70B (2.6 GB) by transport mode. Bandwidth from published specifications. 
+
+ Mode 
+ BW (GB/s) 
+ Latency 
+ vs RDMA 
+ Source 
+
+ NVLink 4.0 
+ 450 
+ 5.8 ms 
+ 18 × \times 
+ NVIDIA 
+
+ PCIe Gen5 
+ 50 
+ 52 ms 
+ 2 × \times 
+ PCI-SIG 
+
+ RDMA (IB NDR) 
+ 25 
+ 104 ms 
+ 1 × \times 
+ Mellanox 
+
+ TCP (100G) 
+ 10 
+ 260 ms 
+ 0.4 × \times 
+ measured 
+
+ Topology-aware selection provides 3 to 18 × \times latency reduction over uniform RDMA, depending on the physical relationship between source and destination.
+The improvement is most significant when source and destination share an NVLink domain, which occurs frequently in practice: on an 8-node cluster with 64 GPUs, 7 out of 8 GPUs on a given node (87.5%) share an NVLink domain with any given source GPU on the same node. 
+
+ 5.2 Pipelining Overlap Model 
+
+ Pipelined transfer sends layer l l ’s KV cache while layers l + 1 , … , L l+1,\ldots,L are still computing during prefill.
+The effective transfer time with pipelining is: 
+
+ | 
+ T eff = max ⁡ ( T compute_last_layer , T transfer − T compute_remaining ) T_{\text{eff}}=\max\left(T_{\text{compute\_last\_layer}},T_{\text{transfer}}-T_{\text{compute\_remaining}}\right) | 
+ | 
+ (3) | 
+
+ For Llama-3-70B with 80 layers, each layer’s prefill computation takes approximately 0.5 ms at batch size 1.
+Total remaining compute after layer 1 completes is 79 × 0.5 = 39.5 79\times 0.5=39.5  ms.
+For RDMA transfer (104 ms total), pipelining hides 39.5 / 104 = 38 % 39.5/104=38\% of transfer latency.
+For NVLink (5.8 ms total), pipelining hides the entire transfer behind compute.
+For intermediate cases (PCIe at 52 ms), pipelining hides 39.5 / 52 = 76 % 39.5/52=76\% . 
+
+ 5.3 KV Cache Sizing Across Architectures 
+
+ Equation  1 assumes standard Multi-Head Attention.
+Modern architectures use fewer KV heads: 
+
+ • 
+
+ Grouped Query Attention (Llama-3): h k ​ v = h / g h_{kv}=h/g where g g is the group size. Llama-3-70B has g = 8 g=8 , reducing KV cache by 8 × \times versus MHA. 
+
+ • 
+
+ Multi-head Latent Attention (DeepSeek-V3): replaces per-head KV with a d latent d_{\text{latent}} -dimensional latent vector. DeepSeek-V3 uses d latent = 512 d_{\text{latent}}=512 versus 128 × 128 = 16,384 128\times 128=16{,}384 for equivalent MHA, a 32 × \times reduction. 
+
+ • 
+
+ Multi-Query Attention (Mistral): single KV head shared across all attention heads, reducing by h × h\times . 
+
+ These reductions change the transfer calculus: DeepSeek-V3’s 250 MB KV cache transfers in 0.6 ms via NVLink versus 10 ms via RDMA, making topology-aware transport less critical for MLA models but still beneficial at high concurrency. 
+
+ 5.4 Aggregate Bandwidth Demand 
+
+ At request rate R R with average KV cache size S ¯ \bar{S} , aggregate transfer demand is R ⋅ S ¯ R\cdot\bar{S} .
+For R = 100 R=100 req/s serving Llama-3-70B: 100 × 2.6 ​ GB = 260 100\times 2.6~\text{GB}=260  GB/s.
+A single InfiniBand NDR link (25 GB/s usable) saturates at 9.6 requests per second.
+NVLink at 450 GB/s handles 173 requests per second per domain.
+This 18 × \times difference in sustainable request rate is the core motivation for topology-aware transport. 
+
+ 5.5 What We Cannot Validate 
+
+ The following aspects require scale hardware beyond our current access: 
+
+ • 
+
+ End-to-end disaggregated throughput under realistic workload mixes, where prefill and decode contend for shared interconnect bandwidth. 
+
+ • 
+
+ ADP conversion latency in production, where model weight redistribution time depends on checkpoint format, NVMe read speed, and CUDA context initialization. 
+
+ • 
+
+ MoE expert rebalancing across NVLink domains under dynamic load, where migration cost must be amortized over future routing savings. 
+
+ • 
+
+ CXL 3.0 decode-phase access patterns , where the interaction between CXL latency (150 ns) and GPU memory controller behavior is not well characterized in public literature. 
+
+ • 
+
+ Interference between KV cache transfers and inference computation sharing the same interconnect fabric. 
+
+ These gaps are structural: they require hardware configurations that do not exist in current GPU clouds and exceed the budget of individual researchers.
+We believe the system design and analytical models presented here provide sufficient evidence that the approach is promising, and we welcome collaboration with organizations that can provide access to the required hardware. 
+
+ 6 Related Work 
+
+ Disaggregated inference. 
+DistServe  [ 1 ] demonstrated the benefit of separating prefill and decode, achieving up to 4.5 × \times throughput improvement.
+Splitwise  [ 2 ] co-locates phases on mixed-use machines.
+Mooncake  [ 3 ] introduces a distributed KV cache store.
+NVIDIA Dynamo  [ 4 ] brings disaggregation to production.
+None of these systems consider interconnect topology in their transfer decisions. 
+
+ KV cache management. 
+vLLM  [ 5 ] introduced PagedAttention for efficient KV cache memory management within a single GPU.
+Infinite-LLM  [ 7 ] extends this to distributed settings.
+SGLang  [ 6 ] uses RadixAttention for prefix sharing.
+These systems manage KV cache allocation but do not address cross-GPU transfer. 
+
+ GPU interconnect optimization. 
+NCCL  [ 8 ] optimizes collective communication for training workloads but targets allreduce patterns, not point-to-point KV cache transfer.
+Prior work on topology-aware collective communication  [ 9 , 10 ] focuses on gradient aggregation during training.
+TopKV addresses a fundamentally different data movement pattern: large, asymmetric, point-to-point transfers triggered by individual inference requests. 
+
+ CXL for ML. 
+CXL-based memory expansion for ML has been explored for training  [ 11 , 12 ] but not for inference KV cache management.
+TopKV is the first to model CXL 3.0 as a KV cache overflow tier with latency and bandwidth characteristics specific to decode-phase access patterns. 
+
+ 7 Conclusion 
+
+ Disaggregated LLM inference creates a new datacenter data movement pattern that existing systems handle suboptimally.
+TopKV demonstrates that topology-aware transport selection, exploiting the 72 × \times bandwidth hierarchy in modern GPU clusters, can reduce KV cache transfer latency by 3 to 18 × \times .
+Co-optimizing MoE expert dispatch with KV cache placement and modeling CXL 3.0 as an overflow tier address complementary aspects of the problem.
+While full evaluation awaits access to multi-node GPU clusters with heterogeneous interconnects, the complete system design and analytical models grounded in published specifications provide evidence that the approach merits further investigation and hardware validation. 
+
+ References 
+
+ [1] 
+
+Y. Zhong et al. , “DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving,” in OSDI , 2024.
+
+ [2] 
+
+P. Patel et al. , “Splitwise: Efficient Generative LLM Inference Using Phase Splitting,” in ISCA , 2024.
+
+ [3] 
+
+R. Qin et al. , “Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving,” arXiv:2407.00079 , 2024.
+
+ [4] 
+
+NVIDIA, “Dynamo: A Framework for Distributed LLM Inference,” NVIDIA Technical Blog , 2025.
+
+ [5] 
+
+W. Kwon et al. , “Efficient Memory Management for Large Language Model Serving with PagedAttention,” in SOSP , 2023.
+
+ [6] 
+
+L. Zheng et al. , “SGLang: Efficient Execution of Structured Language Model Programs,” arXiv:2312.07104 , 2023.
+
+ [7] 
+
+B. Lin et al. , “Infinite-LLM: Efficient LLM Service with DistAttention and Distributed KVCache,” arXiv:2401.02669 , 2024.
+
+ [8] 
+
+NVIDIA, “NCCL: NVIDIA Collective Communications Library,” 2024.
+
+ [9] 
+
+W. Wang et al. , “TopoOpt: Optimizing the Network Topology for Distributed DNN Training,” in NSDI , 2023.
+
+ [10] 
+
+G. Wang et al. , “BLINK: Fast and Generic Collectives for Distributed ML,” in MLSys , 2020.
+
+ [11] 
+
+H. Li et al. , “Pond: CXL-based Memory Pooling Systems for Cloud Platforms,” in ASPLOS , 2023.
+
+ [12] 
+
+H. Al Maruf et al. , “TPP: Transparent Page Placement for CXL-Enabled Tiered Memory,” in ASPLOS , 2023.
+
+ [13] 
+
+“wBPF: Efficient Edge-Case Observability for CXL Pooling Systems via eBPF,” in Proc. 4th Workshop on Heterogeneous Composable and Disaggregated Systems (HCDS) , 2025.

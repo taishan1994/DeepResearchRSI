@@ -1,0 +1,1478 @@
+Prorsa : Unleashing the Potential of Prefill-Decode Disaggregation in Agentic Reinforcement Learning 
+
+ \authorfont Chiheng Lou †∗ Xiangwei Deng ‡ Bangjun Xiao †∗ Xiaodong Ji ‡ 
+ \authorfont Yikai Zhao †‡ Xin Jin † Hailin Zhang ‡⋄ 
+ \authorfont † School of Computer Science, Peking University 
+ \authorfont ‡ LLM-Core Xiaomi
+
+ Abstract 
+
+ Agentic reinforcement learning (RL) is commonly used to enhance the capabilities of large language models (LLMs) in solving complex multi-turn tasks.
+During rollout, agentic RL exhibits a workload pattern distinct from that of traditional RL: multi-turn interactions repeatedly introduce prefill requests, causing prefill and decode workloads to coexist throughout rollout.
+This workload makes prefill-decode (PD) disaggregation, a design widely used for online LLM serving, promising for speeding up agentic RL rollout.
+This paper shows that PD disaggregation can improve rollout efficiency by (a) mitigating interference among data-parallel attention modules, (b) enabling stage-specific parallelism, and (c) reducing end-to-end trajectory completion time.
+However, a fixed prefill-decode allocation may fail to sustain these benefits as workload composition varies across tasks and over time.
+We therefore present Prorsa , an agentic RL framework for prediction-guided prefill-decode resource allocation.
+ Prorsa observes the lifecycle of every trajectory to forecast short-horizon prefill and decode demand.
+These forecasts then guide worker allocation decisions and trigger role switching of rollout engines,
+aligning prefill and decode capacity with anticipated workload demand.
+Across synchronous and asynchronous agentic RL settings, Prorsa achieves end-to-end rollout speedups of 1.11 × \times –4.05 × \times over prefill-decode colocation. 
+
+ 0 0 footnotetext: ∗ Work done during internship at Xiaomi Corporation. 0 0 footnotetext: ⋄ Corresponding author. 
+
+ 1 Introduction 
+
+ Reinforcement learning (RL) has become a core stage of post-training for large language models (LLMs) ( The Microsoft AI Team, 2026 ; DeepSeek-AI, 2025a ; Qwen Team, 2025 ; GLM-5-Team, 2026 ; DeepSeek-AI, 2026 ; Kimi Team, 2026 ) .
+Beyond single-turn reasoning, RL is increasingly applied to agentic scenarios—coding agents ( Pan et al., 2024 ; Wei et al., 2025 ) , computer use ( Wang et al., 2025b ; Huang et al., 2026 ; Lu et al., 2026 ) , and deep research ( Jin et al., 2025 ; Zheng et al., 2025 ) —where the model accomplishes a long-horizon task through multiple turns of interaction with the environment. 
+
+ During RL training, the rollout phase generates samples from prompts ( Sheng et al., 2025 ; Hu et al., 2024b ) .
+For agentic RL, a sample is no longer a single model response but a long-lived trajectory that interleaves LLM generation with tool execution across many turns.
+In this case, rollout can account for up to 70% of end-to-end iteration time, making its efficiency an important optimization target ( Zhong et al., 2024b ; Fu et al., 2025 ; Gao et al., 2025 ; Zhang et al., 2026 ; Chen et al., 2026b ) . 
+
+ This paper studies how to improve agentic rollout efficiency through prefill-decode (PD) disaggregation, which places the two inference stages on separate GPU groups.
+The benefits of PD disaggregation have been well studied in online LLM serving,
+where it enables independent resource allocation and reduces interference between the two stages ( Zhong et al., 2024a ; Patel et al., 2024 ; Qin et al., 2025b ; Hu et al., 2024a ; Hong et al., 2025 ; Feng et al., 2025 ; Zhu et al., 2025 ) .
+Its benefits in agentic RL rollout, however, have not been clearly characterized by prior works ( GLM-5-Team, 2026 ; Chen et al., 2026a ; Gao et al., 2026b ) . 
+
+ Our analysis shows that agentic RL exhibits distinct characteristics that make PD disaggregation particularly beneficial.
+Specifically, agentic RL generates a continuous stream of prefill requests during rollout.
+The prefill workloads come from two sources:
+(1) multi-turn interactions , where each trajectory repeatedly issues inference requests across interaction turns, creating prefill demand as new environment feedback is appended to its context,
+and (2) asynchronous rollout , where new samples are continuously injected into rollout engines rather than all at once to mitigate the long-tail problem ( Fu et al., 2025 ; Zhong et al., 2025 ; Han et al., 2025 ; Zhou et al., 2025 ) .
+As a result, prefill and decode requests coexist throughout the rollout phase (§ 3.1 ). 
+
+ For these interleaved rollout workloads, we find three key benefits of PD disaggregation: (1) reducing GPU idleness caused by prefill-decode interference across data-parallel attention modules, (2) enabling independent parallelism strategies for prefill and decode to maximize throughput, and (3) reducing decode latency for long-tail trajectories. 
+
+ However, applying PD disaggregation to agentic RL is not straightforward.
+Prefill and decode workloads vary across RL tasks, complicating the choice of a suitable prefill-to-decode instance ratio (PD ratio).
+Moreover, the prefill and decode demands change over time even within the same task, so a fixed PD ratio may fail to sustain a throughput advantage over colocation throughout training. 
+
+ To address this challenge, we propose Prorsa , an agentic RL framework that combines PD disaggregation with adaptive worker allocation to improve rollout efficiency.
+The key insight of Prorsa is that the RL framework’s visibility into trajectory lifecycles provides advance signals of upcoming inference demand.
+By monitoring sample dispatch, sandbox startup, tool execution, and reward completion, Prorsa forecasts short-horizon prefill and decode demand.
+Based on these forecasts, Prorsa adjusts the PD ratio by switching rollout workers between prefill and decode roles.
+This adjustment mechanism keeps the instance allocation aligned with changing workload demands, improving GPU utilization. 
+
+ Our main contributions are as follows: 
+
+ • 
+
+ We characterize the benefits and deployment challenges of PD disaggregation in agentic RL rollout through an in-depth workload and performance analysis. 
+
+ • 
+
+ We introduce a prefill-decode role switching strategy driven by short-horizon workload forecasts to adapt resource allocation to changing rollout demand. 
+
+ • 
+
+ We design and implement Prorsa , an agentic RL framework that adopts PD disaggregation to improve rollout efficiency. Experimental results across various agentic RL scenarios demonstrate that Prorsa achieves rollout speedups ranging from 1.11 × \times to 4.05 × \times over colocation in both synchronous and asynchronous settings. 
+
+ 2 Background 
+
+ 2.1 Agentic RL Training 
+
+ In RL training, each iteration includes a rollout phase that generates trajectories using inference engines ( Kwon et al., 2023 ; Zheng et al., 2024 ) , a reward phase that scores the trajectories with predefined rules or reward models, and a
+ training phase that updates the model with an RL algorithm such as PPO ( Schulman et al., 2017 ) , GRPO ( Shao et al., 2024 ) , or DAPO ( Yu et al., 2025 ) .
+Training begins once enough trajectories are scored,
+and updated weights are synchronized to rollout engines. 
+
+ In agentic RL, a sample is no longer a single response but a multi-turn trajectory:
+in each turn the model emits an action (e.g., a tool call),
+the environment executes it, and the feedback is appended to the context for the next turn.
+For on-policy training, the rollout is synchronous :
+training cannot begin until all trajectories in a batch are complete, so long-tail trajectories leave GPUs idle.
+To mitigate this effect, large-scale systems often adopt asynchronous rollout ( The Microsoft AI Team, 2026 ; DeepSeek-AI, 2026 ; GLM-5-Team, 2026 ; Fu et al., 2025 ; Zhong et al., 2025 ; Han et al., 2025 ) , which continuously injects new samples and allows off-policy updates using trajectories generated by earlier model versions.
+In this case, a staleness bound limits the number of model versions a trajectory can span, and trajectories that fail to finish within this bound are dropped. 
+
+ 2.2 Prefill-Decode Disaggregation 
+
+ LLM inference consists of two stages:
+the prefill stage processes all prompt tokens in parallel and produces the first output token,
+while the decode stage generates the remaining tokens autoregressively.
+Prefill-decode disaggregation ( Zhong et al., 2024a ) places the two stages on separate instances:
+prefill instances process prompts and transfer the produced KV cache to decode instances, which carry out generation.
+In online serving, disaggregation prevents decode from being blocked by prefill, and enables separate configuration of parallelism, accelerator types,
+and instance counts for prefill and decode to meet their respective latency SLOs ( Zhong et al., 2024a ; Patel et al., 2024 ) . 
+
+ 3 Motivation and Challenges 
+
+ In this section, we first characterize agentic RL workloads (§ 3.1 ), and then show the benefits of PD disaggregation (§ 3.2 ) under continuous prefill demand.
+Finally, we present the challenges of adopting PD disaggregation for dynamic RL rollout workloads (§ 3.3 ). 
+
+ 3.1 Workload Characterization of Agentic RL Rollout 
+
+ Figure 1: Normalized cumulative prefill and decode tokens for different RL tasks. 
+
+ Figure 1 shows the cumulative prefill and decode tokens within one rollout step for three representative tasks: math, coding agent, and general agent. The details of the tasks are described in § 5.1 .
+We vary the maximum staleness to capture the effects of asynchronous rollout.
+At the start of each step, trajectories carried over from the previous step must re-prefill their existing contexts with the latest model version ( Fu et al., 2025 ; Xiaomi MiMo Team, 2026 ) . 
+
+ The tasks exhibit distinct workload patterns.
+For math, prefill is concentrated near the beginning of each step, primarily due to initial prompt processing and, in asynchronous settings, re-prefill of trajectories carried over from the previous step.
+In contrast, the two agentic tasks generate prefill requests throughout the step, and their prefill-token volumes substantially exceed their decode-token volumes.
+Under the on-policy setting, the token-processing rate drops sharply near the end of the step, revealing a long tail of straggling trajectories ( Zhong et al., 2024b ; Zhong et al., 2025 ; Gao et al., 2025 ; Zhang et al., 2026 ; Zhou et al., 2025 ) . 
+
+ 3.2 Motivating Experiments 
+
+ Stage | 
+ Length | 
+ EP16 | 
+ EP32 | 
+ EP64 | 
+
+ Prefill | 
+ 8K | 
+ 3.24 | 
+ 2.78 | 
+ 2.22 | 
+
+ 64K | 
+ 2.77 | 
+ 2.33 | 
+ 1.95 | 
+
+ 256K | 
+ 1.76 | 
+ 1.36 | 
+ 1.37 | 
+
+ 512K | 
+ 1.29 | 
+ 1.02 | 
+ 1.00 | 
+
+ Decode | 
+ 8K | 
+ 1.20 | 
+ 1.31 | 
+ 1.29 | 
+
+ 64K | 
+ 1.17 | 
+ 1.26 | 
+ 1.25 | 
+
+ 256K | 
+ 1.10 | 
+ 1.14 | 
+ 1.13 | 
+
+ 512K | 
+ 1.02 | 
+ 1.01 | 
+ 1.00 | 
+
+ Table 1: Normalized per-server prefill and decode throughput for MiMo-V2.5-Pro. Decode uses a batch size of 16 per attention DP rank under all configurations. 
+
+ Figure 2: Inter-token latency of PD disaggregation versus colocation for synchronous rollout on the coding agent task. Dashed lines indicate the corresponding mean latencies. 
+
+ Figure 3: Prefill-to-decode token ratios across and within steps with a maximum staleness of 8. 
+
+ Given this continuous prefill demand in agentic RL rollout, this paper shows that PD disaggregation can improve rollout efficiency.
+Using MiMo-V2.5-Pro ( Xiaomi MiMo Team, 2026 ) and the experimental setup in § 5.1 , we identify three major sources of performance improvement: 
+
+ Mitigating interference among data-parallel attention modules. 
+Prior work has studied how PD colocation increases decoding latency through head-of-line blocking ( Zhong et al., 2024a ; Patel et al., 2024 ) .
+However, we show that PD colocation can also significantly degrade throughput for mixture-of-experts (MoE) models.
+In MoE models, experts account for most model parameters, so their deployment commonly combines large-scale expert parallelism with multiple data-parallel (DP) attention modules ( DeepSeek-AI, 2025b ; Xiaomi MiMo Team, 2026 ; GLM-5-Team, 2026 ) . 
+
+ In this case, when prefill and decode are colocated, their differing execution times cause interference across attention DP ranks:
+if one rank processes prefill while others process decode, the decoding ranks must wait before entering the synchronized MoE phase, leaving GPUs idle.
+Chunked prefill ( Agrawal et al., 2024 ) shortens each stall but cannot eliminate the duration mismatch.
+This synchronization-induced idleness can reduce rollout throughput:
+for MiMo-V2.5-Pro on the two agentic tasks, we observe a GPU idle ratio of up to 26% due to prefill-decode interference (§ 5.3 ). 
+
+ Independent parallelism strategies for prefill and decode. 
+PD disaggregation also allows each stage to use its own parallelism strategy ( Zhong et al., 2024a ; Forys et al., 2026 ) .
+Table 1 shows the normalized per-server throughput of prefill and decode under different parallelism strategies and input lengths using the testbed in § 5.1 .
+The results show that prefill consistently favors EP16, whereas decode favors EP32 for request lengths up to 256K and EP16 at 512K.
+Although EP64 does not maximize decode throughput, it provides more KV-cache capacity, which can be necessary for extremely long requests.
+These measurements motivate selecting parallelism separately for prefill and decode instances. 
+
+ Reduced decode latency. 
+RL rollout time is often dominated by a small number of long-tail trajectories, and prior work primarily addresses them by reducing decode latency ( Zhong et al., 2024b ; Zhong et al., 2025 ; Gao et al., 2025 ; Zhang et al., 2026 ) .
+PD disaggregation reduces decode latency by isolating decode from prefill interference.
+For synchronous rollout on the coding agent task, Figure 2 shows that PD disaggregation achieves significantly lower inter-token latency than colocation.
+The reduced decoding latency can shorten long-running trajectories, thus alleviating the long-tail problem. 
+
+ 3.3 Challenges 
+
+ The benefits of PD disaggregation depend on assigning the right number of workers to each stage.
+However, as shown in Figure 1 , workload composition varies substantially across tasks, requiring task-specific PD allocations.
+Moreover, this composition also varies during training.
+Figure 3 (a) shows the prefill-to-decode token ratios across training steps with a maximum staleness of 8.
+The maximum-to-minimum ratio can reach 1.74 × \times , as asynchronous sample dispatch leads to additional variability in rollout demand.
+Figure 3 (b) and Figure 3 (c) further show sharp workload fluctuations within the first training step at 10-second granularity.
+The complete workload analysis across different staleness settings is provided in Appendix A .
+Together, these variations motivate dynamically adjusting the PD worker ratio rather than maintaining a fixed allocation throughout training. 
+
+ 4 Prorsa Design 
+
+ Figure 4: Prorsa architecture overview. 
+
+ To adapt prefill-decode disaggregation to dynamic rollout workloads, we propose Prorsa , an agentic RL framework with prediction-guided worker allocation.
+Figure 4 presents the architecture of Prorsa .
+The framework leverages its visibility into each trajectory’s lifecycle, including sample dispatch, sandbox startup, inference requests, tool completion, and reward computation.
+Using these lifecycle signals, Prorsa forecasts short-horizon prefill demand and decode KV-cache requirements (§ 4.1 ) and dynamically switches rollout workers between the two roles (§ 4.2 ) to accommodate upcoming requests. 
+
+ 4.1 Workload Predictor 
+
+ 4.1.1 Trajectory State Machine 
+
+ To forecast future demands, Prorsa traces each trajectory from sampling to final reward.
+Figure 4 shows the state machine of every trajectory.
+Each sampled trajectory starts a sandbox, either from the prewarm pool or through a cold startup.
+Once the sandbox is ready, the trajectory’s first model request joins the ready queue; this queue-entry event defines a prefill request arrival.
+Admission to Prefill marks the start of service rather than a new arrival, and completion of prefill creates a decode admission and moves the trajectory to Decode . 
+
+ The decoded response either terminates the trajectory or contains a tool call.
+In the latter case, the trajectory enters Tool and waits for the external tool or environment to return.
+The tool result is appended to the trajectory context, creating a new prefill request whose arrival is likewise recorded when it joins the ready queue.
+If the decoded response reaches a stopping condition, the trajectory enters Reward and contributes no further requests. 
+
+ 4.1.2 Workload Prediction 
+
+ With the trajectory state machine, Prorsa can predict the prefill workload and decode-admission token volume from four sources: the data sampler, sandbox startup, the ready queue, and tool execution.
+The following summarizes each component and how it combines with in-flight work.
+All calculations incur negligible overhead.
+Due to space constraints, we leave the problem formulation and detailed equations to Appendix B . 
+
+ • 
+
+ Data sampler. 
+The sampler estimates how many trajectories currently in the reward phase will complete within the horizon.
+It applies an estimated training-admission rate (the fraction of reward-completed trajectories meeting training-admission criteria) and the sample-injection policy to infer new launches, then accounts for dispatch and startup delay before converting predicted request arrivals into prefill demand using estimated prompt lengths.
+Newly sampled requests are assumed to hit the prewarm pool, but their first requests need not arrive immediately. 
+
+ • 
+
+ Sandbox startup. 
+For sandboxes already starting, the predictor distinguishes prewarm hits from cold starts.
+For both modes, historical startup-to-request durations, conditioned on elapsed time, determine the probability that the first request reaches the ready queue within the horizon. 
+
+ • 
+
+ Ready queue. 
+All requests already waiting in the ready queue contribute their full prompt-token counts as observed backlog. 
+
+ • 
+
+ Tool execution. 
+For trajectories currently executing tools, the predictor uses historical tool durations and elapsed execution time to estimate when the next model request will arrive.
+Expected arrivals within the horizon contribute the estimated prompt length after the tool result is appended. 
+
+ • 
+
+ In-flight prefill requests. 
+All requests already in Prefill contribute their full prompt-token counts. 
+
+ • 
+
+ Decode admissions from prefill completion. 
+The predictor estimates prefill completion times from runtime progress, request arrival times, per-instance queue order, and profiled execution times.
+Requests expected to complete prefill within the horizon contribute their prompt lengths to the decode-admission token forecast.
+These token counts are converted to KV-cache requirements under the selected decode configuration, without predicting output lengths. 
+
+ • 
+
+ Aggregation and online correction. 
+The predictor sums the prefill contributions and refreshes the forecasts every S S seconds.
+Observed arrivals and completions update duration statistics, training-admission outcomes update the acceptance-rate estimate, and forecast residuals drive an online bias correction. 
+
+ 4.2 Prefill-Decode Role Switching 
+
+ We select the parallelism configuration with the highest measured throughput separately for prefill and decode.
+For workloads with particularly long requests, a larger decode EP size is used to provide more KV-cache capacity.
+In agentic RL, KV-cache capacity limits concurrency for long requests, making it a key constraint on decode throughput.
+Therefore, the role switcher uses decode KV-cache requirements combined with prefill demand to set the PD instance ratio. 
+
+ At time t t , let 𝒲 t P \mathcal{W}^{\mathrm{P}}_{t} denote the estimated full-prompt token demand for allocation over a prediction horizon of duration S S .
+It includes all queued and in-flight prefill requests at t t and new requests predicted to arrive within the horizon, rather than only requests expected to complete within it.
+ K t D K_{t}^{\mathrm{D}} is the current decode KV-cache footprint, and K ^ t , S D \hat{K}^{\mathrm{D}}_{t,S} is the KV-cache space required by requests predicted to enter decode within the horizon.
+The switcher estimates the effective prefill processing speed θ t P \theta^{\mathrm{P}}_{t} in full-prompt tokens per second per instance, using the same counting convention as 𝒲 t P \mathcal{W}^{\mathrm{P}}_{t} , including cached prefixes.
+This effective speed incorporates the workload’s average prefix-cache hit ratio: the benefit of cache reuse is reflected in the measured service time, while token counts retain the full prompt lengths.
+It initializes this estimate from profiling and updates it from recent busy intervals under the selected configuration with comparable prompt-length distributions and average prefix-cache hit ratios.
+Each completed request contributes its full prompt length once; the denominator sums busy instance-seconds rather than wall-clock time, excluding intervals idle for lack of requests.
+The online measurement uses uninterrupted, completed busy intervals, from the start of service on an idle instance until its prefill work drains, so token counts and service time cover the same requests; overlapping requests share elapsed instance time rather than being timed separately.
+If no matching busy interval has completed, the switcher retains the last valid estimate for that workload profile, falling back to profiling when needed, rather than treating idle observations as zero capacity.
+Let C KV D C_{\mathrm{KV}}^{\mathrm{D}} denote the usable KV-cache capacity per decode instance.
+The switcher computes the prefill instance count from throughput and the decode instance count solely from KV-cache capacity: 
+
+ | 
+ n t P = ⌈ 𝒲 t P S × θ t P ​ ( 1 + δ ) ⌉ , n t D = ⌈ K t D + K ^ t , S D C KV D ​ ( 1 + δ ) ⌉ , n^{\mathrm{P}}_{t}=\Big\lceil\frac{\mathcal{W}^{\mathrm{P}}_{t}}{S\times\theta^{\mathrm{P}}_{t}}(1+\delta)\Big\rceil,\qquad n^{\mathrm{D}}_{t}=\Big\lceil\frac{K_{t}^{\mathrm{D}}+\hat{K}^{\mathrm{D}}_{t,S}}{C_{\mathrm{KV}}^{\mathrm{D}}}(1+\delta)\Big\rceil, | 
+ | 
+ (1) | 
+
+ where δ ≥ 0 \delta\geq 0 is a shared safety margin.
+Within our short prediction horizon, we do not explicitly model KV-cache growth during decoding or cache reclamation upon request completion, as these are hard to predict.
+The safety margin δ \delta provides KV-cache headroom to sustain decode throughput. 
+
+ Let m P m^{\mathrm{P}} and m D m^{\mathrm{D}} be the numbers of GPUs per instance, and let G G be the total GPU budget.
+Our objective is to maximize δ \delta subject to the GPU budget constraint m P ​ n t P + m D ​ n t D ≤ G m^{\mathrm{P}}n^{\mathrm{P}}_{t}+m^{\mathrm{D}}n^{\mathrm{D}}_{t}\leq G .
+The resulting instance counts define the target PD ratio n t P : n t D n^{\mathrm{P}}_{t}:n^{\mathrm{D}}_{t} .
+If the predicted demands cannot be met within the budget even at δ = 0 \delta=0 , the switcher instead chooses a budget-feasible integer allocation that minimizes the larger of the prefill throughput and decode KV-cache demand-to-capacity ratios.
+Appendix C details the switch execution procedure. 
+
+ 5 Evaluation 
+
+ We implement Prorsa on top of Verl ( Sheng et al., 2025 ) and SGLang ( Zheng et al., 2024 ) .
+Our modifications comprise around 6.4K lines of Python code and support scheduling and role switching.
+In this section, we evaluate Prorsa in terms of overall performance (§ 5.2 ),
+sources of performance gains (§ 5.3 ),
+role-switching effectiveness (§ 5.4 ),
+and workload prediction accuracy (§ 5.5 ). 
+
+ 5.1 Experimental Setup 
+
+ Figure 5: Overall performance of Prorsa and PD colocation. 
+
+ Testbed. Experiments are conducted on a GPU cluster with 16 servers,
+each with 8 GPUs connected via NVLink. Each server is equipped with eight 400 Gbps RDMA NICs for inter-server connectivity. 
+
+ Models. We use three models: (a) Qwen3-235B-A22B ( Qwen Team, 2025 ) , (b) DeepSeek-V3.2 (671B) ( DeepSeek-AI, 2025c ) , and (c) MiMo-V2.5-Pro (1T) ( Xiaomi MiMo Team, 2026 ) .
+We enable chunked prefill ( Agrawal et al., 2023 ) and use SGLang’s recommended chunk sizes (4096 for Qwen3-235B and MiMo-V2.5-Pro, and 512 for DeepSeek-V3.2).
+All models use FP8 quantization. For each model, we select an optimal parallelism configuration that allows the model to fit within GPU memory while reserving sufficient KV-cache space for agentic RL rollout.
+We set the expert-parallel size to 16 for DeepSeek-V3.2 and MiMo-V2.5-Pro, and to 4 for Qwen3-235B.
+For attention tensor parallelism, Qwen3-235B uses TP=2 and MiMo-V2.5-Pro uses TP=8.
+For DeepSeek-V3.2, we disable attention tensor parallelism since it would duplicate the KV cache across TP ranks. 
+
+ Workloads. We use the following three representative RL tasks. 
+
+ • 
+
+ Math : single-turn mathematical problem solving tasks from AIME25 ( Zhang and Math-AI, 2025 ) . 
+
+ • 
+
+ Coding Agent : software engineering tasks from SWE-smith ( Yang et al., 2025 ) . 
+
+ • 
+
+ General Agent : general-purpose tasks from APEX-Agents ( Vidgen et al., 2026 ) , Toolathlon ( Li et al., 2026b ) , and MCP-Atlas ( Bandi et al., 2026 ) . 
+
+ All tasks use the GRPO algorithm ( Shao et al., 2024 ) , with a group size of 8 for the math task and 32 for the two agentic tasks.
+We use a 10-second workload prediction window in all experiments. 
+
+ 5.2 Overall Performance 
+
+ Figure 5 compares the average rollout times of Prorsa and PD colocation across different settings.
+The results indicate that Prorsa reduces end-to-end rollout time on the evaluated agentic tasks.
+For the two agentic RL tasks, Prorsa delivers a 1.11 × \times –4.05 × \times speedup across different staleness settings, demonstrating the potential of PD disaggregation.
+Specifically, for DeepSeek-V3.2, which has 16 individual attention modules per engine, Prorsa improves rollout efficiency by 2.54 × \times –4.05 × \times on the coding agent task and 2.35 × \times –2.99 × \times on the general agent task.
+We attribute most of this speedup to reduced interference among attention modules, as detailed in § 5.3 .
+In contrast, on the math task, normalized rollout step times range from 0.86 to 1.28 relative to colocation, indicating a slowdown in most evaluated settings.
+This is due to much less overlap between prefill and decode: rollout first prefills all sequences and then executes successive decoding steps.
+For these workloads, PD disaggregation incurs KV-cache transfer and role-switching overheads that degrade performance. 
+
+ 5.3 Performance Breakdown 
+
+ Table 2: Average end-to-end trajectory completion time (seconds) on the general agent task. 
+
+ Model | 
+ Qwen3-235B | 
+ DeepSeek-V3.2 | 
+ MiMo-V2.5-Pro | 
+
+ Staleness | 
+ On-policy | 
+ 2 | 
+ 8 | 
+ On-policy | 
+ 2 | 
+ 8 | 
+ On-policy | 
+ 2 | 
+ 8 | 
+
+ PD colocation | 
+ 133.88 | 
+ 169.14 | 
+ 176.55 | 
+ 713.05 | 
+ 723.96 | 
+ 939.54 | 
+ 253.17 | 
+ 198.08 | 
+ 252.36 | 
+
+ Prorsa | 
+ 78.98 | 
+ 86.96 | 
+ 80.40 | 
+ 119.47 | 
+ 123.21 | 
+ 128.12 | 
+ 195.35 | 
+ 158.90 | 
+ 216.42 | 
+
+ (1.7 × ⁣ ↓ \times\downarrow ) | 
+ (1.9 × ⁣ ↓ \times\downarrow ) | 
+ (2.2 × ⁣ ↓ \times\downarrow ) | 
+ (6.0 × ⁣ ↓ \times\downarrow ) | 
+ (5.9 × ⁣ ↓ \times\downarrow ) | 
+ (7.3 × ⁣ ↓ \times\downarrow ) | 
+ (1.3 × ⁣ ↓ \times\downarrow ) | 
+ (1.2 × ⁣ ↓ \times\downarrow ) | 
+ (1.2 × ⁣ ↓ \times\downarrow ) | 
+
+ Figure 6: Average GPU idle ratio due to prefill-decode interference under PD colocation. 
+
+ Figure 7: Effects of prediction-based role switching for MiMo-V2.5-Pro. 
+
+ Improved GPU utilization. 
+Figure 6 reports an average GPU idle ratio of 3.76%–59.98% under PD colocation due to the prefill-decode interference across attention DP ranks.
+For DeepSeek-V3.2 (DP=16), this interference is the dominant throughput bottleneck: a single prefill request can stall all other decode batches, yielding idle ratios of 36.21%–59.98%.
+This idleness is the primary contributor to rollout slowdown.
+Note that the reported idle ratios exclude GPU idleness arising from scheduling overhead and cross-DP prefill imbalance, whose contributions are hard to quantify accurately.
+Therefore, these ratios cannot be directly translated into an end-to-end slowdown factor. 
+
+ Stage-specific parallelism. 
+PD disaggregation enables independent configuration of prefill and decode parallelism to maximize throughput.
+For the coding agent task, we double the expert-parallel size of decode instances for MiMo-V2.5-Pro and Qwen3-235B, yielding speedups of 1.04 × \times –1.09 × \times . 
+
+ Reduced decode latency. 
+Table 2 summarizes average trajectory completion times on the general agent task across different settings.
+Compared with PD colocation, Prorsa reduces end-to-end trajectory latency by 1.17 × \times –7.33 × \times .
+This improvement arises because PD disaggregation mitigates both types of prefill-decode interference: (a) cross-DP imbalance that blocks decode batches, as discussed earlier, and (b) head-of-line blocking caused by higher-priority prefill requests. 
+
+ 5.4 Ablation Study 
+
+ Figure 7 evaluates the benefits of role switching by comparing Prorsa with static PD disaggregation for MiMo-V2.5-Pro.
+The static baseline uses the optimal prefill-to-decode instance ratios of 4:4, 5:3, and 3:5 for the math, coding agent, and general agent tasks, respectively.
+The results show that role switching yields speedups of 1.0 × \times –1.44 × \times across different settings.
+On the math task, an initial prefill phase for all samples is followed by prolonged decoding.
+A static PD ratio therefore underutilizes prefill and decode resources at different points in rollout. 
+
+ The benefits of role switching depend on workload characteristics.
+Coding agent trajectories have an average end-to-end completion time of 846 seconds, 3.92 × \times that of general agent trajectories (216 seconds).
+Longer trajectory lifetimes increase request concurrency, and asynchronous rollout further amplifies this effect through sample over-dispatch, placing greater pressure on decode KV-cache capacity and limiting throughput.
+Role switching alleviates this capacity bottleneck by increasing the number of decode instances when needed.
+In contrast, the general agent task benefits less from role switching due to lower KV-cache pressure. 
+
+ 5.5 Prediction Accuracy 
+
+ Figure 8: Prediction WAPE for MiMo-V2.5-Pro across staleness settings. 
+
+ Figure 9: Predicted and measured normalized prefill workloads for MiMo-V2.5-Pro on the coding and general agent tasks. Dashed lines mark training-step boundaries. 
+
+ Figure 9 reports prediction accuracy for MiMo-V2.5-Pro on the coding and general agent tasks across different staleness settings.
+We evaluate prefill and decode-admission forecasts separately using weighted absolute percentage error (WAPE), defined as the sum of absolute prediction errors divided by the sum of measured token counts across all windows.
+Across all settings, WAPE ranges from 5.40% to 14.37% for prefill and from 5.19% to 13.69% for decode.
+This level of accuracy is sufficient to guide role switching.
+The higher prediction errors on the general agent task reflect greater variability in tool-execution times. 
+
+ Figure 9 further compares the prefill workload forecasts of Prorsa with the measured workloads over the first three training steps with staleness set to 8.
+The results show that, by monitoring all trajectories, Prorsa produces forecasts that align with the measured workloads. 
+
+ 6 Related Work 
+
+ RL frameworks. 
+RL frameworks improve performance through resource and trajectory scheduling ( Sheng et al., 2025 ; Hu et al., 2024b ; ROLL Team, 2025 ; Wang et al., 2025d ; Wang et al., 2025c ; Hu et al., 2026 ; Gao et al., 2025 ; Zhong et al., 2024b ; Mei et al., 2024 ; Wu et al., 2026 ) , asynchronous rollout ( Fu et al., 2025 ; Zhong et al., 2025 ; Han et al., 2025 ; Zhou et al., 2025 ) , and speculative decoding ( He et al., 2025 ; Qin et al., 2025a ; Chen et al., 2025 ; Xu et al., 2026a ) .
+Systems also adapt rollout parallelism ( Gao et al., 2025 ; Tan et al., 2026 ; Zhang et al., 2026 ) or multiplex prefill and decode in place ( Wang et al., 2026a ) ,
+and a few production RL systems already adopt PD disaggregation for agentic RL rollout ( GLM-5-Team, 2026 ; Chen et al., 2026a ; Gao et al., 2026b ) without in-depth analysis.
+Our work characterizes the benefits and deployment challenges of PD disaggregation for agentic RL, and introduces role switching to adapt the PD ratio to changing rollout demand. 
+
+ Prefill-decode disaggregation. 
+PD disaggregation separates prefill and decode to avoid interference and enable stage-specific configuration ( Zhong et al., 2024a ; Patel et al., 2024 ; Qin et al., 2025b ; Lin et al., 2024 ; Hong et al., 2025 ; Feng et al., 2025 ; Zhu et al., 2025 ; Forys et al., 2026 ; Wang et al., 2026b ) .
+Variants include hybrid aggregation and disaggregation ( Wang et al., 2025a ) , intra-GPU multiplexing ( Cui et al., 2025 ; Gao et al., 2026a ; Xu et al., 2026b ) , refined splits for multi-turn prefills ( Li et al., 2026c ) , adaptive multi-round prefill scheduling ( He et al., 2026 ) , and load-driven PD autoscaling ( Liao et al., 2026 ) .
+In contrast to these serving systems, Prorsa applies PD disaggregation to agentic RL rollout and uses workload predictions based on RL lifecycle signals. 
+
+ LLM workload prediction. 
+Existing LLM serving systems predict workloads for provisioning, scheduling, and model prewarming ( Jiang et al., 2025 ; Fan et al., 2026 ; Jiang et al., 2026 ; Jaiswal et al., 2025 ; Lai et al., 2025 ; Lou et al., 2026 ; Tiwari et al., 2026 ; Li et al., 2026a ) .
+RL frameworks also exploit workload estimates: OrchestrRL ( Tan et al., 2026 ) forecasts remaining rollout workloads, while Seer ( Qin et al., 2025a ) , RhymeRL ( He et al., 2025 ) , and RollPacker ( Gao et al., 2025 ) use online probes or historical workload statistics to guide scheduling and resource allocation.
+For agentic RL, Heddle ( Zhang et al., 2026 ) predicts trajectory completion times, while Libra ( Chen et al., 2026b ) uses tool-return signals to estimate remaining work and guide scheduling.
+In contrast, Prorsa combines signals from reward-driven sample injection, sandbox startup, and tool returns to forecast short-horizon, turn-level prefill and decode demand in agentic RL rollout. 
+
+ 7 Conclusion 
+
+ Agentic RL introduces continuous prefill requests, making PD disaggregation beneficial for the rollout phase.
+However, our experiments show that a static prefill-decode ratio leads to resource under-utilization due to dynamic rollout workloads.
+ Prorsa employs an adaptive PD role-switching strategy to accommodate fluctuating demand, guided by workload forecasts derived from trajectory lifecycle signals.
+Our evaluation demonstrates that Prorsa effectively unlocks the performance potential of PD disaggregation during rollout, achieving up to 4.05 × \times the throughput of PD colocation. 
+
+ \ULforem 
+
+ References 
+
+ Agrawal et al. (2024) 
+ A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. Gulavani, A. Tumanov, and R. Ramjee 
+
+ Taming Throughput-Latency tradeoff in LLM inference with Sarathi-Serve .
+
+ In USENIX OSDI ,
+
+ Cited by: §3.2 .
+
+ Agrawal et al. (2023) 
+ A. Agrawal, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, and R. Ramjee 
+
+ SARATHI: efficient llm inference by piggybacking decodes with chunked prefills .
+
+ arXiv preprint arXiv:2308.16369 .
+
+ Cited by: §5.1 .
+
+ Bandi et al. (2026) 
+ C. Bandi, R. Dumitru, B. Hertzberg, D. Agarwal, G. Boo, T. Polakam, S. Hassaan, J. Da, H. Kim, V. Gupta, M. Sharma, A. Park, M. Dimakis, E. G. H. Montoya, D. Rambado, I. Salazar, R. Cruz, M. Rezaei, C. Rane, B. Levin, D. Y. Zhang, B. Kenstler, and B. Liu 
+
+ MCP-atlas: a large-scale benchmark for tool-use competency with real mcp servers .
+
+ arXiv preprint arXiv:2602.00933 .
+
+ Cited by: 3rd item .
+
+ Chen et al. (2026a) 
+ A. Chen, A. Li, B. Zhou, B. Gong, B. Jiang, B. Dan, C. Zhang, C. Yu, C. Wang, C. Ma, C. Zhong, C. Zhu, C. Xiao, C. Yang, C. Du, C. Zhang, C. Zhang, C. Huang, C. Zhang, C. Du, C. Zhao, C. Guo, D. Chen, D. Ding, D. Sun, D. Li, D. Zhang, E. Yang, F. Yu, G. Zheng, G. Zheng, G. Li, H. Zhu, H. Zhou, H. Zhang, H. Ding, H. Zhang, H. Sun, H. Lyu, H. Lu, H. Wang, H. Shi, H. Li, J. Chen, J. Zhang, J. Zhuang, J. Cai, J. Pan, J. Li, J. Song, J. Zhang, J. Wang, J. Gu, J. Zhu, J. Dong, J. Li, J. Zhang, J. Zhuang, J. Tian, J. Liu, J. Hu, J. Tao, J. Zhang, J. Ruan, J. Xu, J. Yan, J. Liu, J. He, K. Xu, K. Ji, K. Yang, K. Xiao, K. Duan, K. Li, L. Han, L. Ruan, L. Yuan, L. Yu, L. Feng, L. Mo, L. Li, L. Du, L. Bao, L. Yang, L. Zhou, Loki, L. Chen, L. Zeng, M. Li, M. Zhong, M. Tao, M. Chi, M. Lin, N. Hu, N. Chen, P. Zhu, P. Gao, P. Gao, P. Li, P. Li, P. Zhao, Q. Ren, Q. Ren, Q. Xu, Q. Ren, Q. Li, Q. Wang, Q. Chen, Q. Zeng, R. Tian, R. Guo, R. Dong, R. Leng, R. Zhang, S. Liu, S. Chen, S. Chen, S. Jia, S. Yao, S. Zhao, S. Yu, S. Li, S. Pan, S. Zhu, T. Li, T. Xie, T. Qin, T. Li, T. Liang, W. Liu, W. Xu, W. Li, W. Chen, W. Cheng, W. Zhang, W. Chen, W. Zhao, X. Chen, X. Song, X. Wang, X. Luo, X. Luo, X. Su, X. Li, X. Han, X. Wu, X. Song, X. Han, X. Guan, X. Lu, X. Zou, X. Lai, X. Li, X. Shen, Y. Gong, Y. Ma, Y. Jiao, Y. Wang, Y. Xu, Y. Wang, Y. Tang, Y. Chen, Y. Wang, Y. Qiu, Y. Shi, Y. Guo, Y. Huang, Y. Wang, Y. Hu, Y. Gao, Y. Zhang, Y. Li, Y. Ying, Y. Zhang, Y. Wang, Y. Song, Y. Yang, Y. Meng, Y. Miao, Y. Li, Y. Liu, Y. Hu, Y. Huang, Y. Li, Y. Huang, Y. Zhang, Y. Hong, Y. Xie, Y. Zhang, Y. Liao, Y. Shi, Y. Wenren, Z. Li, Z. Li, Z. Luo, Z. Jin, Z. Sun, Z. Zhou, Z. Su, Z. Li, Z. Zhu, Z. Peng, Z. Fan, Z. Zhang, Z. Xu, Z. Lv, Z. Xu, Z. He, Z. He, Z. Li, Z. Gao, Z. Wu, Z. Song, Z. Zhou, Z. Sun, Z. Huang, Z. Chen, and Z. Ge 
+
+ The minimax-m2 series: mini activations unleashing max real-world intelligence .
+
+ arXiv preprint arXiv:2605.26494 .
+
+ Cited by: §1 ,
+ §6 .
+
+ Chen et al. (2026b) 
+ K. Chen, X. Tan, J. Li, and H. Xu 
+
+ Libra: efficient resource management for agentic rl post-training .
+
+ arXiv preprint arXiv:2606.03077 .
+
+ Cited by: §1 ,
+ §6 .
+
+ Chen et al. (2025) 
+ Q. Chen, Z. Liu, P. Sun, S. Li, G. Wang, Z. Liu, Y. Wen, S. Feng, and T. Zhang 
+
+ ReSpec: towards optimizing speculative decoding in reinforcement learning systems .
+
+ arXiv preprint arXiv:2510.26475 .
+
+ Cited by: §6 .
+
+ Cui et al. (2025) 
+ W. Cui, Y. Chen, H. Zhao, Z. Xu, Q. Chen, X. Chen, Y. Zhou, S. Sun, and M. Guo 
+
+ Optimizing slo-oriented llm serving with pd-multiplexing .
+
+ arXiv preprint arXiv:2504.14489 .
+
+ Cited by: §6 .
+
+ DeepSeek-AI (2025a) 
+ DeepSeek-AI 
+
+ DeepSeek-r1: incentivizing reasoning capability in llms via reinforcement learning .
+
+ arXiv preprint arXiv:2501.12948 .
+
+ Cited by: §1 .
+
+ DeepSeek-AI (2025b) 
+ DeepSeek-AI 
+
+ DeepSeek-v3 technical report .
+
+ arXiv preprint arXiv:2412.19437 .
+
+ Cited by: §3.2 .
+
+ DeepSeek-AI (2025c) 
+ DeepSeek-AI 
+
+ DeepSeek-v3.2: pushing the frontier of open large language models .
+
+ Cited by: §5.1 .
+
+ DeepSeek-AI (2026) 
+ DeepSeek-AI 
+
+ DeepSeek-v4: towards highly efficient million-token context intelligence .
+
+ arXiv preprint arXiv:2606.19348 .
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Fan et al. (2026) 
+ Y. Fan, S. Bai, R. Gong, Z. Wang, and R. Fan 
+
+ PiLLM: resource-efficient llm inference using workload prediction .
+
+ In EuroSys ,
+
+ Cited by: §6 .
+
+ Feng et al. (2025) 
+ J. Feng, Y. Huang, R. Zhang, S. Liang, M. Yan, and J. Wu 
+
+ WindServe: efficient phase-disaggregated llm serving with stream-based dynamic scheduling .
+
+ In Proceedings of the 52nd Annual International Symposium on Computer Architecture ,
+
+ pp. 1283–1295 .
+
+ Cited by: §1 ,
+ §6 .
+
+ Forys et al. (2026) 
+ P. Forys, H. Wu, C. Xiao, J. Nie, T. Liu, R. Antonova, T. Jones, R. Mullins, W. Luk, A. Zhao, and G. A. Constantinides 
+
+ When does disaggregation pay? simulating prefill–decode–attention–ffn specialization for agentic llm inference .
+
+ arXiv preprint arXiv:2608.03741 .
+
+ Cited by: §3.2 ,
+ §6 .
+
+ Fu et al. (2025) 
+ W. Fu, J. Gao, X. Shen, C. Zhu, Z. Mei, C. He, S. Xu, G. Wei, J. Mei, J. Wang, et al. 
+
+ AReaL: a large-scale asynchronous reinforcement learning system for language reasoning .
+
+ arXiv preprint arXiv:2505.24298 .
+
+ Cited by: §1 ,
+ §1 ,
+ §2.1 ,
+ §3.1 ,
+ §6 .
+
+ Gao et al. (2026a) 
+ L. Gao, C. Jiang, H. E. Zarch, D. Wong, M. Hill, and M. Annavaram 
+
+ DuetServe: harmonizing prefill and decode for llm serving via adaptive gpu multiplexing .
+
+ arXiv preprint arXiv:2511.04791 .
+
+ Cited by: §6 .
+
+ Gao et al. (2025) 
+ W. Gao, Y. Zhao, D. An, T. Wu, L. Cao, S. Xiong, J. Huang, W. Wang, S. Yang, W. Su, et al. 
+
+ RollPacker: mitigating long-tail rollouts for fast, synchronous rl post-training .
+
+ arXiv preprint arXiv:2509.21009 .
+
+ Cited by: §1 ,
+ §3.1 ,
+ §3.2 ,
+ §6 ,
+ §6 .
+
+ Gao et al. (2026b) 
+ W. Gao, Y. Zhao, T. Wu, S. Xiong, W. Wang, D. An, L. Cao, D. Muhtar, Z. Liu, H. Zhao, J. Huang, S. Yang, Y. Li, W. Su, J. Wang, L. Qu, B. Zheng, and W. Wang 
+
+ RollArt: disaggregated Multi-Task agentic RL training at scale .
+
+ In USENIX OSDI ,
+
+ Cited by: §1 ,
+ §6 .
+
+ GLM-5-Team (2026) 
+ GLM-5-Team 
+
+ GLM-5: from vibe coding to agentic engineering .
+
+ arXiv preprint arXiv:2602.15763 .
+
+ Cited by: §1 ,
+ §1 ,
+ §2.1 ,
+ §3.2 ,
+ §6 .
+
+ Han et al. (2025) 
+ Z. Han, A. You, H. Wang, K. Luo, G. Yang, W. Shi, M. Chen, S. Zhang, Z. Lan, C. Deng, et al. 
+
+ AsyncFlow: an asynchronous streaming rl framework for efficient llm post-training .
+
+ arXiv preprint arXiv:2507.01663 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §6 .
+
+ He et al. (2025) 
+ J. He, T. Li, E. Feng, D. Du, Q. Liu, T. Liu, Y. Xia, and H. Chen 
+
+ History rhymes: accelerating llm reinforcement learning with rhymerl .
+
+ arXiv preprint arXiv:2508.18588 .
+
+ Cited by: §6 ,
+ §6 .
+
+ He et al. (2026) 
+ W. He, Y. Jiang, P. Zhao, Q. Xu, E. Yoneki, B. Cui, and F. Fu 
+
+ Efficient multi-round llm inference over disaggregated serving .
+
+ arXiv preprint arXiv:2602.14516 .
+
+ Cited by: §6 .
+
+ Hong et al. (2025) 
+ K. Hong, L. Chen, Z. Wang, X. Li, Q. Mao, J. Ma, C. Xiong, G. Wu, B. Han, G. Dai, et al. 
+
+ Semi-pd: towards efficient llm serving via phase-wise disaggregated computation and unified storage .
+
+ arXiv preprint arXiv:2504.19867 .
+
+ Cited by: §1 ,
+ §6 .
+
+ Hu et al. (2024a) 
+ C. Hu, H. Huang, L. Xu, X. Chen, J. Xu, S. Chen, H. Feng, C. Wang, S. Wang, Y. Bao, et al. 
+
+ Inference without interference: disaggregate llm inference for mixed downstream workloads .
+
+ arXiv preprint arXiv:2401.11181 .
+
+ Cited by: §1 .
+
+ Hu et al. (2024b) 
+ J. Hu, X. Wu, W. Shen, J. K. Liu, Z. Zhu, W. Wang, S. Jiang, H. Wang, H. Chen, B. Chen, et al. 
+
+ Openrlhf: an easy-to-use, scalable and high-performance rlhf framework .
+
+ arXiv preprint arXiv:2405.11143 .
+
+ Cited by: §1 ,
+ §6 .
+
+ Hu et al. (2026) 
+ T. Hu, X. Liu, Y. Miao, Y. Xiao, H. Zang, Y. Zheng, X. Huang, J. Ding, Y. Zhang, Y. Yang, Y. Zhang, Y. Sun, C. Han, X. Ma, W. Wang, Q. Gu, Y. Sun, Y. Xie, and X. Cai 
+
+ DORA: a scalable asynchronous reinforcement learning system for language model training .
+
+ arXiv preprint arXiv:2604.26256 .
+
+ Cited by: §6 .
+
+ Huang et al. (2026) 
+ M. Huang, T. Xue, C. Peng, J. Ding, J. Yang, S. Fan, J. Hong, Y. Gao, X. Zhang, L. Guo, X. Yang, D. Zhao, Y. Xie, P. Pei, X. Xie, and X. Qiu 
+
+ EvoCUA-1.5: online reinforcement learning for multi-turn computer-use agents .
+
+ arXiv preprint arXiv:2607.09773 .
+
+ Cited by: §1 .
+
+ Jaiswal et al. (2025) 
+ S. Jaiswal, K. Jain, Y. Simmhan, A. Parayil, A. Mallick, R. Wang, R. St. Amant, C. Bansal, V. Ruhle, A. Kulkarni, S. Kofsky, and S. Rajmohan 
+
+ SAGESERVE: optimizing llm serving on cloud data centers with forecast aware auto-scaling .
+
+ Proceedings of the ACM on Measurement and Analysis of Computing Systems .
+
+ Cited by: §6 .
+
+ Jiang et al. (2026) 
+ Y. Jiang, F. Fu, T. Wang, G. He, and E. Yoneki 
+
+ OServe: accelerating llm serving via spatial-temporal workload orchestration .
+
+ arXiv preprint arXiv:2602.12151 .
+
+ Cited by: §6 .
+
+ Jiang et al. (2025) 
+ Z. Jiang, Y. Huang, G. Yu, J. Huang, J. Gu, and M. R. Lyu 
+
+ Hierarchical prediction-based management for lmaas systems .
+
+ arXiv preprint arXiv:2504.03702 .
+
+ Cited by: §6 .
+
+ Jin et al. (2025) 
+ B. Jin, H. Zeng, Z. Yue, J. Yoon, S. Arik, D. Wang, H. Zamani, and J. Han 
+
+ Search-r1: training llms to reason and leverage search engines with reinforcement learning .
+
+ arXiv preprint arXiv:2503.09516 .
+
+ Cited by: §1 .
+
+ Kimi Team (2026) 
+ Kimi Team 
+
+ Kimi k3: open frontier intelligence .
+
+ arXiv preprint arXiv:2607.24653 .
+
+ Cited by: §1 .
+
+ Kwon et al. (2023) 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica 
+
+ Efficient memory management for large language model serving with pagedattention .
+
+ In ACM SOSP ,
+
+ pp. 611–626 .
+
+ Cited by: §2.1 .
+
+ Lai et al. (2025) 
+ R. Lai, H. Liu, C. Lu, Z. Liu, S. Cao, S. Shao, Y. Zhang, L. Mai, and D. Ustiugov 
+
+ TokenScale: timely and accurate autoscaling for disaggregated llm serving with token velocity .
+
+ arXiv preprint arXiv:2512.03416 .
+
+ Cited by: §6 .
+
+ Li et al. (2026a) 
+ H. Li, R. He, Q. Mang, Q. Zhang, H. Mao, X. Chen, H. Zhou, H. Zhang, A. Cheung, J. Gonzalez, and I. Stoica 
+
+ Continuum: efficient and robust multi-turn llm agent scheduling with kv cache time-to-live .
+
+ arXiv preprint arXiv:2511.02230 .
+
+ Cited by: §6 .
+
+ Li et al. (2026b) 
+ J. Li, W. Zhao, J. Zhao, W. Zeng, H. Wu, X. Wang, R. Ge, Y. Cao, Y. Huang, W. Liu, J. Liu, Z. Su, Y. Guo, F. Zhou, L. Zhang, J. Michelini, X. Wang, X. Yue, S. Zhou, G. Neubig, and J. He 
+
+ The tool decathlon: benchmarking language agents for diverse, realistic, and long-horizon task execution .
+
+ arXiv preprint arXiv:2510.25726 .
+
+ Cited by: 3rd item .
+
+ Li et al. (2026c) 
+ Z. Li, J. Liu, Z. Xu, Y. Zhang, T. Rabbani, and C. Zhang 
+
+ Not all prefills are equal: ppd disaggregation for multi-turn llm serving .
+
+ arXiv preprint arXiv:2603.13358 .
+
+ Cited by: §6 .
+
+ Liao et al. (2026) 
+ J. Liao, M. Xu, W. Zheng, Y. Wang, K. Ye, R. Buyya, and C. Xu 
+
+ DOPD: a dynamic pd-disaggregation architecture for maximizing goodput in llm inference serving .
+
+ arXiv preprint arXiv:2511.20982 .
+
+ Cited by: §6 .
+
+ Lin et al. (2024) 
+ B. Lin, C. Zhang, T. Peng, H. Zhao, W. Xiao, M. Sun, A. Liu, Z. Zhang, L. Li, X. Qiu, S. Li, Z. Ji, T. Xie, Y. Li, and W. Lin 
+
+ Infinite-llm: efficient llm service for long context with distattention and distributed kvcache .
+
+ arXiv preprint arXiv:2401.02669 .
+
+ Cited by: §6 .
+
+ Lou et al. (2026) 
+ C. Lou, S. Qi, R. Kang, Y. Zhang, C. Sun, P. Wang, X. Liu, and X. Jin 
+
+ WarmServe: enabling one-for-many gpu prewarming for multi-llm serving .
+
+ arXiv preprint arXiv:2512.09472 .
+
+ Cited by: §6 .
+
+ Lu et al. (2026) 
+ D. Lu, S. Bai, T. Bai, S. Fan, C. Gao, J. Guan, F. Hu, M. Huang, X. Huang, Y. Jiang, Y. Jing, D. Kong, N. Li, D. Liu, S. Liu, Z. Liu, Q. Shen, B. Wang, J. Wang, C. Wu, R. Xie, T. Xie, Z. Xie, H. Xu, A. Yang, T. Yu, W. Yuan, X. Zhang, Z. Zhang, M. Zhu, Z. Zhu, Y. Cao, K. Dang, B. Hui, K. Li, J. Lin, H. Wang, Z. Wang, Y. Xu, F. Yan, M. Yuan, D. Zhang, J. Zhang, Z. Zhang, F. Zhou, and F. Zhou 
+
+ Qwen-cua: native computer use for (almost) everything .
+
+ arXiv preprint arXiv:2608.02352 .
+
+ Cited by: §1 .
+
+ Mei et al. (2024) 
+ Z. Mei, W. Fu, K. Li, G. Wang, H. Zhang, and Y. Wu 
+
+ Real: efficient rlhf training of large language models with parameter reallocation .
+
+ arXiv preprint arXiv:2406.14088 .
+
+ Cited by: §6 .
+
+ Pan et al. (2024) 
+ J. Pan, X. Wang, G. Neubig, N. Jaitly, H. Ji, A. Suhr, and Y. Zhang 
+
+ Training software engineering agents and verifiers with swe-gym .
+
+ External Links: 2412.21139 
+
+ Cited by: §1 .
+
+ Patel et al. (2024) 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, I. Goiri, S. Maleki, and R. Bianchini 
+
+ Splitwise: efficient generative llm inference using phase splitting .
+
+ In isca ,
+
+ Cited by: §1 ,
+ §2.2 ,
+ §3.2 ,
+ §6 .
+
+ Qin et al. (2025a) 
+ R. Qin, W. He, W. Huang, Y. Zhang, Y. Zhao, B. Pang, X. Xu, Y. Shan, Y. Wu, and M. Zhang 
+
+ Seer: online context learning for fast synchronous llm reinforcement learning .
+
+ arXiv preprint arXiv:2511.14617 .
+
+ Cited by: §6 ,
+ §6 .
+
+ Qin et al. (2025b) 
+ R. Qin, Z. Li, W. He, J. Cui, F. Ren, M. Zhang, Y. Wu, W. Zheng, and X. Xu 
+
+ Mooncake: trading more storage for less computation — a KVCache-centric architecture for serving LLM chatbot .
+
+ In USENIX Conference on File and Storage Technologies ,
+
+ pp. 155–170 .
+
+ Cited by: §1 ,
+ §6 .
+
+ Qwen Team (2025) 
+ Qwen Team 
+
+ Qwen3 technical report .
+
+ arXiv preprint arXiv:2505.09388 .
+
+ Cited by: §1 ,
+ §5.1 .
+
+ ROLL Team (2025) 
+ ROLL Team 
+
+ Reinforcement Learning Optimization for Large-Scale Learning: An Efficient and User-Friendly Scaling Library .
+
+ arXiv preprint arXiv:2506.06122 .
+
+ Cited by: §6 .
+
+ Schulman et al. (2017) 
+ J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov 
+
+ Proximal policy optimization algorithms .
+
+ arXiv preprint arXiv:1707.06347 .
+
+ Cited by: §2.1 .
+
+ Shao et al. (2024) 
+ Z. Shao, P. Wang, Q. Zhu, R. Xu, J. Song, X. Bi, H. Zhang, M. Zhang, Y. Li, Y. Wu, et al. 
+
+ Deepseekmath: pushing the limits of mathematical reasoning in open language models .
+
+ arXiv preprint arXiv:2402.03300 .
+
+ Cited by: §B.2 ,
+ §2.1 ,
+ §5.1 .
+
+ Sheng et al. (2025) 
+ G. Sheng, C. Zhang, Z. Ye, X. Wu, W. Zhang, R. Zhang, Y. Peng, H. Lin, and C. Wu 
+
+ Hybridflow: a flexible and efficient rlhf framework .
+
+ In Proceedings of the Twentieth European Conference on Computer Systems ,
+
+ pp. 1279–1297 .
+
+ Cited by: §1 ,
+ §5 ,
+ §6 .
+
+ Tan et al. (2026) 
+ X. Tan, Y. Feng, Y. Zhou, Y. Jiang, Y. Zhu, and H. Xu 
+
+ OrchestrRL: dynamic compute and network orchestration for disaggregated rl .
+
+ arXiv preprint arXiv:2601.01209 .
+
+ Cited by: §6 ,
+ §6 .
+
+ The Microsoft AI Team (2026) 
+ The Microsoft AI Team 
+
+ MAI-thinking-1: building a hill-climbing machine .
+
+ Technical report 
+
+ Microsoft AI .
+
+ External Links: Link 
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Tiwari et al. (2026) 
+ S. Tiwari, T. Chugh, N. Rickert, S. Peter, R. Mahajan, and H. Shen 
+
+ CacheWise: understanding workloads and optimizing kvcache management for efficiently serving llm coding agents .
+
+ arXiv preprint arXiv:2606.16824 .
+
+ Cited by: §6 .
+
+ Vidgen et al. (2026) 
+ B. Vidgen, A. Mann, A. Fennelly, J. W. Stanly, L. Rothman, M. Burstein, J. Benchek, D. Ostrofsky, A. Ravichandran, D. Sur, N. Venugopal, A. Hsia, I. Robinson, C. Huang, O. Varones, D. Khan, M. Haines, A. Bridges, J. Boyle, K. Twist, Z. Richards, C. Mahapatra, B. Foody, and O. Nitski 
+
+ APEX-agents .
+
+ arXiv preprint arXiv:2601.14242 .
+
+ Cited by: 3rd item .
+
+ Wang et al. (2025a) 
+ C. Wang, P. Zuo, Z. Chen, Y. Liang, Z. Yu, and M. Yang 
+
+ Prefill-decode aggregation or disaggregation? unifying both for goodput-optimized llm serving .
+
+ arXiv preprint arXiv:2508.01989 .
+
+ Cited by: §6 .
+
+ Wang et al. (2026a) 
+ G. Wang, C. Yang, Z. Pan, Y. Wei, Y. Guo, M. Zhu, Z. Zhang, S. Wan, and X. Zhu 
+
+ AInfer-pd: communication-safe in-place prefill-decode multiplexing for distributed moe rollouts .
+
+ arXiv preprint arXiv:2609.00993 .
+
+ Cited by: §6 .
+
+ Wang et al. (2025b) 
+ H. Wang, H. Zou, H. Song, J. Feng, J. Fang, J. Lu, L. Liu, Q. Luo, S. Liang, S. Huang, W. Zhong, Y. Ye, Y. Qin, Y. Xiong, Y. Song, Z. Wu, A. Li, B. Li, C. Dun, C. Liu, D. Zan, F. Leng, H. Wang, H. Yu, H. Chen, H. Guo, J. Su, J. Huang, K. Shen, K. Shi, L. Yan, P. Zhao, P. Liu, Q. Ye, R. Zheng, S. Xin, W. X. Zhao, W. Heng, W. Huang, W. Wang, X. Qin, Y. Lin, Y. Wu, Z. Chen, Z. Wang, B. Zhong, X. Zhang, X. Li, Y. Li, Z. Zhao, C. Jiang, F. Wu, H. Zhou, J. Pang, L. Han, Q. Liu, Q. Ma, S. Liu, S. Cai, W. Fu, X. Liu, Y. Wang, Z. Zhang, B. Zhou, G. Li, J. Shi, J. Yang, J. Tang, L. Li, Q. Han, T. Lu, W. Lin, X. Tong, X. Li, Y. Zhang, Y. Miao, Z. Jiang, Z. Li, Z. Zhao, C. Li, D. Ma, F. Lin, G. Zhang, H. Yang, H. Guo, H. Zhu, J. Liu, J. Du, K. Cai, K. Li, L. Yuan, M. Han, M. Wang, S. Guo, T. Cheng, X. Ma, X. Xiao, X. Huang, X. Chen, Y. Du, Y. Chen, Y. Wang, Z. Li, Z. Yang, Z. Zeng, C. Jin, C. Li, H. Chen, H. Chen, J. Chen, Q. Zhao, and G. Shi 
+
+ UI-tars-2 technical report: advancing gui agent with multi-turn reinforcement learning .
+
+ arXiv preprint arXiv:2509.02544 .
+
+ Cited by: §1 .
+
+ Wang et al. (2025c) 
+ J. Wang, S. Wang, Y. Cui, X. Chen, C. Wang, X. Zhang, M. Zhang, J. Zhang, W. Zhuang, Y. Cao, et al. 
+
+ SeamlessFlow: a trainer agent isolation rl framework achieving bubble-free pipelines via tag scheduling .
+
+ arXiv preprint arXiv:2508.11553 .
+
+ Cited by: §6 .
+
+ Wang et al. (2026b) 
+ Y. Wang, X. Li, J. Ma, G. Sun, Y. Xu, B. Han, J. Ng, Y. Luo, K. Hong, G. Dai, B. Li, and Y. Wang 
+
+ PDD: unleashing economical and flexible heterogeneous llm inference via cross-datacenter prefill-decode disaggregation .
+
+ arXiv preprint arXiv:2609.13161 .
+
+ Cited by: §6 .
+
+ Wang et al. (2025d) 
+ Z. Wang, T. Zhou, L. Liu, A. Li, J. Hu, D. Yang, Y. Lu, J. Hou, S. Feng, Y. Cheng, et al. 
+
+ DistFlow: a fully distributed rl framework for scalable and efficient llm post-training .
+
+ arXiv preprint arXiv:2507.13833 .
+
+ Cited by: §6 .
+
+ Wei et al. (2025) 
+ Y. Wei, O. Duchenne, J. Copet, Q. Carbonneaux, L. Zhang, D. Fried, G. Synnaeve, R. Singh, and S. I. Wang 
+
+ SWE-rl: advancing llm reasoning via reinforcement learning on open software evolution .
+
+ arXiv preprint arXiv:2502.18449 .
+
+ Cited by: §1 .
+
+ Wu et al. (2026) 
+ T. Wu, L. Cao, Y. Wei, W. Gao, Y. Zhao, D. An, S. Xiong, Z. Lv, J. Huang, S. Yang, Y. Yu, J. Wang, L. Qu, and W. Wang 
+
+ Weave: efficient co-scheduling for disaggregated rl post-training .
+
+ Cited by: §6 .
+
+ Xiaomi MiMo Team (2026) 
+ Xiaomi MiMo Team 
+
+ MiMo-v2.5-pro .
+
+ Note: https://huggingface.co/collections/XiaomiMiMo/mimo-v25 
+
+ Cited by: §3.1 ,
+ §3.2 ,
+ §3.2 ,
+ §5.1 .
+
+ Xu et al. (2026a) 
+ R. Xu, A. Zhao, D. Bao, and F. Du 
+
+ WAR: workload-aware rollouts for synchronous agentic reinforcement learning .
+
+ arXiv preprint arXiv:2607.17299 .
+
+ Cited by: §6 .
+
+ Xu et al. (2026b) 
+ Y. Xu, E. K. Ardestani, W. Fu, M. Schatz, K. Malladi, Z. Shu, A. Aziz, S. Kanaujia, A. Mathews, and C. Tang 
+
+ Crossflow: prefill-decode elasticity for agentic llm serving .
+
+ arXiv preprint arXiv:2609.27085 .
+
+ Cited by: §6 .
+
+ Yang et al. (2025) 
+ J. Yang, K. Lieret, C. E. Jimenez, A. Wettig, K. Khandpur, Y. Zhang, B. Hui, O. Press, L. Schmidt, and D. Yang 
+
+ SWE-smith: scaling data for software engineering agents .
+
+ arXiv preprint arXiv:2504.21798 .
+
+ Cited by: 2nd item .
+
+ Yu et al. (2025) 
+ Q. Yu, Z. Zhang, R. Zhu, Y. Yuan, X. Zuo, Y. Yue, W. Dai, T. Fan, G. Liu, L. Liu, et al. 
+
+ Dapo: an open-source llm reinforcement learning system at scale .
+
+ arXiv preprint arXiv:2503.14476 .
+
+ Cited by: §2.1 .
+
+ Zhang and Math-AI (2025) 
+ Y. Zhang and T. Math-AI 
+
+ American invitational mathematics examination (aime) 2025 .
+
+ Cited by: 1st item .
+
+ Zhang et al. (2026) 
+ Z. Zhang, Y. Zhong, C. Yang, C. Jin, B. Wu, X. Wei, Y. Liu, and X. Jin 
+
+ Heddle: a distributed orchestration system for agentic rl rollout .
+
+ arXiv preprint arXiv:2603.28101 .
+
+ Cited by: §1 ,
+ §3.1 ,
+ §3.2 ,
+ §6 ,
+ §6 .
+
+ Zheng et al. (2024) 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng 
+
+ SGLang: efficient execution of structured language model programs .
+
+ In Neural Information Processing Systems ,
+
+ Cited by: §2.1 ,
+ §5 .
+
+ Zheng et al. (2025) 
+ Y. Zheng, D. Fu, X. Hu, X. Cai, L. Ye, P. Lu, and P. Liu 
+
+ DeepResearcher: scaling deep research via reinforcement learning in real-world environments .
+
+ arXiv preprint arXiv:2504.03160 .
+
+ Cited by: §1 .
+
+ Zhong et al. (2024a) 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang 
+
+ DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In USENIX OSDI ,
+
+ Cited by: §1 ,
+ §2.2 ,
+ §3.2 ,
+ §3.2 ,
+ §6 .
+
+ Zhong et al. (2025) 
+ Y. Zhong, Z. Zhang, X. Song, H. Hu, C. Jin, B. Wu, N. Chen, Y. Chen, Y. Zhou, C. Wan, et al. 
+
+ StreamRL: scalable, heterogeneous, and elastic rl for llms with disaggregated stream generation .
+
+ arXiv preprint arXiv:2504.15930 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §3.1 ,
+ §3.2 ,
+ §6 .
+
+ Zhong et al. (2024b) 
+ Y. Zhong, Z. Zhang, B. Wu, S. Liu, Y. Chen, C. Wan, H. Hu, L. Xia, R. Ming, Y. Zhu, et al. 
+
+ Optimizing rlhf training for large language models with stage fusion .
+
+ arXiv preprint arXiv:2409.13221 .
+
+ Cited by: §1 ,
+ §3.1 ,
+ §3.2 ,
+ §6 .
+
+ Zhou et al. (2025) 
+ Y. Zhou, J. Li, Y. Su, G. Ramesh, Z. Zhu, X. Long, C. Zhao, J. Pan, X. Yu, Z. Wang, K. Du, J. Wu, X. Sun, J. Liu, Q. Yu, H. Chen, Z. Liu, and E. Barsoum 
+
+ APRIL: active partial rollouts in reinforcement learning to tame long-tail generation .
+
+ arXiv preprint arXiv:2509.18521 .
+
+ Cited by: §1 ,
+ §3.1 ,
+ §6 .
+
+ Zhu et al. (2025) 
+ K. Zhu, Y. Gao, Y. Zhao, L. Zhao, G. Zuo, Y. Gu, D. Xie, T. Tang, Q. Xu, Z. Ye, K. Kamahori, C. Lin, Z. Wang, S. Wang, A. Krishnamurthy, and B. Kasikci 
+
+ NanoFlow: towards optimal large language model serving throughput .
+
+ External Links: 2408.12757 
+
+ Cited by: §1 ,
+ §6 .
+
+ Appendix A Additional Motivation Experiments 
+
+ We extend the workload analysis in § 3.3 with the complete plots of inter-step and intra-step workload variation for the two agentic tasks under different configurations. 
+
+ Figure 10: Inter-step prefill-to-decode token ratios for the general agent and coding agent tasks over seven training steps. 
+
+ Inter-step variation. 
+Figure 10 shows that workload variation occurs across all settings.
+Even in the relatively stable on-policy setting, the maximum ratio is 1.20 × \times the minimum. 
+
+ Figure 11: Intra-step prefill-to-decode token ratios within the first training step, measured over 10-second windows. 
+
+ Intra-step variation. 
+Figure 11 reveals a similar pattern of workload variation across all settings.
+Across all settings, the first rollout step always begins with a prefill-heavy phase, followed by a sharp decline in the token ratio. 
+
+ Appendix B Workload Prediction 
+
+ This section formalizes the workload predictor in § 4.1 and details the procedure summarized in § 4.1.2 .
+The predictor estimates prefill demand and decode-admission token volume from the data sampler, sandbox startup, the ready queue, tool execution, and observed in-flight requests. 
+
+ B.1 Problem Formulation 
+
+ At time t t , the predictor estimates two demand signals over the short horizon [ t , t + S ) [t,t+S) (default S = 10 S=10  s): a prefill workload estimate for worker allocation and the prompt-token volume of requests expected to be newly admitted to decode.
+Throughout this section, x j x_{j} denotes the observed or predicted full prompt length of request j j , including any cached prefix; we do not subtract cached or already processed tokens from this length.
+The processing-speed estimate in § 4.2 uses the same full-prompt convention and already incorporates the average prefix-cache hit ratio, so no separate cache-hit discount is applied to the demand.
+Prefill demand is not a forecast of completed token volume.
+For simplicity, we do not model a trajectory entering the prefill and decode stages more than once within the prediction horizon. 
+
+ Input. 
+The input is an atomic snapshot of the rollout framework at time t t , including the lifecycle record T t T_{t} of every live trajectory: its current state, context length, elapsed time in that state, and group membership under group-based algorithms.
+The snapshot further contains the online training-admission rate estimate p ^ t \hat{p}_{t} , the configured sample-injection function f ⁡ ( ⋅ ) f(\cdot) , the sandbox records P t P_{t} for launched trajectories whose first requests have not yet joined the ready queue, the ready queues and their instance assignments, the in-flight prefill set Q t P Q_{t}^{P} with each request’s prompt length and instance assignment, the active decode set Q t D Q_{t}^{D} with its current KV-cache footprint K t D K_{t}^{\mathrm{D}} , and historical duration statistics for sandbox startup, tool execution, and reward computation.
+Runtime finish-time estimates for in-flight prefills are additionally used to predict decode admissions, not to compute prefill demand. 
+
+ Output. 
+The predictor outputs the prefill demand forecast W ^ t , S P \hat{W}^{\mathrm{P}}_{t,S} and the decode-admission token forecast A ^ t , S D \hat{A}^{\mathrm{D}}_{t,S} over [ t , t + S ) [t,t+S) .
+ W ^ t , S P \hat{W}^{\mathrm{P}}_{t,S} is measured in prompt tokens and follows the source-specific counting rules in § 4.1.2 .
+New requests predicted to arrive from the data sampler, sandbox startup, or tool execution before t + S t+S contribute their estimated prompt-token counts.
+All requests already in the ready queue or Q t P Q_{t}^{P} at t t contribute their full prompt lengths, regardless of their predicted completion times.
+The forecast measures prompt-token volume rather than remaining token-processing work.
+ A ^ t , S D \hat{A}^{\mathrm{D}}_{t,S} aggregates the prompt lengths of requests whose prefill is expected to complete before t + S t+S .
+The allocator combines the prefill forecast with the current decode footprint K t D K_{t}^{\mathrm{D}} and the KV-cache demand K ^ t , S D \hat{K}^{\mathrm{D}}_{t,S} derived from predicted admissions to select worker roles in § 4.2 . 
+
+ B.2 Data Sampler 
+
+ In asynchronous rollout, reward completion triggers sample injection, so the sampler forecasts how many trajectories will complete reward computation within [ t , t + S ) [t,t+S) .
+Let R t R_{t} be the set of trajectories currently in the reward phase.
+For i ∈ R t i\in R_{t} , the probability of completing reward computation within the horizon is 
+
+ | 
+ q i rew = Pr ⁡ ( T i rew ​ < e i + S ∣ T i rew > ​ e i ) , q_{i}^{\mathrm{rew}}=\Pr(T_{i}^{\mathrm{rew}}<e_{i}+S\mid T_{i}^{\mathrm{rew}}>e_{i}), | 
+ | 
+ (2) | 
+
+ where e i e_{i} is the elapsed reward time and T i rew T_{i}^{\mathrm{rew}} follows a task-conditioned empirical distribution of total reward durations.
+The conditioning accounts for the fact that reward computation has not finished by time t t .
+Here, a trajectory passes if it satisfies the criteria for admission to training.
+The online estimate p ^ t ∈ [ 0 , 1 ] \hat{p}_{t}\in[0,1] approximates the fraction of reward-completed trajectories that satisfy these criteria.
+Using this shared acceptance-rate estimate, we predict the number of newly eligible trajectories as 
+
+ | 
+ N t , S pass = p ^ t ​ ∑ i ∈ R t q i rew . N^{\mathrm{pass}}_{t,S}=\hat{p}_{t}\sum_{i\in R_{t}}q_{i}^{\mathrm{rew}}. | 
+ | 
+ (3) | 
+
+ When all reward-completed trajectories are eligible for training, p ^ t = 1 \hat{p}_{t}=1 .
+Under GRPO ( Shao et al., 2024 ) , some group members may have completed reward computation by time t t .
+The sum includes only members still in the reward phase, weighted by their probabilities of completing reward computation within the horizon, and is scaled by p ^ t \hat{p}_{t} .
+Members still in Decode or Tool are excluded, consistent with the one-step assumption. 
+
+ Rollout systems inject new samples under different policies—replace-on-reward, fixed-rate refresh, or group replenishment—so we abstract the injection rule as a configurable function f ⁡ ( ⋅ ) f(\cdot) .
+The function is evaluated with the current sampler state, including known group-completion information, held fixed.
+The estimated number of new sample launches triggered within the horizon is 
+
+ | 
+ N ^ t , S samp = f ⁡ ( N t , S pass ) . \hat{N}^{\mathrm{samp}}_{t,S}=f\!\left(N^{\mathrm{pass}}_{t,S}\right). | 
+ | 
+ (4) | 
+
+ For nonlinear or group-based injection rules, this is a plug-in approximation rather than an exact expectation over all possible completion outcomes.
+For newly sampled requests, the forecast assumes a prewarm hit and omits cold starts of not-yet-launched samples.
+Let d ^ t pw \hat{d}_{t}^{\mathrm{pw}} be the online mean delay from a sample-injection decision until the first request joins the ready queue, including dispatch and prewarmed startup.
+Using this point estimate, define the effective launch horizon S t pw = max ⁡ ( 0 , S − d ^ t pw ) S_{t}^{\mathrm{pw}}=\max(0,S-\hat{d}_{t}^{\mathrm{pw}}) and reevaluate Equations 2 – 4 over this shorter horizon, with the same sampler state and injection policy.
+Each launch predicted early enough for its first request to arrive before t + S t+S contributes the estimated prompt-token count x ^ \hat{x} : 
+
+ | 
+ W ^ t , S P , samp = N ^ t , S t pw samp ​ x ^ . \hat{W}^{\mathrm{P},\mathrm{samp}}_{t,S}=\hat{N}^{\mathrm{samp}}_{t,S_{t}^{\mathrm{pw}}}\,\hat{x}. | 
+ | 
+ (5) | 
+
+ For S t pw = 0 S_{t}^{\mathrm{pw}}=0 , the contribution is zero.
+Thus, a launch within [ t , t + S ) [t,t+S) is not counted as a prefill arrival in that window if its estimated dispatch and startup delay extends beyond the horizon. 
+
+ B.3 Sandbox Startup 
+
+ For each sandbox k k already starting, let a k a_{k} be its launch time and mode ⁡ ( k ) ∈ { pw , cold } \mathrm{mode}(k)\in\{\mathrm{pw},\mathrm{cold}\} identify a prewarm hit or cold start.
+The first-request arrival time is a k + T k start a_{k}+T_{k}^{\mathrm{start}} , where T k start T_{k}^{\mathrm{start}} follows the measured launch-to-ready-queue duration distribution for that startup mode, including dispatch of the first request.
+Since the first request has not arrived at time t t , let e k = t − a k e_{k}=t-a_{k} and condition on this duration exceeding e k e_{k} : 
+
+ | 
+ q k start = Pr ⁡ ( T k start ​ < e k + S ∣ T k start > ​ e k , mode ⁡ ( k ) ) . q_{k}^{\mathrm{start}}=\Pr(T_{k}^{\mathrm{start}}<e_{k}+S\mid T_{k}^{\mathrm{start}}>e_{k},\mathrm{mode}(k)). | 
+ | 
+ (6) | 
+
+ With P t pw P_{t}^{\mathrm{pw}} and P t cold P_{t}^{\mathrm{cold}} denoting the sets of prewarm-hit and cold-start sandboxes in P t P_{t} , the expected contribution is 
+
+ | 
+ W ^ t , S P , start = ∑ k ∈ P t pw q k start ​ x k + ∑ k ∈ P t cold q k start ​ x k . \hat{W}^{\mathrm{P},\mathrm{start}}_{t,S}=\sum_{k\in P_{t}^{\mathrm{pw}}}q_{k}^{\mathrm{start}}\,x_{k}+\sum_{k\in P_{t}^{\mathrm{cold}}}q_{k}^{\mathrm{start}}\,x_{k}. | 
+ | 
+ (7) | 
+
+ Startup histories are conditioned on startup mode, image, node class, and concurrent startup load. 
+
+ B.4 Ready Queue 
+
+ Let Ready t \mathrm{Ready}_{t} denote all requests waiting to start prefill in the snapshot at time t t .
+The ready-queue contribution is the full prompt-token volume of this observed backlog: 
+
+ | 
+ W ^ t , S P , ready = ∑ j ∈ Ready t x j . \hat{W}^{\mathrm{P},\mathrm{ready}}_{t,S}=\sum_{j\in\mathrm{Ready}_{t}}x_{j}. | 
+ | 
+ (8) | 
+
+ Predicted future arrivals are accounted for by the sampler, sandbox-startup, and tool-execution components and are not counted again in Ready t \mathrm{Ready}_{t} . 
+
+ B.5 Tool Execution 
+
+ We forecast tool-induced prefill arrivals only for trajectories already in Tool .
+For trajectory i i , let τ i \tau_{i} be the exponential moving average (EMA) of its tool-execution duration and τ ^ i \hat{\tau}_{i} the most recently observed duration in the same conditioning class; the update is 
+
+ | 
+ τ i ← ( 1 − α ) ​ τ i + α ​ τ ^ i , α = 0.1 . \tau_{i}\leftarrow(1-\alpha)\tau_{i}+\alpha\hat{\tau}_{i},\qquad\alpha=0.1. | 
+ | 
+ (9) | 
+
+ The EMA is conditioned on task type, tool type, turn index, and concurrent tool load whenever enough samples are available.
+Let e i e_{i} be the elapsed time in the current Tool state; the estimated residual time to the next prefill arrival is 
+
+ | 
+ r i = max ⁡ ( 0 , τ i − e i ) . r_{i}=\max(0,\tau_{i}-e_{i}). | 
+ | 
+ (10) | 
+
+ Only trajectories whose tools are predicted to finish within the horizon, i.e., r i < S r_{i}<S , contribute, so the predicted tool-induced prefill workload is 
+
+ | 
+ W ^ t , S P , tool = ∑ i ∈ Tool , r i < S x ^ i , \hat{W}^{\mathrm{P},\mathrm{tool}}_{t,S}=\sum_{i\in\mathrm{Tool},\,r_{i}<S}\hat{x}_{i}, | 
+ | 
+ (11) | 
+
+ where x ^ i \hat{x}_{i} is the estimated prompt length after the tool result is appended. 
+
+ B.6 In-flight Prefill Requests 
+
+ Requests already in Prefill are observed directly.
+Their contribution is the full prompt-token volume of all requests in Q t P Q_{t}^{P} : 
+
+ | 
+ W t P , inflight = ∑ j ∈ Q t P x j . W^{\mathrm{P},\mathrm{inflight}}_{t}=\sum_{j\in Q_{t}^{P}}x_{j}. | 
+ | 
+ (12) | 
+
+ Assuming individual prefill executions are short relative to the prediction horizon, we approximate in-flight demand using full prompt lengths rather than explicitly subtracting already processed tokens. 
+
+ B.7 Decode Admissions from Prefill Completion 
+
+ We estimate the KV-cache footprint of newly admitted requests from their prompt lengths, without predicting output lengths.
+Let R t , S P R^{P}_{t,S} contain the in-flight prefills, requests already in the ready queue, and the one-step future arrivals represented in the forecast.
+Let b ^ j \hat{b}_{j} denote the predicted prefill completion time of request j j , used only for decode-admission prediction.
+For requests already in Q t P Q_{t}^{P} , this estimate comes from the runtime snapshot and accounts for execution progress before t t ; their completion times are not recomputed as if prefill were starting from scratch. 
+
+ For queued requests and predicted future arrivals, let g ⁡ ( x j ) g(x_{j}) denote the profiled prefill execution time for prompt length x j x_{j} under the selected configuration.
+We estimate completion times using a request-level serial approximation within each prefill instance, while modeling different instances in parallel.
+Routing and queue order follow the current scheduling policy; the approximation does not explicitly simulate batched or chunked execution.
+Let u j u_{j} be the observed or predicted request-arrival time, with u j = t u_{j}=t for requests already in the ready queue.
+For future arrivals, u j u_{j} includes the estimated residual reward or sandbox-startup delay, any subsequent sample-injection and prewarmed-startup delay, or the tool-return delay, as applicable.
+Residual reward and sandbox-startup estimates are conditioned on the operation still being unfinished at t t , as in the preceding subsections.
+Let v m v_{m} denote the next available time of prefill instance m m , initialized to the latest estimated finish time of its in-flight requests, or t t if it is idle.
+For each not-yet-started request j j assigned to instance m ⁡ ( j ) m(j) , the estimated prefill finish time is 
+
+ | 
+ b ^ j = max ⁡ { u j , v m ⁡ ( j ) } + g ⁡ ( x j ) , v m ⁡ ( j ) ← b ^ j . \hat{b}_{j}=\max\{u_{j},v_{m(j)}\}+g(x_{j}),\qquad v_{m(j)}\leftarrow\hat{b}_{j}. | 
+ | 
+ (13) | 
+
+ This recurrence is evaluated in scheduling order on each instance for queued requests and predicted future arrivals.
+It prevents a future request from beginning prefill before it arrives and avoids serializing work assigned to different instances. 
+
+ Let κ D ​ ( x j ) \kappa^{\mathrm{D}}(x_{j}) denote the KV-cache footprint of a request with prompt length x j x_{j} at decode admission under the selected decode configuration.
+Only requests with b ^ j < t + S \hat{b}_{j}<t+S contribute to the admission forecasts: 
+
+ | 
+ A ^ t , S D \displaystyle\hat{A}^{\mathrm{D}}_{t,S} | 
+ = ∑ j ∈ R t , S P , b ^ j < t + S x j , \displaystyle=\sum_{j\in R^{P}_{t,S},\,\hat{b}_{j}<t+S}x_{j}, | 
+ | 
+ (14) | 
+
+ | 
+ K ^ t , S D \displaystyle\hat{K}^{\mathrm{D}}_{t,S} | 
+ = ∑ j ∈ R t , S P , b ^ j < t + S κ D ​ ( x j ) . \displaystyle=\sum_{j\in R^{P}_{t,S},\,\hat{b}_{j}<t+S}\kappa^{\mathrm{D}}(x_{j}). | 
+ | 
+
+ B.8 Aggregation and Online Correction 
+
+ The complete prefill forecast is 
+
+ | 
+ W ^ t , S P = W ^ t , S P , samp + W ^ t , S P , start + W ^ t , S P , ready + W ^ t , S P , tool + W t P , inflight . \hat{W}^{\mathrm{P}}_{t,S}=\hat{W}^{\mathrm{P},\mathrm{samp}}_{t,S}+\hat{W}^{\mathrm{P},\mathrm{start}}_{t,S}+\hat{W}^{\mathrm{P},\mathrm{ready}}_{t,S}+\hat{W}^{\mathrm{P},\mathrm{tool}}_{t,S}+W^{\mathrm{P},\mathrm{inflight}}_{t}. | 
+ | 
+ (15) | 
+
+ The forecast is refreshed every S S seconds using the current allocation.
+Observed training-admission outcomes update p ^ t \hat{p}_{t} ; arrivals and completions update the reward and startup distributions and the tool-duration EMA, while forecast residuals update a multiplicative bias correction. 
+
+ Appendix C Role Switch 
+
+ To implement the target allocation from § 4.2 , the executor selects the least-loaded eligible instance for each required role change.
+The instance is removed from the routing pool and stops accepting new requests.
+Affected requests are cancelled, with their input and already generated tokens retained and the KV cache state persisted to remote storage.
+The rollout controller retries these requests on other instances using the retained prefixes and persisted KV cache, avoiding recomputation of cached tokens.
+Retries continue generation from the tokens already produced rather than restarting from the original input, preserving the output already visible to the agent.
+This cancel-and-resend mechanism is transparent to the agent sandbox and requires no intervention from it.
+Once in-flight work has quiesced, the engine rebuilds role-specific communication and cache resources for the target role, coordinating the transition across all participating ranks.
+Model weights remain resident in GPU memory throughout execution, so no additional weight loading is required during role switching.
+The whole role-switch procedure takes around 5 seconds on average.

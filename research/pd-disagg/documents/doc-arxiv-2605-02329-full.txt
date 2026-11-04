@@ -1,0 +1,760 @@
+Taming Request Imbalance: 
+ SLO-Aware Scheduling for Disaggregated LLM Inference 
+
+ Qipeng Wang
+
+ Correspondence to: 861026685@qq.com 
+
+ Zhendong Yang
+
+ Abstract 
+
+ In production environments, large language model (LLM) serving is required to meet stringent service-level objectives (SLOs) amid highly variable request patterns. In practice, request lengths follow a long-tail distribution, which gives rise to head-of-line blocking on the prefill side and underutilization caused by stragglers on the decode side in disaggregated serving architectures. Current systems, which adopt first-come-first-served (FCFS) scheduling for prefill and continuous batching for decode, lack the ability to adapt to this imbalance, resulting in compromised SLO attainment and reduced throughput. 
+
+ To address these challenges, we propose Kairos , an SLO-aware scheduling system equipped with two complementary mechanisms. On the prefill side, Kairos employs urgency-based priority scheduling: it predicts prefill completion times and dynamically selects requests to maximize the attainment of time-to-first-token (TTFT) SLOs. On the decode side, Kairos introduces slack-guided adaptive batching, which leverages the gap between per-step decode time and the time-per-output-token (TPOT) SLO to greedily pack short requests. This approach maximizes throughput while strictly adhering to SLO requirements. We implement Kairos and conduct evaluations using an online serving dataset and a state-of-the-art LLM. Experimental results demonstrate that, compared with state-of-the-art baselines, Kairos improves TTFT SLO attainment by up to 23.9%, TPOT SLO attainment by up to 27.1%, end-to-end SLO attainment by up to 33.8%, and decode throughput by up to 19.3%. 
+
+ Keywords:  Machine Learning, ICML
+ † † affiliationnotice: Equal contribution 
+
+ 1 Introduction 
+
+ Large language models (LLMs) have demonstrated remarkable capabilities across a wide range of tasks  ( Vaswani et al., 2017 ; Achiam et al., 2023 ; Liu et al., 2024 ; Zhao et al., 2023 ) , from natural language understanding and generation to code synthesis and mathematical reasoning. Their strong performance has made them a foundational technology for numerous real-world applications. 
+
+ Serving LLMs in production environments demands highly efficient systems to meet stringent service-level objectives (SLOs)  ( Wu et al., 2024 ) . LLM inference consists of two distinct phases: the prefill phase, which processes the input prompt and generates the initial key-value cache, and the decode phase, which iteratively generates output tokens. These phases are governed by two critical SLO metrics: time-to-first-token (TTFT) for prefill and time-per-output-token (TPOT) for decode. To prevent interference between them and maximize system goodput, modern serving systems commonly adopt a prefill-decode disaggregation architecture  ( Zhong et al., 2024 ) , where the two phases are handled by separate hardware resources. 
+
+ A fundamental challenge in online LLM serving stems from the highly variable and unpredictable lengths of incoming requests  ( Agrawal et al., 2023 ) . With modern LLMs supporting context windows spanning up to hundreds of thousands of tokens  ( Achiam et al., 2023 ; DeepseekAI, 2026 ) , request lengths in practice follow a long-tail distribution: the vast majority of requests are short, while a small fraction are extremely long  ( Ikram et al., 2025 ; Wu et al., 2023 ) . This imbalance leads to severe inefficiencies in disaggregated architectures, affecting both the prefill and decode phases in distinct ways. 
+
+ On the prefill side, existing disaggregated systems typically adopt first-come-first-served (FCFS) scheduling  ( Zheng et al., 2024 ; Kwon et al., 2023 ) . Under this policy, a long request that arrives ahead of subsequent short requests can monopolize the prefill stage, leading to head-of-line blocking  ( Ikram et al., 2025 ) , substantially inflating their TTFT. On the decode side, continuous batching is widely used  ( Kwon et al., 2023 ) . However, when short and long requests coexist in the same batch, synchronization barriers at each decoding step force short requests to wait for long requests to finish, even though the short ones require far less computation. As per our analysis in § , the per-step decode time grows significantly with request length, because the complexity of attention operation grows linearly according to the sequence length at the decoding stage. When a short request is batched with a much longer one, it must idle through substantially longer per-step latencies, leaving compute resources underutilized and degrading overall throughput. 
+
+ Our design . To address the above challenges, we propose Kairos . Kairos is built upon two key observations: (1) prefill time is highly predictable from input length, queue size and arrival time, enabling scheduling decisions to be made based on estimated completion time; and (2) the TPOT SLO is agnostic to request length—the system only needs to deliver each token within the SLO budget—and the SLO is typically significantly larger than the per-step decode time, leaving a slack buffer that can be exploited. 
+
+ To mitigate head-of-line blocking on the prefill side, where early-arriving long requests delay subsequent short ones, Kairos incorporates urgency-based priority scheduling. Specifically, Kairos predicts the prefill finish time for all queued requests first, and computes an urgency score for each based on the SLO and arrival time. It then greedily selects requests for prefill in order of urgency, maximizing TTFT SLO attainment. 
+
+ To address the straggler problem on the decode side, where short requests are forced to wait for long ones within the same batch and decode step, Kairos employs an slack-guided adaptive scheduling that maximizes throughput while respecting SLO constraints. Concretely, Kairos profiles the per-step decode time and exploits the slack between decode step time and the TPOT SLO budget during serving. Once the slack is large enough, Kairos greedily selects short requests whose decode step time is smaller than the slack, packing them together and decoding them within the slack to maximize decode throughput without violating the TPOT SLO. 
+
+ Evaluation . We implement a prototype of Kairos . We evaluate Kairos on an online serving dataset and a state-of-the-art LLM, and the experimental results demonstrate its effectiveness. Under the same request rate, Kairos improves the TTFT SLO attainment by up to 23.9%, TPOT SLO attainment by up to 27.1%, end-to-end SLO attainment by up to 33.8%, and decode throughput by up to 19.3%. 
+
+ Contributions are summarized as follows: 
+
+ • 
+
+ We identify the key challenges of request imbalance and its impact on system underutilization in online LLM serving systems with disaggregated architectures. 
+
+ • 
+
+ We propose Kairos , an SLO-aware scheduling method that dynamically prioritizes prefill requests based on urgency and adaptively batches decode requests to maximize both SLO attainment and system throughput. 
+
+ • 
+
+ We implement and evaluate Kairos on various tasks, demonstrating significant improvements in SLO attainment and decode throughput. 
+
+ 2 Background and Motivation 
+
+ 2.1 LLM Serving System 
+
+ LLM inference is a two-phase process consisting of the prefill stage and the decode stage. During prefill, the model processes the entire input prompt in a single forward pass and produces the initial token along with the key-value (KV) cache. During decode, the model generates subsequent tokens one by one in an autoregressive manner, each step attending to all previously generated KV cache. These two phases have fundamentally different computational characteristics: prefill is compute-bound, while decode is memory-bound. More importantly, the two phases interfere with each other when colocated on the same hardware—prioritizing either one can starve the other, causing SLO violations. To mitigate this interference, modern LLM serving frameworks such as SGLang  ( Zheng et al., 2024 ) and vLLM  ( Kwon et al., 2023 ) adopt a prefill-decode (PD) disaggregation architecture, where the two phases are deployed on separate sets of hardware resources. In this architecture, prefill instances typically employ chunked prefill  ( Agrawal et al., 2023 ) to bound the peak memory usage of extremely long sequences, while decode instances leverage continuous batching  ( Kwon et al., 2023 ) to maximize output token throughput. 
+
+ 2.2 Request Imbalance 
+
+ (a) Reuqest length distribution of 2 datasets. 
+
+ (b) Decode step time at different sequence length. 
+
+ Figure 1 : Imbalabce request distribution and decode step time growth to sequence length. 
+
+ Figure 2 : Workflow of the algorithms in Kairos . 
+
+ Long-tail distribution of request lengths. Modern LLMs support increasingly wide context windows, with many models reaching up to 1M tokens  ( DeepseekAI, 2026 ; Anthropics, 2026 ) . In practice, the distribution of request lengths in online serving exhibits a pronounced long-tail pattern: the overwhelming majority of requests are relatively short, while a small fraction are extremely long. We observe this phenomenon in both production serving traces and commonly used benchmark datasets  ( Bai et al., 2023 ) . Figure  1 illustrates the request length distributions, where the x-axis represents request length and the y-axis shows the cumulative distribution or probability density. The long-tail characteristic is clearly visible in both settings. 
+
+ Impact of request imbalance. This imbalance leads to severe SLO degradation in both the prefill and decode phases.
+On the prefill side, when a long request arrives ahead of subsequent short requests under FCFS scheduling, it can block others for an extended period, causing their TTFT to exceed the SLO. Under the experimental settings described in § 4.1 , a 128K-token request requires approximately 8.8s for prefill, whereas a 8K-token request completes in only 400.4ms for MiniMax-M2.5  ( MiniMaxAI, 2026 ) . Consequently, if a 128K-token request arrives first, the maximum sustainable QPS without violating the SLO for the following 8K-tokens requests drops below 0.114.
+On the decode side, the per-step decode time grows linearly with sequence length even at a batch size of one. As shown in Figure  1 , a 8K-token request takes roughly 11.0ms per decode step, while a 128K-token request incurs approximately 40.3ms. When both coexist in the same batch, the batch step time is determined by the slowest request—namely, 40.3ms. For the 8K-token short request, this means 29.3ms of idle waiting per step due to the synchronization barrier, representing a substantial waste of compute resources. 
+
+ 2.3 Opportunities 
+
+ Despite the aforementioned challenges, we identify two key opportunities that enable more efficient scheduling under imbalanced workloads. 
+
+ The first is that the prefill time of a request is highly predictable from its input length and the model architecture  ( Du et al., 2025 ) . This predictability allows the system to estimate, before execution, how long each queued request will take to prefill. When a long request threatens to delay subsequent short requests and degrade TTFT attainment, the scheduler can leverage these predictions to make informed decisions—selecting the request that best balances SLO compliance and overall throughput, rather than blindly following the arrival order. 
+
+ The second is that there are time slack between TPOT SLO and decode step time. The TPOT SLO is inherently agnostic to request length: the system only needs to deliver one token per SLO interval to meet the target. For instance, with a 50ms TPOT SLO, it suffices to output a token every 50ms. If the system can generate tokens faster than the SLO requires, the excess tokens can be buffered and released gradually, effectively decoupling generation speed from token delivery. Critically, the per-step decode time is typically much smaller than the TPOT SLO—as noted earlier, a 128K-token request incurs roughly 40.3ms per step, well below a typical 50ms SLO budget. This leaves a slack of tens of milliseconds after each decode step, which can be exploited to schedule additional computation without violating the SLO. 
+
+ The above analysis highlights the inefficiencies caused by imbalanced, long-tailed request distributions and motivates us to design an optimized scheduling method that improves both SLO attainment and system throughput. 
+
+ 3 Design 
+
+ The design of Kairos is designed to mitigate the inefficiencies caused by long-tail request distributions in disaggregated LLM serving systems, by introducing specialized scheduling mechanisms for each phase. 
+
+ Figure  2 provides an architectural overview of Kairos , illustrating how these two components work within a disaggregated serving framework.
+On the prefill side (§ 3.1 ), Kairos employs urgency-based priority scheduling. By predicting the prefill time for all queued requests and computing their urgency based on remaining SLO budget, the prefill scheduler greedily selects the most urgent requests to prefill, preventing long requests from starving short ones and maximizing overall TTFT SLO attainment.
+On the decode side (§ 3.2 ), Kairos introduces slack-guided adaptive scheduling. By profiling per-step decode times and exploiting the slack between step time and the TPOT SLO, the decode scheduler greedily packs short requests to maximize throughput while ensuring that every request meets its token delivery deadline.
+We detail each component in the following subsections. 
+
+ Algorithm 1 Urgency-Based Prefill Scheduling 
+
+ 1: 
+
+   Input: request queue 𝒬 \mathcal{Q} , fixed chunk-size C C , current time t now t_{\text{now}} 
+
+ 2: 
+
+   ℬ ← ∅ \mathcal{B}\leftarrow\emptyset ,   c used ← 0 c_{\text{used}}\leftarrow 0 
+
+ 3: 
+
+   ⊳ \triangleright Compute normalized urgency for each request 
+
+ 4: 
+
+  Sort 𝒬 \mathcal{Q} by arrival time r . t arrive r.t_{\text{arrive}} (FCFS order)
+
+ 5: 
+
+   for each request r ∈ 𝒬 r\in\mathcal{Q} do 
+
+ 6: 
+
+    t ^ r finish ← PredictPrefillFinishTime ​ ( 𝒬 , r , t now ) \hat{t}_{r}^{\text{finish}}\leftarrow\textsc{PredictPrefillFinishTime}(\mathcal{Q},r,t_{\text{now}}) 
+
+ 7: 
+
+    t r slack ← r . SLO TTFT − ( t ^ r finish − r . t arrive ) t_{r}^{\text{slack}}\leftarrow r.\text{SLO}_{\text{TTFT}}-(\hat{t}_{r}^{\text{finish}}-r.t_{\text{arrive}}) 
+
+ 8: 
+
+    u r n ​ o ​ r ​ m ​ a ​ l ​ i ​ z ​ e ​ d ← t r slack r . SLO TTFT / r . input_len u_{r}^{normalized}\leftarrow\frac{t_{r}^{\text{slack}}}{r.\text{SLO}_{\text{TTFT}}}\,/\,r.\text{input\_len} ⊳ \triangleright normalized urgency score
+
+ 9: 
+
+   end for 
+
+ 10: 
+
+   ⊳ \triangleright Select the most urgent requests to prefill 
+
+ 11: 
+
+  Sort 𝒬 \mathcal{Q} in descending order of u r n ​ o ​ r ​ m ​ a ​ l ​ i ​ z ​ e ​ d u_{r}^{normalized} 
+
+ 12: 
+
+   for each request r r in sorted 𝒬 \mathcal{Q} do 
+
+ 13: 
+
+    if c used + r . input_len ≤ C c_{\text{used}}+r.\text{input\_len}\leq C then 
+
+ 14: 
+
+     ℬ ← ℬ ∪ { r } \mathcal{B}\leftarrow\mathcal{B}\cup\{r\} 
+
+ 15: 
+
+     c used ← c used + r . input_len c_{\text{used}}\leftarrow c_{\text{used}}+r.\text{input\_len} 
+
+ 16: 
+
+    else 
+
+ 17: 
+
+     ℬ ← ℬ ∪ { r [ : C − c used ] } \mathcal{B}\leftarrow\mathcal{B}\cup\{r[:C-c_{\text{used}}]\} 
+
+ 18: 
+
+     C ← c used C\leftarrow c_{\text{used}} 
+
+ 19: 
+
+    end if 
+
+ 20: 
+
+   end for 
+
+ 21: 
+
+   t actual ← t_{\text{actual}}\leftarrow DecodeStep ( ℬ \mathcal{B} )
+
+ 22: 
+
+   UpdateThroughput ( ∑ r ∈ ℬ r . s ​ e ​ q ​ _ ​ l ​ e ​ n \sum_{r\in\mathcal{B}}r.seq\_len , t actual t_{\text{actual}} )
+
+ 3.1 Urgency-based Priority Scheduling 
+
+ Limitations of existing approaches. Existing disaggregated serving systems typically employ first-come-first-served (FCFS) scheduling on the prefill side  ( Zheng et al., 2024 ; Kwon et al., 2023 ) . While simple, FCFS is highly vulnerable to head-of-line (HOL) blocking: a long request that arrives first can monopolize the prefill stage and delay all subsequent short requests. As analyzed in § 2.2 , when long and short requests arrive in sequence, the TTFT SLO begins to be violated even at low request rate. One natural alternative is shortest-job-first (SJF) scheduling, which prioritizes short requests and can substantially improve TTFT attainment. However, SJF is impractical in online serving scenarios: long requests may be indefinitely starved, as newly arriving short requests continuously jump ahead in the queue, causing unbounded delays for long requests and eventual SLO violations for them. 
+
+ | 
+ u ​ r ​ g ​ e ​ n ​ c ​ y R = S ​ L ​ O T ​ T ​ F ​ T − ( T f ​ i ​ n ​ i ​ s ​ h R − T a ​ r ​ r ​ i ​ v ​ a ​ l R ) S ​ L ​ O T ​ T ​ F ​ T \displaystyle urgency_{R}=\frac{SLO_{TTFT}-(T^{R}_{finish}-T^{R}_{arrival})}{SLO_{TTFT}} | 
+ | 
+ (1) | 
+
+ Algorithm 2 PredictPrefillFinishTime : FCFS-based prefill finish time estimation 
+
+ 1: 
+
+   Input: queue 𝒬 \mathcal{Q} (sorted by t arrive t_{\text{arrive}} ), target request r r , current time t now t_{\text{now}} 
+
+ 2: 
+
+   Output: estimated prefill finish time t ^ r finish \hat{t}_{r}^{\text{finish}} 
+
+ 3: 
+
+   t cursor ← t now t_{\text{cursor}}\leftarrow t_{\text{now}} ⊳ \triangleright simulated clock
+
+ 4: 
+
+   for each request r ′ ∈ 𝒬 r^{\prime}\in\mathcal{Q} with r ′ . t arrive ≤ r . t arrive r^{\prime}.t_{\text{arrive}}\leq r.t_{\text{arrive}} do 
+
+ 5: 
+
+    n r ′ ← r ′ . remaining_prefill_tokens n_{r^{\prime}}\leftarrow r^{\prime}.\text{remaining\_prefill\_tokens} 
+
+ 6: 
+
+    d ^ r ′ ← n r ′ / μ prefill \hat{d}_{r^{\prime}}\leftarrow n_{r^{\prime}}\,/\,\mu_{\text{prefill}} ⊳ \triangleright estimated prefill duration via profiled throughput μ prefill \mu_{\text{prefill}} 
+
+ 7: 
+
+    t cursor ← max ( t cursor , r ′ . t arrive ) + d ^ r ′ t_{\text{cursor}}\leftarrow\max(t_{\text{cursor}},\;r^{\prime}.t_{\text{arrive}})+\hat{d}_{r^{\prime}} 
+
+ 8: 
+
+   end for 
+
+ 9: 
+
+   return t cursor t_{\text{cursor}} 
+
+ Our approach. To address this challenge, we propose urgency-based priority scheduling, whose pseudocode is presented in Algorithm  1 . Kairos adopts chunked prefill  ( Agrawal et al., 2023 ) to bound the peak memory footprint when processing extremely long sequences, splitting them into fixed-size chunks. Unlike existing FCFS-based approaches, Kairos selects certain chunks at the beginning of each prefill step. Specifically, Kairos computes an urgency score (Line 7-8) for each queued request before every prefill scheduling decision. The urgency score is defined by Equation  1 , where the numerator captures the ratio of the slack between prefill finish time to the TTFT SLO under FCFS scheduling policy. If this ratio is greater than 0, there is slack that can be exploited without violating the SLO; otherwise, the request has already exceeded its TTFT SLO under FCFS order. Kairos normalizes the urgency score by request length (Line 8), such that shorter requests naturally receive higher priority than longer ones at comparable finish times. The scheduler then greedily selects the chunks of the requests with the highest normalized urgency for prefill (Line 11-20), where the total length of these chunk is less than the fixed chunk-size. 
+
+ Additionally, as shown in Algorithm  2 , Kairos re-estimates the finish time of each request at the beginning of each step to avoid the impact of the prefix cache hit ratio, which has a significant impact on the number of tokens to prefill. Kairos maintains a running estimate of the average prefill throughput (tokens per second, TPS) on the prefill instance (Line 6). This allows the system to accurately predict the execution time of a queued request by dividing its token count by the current throughput estimate, and this prediction is used in computing the urgency (Line 6 of Algorithm  1 ). 
+
+ This design directly addresses the HOL blocking problem. Consider a scenario where a 128K-token request arrives first, followed shortly by a few 8K-token request, as shown in Figure  2 . Under FCFS, the short request must wait for the entire long prefill to complete, likely violating its TTFT SLO. In contrast, Kairos computes the urgency scores for both requests. Even though the long request arrived earlier and has waited longer, the short request’s urgency score is amplified by its shorter length, allowing it to be selected first. As a result, the short request meets its SLO, while the long request retains a reasonable urgency score since it still has slack before its own TTFT SLO expires. This mechanism naturally balances SLO attainment across requests of varying lengths without risking starvation. 
+
+ 3.2 Slacked-guided Adaptive Scheduling 
+
+ Algorithm 3 Slack-guided Adaptive Decode Scheduling 
+
+ 1: 
+
+   Input: active request set 𝒟 \mathcal{D} , TPOT SLO T SLO T_{\text{SLO}} , lookup table LUT ​ [ bsz , seq_len ] \textsc{LUT}[\textit{bsz},\textit{seq\_len}] 
+
+ 2: 
+
+   ⊳ \triangleright Compute slack for each active request 
+
+ 3: 
+
+   for each request r ∈ 𝒟 r\in\mathcal{D} do 
+
+ 4: 
+
+    t r elapsed ← t now − r . t first_token t_{r}^{\text{elapsed}}\leftarrow t_{\text{now}}-r.t_{\text{first\_token}} 
+
+ 5: 
+
+    s r ← T SLO ⋅ ( r . n gen + 1 ) − t r elapsed − L U T [ 1 , r . s e q _ l e n ] s_{r}\leftarrow T_{\text{SLO}}\cdot(r.n_{\text{gen}}+1)-t_{r}^{\text{elapsed}}-LUT[1,r.seq\_len] ⊳ \triangleright slack before SLO violation
+
+ 6: 
+
+   end for 
+
+ 7: 
+
+   s min ← min r ∈ 𝒟 ⁡ { s r } s_{\min}\leftarrow\min_{r\in\mathcal{D}}\{s_{r}\} 
+
+ 8: 
+
+   ⊳ \triangleright Partition requests by slack and throughput gain 
+
+ 9: 
+
+   ℬ ← ∅ \mathcal{B}\leftarrow\emptyset ,   ℛ delay ← ∅ \mathcal{R}_{\text{delay}}\leftarrow\emptyset ,   t cur ← 0 t_{\text{cur}}\leftarrow 0 
+
+ 10: 
+
+  Sort 𝒟 \mathcal{D} in ascending order of r.seq_len
+
+ 11: 
+
+   for each request r ∈ sorted ​ 𝒟 r\in\text{sorted}\ \mathcal{D} do 
+
+ 12: 
+
+    t r step ← LUT [ | ℬ ∪ { r } | , r . seq_len ] t_{r}^{\text{step}}\leftarrow\textsc{LUT}[|\mathcal{B}\cup\{r\}|,\;r.\text{seq\_len}] 
+
+ 13: 
+
+    if t r step ≤ s min t_{r}^{\text{step}}\leq s_{\min} and ( | ℬ | = 0 CLOSE (|\mathcal{B}|=0 or OPEN | ℬ | + 1 t r step > | ℬ | t cur ) \frac{|\mathcal{B}|+1}{t_{r}^{\text{step}}}>\frac{|\mathcal{B}|}{t_{\text{cur}}}) then 
+
+ 14: 
+
+     ℬ ← ℬ ∪ { r } \mathcal{B}\leftarrow\mathcal{B}\cup\{r\} ,   t cur ← t r step t_{\text{cur}}\leftarrow t_{r}^{\text{step}} 
+
+ 15: 
+
+    else 
+
+ 16: 
+
+     ℛ delay ← ℛ delay ∪ { r } \mathcal{R}_{\text{delay}}\leftarrow\mathcal{R}_{\text{delay}}\cup\{r\} 
+
+ 17: 
+
+    end if 
+
+ 18: 
+
+   end for 
+
+ 19: 
+
+   if ℬ = ∅ \mathcal{B}=\emptyset then 
+
+ 20: 
+
+    ℬ ← 𝒟 \mathcal{B}\leftarrow\mathcal{D} ⊳ \triangleright no slack to exploit; decode all
+
+ 21: 
+
+   end if 
+
+ 22: 
+
+   ⊳ \triangleright Execute decode step and update LUT 
+
+ 23: 
+
+   t actual ← t_{\text{actual}}\leftarrow DecodeStep ( ℬ \mathcal{B} )
+
+ 24: 
+
+   UpdateLUT ( | ℬ | |\mathcal{B}| , max r ∈ ℬ { r . seq_len } \max_{r\in\mathcal{B}}\{r.\text{seq\_len}\} , t actual t_{\text{actual}} )
+
+ 25: 
+
+   for each r ∈ ℬ r\in\mathcal{B} do 
+
+ 26: 
+
+    r . n gen ← r . n gen + 1 r.n_{\text{gen}}\leftarrow r.n_{\text{gen}}+1 
+
+ 27: 
+
+    if r r generated EOS token then 
+
+ 28: 
+
+    Remove r r from 𝒟 \mathcal{D} ; return result to client
+
+ 29: 
+
+    end if 
+
+ 30: 
+
+   end for 
+
+ Limitations of existing approaches. Existing disaggregated serving systems employ continuous batching on the decode side, which eagerly adds new requests to the current batch as soon as slots become available  ( Kwon et al., 2023 ) . However, this approach ignores the straggler effect: when requests of vastly different lengths coexist in a batch, all requests are paced by the slowest one. As quantified in § 2.2 , the per-step decode time for a 128K-token request is roughly 4 × \times that of a 8K-token request. Even if requests are initially grouped by input length, their output lengths can diverge significantly during generation—a short-prompt request may produce a very long output and vice versa—making static grouping insufficient to avoid stragglers over the course of decoding. 
+
+ | 
+ s ​ l ​ a ​ c ​ k R = \displaystyle slack_{R}= | 
+ ( N + 1 ) × S ​ L ​ O T ​ P ​ O ​ T − ( T c ​ u ​ r − T p ​ r ​ e ​ f ​ i ​ l ​ l f ​ i ​ n ​ i ​ s ​ h ) − \displaystyle(N+1)\times SLO_{TPOT}-(T_{cur}-T^{finish}_{prefill})- | 
+ | 
+
+ | 
+ | 
+ L ​ U ​ T ​ ( S ​ e ​ q ​ L ​ e ​ n R , B ​ a ​ t ​ c ​ h ​ S ​ i ​ z ​ e ) \displaystyle LUT(SeqLen_{R},BatchSize) | 
+ | 
+ (2) | 
+
+ Our approach. To address this issue, we propose slack-guided adaptive batching, as is shown in Algorithm  3 . Kairos constructs a lookup table (LUT) mapping batch size and sequence length to per-step decode time (Line 1). This LUT is profiled offline once per model-hardware configuration and incurs no runtime overhead. Before each decode step, Kairos computes a slack value for every active request, defined as the remaining time budget before the next token must be delivered to meet the TPOT SLO. As formulated in Equation  2 , the slack is calculated based on the request’s prefill finish time, current sequence length, number of tokens generated so far ( N N ), and the TPOT SLO. Kairos identifies the minimum slack among all active requests and compares it against the per-step decode times obtained from the LUT (Line 3-7). If there exist requests whose decode step time is smaller than this minimum slack, and packing them can improve the decode throughput, Kairos selectively executes only those requests and delays the remaining ones for this step (Line 11-18); otherwise, it proceeds to decode all requests together (Line 19-21). 
+
+ The profiled LUT captures the mean decode step time over 100 profiling runs per configuration. However, step times could fluctuate at runtime due to hardware variability, power throttling, or interference from other processes. To remain robust to these dynamics, Kairos continuously updates the LUT at runtime (Line 23-24) based on observed decode step times. Specifically, after each decode step, Kairos updates the corresponding LUT entry using the historical mean of all observed step times for that batch size and sequence length combination, ensuring the scheduling decisions are accurate and reliable. 
+
+ This design eliminates unnecessary waiting caused by stragglers at each step. For instance, as illustrated in the right part of Figure  2 , suppose the batch contains a few short requests with short decode time and a long request with long decode time, under a 50ms TPOT SLO. When the slack is enough (Step 3), Kairos recognizes that it can execute the short request within the SLO budget before the long request must be served. Rather than forcing the short request to idle for each step alongside the straggler, Kairos decouples their execution, allowing the short request to progress rapidly and buffering its output tokens, thereby significantly improving decode throughput without violating any SLO. 
+
+ 4 Experiment 
+
+ 4.1 Experiment Settings 
+
+ Model. We evaluate Kairos on Minimax-M2.5  ( MiniMaxAI, 2026 ) , a 229B-parameter text-only model served in FP8 precision, optimized for agentic coding and reasoning. This model represents the frontier of large-scale Mixture-of-Experts architectures and achieves state-of-the-art results across a wide range of benchmarks. 
+
+ Dataset. We use a production online serving trace collected from a real-world LLM service, containing 1000 requests with a pronounced long-tail distribution in sequence lengths. This dataset allows us to evaluate Kairos under realistic production workloads. 
+
+ Testbed. All experiments are conducted on a single server equipped with 8× NVIDIA H200 SXM GPUs, 192 Intel Xeon Platinum 8558 CPU cores, and 2 TB of host memory. The NVLink bandwidth is 900 GB/s  ( Nvidia, 2026 ) . We deploy the disaggregated architecture with 4 GPUs dedicated to the prefill phase and 4 GPUs dedicated to decode, both configured with tensor parallelism degree 4 (TP4). The server uses NVLink and NVSwitch for intra-node GPU communication, providing full bisection bandwidth across all 8 GPUs. 
+
+ Baselines. We compare Kairos against DistServe  ( Zhong et al., 2024 ) , which applies the FCFS strategy and employs the same 4P+4D disaggregated setup with TP4 for each phase, serving as a direct architectural baseline to isolate the benefits of our scheduling policies. DistServe uses default FCFS prefill scheduling and continuous batching for decode. 
+
+ Metrics. We evaluate Kairos along three dimensions: (1) TTFT SLO attainment captures the fraction of requests whose time-to-first-token meets the prefill-side latency target; (2) TPOT SLO attainment measures the fraction of requests where the mean inter-token latency falls within the SLO budget; (3) End-to-end SLO attainment measures the fraction of requests that meets both TTFT and TPOT SLOs; (4) Decode throughput quantifies the per-request decode speed in tokens per second, reflecting decode-side efficiency. 
+
+ SLO Configuration. We set the TTFT SLO to 8s and the TPOT SLO to 50ms. These values are chosen to reflect typical production requirements: the 8s TTFT SLO corresponds to a commonly acceptable initial latency for interactive applications, while the 50ms TPOT SLO maps to a human-perceptible token generation rate of 20 tokens per second. 
+
+ 4.2 End-to-End SLO Attainment 
+
+ Figure 3 : End-to-end SLO attainment of Minimax M2.5 and online dataset under differnet QPS. 
+
+ Figure  3 presents the combined SLO attainment (both TTFT and TPOT satisfied per request) as a function of request rate for Minimax-M2.5 on the Online-GLM dataset. Kairos consistently outperforms DistServe across all QPS levels. At low load (QPS ≤ \leq 2.8), Kairos achieves 92–97% combined attainment versus 63–74% for DistServe, a gap of 22%–29%. At the critical inflection point of QPS = = 3.0, Kairos reaches 89.6% combined attainment while DistServe collapses to 55.8%, an improvement of 33.8%. As QPS increases beyond 3.0, both systems degrade, but Kairos sustains consistently higher attainment: at QPS = = 4.0, Kairos achieves 47.2% versus 29.0% for DistServe (+18.2%), and at QPS = = 4.2, 38.9% versus 22.8% (+16.1%). 
+
+ The performance gap is especially striking on the TTFT dimension: DistServe TTFT attainment drops sharply from 100% to 76.1% at QPS = = 3.0, while Kairos maintains 100% TTFT attainment through QPS = = 3.0 and does not fall below 90% until QPS = = 3.6. This demonstrates that the urgency-based priority scheduling effectively prevents head-of-line blocking, keeping short requests from being stalled behind long ones under the FCFS discipline. 
+
+ 4.3 TTFT SLO Attainment 
+
+ Figure 4 : TTFT SLO attainment of Minimax M2.5 and online dataset under differnet QPS. 
+
+ Figure  4 shows the TTFT SLO attainment as QPS increases. At low QPS ( ≤ \leq 2.8), both systems achieve 100% TTFT attainment, as the system is under-loaded and all requests are served promptly. As QPS climbs, DistServe degrades sharply: its TTFT attainment drops to 76.1% at QPS = = 3.0, 60.5% at QPS = = 3.4, and 15.5% at QPS = = 5.0. In contrast, Kairos maintains 100% TTFT attainment at QPS = = 3.0 and degrades more gracefully, reaching 76.9% at QPS = = 3.4 and 16.1% at QPS = = 5.0. At QPS = = 3.0, Kairos improves TTFT attainment by 23.9% over DistServe. 
+
+ The superior TTFT performance of Kairos stems from its urgency-based priority scheduling on the prefill side. When a long request arrives ahead of short ones, Kairos recognizes that the short requests are more urgent relative to their SLO deadline and schedules them first, preventing their TTFT from violating the SLO. DistServe, by contrast, enforces strict arrival order, so short requests are helplessly blocked behind long ones, causing TTFT violations to accumulate as QPS increases. 
+
+ 4.4 TPOT SLO Attainment 
+
+ Figure 5 : TTFT SLO attainment of Minimax M2.5 and online under differnet QPS. 
+
+ Figure  5 presents the TPOT SLO attainment as QPS increases. Kairos substantially outperforms DistServe across the entire QPS range. While the TPOT attainment of DistServe stagnates between 60% and 74% regardless of load—indicating a fundamental inability to meet the 50ms TPOT target for a large fraction of requests— Kairos achieves 92–97% at low QPS (2.0–2.8) and remains above 83% even at QPS = = 3.2. At QPS = = 2.0, Kairos improves TPOT attainment from 73.7% to 96.6%, a gain of 22.9%. At QPS = = 3.0, the gap is 27.1% (89.6% vs. 62.5%). 
+
+ The structural disadvantage of DistServe on TPOT arises from its continuous batching policy, which batches all active decode requests together regardless of their individual TPOT slack. Long requests with many remaining tokens inflate the decode batch and slow down the per-step latency for all requests. Kairos ’s slack-guided adaptive batching avoids this: it adjusts batch composition based on per-request TPOT slack, allowing short or time-critical requests to progress quickly without being stalled by long-tail stragglers. This enables Kairos to keep the decode step time well within the 50ms budget for the vast majority of requests. 
+
+ 4.5 Decode Throughput 
+
+ Figure 6 : TTFT SLO attainment of Minimax M2.5 and online dataset under differnet QPS. 
+
+ Figure  6 presents the per-request decode throughput (tokens per second) as a function of QPS. Kairos achieves consistently higher per-request decode throughput than DistServe across all QPS levels. At QPS = = 2.0, the median decode throughput is 28.1 tok/s for Kairos versus 23.6 tok/s for DistServe, a relative improvement of 19.3% . Across QPS = = 2.0–4.8, Kairos delivers a median decode throughput improvement of 13–19% over DistServe. Even at QPS = = 5.0, Kairos maintains a P50 of 22.6 tok/s versus 20.9 tok/s for DistServe (+8.0%). 
+
+ Since prefill is compute-bound and our urgency-based scheduling only reorders request execution without altering the total computation, prefill throughput remains unchanged compared to the baseline. The decode throughput gains therefore reflect the direct benefit of slack-guided adaptive batching: by prioritizing requests with tight TPOT budgets and packing decode batches more efficiently, Kairos keeps the decode GPUs highly utilized while serving more tokens per second to each individual request. These gains are most pronounced at low-to-moderate QPS, where the slack-guided policy has the most room to differentiate request priorities before the system becomes saturated. 
+
+ We note that the absolute decode throughput values (20–28 tokens/s) are lower than the peak decode throughput achievable on this hardware in isolation. This is primarily due to GPU memory constraints on the decode node. The decode instance must maintain KV caches for all concurrently active requests; at high concurrency, the KV cache memory is exhausted and new requests cannot be admitted, which caps the maximum batch size and, consequently, the aggregate decode throughput. As a result, the system operates at a moderate concurrency ceiling dictated by memory capacity rather than compute throughput, and the reported decode throughput reflects this memory-bound regime rather than the compute-bound peak. 
+
+ 5 Related Work 
+
+ LLM serving systems. 
+LLM inference consists of a prefill stage that processes the input prompt in parallel, and a decode stage that generates tokens autoregressively  ( Achiam et al., 2023 ; Liu et al., 2024 ) . State-of-the-art serving systems include vLLM  ( Kwon et al., 2023 ) , which introduced PagedAttention and continuous batching; SGLang  ( Zheng et al., 2024 ) , which provides RadixAttention for prefix caching and efficient constrained decoding; and TensorRT-LLM  ( Nvidia, 2023 ) , which leverages NVIDIA’s compilation stack for optimized kernels. Disaggregated architectures, such as DistServe  ( Zhong et al., 2024 ) and Splitwise  ( Patel et al., 2024 ) , separate prefill and decode across different GPU sets to reduce interference, while Sarathi  ( Agrawal et al., 2023 ) introduces chunked prefill to bound peak memory for long sequences. Our work builds upon PD disaggregation and focuses on request scheduling, an orthogonal direction compatible with existing optimizations in these frameworks. 
+
+ Request scheduling. 
+The limitations of FCFS scheduling have motivated extensive research. FastServe  ( Wu et al., 2023 ) enables token-level preemption with a multi-level feedback queue. Preble  ( Srivatsa et al., 2024 ) co-optimizes KV cache reuse and load balancing for prompt sharing. PARS  ( Tao et al., 2025 ) approximates SJF by learning pairwise rankings of output lengths. TRAIL  ( Shahout et al., 2024b ) predicts remaining generation length for constrained preemptive scheduling. AugServe  ( Wang et al., 2025 ) and MARS  ( Shahout et al., 2024a ) incorporate runtime information for adaptive scheduling, while MemServe  ( Hu et al., 2024 ) manages distributed KV caches with global scheduling. K-LPM  ( Dexter et al., 2025 ) addresses prefix reuse scheduling under TTFT constraints, and SageSched  ( Gan et al., 2026 ) employs uncertainty-aware scheduling with lightweight output-length prediction.
+In contrast, our work addresses request imbalance in disaggregated architectures without requiring output length prediction or expensive preemption.
+We exploit the predictability of prefill time and the slack between decode step time and SLO for lightweight, effective scheduling. 
+
+ Resource disaggregation. 
+Resource disaggregation  ( Guo et al., 2023 ; Shan et al., 2018 ) decouples hardware resources from monolithic infrastructure into independently managed pools, enabling flexible and efficient scaling. In LLM serving, disaggregation spans multiple dimensions: PD disaggregation (DistServe  ( Zhong et al., 2024 ) , Splitwise  ( Patel et al., 2024 ) ) separates prefill and decode to different instance; AF disaggregation (MegaScale-Infer  ( Zhu et al., 2025 ) ) decouples attention from FFN layers; and EPD disaggregation (EPD  ( Singh et al., 2024 ) , SpaceServe  ( Li et al., 2025 ) ) separates encoders, prefill, and decode for multimodal models. Our work adopts PD disaggregation and is compatible with both AF and EPD approaches, allowing combined deployment for further gains. 
+
+ 6 Conclusion 
+
+ We presented Kairos , an SLO-aware scheduling system for disaggregated LLM serving that addresses the inefficiencies caused by long-tail request distributions. By leveraging two key observations—the predictability of prefill time and the slack between decode step time and TPOT SLO— Kairos employs urgency-based priority scheduling on the prefill side and slack-guided adaptive batching on the decode side. Experiments show that Kairos demonstrates significant improvements over state-of-the-art baselines in end-to-end SLO, TTFT and TPOT attainment, and decode throughput. 
+
+ References 
+
+ Achiam et al. (2023) 
+ J. Achiam, S. Adler, S. Agarwal, L. Ahmad, I. Akkaya, F. L. Aleman, D. Almeida, J. Altenschmidt, S. Altman, S. Anadkat, et al. 
+
+ Gpt-4 technical report .
+
+ arXiv preprint arXiv:2303.08774 .
+
+ Cited by: §1 ,
+ §1 ,
+ §5 .
+
+ Agrawal et al. (2023) 
+ A. Agrawal, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, and R. Ramjee 
+
+ Sarathi: efficient llm inference by piggybacking decodes with chunked prefills .
+
+ arXiv preprint arXiv:2308.16369 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §3.1 ,
+ §5 .
+
+ Anthropics (2026) 
+ Anthropics 
+
+ Claude-opus-4.7. https://www.anthropic.com/news/claude-opus-4-7 .
+
+ Cited by: §2.2 .
+
+ Bai et al. (2023) 
+ Y. Bai, X. Lv, J. Zhang, H. Lyu, J. Tang, Z. Huang, Z. Du, X. Liu, A. Zeng, L. Hou, Y. Dong, J. Tang, and J. Li 
+
+ LongBench: a bilingual, multitask benchmark for long context understanding .
+
+ External Links: 2308.14508 
+
+ Cited by: §2.2 .
+
+ DeepseekAI (2026) 
+ DeepseekAI 
+
+ DeepSeek-v4-pro. https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro .
+
+ Cited by: §1 ,
+ §2.2 .
+
+ Dexter et al. (2025) 
+ G. Dexter, S. Tang, A. F. Baarzi, Q. Song, T. Dharamsi, and A. Gupta 
+
+ Llm query scheduling with prefix reuse and latency constraints .
+
+ arXiv preprint arXiv:2502.04677 .
+
+ Cited by: §5 .
+
+ Du et al. (2025) 
+ K. Du, B. Wang, C. Zhang, Y. Cheng, Q. Lan, H. Sang, Y. Cheng, J. Yao, X. Liu, Y. Qiao, et al. 
+
+ Prefillonly: an inference engine for prefill-only workloads in large language model applications .
+
+ In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles ,
+
+ pp. 399–414 .
+
+ Cited by: §2.3 .
+
+ Gan et al. (2026) 
+ Z. Gan, Y. Bao, Y. Liu, C. Chen, Q. Chen, and M. Guo 
+
+ SageSched: efficient llm scheduling confronting demand uncertainty and hybridity .
+
+ arXiv preprint arXiv:2603.07917 .
+
+ Cited by: §5 .
+
+ Guo et al. (2023) 
+ Z. Guo, Z. He, and Y. Zhang 
+
+ Mira: a program-behavior-guided far memory system .
+
+ In Proceedings of the 29th Symposium on Operating Systems Principles ,
+
+ pp. 692–708 .
+
+ Cited by: §5 .
+
+ Hu et al. (2024) 
+ C. Hu, H. Huang, J. Hu, J. Xu, X. Chen, T. Xie, C. Wang, S. Wang, Y. Bao, N. Sun, et al. 
+
+ Memserve: context caching for disaggregated llm serving with elastic memory pool .
+
+ arXiv preprint arXiv:2406.17565 .
+
+ Cited by: §5 .
+
+ Ikram et al. (2025) 
+ A. Ikram, X. Li, S. Elnikety, and S. Bagchi 
+
+ Ascendra: dynamic request prioritization for efficient llm serving .
+
+ arXiv preprint arXiv:2504.20828 .
+
+ Cited by: §1 ,
+ §1 .
+
+ Kwon et al. (2023) 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica 
+
+ Efficient memory management for large language model serving with pagedattention .
+
+ In Proceedings of the 29th symposium on operating systems principles ,
+
+ pp. 611–626 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §3.1 ,
+ §3.2 ,
+ §5 .
+
+ Li et al. (2025) 
+ Z. Li, S. Zhang, J. Zhao, S. Li, X. Shi, Y. Zhang, S. Li, D. Yu, Z. Yang, Y. WEN, et al. 
+
+ Spaceserve: spatial multiplexing of complementary encoders and decoders for multimodal llms .
+
+ In The Thirty-ninth Annual Conference on Neural Information Processing Systems ,
+
+ Cited by: §5 .
+
+ Liu et al. (2024) 
+ A. Liu, B. Feng, B. Xue, B. Wang, B. Wu, C. Lu, C. Zhao, C. Deng, C. Zhang, C. Ruan, et al. 
+
+ Deepseek-v3 technical report .
+
+ arXiv preprint arXiv:2412.19437 .
+
+ Cited by: §1 ,
+ §5 .
+
+ MiniMaxAI (2026) 
+ MiniMaxAI 
+
+ MiniMax-m2.5. https://huggingface.co/MiniMaxAI/MiniMax-M2.5 .
+
+ Cited by: §2.2 ,
+ §4.1 .
+
+ Nvidia (2023) 
+ Nvidia 
+
+ TensorRT-llm. https://docs.nvidia.com/tensorrt-llm/index.html .
+
+ Cited by: §5 .
+
+ Nvidia (2026) 
+ Nvidia 
+
+ Nvidia h200. https://www.nvidia.com/en-us/data-center/h200/ .
+
+ Cited by: §4.1 .
+
+ Patel et al. (2024) 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, Í. Goiri, S. Maleki, and R. Bianchini 
+
+ Splitwise: efficient generative llm inference using phase splitting .
+
+ In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) ,
+
+ pp. 118–132 .
+
+ Cited by: §5 ,
+ §5 .
+
+ Shahout et al. (2024a) 
+ R. Shahout, C. Liang, S. Xin, Q. Lao, Y. Cui, M. Yu, and M. Mitzenmacher 
+
+ Fast inference for augmented large language models .
+
+ arXiv preprint arXiv:2410.18248 .
+
+ Cited by: §5 .
+
+ Shahout et al. (2024b) 
+ R. Shahout, E. Malach, C. Liu, W. Jiang, M. Yu, and M. Mitzenmacher 
+
+ Don’t stop me now: embedding based scheduling for llms .
+
+ arXiv preprint arXiv:2410.01035 .
+
+ Cited by: §5 .
+
+ Shan et al. (2018) 
+ Y. Shan, Y. Huang, Y. Chen, and Y. Zhang 
+
+ { \{ legoos } \} : A disseminated, distributed { \{ os } \} for hardware resource disaggregation .
+
+ In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18) ,
+
+ pp. 69–87 .
+
+ Cited by: §5 .
+
+ Singh et al. (2024) 
+ G. Singh, X. Wang, Y. Hu, T. Yu, L. Xing, W. Jiang, Z. Wang, X. Bai, Y. Li, Y. Xiong, et al. 
+
+ Efficiently serving large multimodal models using epd disaggregation .
+
+ arXiv preprint arXiv:2501.05460 .
+
+ Cited by: §5 .
+
+ Srivatsa et al. (2024) 
+ V. Srivatsa, Z. He, R. Abhyankar, D. Li, and Y. Zhang 
+
+ Preble: efficient distributed prompt scheduling for llm serving .
+
+ arXiv preprint arXiv:2407.00023 .
+
+ Cited by: §5 .
+
+ Tao et al. (2025) 
+ Y. Tao, Y. Zhang, M. T. Dearing, X. Wang, Y. Fan, and Z. Lan 
+
+ Prompt-aware scheduling for low-latency llm serving .
+
+ arXiv preprint arXiv:2510.03243 .
+
+ Cited by: §5 .
+
+ Vaswani et al. (2017) 
+ A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin 
+
+ Attention is all you need .
+
+ Advances in neural information processing systems 30 .
+
+ Cited by: §1 .
+
+ Wang et al. (2025) 
+ Y. Wang, Z. Jin, J. Xu, W. Lin, Y. Chen, and W. Chen 
+
+ AugServe: adaptive request scheduling for augmented large language model inference serving .
+
+ arXiv preprint arXiv:2512.04013 .
+
+ Cited by: §5 .
+
+ Wu et al. (2024) 
+ B. Wu, S. Liu, Y. Zhong, P. Sun, X. Liu, and X. Jin 
+
+ Loongserve: efficiently serving long-context large language models with elastic sequence parallelism .
+
+ In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles ,
+
+ pp. 640–654 .
+
+ Cited by: §1 .
+
+ Wu et al. (2023) 
+ B. Wu, Y. Zhong, Z. Zhang, S. Liu, F. Liu, Y. Sun, G. Huang, X. Liu, and X. Jin 
+
+ Fast distributed inference serving for large language models .
+
+ arXiv preprint arXiv:2305.05920 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Zhao et al. (2023) 
+ W. X. Zhao, K. Zhou, J. Li, T. Tang, X. Wang, Y. Hou, Y. Min, B. Zhang, J. Zhang, Z. Dong, et al. 
+
+ A survey of large language models .
+
+ arXiv preprint arXiv:2303.18223 1 ( 2 ), pp. 1–124 .
+
+ Cited by: §1 .
+
+ Zheng et al. (2024) 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, et al. 
+
+ Sglang: efficient execution of structured language model programs .
+
+ Advances in neural information processing systems 37 , pp. 62557–62583 .
+
+ Cited by: §1 ,
+ §2.1 ,
+ §3.1 ,
+ §5 .
+
+ Zhong et al. (2024) 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang 
+
+ { \{ distserve } \} : Disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ pp. 193–210 .
+
+ Cited by: §1 ,
+ §4.1 ,
+ §5 ,
+ §5 .
+
+ Zhu et al. (2025) 
+ R. Zhu, Z. Jiang, C. Jin, P. Wu, C. A. Stuardo, D. Wang, X. Zhang, H. Zhou, H. Wei, Y. Cheng, et al. 
+
+ Megascale-infer: efficient mixture-of-experts model serving with disaggregated expert parallelism .
+
+ In Proceedings of the ACM SIGCOMM 2025 Conference ,
+
+ pp. 592–608 .
+
+ Cited by: §5 .

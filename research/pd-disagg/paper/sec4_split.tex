@@ -1,0 +1,69 @@
+\section{怎么切分与调度}
+\label{sec:split}
+
+\subsection{三条路线，其中两条互斥}
+
+\begin{table}[t]
+\centering
+\caption{切分与调度的三条路线。第一条与第二条互斥：选了 chunked prefill
+就不存在「独立的 prefill 实例」。第三条可与任一叠加。}
+\label{tab:routes}
+\small
+\begin{tabular}{@{}p{1.5cm}p{2.3cm}p{2.4cm}@{}}
+\toprule
+路线 & 做法 & 代表 \\
+\midrule
+不分离 & 把 prefill 切成块，混进 decode 批次 & Sarathi-Serve、vLLM 默认 \\
+显式分离 & P / D 各自独立实例，KV 跨实例搬 & DistServe、SGLang、Mooncake \\
+弹性调整 & 运行时改变 P:D 配比或迁移请求 & FluidPD、Llumnix \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{第一条路线是「不分离」。} Sarathi-Serve 提出 chunked prefill：
+把一次 prefill 拆成若干个 chunk，与 decode 请求拼进同一批。
+这样长 prefill 不会阻塞 decode 的迭代节奏，TTFT 与 TPOT 得以解耦。
+vLLM 在 V1 里把 chunked prefill 设为默认开启（「whenever possible」）
+\texttt{[c-split]}。这条路线的优点是零传输成本，缺点是两阶段仍共享
+同一套配置，第 \ref{sec:why} 节说的三处冲突一个都没解除。
+
+\textbf{第二条是显式分离。} SGLang 用 \texttt{--disaggregation-mode}
+显式指定实例角色：一个进程起 prefill、另一个起 decode，再由 router
+把请求分发到两侧\texttt{[c-split]}。官方文档给出的完整命令中，
+prefill 与 decode 各占一张卡、各用一个端口，router 通过
+\texttt{--prefill} 与 \texttt{--decode} 两个参数知道对端地址。
+
+\textbf{第三条是运行时弹性。} FluidPD 的出发点是一个观察：
+一个此刻配置良好的部署，可能很快变得不匹配，导致延迟 SLO 违例——
+即使别处还有空闲容量\texttt{[c-split]}。它的做法是把一部分 prefill
+计算下放到 decode 实例，从而在不增删实例的前提下改变配比。
+Llumnix 走另一条路：在运行时重调度请求，用于负载均衡以减少抢占
+\texttt{[c-split]}。
+
+\subsection{配比怎么定}
+
+分离之后必须回答一个问题：P 卡与 D 卡按什么比例分配？
+
+DistServe 的答案是把这变成一个优化问题：给定应用的 TTFT 与 TPOT 要求，
+有效的服务系统应当在满足两个 SLO 的前提下最大化\textbf{goodput}
+（满足 SLO 的请求吞吐）\texttt{[c-split]}。配比是这个优化问题的解，
+不是拍出来的。
+
+这一点值得强调，因为它解释了为什么「P:D = 1:1」这类经验值经常失效：
+最优配比随负载的输入输出长度比、随 SLO、随模型而变。
+固定配比在负载漂移后就不再最优，这正是 FluidPD 与 Llumnix 存在的理由。
+
+\subsection{小结：怎么选}
+
+\begin{itemize}[leftmargin=1.3em,itemsep=1.5pt,topsep=2pt]
+  \item 单机、模型能塞进单卡或同机多卡、上下文不长
+        $\rightarrow$ 先用 chunked prefill，零传输成本。
+  \item 两阶段最优配置明显冲突（长输入 + 大 batch decode）
+        且同机有 NVLink $\rightarrow$ 显式分离，收益最容易兑现。
+  \item 负载随昼夜或业务波动大 $\rightarrow$ 在分离之上加弹性，
+        否则配比会持续失配。
+\end{itemize}
+
+这个顺序有实际意义：分离的复杂度（多实例、router、KV 连接器、
+故障域变大）远高于 chunked prefill。先用低成本手段拿掉大部分收益，
+再考虑是否值得为剩余部分付出复杂度。

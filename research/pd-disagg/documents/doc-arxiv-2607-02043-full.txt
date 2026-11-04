@@ -1,0 +1,1127 @@
+Towards Load-Aware Prefill Deflection for Disaggregated LLM Serving 
+
+ Shrikara Arun
+
+ Affiliation:  Microsoft 
+
+ email: t-sarun@microsoft.com 
+
+ , 
+ Anjaly Parayil
+
+ Affiliation:  Microsoft 
+
+ email: aparayil@microsoft.com 
+
+ , 
+ Srikant Bharadwaj
+
+ Affiliation:  Microsoft 
+
+ email: srikant.bharadwaj@microsoft.com 
+
+ , 
+ Renee St. Amant
+
+ Affiliation:  Microsoft 
+
+ email: reneestamant@microsoft.com 
+
+ and 
+ Victor Rühle
+
+ Affiliation:  Microsoft 
+
+ email: virueh@microsoft.com 
+
+ Abstract. 
+
+ Disaggregated LLM serving runs prefill and decode on separate GPU pools to keep the two phases from interfering. In practice, this creates a new asymmetry: under bursty, heavy-tailed workloads prefill nodes saturate while decode nodes have compute underutilized, and on a production-style
+A100 cluster with 2 prefill and 2 decode nodes (2P2D), we find that prefill execution accounts for only 2-23% of P95 Time-to-First-Token (TTFT). Queuing and inter-node GPU-GPU KV-cache transfer account for the rest. 
+
+ We present a proactive prefill-deflecting scheduler that lets decode nodes serve prefill phase of requests as chunked-prefill steps interleaved with their in-flight decode batches. For each queued request, we estimate the TTFT it would see on the prefill node, and on every decode node, search for the largest chunk schedule that keeps in-flight decodes within their Time-Between-Tokens (TBT) SLO, and deflect when the decode path helps tail latency.
+Because the prefill phase of deflected requests runs in place on the decode node, the inter-node KV transfer is eliminated. Implemented on vLLM and evaluated on production-style traces with DeepSeek-V2-Lite, our approach reduces P95 TTFT by upto 81% and raises SLO attainment by upto 79% over state-of-the-art disaggregated schedulers, at sub-millisecond per-request routing cost. 
+
+ 1. Introduction 
+
+ Large language model (LLM) inference has become a dominant datacenter workload, and
+serving it efficiently at scale demands careful management of both latency and throughput. Modern production systems increasingly use disaggregated inference: prefill and decode are executed on separate GPU node pools, allowing each phase to scale independently and eliminating the GPU contention that arises when both phases compete on the same hardware  ( Patel et al., 2024 ; Zhong et al., 2024 ; Qin et al., 2024 ) . 
+
+ Prefill nodes become the critical bottleneck. 
+In a disaggregated cluster, prefill nodes bear the full cost of processing incoming prompts before any token is generated. Under realistic workloads where prompt lengths are heavy-tailed and request arrivals are bursty, prefill nodes saturate and requests queue while decode nodes have idle compute capacity. Meanwhile, decode nodes sit underutilized. The decode phase itself is memory-bound, leaving some compute on the table and disaggregated serving never utilizes this headroom.
+Previous works such as Splitwise  ( Patel et al., 2024 ) , DistServe  ( Zhong et al., 2024 ) , Mooncake  ( Qin et al., 2024 ) , and TetriInfer  ( Hu et al., 2024 ) all share this design. On a cluster with 2 prefill and 2 decode nodes (2P2D), running representative production-style workloads, we find that prefill execution itself accounts for only 2-23% of P95 TTFT with the rest being prefill queuing wait and inter-node GPU-GPU KV-cache transfer (§ 3 , Table  3 ). The result is that queue size grows on prefill nodes, especially during bursts of arrivals, while decode node compute which could be used to alleviate the pressure is underutilized. Rerouting the prefill phase of requests to the decode node also has the added benefit of removing the need for KV cache transfer, since the cache is built directly on the decode node. This is especially effective during bursts of requests, when transfer is choked. 
+
+ Decode nodes can absorb prefill work, if routed with TBT-awareness. 
+A decode node is assigned only the output token generation phase by design of disaggregation, and is not configured to function as a Sarathi-style ( Agrawal et al., 2024a ) chunked-prefill colocated serving. However, the assignment of prefill requests to the decode node must be such that the utilization of idle compute is not at the cost of worsening service for existing decodes by violating their time-between-tokens (TBT) Service Level Objective (SLO) or by significantly worsening TTFT due to chunking overhead. Sarathi handles the competing TTFT and TBT SLOs by choosing a suitable chunk size, the total number of tokens in a batch and prioritizing decodes over prefills. This chunk size is fixed throughout execution in Sarathi-style serving. In reality, the state of the decode node may change drastically over time due to the bursty nature of arrivals, and thus may require different chunk sizes at different times ( Agrawal et al., 2024b ) .
+The key question is: given an incoming request, can we deflect it to a decode node without violating SLOs? 
+
+ Answering this question requires three pieces of information that are all computable at scheduling time: (1) the expected TTFT if the request stays on the prefill node, given current queue depth and request order, (2) the time to complete prefill phase of the request on decode node for a sequence of safe chunk sizes (3) the TBT headroom available on each decode node. Kairos computes all three and makes the deflecting decision in less than a millisecond. 
+
+ Kairos : time-aware prefill deflection. 
+We present 
+ Kairos , a proactive scheduling framework for disaggregated LLM serving that reroutes prefill phase of requests to decode nodes when doing so improves tail TTFT without violating TBT SLO. For each request in the prefill phase, Kairos estimates its TTFT under the current prefill schedule. Concurrently, for every decode node in the cluster, it sweeps over a set of candidate chunk size sequence (chunk sizes for each step of the prefill phase) and models resulting per-step latency. For each (node, chunk size sequence) pair, Kairos checks two conditions: (i) TBT safety: does adding a chunked prefill to the decode node’s batch increase any in-flight decode request’s step latency beyond its TBT SLO? and (ii) TTFT effect: is the projected TTFT for serving a request on the decode node less than α \alpha times the projected TTFT on the prefill node? If both conditions hold, Kairos deflects prefill phase of a request to the decode node and executes it at a specific chunk-size schedule as decided by Kairos ; otherwise the request gets routed to a prefill node. The parameter α ≥ 1 \alpha\geq 1 is a single operator-tunable knob: α = 1 \alpha=1 deflects only when the decode path is strictly faster while α > 1 \alpha>1 permits a bounded TTFT regression for the deflected request when doing so relieves the prefill queue for requests behind it (all within the request’s own TTFT SLO).
+The design requires only one-time deployment-time profiling, no changes to the model, and a light per-request scheduling computation at the prefill dispatcher. 
+
+ Contributions This paper makes the following contributions: 
+
+ • 
+
+ A motivating characterization of prefill-node bottlenecks 
+(§ 3 ). We show on a normalized production trace
+that under bursty arrival patterns, prefill queuing and KV cache transfer dominates P95 TTFT even at moderate load, while decode nodes carry spare compute capacity. We also show that static policies based on thresholds leave performance on the table. 
+
+ • 
+
+ A TBT safety model for mixed prefill-decode batches 
+(§ 4 ). We derive an analytical model that predicts per-step latency on a decode node as a function of in-flight decode batch size, KV cache occupancy, and added prefill chunk size. This model enables the chunk-size sweep at low cost and without live inference trials. 
+
+ • 
+
+ A time-aware deflection decision algorithm (§ 4 ). For each request in the prefill phase, Kairos (i) estimates TTFT on the prefill node, (ii) sweeps (decode node, chunk size schedule) pairs to find TBT-safe configurations, and (iii) deflects if the best decode-node TTFT is below α \alpha times the prefill-node TTFT. 
+
+ • 
+
+ A full system implementation on vLLM (§ 5 ). Kairos is implemented on top of vLLM 0.18.1 ( Kwon et al., 2023 ) with approximately 2000 lines of Python code. The per-request scheduling overhead is less than 1 ms. 
+
+ • 
+
+ An evaluation (§ 6 ) on production derived trace from Company X, showing P95 TTFT improvement of upto 81%, and upto 79% higher SLO attainment under bursty load compared to state-of-the-art disaggregated schedulers. 
+
+ Code for Kairos is available at 
+ https://github.com/sudokara/Kairos . 
+
+ 2. Background 
+
+ 2.1. LLM Inference: Prefill and Decode 
+
+ Modern LLM inference splits each request into two computational phases with very
+different resource profiles. 
+
+ Prefill processes the full input prompt in a single forward pass, computing
+attention over all input tokens in parallel. It is compute-bound 
+, and its duration scales primarily with prompt length. The output of the prefill is the KV
+cache (key/value activations for every layer and token) plus the first generated token. 
+
+ Decode generates output tokens autoregressively, one per forward pass, attending
+over all previously generated tokens. It is memory-bandwidth bound: each step reads the full KV cache but performs little new compute. Per-step
+latency typically depends on batch size and aggregate KV-cache size. 
+
+ Prefill is short and compute-intensive while decode is long and memory-intensive. Running
+both on the same GPU forces them to share resources that they each under use, which is the
+basic motivation for disaggregated serving. 
+
+ 2.2. Disaggregated Serving 
+
+ Disaggregated serving runs prefill and decode on dedicated GPU node pools, transferring the KV between instances when a request transitions from prefill to decode.
+The canonical designs Splitwise ( Patel et al., 2024 ) , DistServe ( Zhong et al., 2024 ) , Mooncake ( Qin et al., 2024 ) , and TetriInfer ( Hu et al., 2024 ) differ in placement policy, KV-cache management, and hardware heterogeneity, but all share the assumption that a request that arrives at a prefill node stays there until prefill completes, after which its KV cache is shipped to a decode node.
+For disaggregated serving, KV cache transfer is on the critical path, and TTFT includes processing on prefill node, KV cache transfer and the return of the first token from the decode node ( NVIDIA, 2026b ) . 
+
+ Kairos relaxes this assumption. We allow a request’s prefill phase to execute on a decode node as chunked-prefill steps interleaved with the node’s ongoing decode batches, exploiting decode-side compute slack that is typically unused. The remainder of this section defines the terms we use throughout the paper. We validate that decode nodes are underutilized and can accept chunked prefill steps within TBT SLO in § 3 , and detail our design in § 4 . 
+
+ 2.3. Chunked Prefill 
+
+ Chunked prefill processes a request’s prompt in bounded-size chunks across multiple batch steps rather than in a single forward pass. The maximum number of tokens processed per step is the chunk size χ \chi . Sarathi ( Agrawal et al., 2024a ) introduced chunked prefill to mitigate prefill-decode interference in colocated (aggregated) serving. By capping χ \chi per step, decode steps in the same batch see bounded latency inflation, preserving inter-token latency for in-flight decodes. Kairos uses chunked prefill as the mechanism for executing deflected requests on decode nodes, but the per-request, state-aware χ \chi selection it requires is what sets it apart from Sarathi’s fixed- χ \chi colocated setting (see § 8 ). 
+
+ 2.4. Terminology 
+
+ We use the terms in the following table throughout the paper: 
+
+ Term | 
+
+ Definition 
+ | 
+
+ TTFT | 
+
+ Time-to-first-token: latency from request arrival to first output token delivered to user. 
+ | 
+
+ TBT | 
+
+ Time-between-tokens: per-step decode latency seen by in-flight requests. 
+ | 
+
+ SLO | 
+
+ Service-level objective; a per-metric latency target (e.g., 4 s P95 TTFT, 70 ms TBT). 
+ | 
+
+ Chunked prefill | 
+
+ Processing a prompt in bounded-size chunks across multiple batch steps. 
+ | 
+
+ Chunk size ( χ \chi ) | 
+
+ Maximum tokens processed per batch step. 
+ | 
+
+ Deflection | 
+
+ Routing a request in the prefill phase to a decode node to execute via chunked prefill. 
+ | 
+
+ τ \tau | 
+
+ TBT SLO 
+ | 
+
+ α \alpha | 
+
+ TTFT margin for the deflection condition: deflect when 𝑇𝑇𝐹𝑇 ^ dec ≤ α ⋅ 𝑇𝑇𝐹𝑇 ^ pf \widehat{\mathit{TTFT}}_{\mathrm{dec}}\leq\alpha\cdot\widehat{\mathit{TTFT}}_{\mathrm{pf}} , with α ≥ 1 \alpha\geq 1 . 
+ | 
+
+ β \beta | 
+
+ TBT error margin when calculating chunk schedule, T s ​ t ​ e ​ p ≤ β × τ T_{step}\leq\beta\times\tau 
+ | 
+
+ 3. Empirical Study 
+
+ Every experiment in this section uses request traces derived from a large-scale production LLM serving deployment. We replay all traces against DeepSeek-V2-Lite with a comparable architecture (Mixture of Experts (MoE)) to the proprietary model in the deployment. Token counts are normalized to DeepSeek-V2-Lite’s 32K context window while preserving the original prompt-to-completion ratio. After normalization, prompt token counts (P25 / median / P90) are 2,071 / 3,569 / 10,336 and completion token counts are 21 / 50 / 163, and median prefill-to-decode (P:D) ratio is 69.7 69.7 . This places the workload in the regime where disaggregated serving is expected to pay off. NVIDIA Dynamo  ( NVIDIA, 2026a ) recommends disaggregation once the P:D ratio exceeds 8 : 1 8{:}1 (assuming RDMA availability). 
+
+ Workload stratification: 
+We stratify requests from the production trace into high ( > > P90) and low ( < < P25) buckets for both prompt and completion lengths, yielding four workloads (Table  1 ) with Poisson arrivals: LPLD, LPHD, HPLD, HPHD. To capture realistic temporal dynamics we add a fifth workload, Bursty, constructed directly from the long tailed production token distribution with a Gamma distributed inter-arrival process. These five workloads map to real-world scenarios such as conversational (LPHD), code completion (HPLD), retrieval augmented summarization (HPHD) and let us isolate the effect of each phase on cluster behavior. 
+
+ Unless noted, all experiments use the cluster described in § 5 : 2 prefill + 2 decode nodes (2P2D), each an NVIDIA A100 80 GB. 1 1 
+ 1 
+
+ We compared 2P2D against 1P3D and 3P1D on the Bursty workload: 1P3D saturates the single prefill node (median prefill queue > > 2 × \times 2P2D), while 3P1D is capacity-limited on the single decode node, where KV-cache occupancy forces transfer back-pressure and inflates end-to-end TTFT. 2P2D balances both pressures and is the configuration where the prefill → \rightarrow decode imbalance we study is clearest; we revisit alternative ratios in § 6 . 
+
+ Table 1 . Workload characteristics. Each row is one of the five workloads used throughout § 3 and is from normalized production trace of Company X. 
+
+ Workload | 
+ Abbrev. | 
+
+ Median 
+
+ prompt 
+ | 
+
+ Median 
+
+ completion 
+ | 
+
+ RPS 
+ | 
+
+ Median 
+
+ P:D ratio 
+ | 
+
+ Low prompt, low decode | 
+ LPLD | 
+ 842 | 
+ 15 | 
+ 22 | 
+ 61.46 | 
+
+ Low prompt, high decode | 
+ LPHD | 
+ 998 | 
+ 191 | 
+ 20 | 
+ 4.99 | 
+
+ High prompt, low decode | 
+ HPLD | 
+ 14,013 | 
+ 9 | 
+ 1 | 
+ 1482.89 | 
+
+ High prompt, high decode | 
+ HPHD | 
+ 13,968 | 
+ 198 | 
+ 1 | 
+ 66.53 | 
+
+ Long-tailed, bursty | 
+ Bursty | 
+ 3,569 | 
+ 50 | 
+ 4 | 
+ 69.67 | 
+
+ 3.1. P95 TTFT Breakdown 
+
+ From § 2 , we know that prefill is compute-bound and decode is memory-bandwidth-bound. We measure the extent to which this difference is exhibited across the different workloads. We also examine a breakdown of P95 TTFT to understand the main bottlenecks driving tail latency. 
+
+ We run each workload of Table  1 to steady state on the 2P2D cluster and collect (i) per-node SM, Tensor Core, and HBM bandwidth utilization via NVIDIA Nsight Systems (Table  2 ) and (ii) per-request P95 TTFT breakdown into prefill queue wait, prefill execution, KV-cache transfer, and decode queue wait
+(Table  3 ). 
+
+ Table 2 . Steady-state utilization on prefill vs. decode instances. 
+SM and TC are active-cycle %; BW is DRAM bandwidth (R = read, W = write)
+expressed as % of the A100’s 2 TB/s peak. Mean ± \pm s.d. 
+
+ | 
+ Prefill Instance | 
+ Decode Instance | 
+
+ Workload | 
+ SM (%) | 
+ TC (%) | 
+ BW R/W (% peak) | 
+ SM (%) | 
+ TC (%) | 
+ BW R/W (% peak) | 
+
+ LPLD | 
+ 76.3 ± \pm 7.5 | 
+ 43.2 ± \pm 5.4 | 
+ 1.58 / 0.18 | 
+ 15.5 ± \pm 2.1 | 
+ 1.9 ± \pm 0.2 | 
+ 0.63 / 0.05 | 
+
+ LPHD | 
+ 75.0 ± \pm 7.9 | 
+ 42.7 ± \pm 5.1 | 
+ 1.49 / 0.19 | 
+ 26.4 ± \pm 13.8 | 
+ 5.6 ± \pm 4.8 | 
+ 0.96 / 0.05 | 
+
+ HPLD | 
+ 83.9 ± \pm 2.0 | 
+ 48.6 ± \pm 1.8 | 
+ 0.97 / 0.28 | 
+ 7.5 ± \pm 0.5 | 
+ 1.2 ± \pm 0.1 | 
+ 0.28 / 0.05 | 
+
+ HPHD | 
+ 82.5 ± \pm 6.7 | 
+ 47.7 ± \pm 4.4 | 
+ 0.97 / 0.27 | 
+ 16.8 ± \pm 2.6 | 
+ 2.1 ± \pm 0.2 | 
+ 0.64 / 0.05 | 
+
+ Bursty | 
+ 79.6 ± \pm 8.4 | 
+ 45.8 ± \pm 5.7 | 
+ 1.08 / 0.25 | 
+ 16.4 ± \pm 3.8 | 
+ 2.0 ± \pm 0.4 | 
+ 0.66 / 0.05 | 
+
+ Claim 1: utilization is complementary and accentuated by some workloads. 
+Across every workload, prefill SM utilization is 75-84% while decode SM utilization never exceeds 27%. Within that pattern, both sides show a mild but consistent workload dependence. On the prefill side, long-prompt workloads (HPLD, HPHD) push SM utilization to 83-84% compared to the 75-76% of short-prompt workloads because the per-step GEMMs grow with sequence length and operate closer to roofline. On the decode side, SM utilization tracks the concurrent decode batch size and cache length: LPHD with short prefills feeding long decodes at a high RPS sustains the most simultaneous decode streams and reaches 26% SM utilization, while HPLD with long prefills feeding short decodes at a low 1 RPS leaves the decode batch nearly empty and has only 7.5% SM utilization. The gap is widest in HPLD (84% vs. 7.5%).
+Bandwidth shows a similar trend, prefill nodes use under 1.6% of HBM peak, confirming compute-boundedness, and decode nodes use under 1%, where the limit is not raw bandwidth but the per-step O ⁡ ( K ) O(K) KV-cache reads on small decode batches that leave SMs idle. 
+
+ Claim 2: prefill compute is not the bottleneck for tail TTFT. 
+Table  3 decomposes P95 TTFT into its four constituents. Prefill execution accounts for only 2-23% of P95 TTFT and the remaining 77-98% is queue wait and KV-cache transfer. 
+
+ For High P workloads (1 RPS), long prompts (approximately 14K tokens) result in significant prefill queueing delays, reaching hundreds of milliseconds per engine, even with two prefill instances. KV cache transfer further contributes over 1.5 seconds at P95, with HPHD reaching up to 3.5 seconds due to memory pressure on decode nodes. 
+
+ In Low P workloads, prefill queueing is substantially lower (P95 queue wait below 60 ms), yet end-to-end TTFT remains high (P95: 6.2s for LPLD and 7.8s for LPHD). This is primarily driven by decode-side congestion at higher request rates. KV cache transfer latency can reach up to 4.2s at P95 for LPLD. 
+
+ The bursty workload exhibits both effects simultaneously: prefill queueing spikes to 840 ms, while KV cache transfer times reach 2.1s at P95 during traffic bursts.
+In all workloads, P95 TTFT is bottlenecked by queueing + KV cache transfer and not actual prefill computation. 
+
+ Table 3 . P95 TTFT breakdown. Prefill execution is 2–23% of end-to-end
+TTFT across all five workloads; prefill queue wait and inter-node KV-cache transfer
+account for the rest. Both are scheduling artifacts that deflection can eliminate. 
+
+ Workload | 
+ Prefill queue P95 (ms) | 
+ Prefill exec P95 (ms) | 
+ KV transfer P95 (ms) | 
+ Decode queue P95 (ms) | 
+
+ End-to-end 
+
+ TTFT P95 (ms) 
+ | 
+
+ LPLD | 
+ 59.2 | 
+ 191.4 | 
+ 4,205.4 | 
+ 54.5 | 
+ 6,278.8 | 
+
+ LPHD | 
+ 54.4 | 
+ 177.0 | 
+ 1,428.9 | 
+ 58.6 | 
+ 7,876.1 | 
+
+ HPLD | 
+ 655.3 | 
+ 1,340.2 | 
+ 1,723.4 | 
+ 37.4 | 
+ 5,781.5 | 
+
+ HPHD | 
+ 349.6 | 
+ 1,222.8 | 
+ 3,584.6 | 
+ 55.4 | 
+ 6,292.0 | 
+
+ Bursty | 
+ 840.8 | 
+ 1,070.1 | 
+ 2,175.6 | 
+ 55.6 | 
+ 7,893.9 | 
+
+ Insight 1. Prefill compute consumes only 2-23% of P95 TTFT with the remaining
+77-98% being prefill queue wait and inter-node KV-cache transfer. Deflecting some prefills to decode nodes can take advantage of idle SMs and an execution path that builds the KV cache in place. 
+
+ 3.2. Q2: Is There Exploitable Slack on Decode Nodes Without Violating SLO on TBT? 
+
+ Next,
+we quantify how much spare compute on decode nodes can be exploited for prefill work before decode latency degrades beyond acceptable limits. 
+
+ Methodology: 
+We perform a controlled microbenchmark in which we fix a decode batch of size B B , with each decode request having K K cached tokens, where K K corresponds to the median prompt length of the workload (Table  1 ). We then inject chunked prefill tokens, increasing the total tokens processed per batch to χ \chi , and measure the resulting step latency increase Δ ​ T step ​ ( χ ) \Delta T_{\mathrm{step}}(\chi) across five successive chunks. Each successive chunk adds χ − B \chi-B prefill tokens while retaining B B decode tokens, enabling us to isolate the incremental impact of prefill injection on decode latency. 
+
+ We sweep batch size B ∈ { 4 , 8 , 16 , 32 } B\in\{4,8,16,32\} , cached context length K ∈ { 842,998 , 14013 , 13968 , 3569 } K\in\{842,998,14013,13968,3569\} tokens, and total batch tokens χ ∈ { 128,256,512 , 1024 , 2048 } \chi\in\{128,256,512,1024,2048\} to comprehensively characterize the trade-offs. 
+
+ Figure 1 . Decode step latency increase from chunked prefill injection. Step latency remains flat ( Δ ​ T step ≤ \Delta T_{\mathrm{step}}\leq 30 ms) for chunk sizes up to 512 512 tokens across all workloads and batch sizes. 
+
+ Figure  1 shows the step latency increase as a function of the chunk index for different values of χ \chi and B B . For χ ≤ 512 \chi\leq 512 , adding prefill tokens to the decode batch increases step latency by at most 30 ms across all tested workloads and batch sizes. This is because decode is memory bandwidth bound, the GPU stalls waiting for HBM reads, and small prefill chunks fill idle compute units without extending the memory bound critical path. However, for higher chunk sizes χ = 1024 \chi=1024 and χ = 2048 \chi=2048 , the additional computation leads to a non negligible increase in batch time over smaller chunk sizes. We see that the absolute increase for these chunk sizes depends on the workload regime. For low prefill workloads (thus having fewer cached tokens for running decode requests), Δ ​ T step \Delta T_{\mathrm{step}} for the first chunk is ≈ 30 \approx 30 ms. For bursty workloads and those with high prefill, this value is upto ≈ 50 \approx 50 ms. Thus, to utilize χ ≥ 1024 \chi\geq 1024 for the first chunk, we must have knowledge of the amount of prefill cached tokens, indicating the regime we are operating in. 
+
+ As expected, higher batch sizes show higher Δ ​ T step \Delta T_{\mathrm{step}} . This effect is more pronounced at higher chunk sizes ( χ ≥ 1024 \chi\geq 1024 ), later chunks and workloads with high prefill cached tokens (HPHD, HPLD). 
+
+ When the prefill length exceeds χ − B \chi-B , multiple chunks are required. Each successive chunk adds at least χ − B \chi-B cached prefill tokens, progressively increasing latency. While small chunks ( χ ≤ 512 \chi\leq 512 ) show minimal growth across chunks, larger chunks ( χ = 1024 , 2048 \chi=1024,2048 ) accumulate substantial overhead, reaching up to 250 ms by the fifth chunk for χ = 2048 \chi=2048 . 
+
+ Since later chunks are more expensive, an effective strategy is to adapt chunk sizes dynamically using larger chunks early and smaller chunks later. For example, with a 50 ms TBT headroom in bursty workloads, the first chunk can use χ = 1024 \chi=1024 , while subsequent chunks must reduce to χ ≤ 512 \chi\leq 512 to remain within budget. 
+
+ For the workloads in Table 1 , we find that actual TBT is well below the 70 ms SLO: P50 TBT ranges from 49 ms (HPLD) to 53 ms (bursty), leaving 17-21 ms of headroom at the median. Figure 1 shows that several chunks can be processed with this amount of headroom, using even χ = 1024 \chi=1024 in some cases. Deflection allows requests to bypass the prefill queue and KV cache transfer time. Since these are significant contributors to TTFT, as shown in Table 3 , deflecting requests can dramatically reduce tail TTFT. For High P workloads (HPLD/HPHD), the advantage lies in reducing strain on prefill instances, while for Low P workloads (LPLD/LPHD) deflection offers an alternative prefill pathway. In both cases, the load on prefill instances are reduced and compute utilization of decode instances increase. Deflection also helps smooth out bursts of arrivals through this alternative prefill pathway. 
+
+ Insight 2: Small prefill chunks can be safely deflected without violating TBT but larger chunks require workload-aware control necessitating adaptive chunking. Deflection reduces queueing and KV transfer overhead, significantly improving tail TTFT. 
+
+ 3.3. Mechanism: Predicting Step Latency 
+
+ § 3.2 established that decode-node slack is exploitable, but a safe chunk size depends on the in-flight decode batch, the KV occupancy, the chunk index within the prefill, and the workload regime. A practical deflection scheduler therefore cannot commit to a fixed chunk size. For every candidate (decode node, chunk size) pair it needs to predict whether the resulting step would violate TBT before dispatching. Running live trials per request is infeasible and wasteful, necessitating a closed-form predictor. 
+
+ Analytical models: 
+We build three analytical step-latency predictors, one for prefill batches, one for decode batches, and one for mixed batches, plus a transfer-time model for inter-node KV migration.
+All predictors require only a one-time profiling for a model-hardware combination. On held-out traces from Table  1 , both step-latency predictors achieve MAPE < 10 % <10\% , which is sufficient for ranking (chunk size, decode node) pairs reliably. Kairos uses these predictors at scheduling time (§ 4 ). More details are in § 5.2 . 
+
+ Simulator. 
+We wrap the three predictors in an event-based simulator with support for PD disaggregation. We use this simulator to evaluate static deflection policies in § 3.4 . 
+
+ 3.4. Q3: Do Static Deflection Policies Suffice, or Do They Cause SLO Violations Under Bursty Workloads? 
+
+ Figure 2 . Comparison of static deflection policies. Oracle and SL( ℓ = 2048 \ell=2048 ) are the only policies within TTFT SLO, with Oracle having higher throughput and SLO attainment and no TBT violations. Static deflection policies perform poorly, and motivate runtime deflection decisions. 
+
+ Given a per-request step-latency predictor (§ 3.3 ), we imagine an Oracle scheduler which sweeps every (decode node, chunk size) pair for every request in the prefill phase, using the predictors to estimate TTFT and TBT impact and deflects if a TBT-safe pair beats the prefill node. The Oracle scheduler has perfect knowledge of the system state since the simulator uses the same analytical models to determine batch time as Oracle does. Oracle is not a deployable system since it uses simulator-side state as both ground truth and decision input, but it tells us the headroom an ideal predictor-driven policy would unlock. The question we seek to answer is whether we actually need runtime per-request deflection decisions or static policies would suffice. 
+
+ Policies evaluated. 
+
+ • 
+
+ Baseline : regular P/D disaggregation, no deflection. 
+
+ • 
+
+ Static-queue (SQ( θ \theta )) : deflect to a decode node when prefill queue length exceeds θ \theta on all prefill nodes; fixed chunk size χ = 128 \chi=128 . 
+
+ • 
+
+ Static-length (SL( ℓ \ell )) : deflect every request with prompt length < ℓ <\ell tokens; fixed chunk size χ = 128 \chi=128 . 
+
+ • 
+
+ Oracle : per-request TBT-safe chunk-size sweep using the § 3.3 predictors with simulator-side state as ground truth. 
+
+ Results. 
+Table  4 summarizes every policy on the Bursty workload and describes how many requests were deflected, whether it meets the 4 s P95 TTFT SLO, and the rate of violation of the 70 ms TBT SLO. Oracle is the only policy that meets both SLOs simultaneously (P95 TTFT 2.6 s, 0% TBT violations); SL( ℓ = 2048 \ell=2048 ) is the only static policy within the TTFT SLO but pays for it with a 1.5% TBT violation rate. Figure  2 summarizes the same. 
+
+ Table 4 . Static deflection policies vs. Oracle on the Bursty workload. Deflection count and P95 TTFT are absolute; TBT violation rate is the fraction of decode steps exceeding the 70 ms TBT SLO; SLO attainment is the fraction of requests meeting both the TTFT and TBT SLOs. The two failure regimes are under-deflection (SQ, SL( ℓ ≤ 1024 \ell\leq 1024 )) and over-deflection (SL( ℓ = 2048 \ell=2048 )). 
+
+ Policy | 
+
+ Deflections 
+ | 
+
+ P95 TTFT 
+
+ (s) ↓ \downarrow 
+ | 
+
+ TBT viol. 
+
+ (%) ↓ \downarrow 
+ | 
+
+ SLO attain. 
+
+ (%) ↑ \uparrow 
+ | 
+
+ Baseline 
+
+ (no deflection) 
+ | 
+ 0 | 
+ 4.5 | 
+ 0.0 | 
+ 88.0 | 
+
+ SQ( θ = 1 \theta=1 ) | 
+ 7 | 
+ 4.2 | 
+ 1.0 | 
+ 91.7 | 
+
+ SQ( θ = 4 \theta=4 ) | 
+ 0 | 
+ 4.5 | 
+ 0.0 | 
+ 88.0 | 
+
+ SL( ℓ = 512 \ell=512 ) | 
+ 3 | 
+ 4.5 | 
+ 0.0 | 
+ 88.0 | 
+
+ SL( ℓ = 1024 \ell=1024 ) | 
+ 151 | 
+ 4.1 | 
+ 0.0 | 
+ 94.1 | 
+
+ SL( ℓ = 2048 \ell=2048 ) | 
+ 298 | 
+ 3.6 | 
+ 1.5 | 
+ 95.1 | 
+
+ Oracle | 
+ 251 | 
+ 2.6 | 
+ 0.0 | 
+ 99.5 | 
+
+ From Table 4 , we see that SQ( θ = 4 \theta=4 ), SL( ℓ = 512 \ell=512 ), and SL( ℓ ≤ 1024 \ell\!\leq\!1024 ) all under-deflect (0-151 requests deflected), leaving TTFT gains on the table. SL( ℓ = 2048 \ell=2048 ) on the other hand deflects more requests (298) than Oracle by sending longer prompts to decode nodes regardless of in-flight decode state, inflating mixed-batch step latency past 70 ms 1.5% of the time. SQ( θ = 1 \theta=1 ) deflects only when bursts arrive. Therefore, by the time it fires, the decode nodes already have full batches, and the prefill queue is empty, leaving the decode node to service both the burst’s prefill chunks and its decodes. 
+
+ Static policies involve setting inflexible thresholds, such as ℓ \ell or θ \theta . This can lead to limited improvement over traditional P/D disaggregation through missed opportunities for deflection or increased violation due to limited knowledge of the state of the instances and workload characteristics. Thus, an effective policy is a per-request predictor. 
+
+ Insight 3. Static policies are not ideal for deflection decisions. Under-deflection misses the bulk of Oracle’s TTFT gain (up to 36% on Bursty) and over-deflection violates TBT. The right deflection decision depends on the request, node state, and workload characteristics and necessitates per-request scheduling driven SLO-aware step-latency models. 
+
+ 4. System Design 
+
+ Based on insights from § 3 , we design Kairos with a scheduling layer that dispatches incoming requests to an appropriate node by computing a TBT safe chunked-prefill schedule on a decode node if deflection is feasible and beneficial to tail TTFT. 
+
+ 4.1. Architecture Overview 
+
+ Kairos adds a thin scheduling layer at the prefill dispatcher (Figure  3 ). When a request joins the prefill queue, the dispatcher invokes the Deflection Decision algorithm (Algorithm  1 ) and either (a) sends the request to a prefill node (the default disaggregated path) or (b) deflects it to a decode node, where the prompt is processed as chunked-prefill steps along with the node’s ongoing decode phase requests. The decision depends on two predictors - a Prefill-Node TTFT Estimator (§ 4.2 ) and a Decode-Node Feasibility Checker (§ 4.3 ) which use the step-latency models described in § 3.3 . The model and inference kernels are unmodified and the dispatcher needs only a one-time per-hardware step-latency characterization. 
+
+ Figure 3 . Kairos architecture. 
+
+ 4.2. Prefill-Node TTFT Estimator 
+
+ For a request r r with prompt length ℓ r \ell_{r} arriving at the prefill dispatcher, Kairos estimates projected TTFT if it stayed on the assigned prefill node: 
+
+ (1) | 
+ | 
+ 𝑇𝑇𝐹𝑇 ^ pf ​ ( r ) = W queue ​ ( r ) + T pf ​ ( r ) \widehat{\mathit{TTFT}}_{\mathrm{pf}}(r)\;=\;W_{\mathrm{queue}}(r)+T_{\mathrm{pf}}(r) | 
+ | 
+
+ Queue wait: We assume FIFO scheduling on the prefill node, similar to the default vLLM scheduler and most production disaggregated deployments.
+Given the queue state [ ℓ 1 , … , ℓ k ] [\ell_{1},\ldots,\ell_{k}] of prompt lengths ahead of r r , the prefill node chunk size χ p \chi_{\mathrm{p}} , the waiting time is the product of the number of chunks and the average chunk execution time considering half of outstanding prefill tokens as cached in every step: 
+
+ (2) | 
+ | 
+ W queue ​ ( r ) = ∑ i = 1 k ℓ i χ p × T s ​ t ​ e ​ p ​ ( χ p , ∑ i = 1 k ℓ i 2 ) W_{\mathrm{queue}}(r)=\frac{\sum_{i=1}^{k}\ell_{i}}{\chi_{\mathrm{p}}}\times T_{step}\left(\chi_{\mathrm{p}},\frac{\sum_{i=1}^{k}\ell_{i}}{2}\right) | 
+ | 
+
+ Prefill execution time. For a request of prompt length ℓ r \ell_{r} : 
+
+ (3) | 
+ | 
+ T pf ​ ( r ) = ∑ i = 0 i = ⌈ ℓ r χ p ⌉ T s ​ t ​ e ​ p ​ ( χ p , χ p × i ) T_{\mathrm{pf}}(r)=\sum_{i=0}^{i=\lceil\frac{\ell_{r}}{\chi_{p}}\rceil}{T_{step}(\chi_{p},\chi_{p}\times i)} | 
+ | 
+
+ We calculate prefill execution time as the sum of batch execution times calculated with the prefill step latency model T s ​ t ​ e ​ p T_{step} which is discussed next. 
+
+ 4.3. Decode-Node Feasibility Checker 
+
+ For each decode node n n , Kairos checks if there is a chunked-prefill schedule
+that completes request r r ’s prefill on n n without violating any in-flight decode’s TBT and estimates the TTFT. 
+
+ 4.3.1. Step-latency model 
+
+ We model the per-step latency of a mixed batch on decode node n n as a function of the
+current decode batch size B n B_{n} , total KV-cache occupancy K n K_{n} (tokens), and the
+chunked prefill size χ \chi of that step: 
+
+ (4) | 
+ | 
+ T step ​ ( B n , K n , χ ) = T step ( 0 ) ​ ( B n , K n ) + Δ ​ T pf ​ ( B n , K n , χ ) . T_{\mathrm{step}}(B_{n},K_{n},\chi)\;=\;T_{\mathrm{step}}^{(0)}(B_{n},K_{n})+\Delta T_{\mathrm{pf}}(B_{n},K_{n},\chi). | 
+ | 
+
+ T step ( 0 ) T_{\mathrm{step}}^{(0)} is the baseline decode-only step latency, Δ ​ T pf \Delta T_{\mathrm{pf}} is
+the latency increase from injecting a χ − B n \chi-B_{n} prefill tokens into the batch. Both
+terms come from the predictors in § 3.3 , which on held-out traces
+achieve MAPE < 10 % <10\% . Predictions are O ⁡ ( 1 ) O(1) via simple linear regressors. 
+
+ 4.3.2. Chunk Schedule 
+
+ A key finding from § 3.2 is that successive prefill chunks for the same deflected request are not equivalent. As cached prefill tokens accumulate on the decode node, Δ ​ T pf \Delta T_{\mathrm{pf}} grows, and the largest TBT-safe χ \chi shrinks. Kairos therefore models a deflect as a schedule 
+ X = [ χ ( 1 ) , χ ( 2 ) , … , χ ( m ) ] X=[\chi^{(1)},\chi^{(2)},\ldots,\chi^{(m)}] such that ∑ i = 1 m χ ( i ) ≥ ℓ r \sum_{i=1}^{m}\chi^{(i)}\geq\ell_{r} , with each χ ( i ) \chi^{(i)} TBT-safe given the projected decode-node state at step i i : 
+
+ (5) | 
+ | 
+ T step ​ ( B n , K n + ∑ j < i χ ( j ) , χ ( i ) ) ≤ β × τ , T_{\mathrm{step}}\bigl(B_{n},K_{n}+{\textstyle\sum_{j<i}}\,\chi^{(j)},\,\chi^{(i)}\bigr)\;\leq\;\beta\times\tau, | 
+ | 
+
+ where τ \tau is the TBT SLO and β \beta is a tunable safety factor. The schedule is constructed greedily: at step i i pick the largest χ ∈ 𝒳 \chi\in\mathcal{X} that satisfies Eq. ( 5 ). The corresponding TTFT estimate on node n n is the sum of step latencies: 
+
+ (6) | 
+ | 
+ 𝑇𝑇𝐹𝑇 ^ dec ​ ( r , n , X ) = ∑ i = 1 | X | T step ​ ( B n , K n + ∑ j < i χ ( j ) , χ ( i ) ) . \widehat{\mathit{TTFT}}_{\mathrm{dec}}(r,n,X)\;=\;\sum_{i=1}^{|X|}T_{\mathrm{step}}\bigl(B_{n},K_{n}+{\textstyle\sum_{j<i}}\,\chi^{(j)},\,\chi^{(i)}\bigr). | 
+ | 
+
+ If no schedule exists, node n n is infeasible for deflection r r . 
+
+ 4.4. Deflection Decision Algorithm 
+
+ Algorithm 1 composes the estimator and the feasibility checker. For request r r , Algorithm 1 (i) estimates the prefill-node TTFT, (ii) builds a TBT-safe chunk schedule on every decode node and computes the resulting decode-node TTFT, (iii) picks the fastest feasible node, and (iv) deflects only when the α \alpha margin condition is met. 
+
+ Algorithm 1 Kairos deflection decision (per request) 
+
+ Input: Request r r with prompt length ℓ r \ell_{r} , 
+ prefill-node state: queue lengths [ ℓ 1 , … , ℓ k ] [\ell_{1},\ldots,\ell_{k}] , chunk size χ p \chi_{\mathrm{p}} , 
+ decode-node states { ( B n , K n ) } n = 1 N d \{(B_{n},K_{n})\}_{n=1}^{N_{d}} , 
+ chunk-size candidates 𝒳 = [ χ 1 > ⋯ > χ C ] \mathcal{X}=[\chi_{1}>\cdots>\chi_{C}] , 
+ TBT SLO τ \tau ; deflection margin α ≥ 1 \alpha\geq 1 
+
+ Output: ( decision , n ⋆ , X ⋆ ) (\mathrm{decision},\,n^{\star},\,X^{\star}) 
+
+ // 1. Prefill-node TTFT estimate 
+ 𝑇𝑇𝐹𝑇 ^ pf ​ ( r ) = W queue ​ ( r ) + T pf ​ ( r ) \widehat{\mathit{TTFT}}_{\mathrm{pf}}(r)\;=\;W_{\mathrm{queue}}(r)+T_{\mathrm{pf}}(r) // Eq. 1 
+
+ // 2. Build a TBT-safe schedule per decode node 
+ ℱ ← ∅ \mathcal{F}\leftarrow\emptyset 
+
+ foreach decode node n ∈ { 1 , … , N d } n\in\{1,\ldots,N_{d}\} do 
+
+        X ← [ ] X\leftarrow[\,] ;  K ← K n K\leftarrow K_{n} ;  served ← 0 \text{served}\leftarrow 0 
+
+        while served < ℓ r \text{served}<\ell_{r} do 
+
+              // first χ ∈ 𝒳 \chi\in\mathcal{X} s.t. Eq.  5 
+
+              χ ← LargestSafe ​ ( B n , K , 𝒳 , τ ) \chi\leftarrow\textsc{LargestSafe}(B_{n},K,\mathcal{X},\tau) 
+ if χ = 0 \chi=0 then break // node n n infeasible 
+
+              X ← X | [ χ ] X\leftarrow X\,\|\,[\chi] ;  K ← K + χ K\leftarrow K+\chi ;  served ← served + χ \text{served}\leftarrow\text{served}+\chi 
+
+       end while 
+
+        if served ≥ ℓ r \text{served}\geq\ell_{r} then 
+
+              𝑇𝑇𝐹𝑇 ^ dec ​ ( n ) ← ∑ χ ( i ) ∈ X T step ​ ( B n , K n + ∑ j < i χ ( j ) , χ ( i ) ) \widehat{\mathit{TTFT}}_{\mathrm{dec}}(n)\leftarrow\sum_{\chi^{(i)}\in X}T_{\mathrm{step}}(B_{n},K_{n}{+}\!\!\sum_{j<i}\chi^{(j)},\chi^{(i)}) // Eq.  6 
+
+              ℱ ← ℱ ∪ { ( n , X ) } \mathcal{F}\leftarrow\mathcal{F}\cup\{(n,X)\} 
+
+       end if 
+
+ end foreach 
+
+ // 3. Pick fastest feasible decode node 
+ if ℱ = ∅ \mathcal{F}=\emptyset then return ( Keep , − , − ) (\textsc{Keep},\,-,\,-) 
+
+ ( n ⋆ , X ⋆ ) ← arg ⁡ min ( n , X ) ∈ ℱ ​ 𝑇𝑇𝐹𝑇 ^ dec ​ ( n ) (n^{\star},X^{\star})\leftarrow\arg\min_{(n,X)\in\mathcal{F}}\widehat{\mathit{TTFT}}_{\mathrm{dec}}(n) 
+
+ // 4. Deflect only if margin holds 
+ if 𝑇𝑇𝐹𝑇 ^ dec ( n ⋆ ) ≤ α ⋅ 𝑇𝑇𝐹𝑇 ^ pf   & &   𝑇𝑇𝐹𝑇 ^ dec ( n ⋆ ) ≤ T T F T s ​ l ​ o \widehat{\mathit{TTFT}}_{\mathrm{dec}}(n^{\star})\leq\alpha\cdot\widehat{\mathit{TTFT}}_{\mathrm{pf}}\text{ }\&\&\text{ }\widehat{\mathit{TTFT}}_{\mathrm{dec}}(n^{\star})\leq TTFT_{slo} // Eq. 7 
+
+ then 
+
+        return ( Deflect , n ⋆ , X ⋆ ) (\textsc{Deflect},\,n^{\star},\,X^{\star}) 
+
+ else 
+
+        return ( Keep , − , − ) (\textsc{Keep},\,-,\,-) 
+
+ end if 
+
+ The deflection condition. The dispatcher deflects when 
+
+ (7) | 
+ | 
+ 𝑇𝑇𝐹𝑇 ^ dec ​ ( r , n ⋆ , X ⋆ ) ≤ α ⋅ 𝑇𝑇𝐹𝑇 ^ pf ​ ( r ) ​  and  𝑇𝑇𝐹𝑇 ^ dec ​ ( r , n ⋆ , X ⋆ ) ≤ T ​ T ​ F ​ T s ​ l ​ o \begin{split}\widehat{\mathit{TTFT}}_{\mathrm{dec}}(r,n^{\star},X^{\star})&\leq\alpha\cdot\widehat{\mathit{TTFT}}_{\mathrm{pf}}(r)\text{ and }\\
+\widehat{\mathit{TTFT}}_{\mathrm{dec}}(r,n^{\star},X^{\star})&\leq TTFT_{slo}\end{split} | 
+ | 
+
+ with α ≥ 1 \alpha\geq 1 an operator-tunable knob. α = 1 \alpha=1 deflects only when the decode path is similar or faster and values α > 1 \alpha>1 permit a bounded TTFT regression for r r in exchange for relieving the prefill queue which is useful when the request itself is already comfortably within its TTFT SLO but its presence in the prefill queue is hurting requests behind it. We choose α = 1.3 \alpha=1.3 . 
+
+ Complexity The worst-case complexity of the algorithm is
+ O ⁡ ( ⌈ N d × ℓ r χ m ​ i ​ n − max_concurrency ⌉ + N p ) O\left(\lceil\frac{N_{d}\times\ell_{r}}{\chi_{min}-\text{max\_concurrency}}\rceil+N_{p}\right) 
+per request, where N d N_{d} is the number of decode nodes, ℓ r \ell_{r} is the prompt length of the incoming request, χ min \chi_{\min} is the smallest candidate chunk size and N p N_{p} is the number of prefill nodes.
+We measure that the scheduling delay is under 1ms on a single CPU core. 
+
+ textbfCorrectness By construction, the algorithm never returns
+ ( Deflect , n ⋆ , X ⋆ ) (\textsc{Deflect},\,n^{\star},\,X^{\star}) for a schedule that the step-latency model
+predicts will violate the TBT SLO. 
+
+ 5. Implementation 
+
+ Kairos is implemented on top of vLLM v0.18.1 ( Kwon et al., 2023 ) which supports disaggregated prefill/decode through a KV transfer API. Kairos adds approximately 2000 lines of new code across the profiling for step latency models, the Deflection Dispatcher (which contains the analytical models and the deflection algorithm), the modifications to the scheduler on the decode nodes and plugins to report node state to the Deflection Dispatcher. 
+
+ 5.1. Step-Latency Profiling 
+
+ At deployment time, a one-time profiling script collects data for the analytical models by running production traces at various request rates against the target model hardware combination. The step latency and batch contents are recorded at each step and used to train the analytical models. Total profiling time is ≈ \approx 30 minutes per model/hardware combination. 
+
+ 5.2. Analytical Batch Time Estimator Models 
+
+ The estimators run as separate threads on the Deflection Dispatcher. Each batch execution time estimator is implemented as scikit-learn Linear Regression models.
+Node state is reported by vLLM plugins that run on each node which periodically send node state to the Deflection Dispatcher. 
+
+ • 
+
+ Prefill step latency is modeled as a function of the number of tokens in the batch and the number of cached KV tokens already on the engine. 
+
+ • 
+
+ Decode step latency is modeled as a function of the number of tokens in the batch (sum of decode tokens plus any injected prefill chunk) and the cached KV tokens. 
+
+ • 
+
+ For mixed batches, step latency is modeled as the sum of pure decode step latency and additional prefill time based on total chunk size and cached tokens from the data for the microbenchmark to plot Figure 1 . 
+
+ • 
+
+ KV-cache transfer time is computed from bytes transferred and link bandwidth, following the Splitwise  ( Patel et al., 2024 ) simulator. 
+
+ 5.3. Deflection Dispatcher 
+
+ The Dispatcher is implemented as a Python service. It stores decode node state ( B n B_{n} , K n K_{n} ) and prefill node state (remaining prefill tokens) in an in-memory map, which is refreshed by reporting from nodes every Δ h = 100 ​ m ​ s \Delta_{h}=100ms . Between heartbeats, the dispatcher marks decode nodes where it has already sent requests in the preifll state as unavailable to prevent TBT violations. The Dispatcher houses the deflection decision loop (Algorithm 1 ), which completes in < < 1 ms for our setup in § 6 . 
+
+ 5.4. Chunked Prefill Scheduler on Decode Nodes 
+
+ vLLM’s scheduler already supports chunked prefill as a batching strategy. When a request whose prefill phase is pending is sent to the decode node, Kairos sends the chunk schedule for the request in the KV parameters.
+The underlying scheduling policy remains the same, but at each step, the max tokens in the batch is governed by the corresponding chunk size in the chunk schedule of the request currently in its prefill phase. 
+
+ 6. Evaluation 
+
+ We evaluate Kairos against two baselines to answer the following questions:
+ Q1 Does Kairos reduce tail TTFT while maintaining TBT within SLO?
+ Q2 Does Kairos improve output token throughput and overall SLO attainment?
+ Q3 How many requests does Kairos deflect? 
+
+ 6.1. Experimental Setup 
+
+ We run our experiments on Azure Machine Learning Compute Clusters ( Microsoft, 2025 ) , using Standard_ND96amsr_A100_v4 nodes.
+Each node is equipped with 8 × \times Nvidia A100-SXM4-80GB GPUs connected through
+NVLINK 3.0, an AMD EPYC 7V12 CPU with 64-Cores
+along with 900 GiB of host memory and 1.7 TiB disk storage. Internode communication is through InfiniBand ( NVIDIA, 2026c ) and Azure Accelerated Networking ( Microsoft, 2026 ) . 
+
+ 6.1.1. Model, Trace and SLO: 
+
+ We evaluate Kairos using DeepSeek-v2-Lite ( DeepSeek-AI, 2024 ) , a mixture of experts model with 16B total and 2.4B active parameters on the Bursty trace from Table 1 , which is the most realistic of our traces since it is not the result of any stratification. Based on the model and hardware combination, we use P95 TTFT ≤ 4 \leq 4 s and P95 TBT ≤ 70 \leq 70 ms (both must hold simultaneously) as SLO targets. 
+
+ 6.1.2. Baselines: 
+
+ • 
+
+ PD Disaggregation : Traditional DistServe style disaggregation ( Zhong et al., 2024 ) , all prefilling done on prefill nodes. 
+
+ • 
+
+ TaiChi : unified aggregation/disaggregation with differentiated GPU instances and flowing-decode scheduling ( Wang et al., 2025 ) . 
+
+ Figure 4 . L:P95 TTFT and R:P95 TBT vs. request rate. Kairos stays within SLOs at a higher RPS than baselines. TaiChi violates both TTFT and TBT SLO at high request rates. 
+
+ 6.2. Q1: Does Kairos reduce tail TTFT while maintaining TBT within SLO? 
+
+ Figure 4 shows P95 TTFT and TBT for each methods on the Bursty trace for RPS ranging from 6-12.
+ P95 TTFT (Figure 4 , left) 
+On the Bursty trace, Kairos stays within SLO upto 9 RPS, while PD disaggregation and TaiChi can only manage to do so until 7 RPS. At lower request rates, Kairos is similar to PD disaggregation since there is lower queuing to be skipped by deflection, while the difference rises at higher RPS. Taichi shows relatively faster increase in TTFT with RPS compared to PD disaggregation and Kairos . 
+
+ P95 TBT (Figure 4 , right) 
+ Kairos maintains zero TBT violations by construction, and is always below the 70ms SLO. P95 TBT for Kairos is 5-10ms higher as it uses TBT headroom to deflect requests to the decode node. The increase in TBT is higher at higher RPS as deflections get more costly, even if they are fewer in number, due to the increase in batch size and cached KV tokens. TaiChi only manages to stay within the TBT SLO until 8 RPS and P95 TBT value crosses 100ms at 10 RPS. This shows the effectiveness of state-aware algorithm by Kairos . As decode nodes fill up, the safe chunk size χ ∗ \chi^{*} shrinks, and Kairos tends to use smaller chunk size or chooses not to deflect at all. 
+
+ 6.3. Q2: Does Kairos improve output token throughput and overall SLO attainment? 
+
+ Next, we measure output token throughput and SLO attainment rate to see effectiveness beyond a per request level using identical experiment setup as in § 6.2 , 
+
+ Figure 5 . Kairos has comparable or higher throughput than baselines. 
+
+ Throughput (Figure 5 ) 
+For both total token throughput and output token throughput, Kairos shows similar values to TaiChi and PD disaggregation at low RPS and higher than both baselines at higher RPS. The deflection of requests allows those subset of requests to start decoding faster, while only slowing down existing decodes marginally. Both PD disaggregation and TaiChi saturate at a lower output token throughput, with TaiChi even worsening after 9 RPS. 
+
+ SLO Attainment (Figure 6 , left) 
+ Kairos sustains 100% joint SLO attainment up to 9 RPS cluster load, whereas PD Disaggregation and TaiChi attain 100% up to 7 RPS.
+TaiChi even performs better than PD Disaggregation at RPS values of 8 and 9, however, its worsening TBT makes it fall below PD Disaggregation beyond 10 RPS.
+Degradation after the knee point is also more graceful for Kairos , as seen in the figure, with the drop in attainment being sharper for PD disaggregation after 7 RPS and for TaiChi after 8 RPS.
+This translates to 28.5% higher sustainable request rate under the same SLO target. 
+
+ 6.4. Q3: How many requests does Kairos deflect? 
+
+ From the experiment in § 6.2 , we measure how many requests are deflected by Kairos at every request rate for the Burst trace. From Figure 6 (right), we see that at 6 RPS, Kairos deflects more than 500 requests to the decode node, and number of deflection reduces to 265 at 12 RPS. 
+
+ At higher request rate, more queuing at the prefill nodes increases the potential TTFT improvement of a deflection. However, the high RPS also causes the decode nodes to be running at higher batch sizes and with more cached tokens, limiting the amount of TBT headroom that Kairos can exploit by deflecting a request. This limited headroom makes the safe chunk size χ ⋆ \chi^{\star} smaller, or even zero, leading to fewer deflections at higher request rates to avoid violating the TBT of running decode requests. 
+
+ Figure 6 . Left : Kairos has the best SLO attainment % at all request rates. Right : Number of deflections by Kairos at various RPS for the Burst trace. Higher request rates see fewer deflections due to limited headroom caused by increased batch size and cached tokens. 
+
+ 7. Limitations and Future Work 
+
+ Error from analytical models: 
+Error in the decode node analytical model could result in actual TBT being higher than predicted, potentially violating SLO. Error in the prefill analytical model does not put SLO at risk, and only makes a deflection decision non-optimal with slight TTFT regression for the request. The request will still meet SLO by design of Eq. ( 7 ). With the < 10 % <10\% MAPE of our analytical models, we do not find any violations due to prediction errors, and better analytical models would only improve our results.
+Future works could include detecting rise in error rates to trigger retraining of the analytical models, and support for non-FIFO scheduling policies such as prefix-aware or priority. 
+
+ Stale state information at dispatch time: Decode nodes report their state ( B n , K n ) (B_{n},K_{n}) periodically (every Δ h = 100 ​ m ​ s \Delta_{h}=100ms in our implementation). The dispatcher uses this state to decide if a deflection is feasible, and limits each decode node to a single deflected request to prevent a single decode node from being overloaded with deflected requests. For this to become a bottleneck, the RPS must exceed | decode nodes | Δ h ≥ 20 \frac{|\text{decode nodes}|}{\Delta_{h}}\geq 20 which is much higher than the RPS our SLO supports. Moreover, this RPS limit can be improved by scaling the number of decode nodes or more frequent decode state reporting. Future work can include updating decode node state within dispatch until new state arrives to remove the single deflection request limit.
+A decode node whose batch grows after a deflection is accepted reports its updated ( B n , K n ) (B_{n},K_{n}) at the next heartbeat ( Δ h = 100 \Delta_{h}=100  ms in our implementation). Already-dispatched requests are not migrated back. Future work could consider modeling arrival rate and characteristics of requests coming from the prefill nodes to decode nodes. 
+
+ Effect on KV cache and multi-turn: 
+ Kairos ’s deflection path eliminates the KV transfer cost because the KV cache is built directly on the decode node. However, if a request has a prefix already cached on a prefill node, deflecting it to a decode node loses that cached prefix. Kairos currently does not account for prefix cache residency in its TTFT estimate. 
+
+ Centralized dispatcher as a potential bottleneck: 
+At very high request rates, the dispatcher’s per-request sweep could become a CPU bottleneck. For such deployments, the dispatcher can be sharded by node groups (a set of prefill and decode nodes are governed by a dispatcher instance), sacrificing global optimality for scalability. 
+
+ 8. Related Work 
+
+ A wide variety of works have targeted optimizing LLM inference, including optimized kernels ( Ye et al., 2025 ; Dao et al., 2022 ; Kamath et al., 2025 ) , KV cache management ( Kwon et al., 2023 ; Zheng et al., 2024 ) , batching ( Agrawal et al., 2024a ) and SM partitioning ( Shi et al., 2025 ; Chen et al., 2026 ) . However, these works focus on single node inference optimization.
+Access to multiple nodes leads to more ways to route requests, store weights, load balance and parallelize. SplitWise ( Patel et al., 2024 ) and DistServe ( Zhong et al., 2024 ) introduced prefill/decode disaggregation by characterizing the differing compute/memory boundedness of prefill and decode phases. Mooncake ( Qin et al., 2024 ) treats the KV cache as a first-class distributed object with a global index, enabling prefix reuse and fine-grained migration. TetriInfer ( Hu et al., 2024 ) addresses disaggregated scheduling on heterogeneous GPU fleets. 
+
+ TaiChi ( Wang et al., 2025 ) proposes a unified PD aggregation-disaggregation architecture with different kinds of instances (prefill-heavy vs.decode-heavy) and configurable sliders that adapt the ratio between instances and their chunk sizes to optimize goodput under TTFT/TPOT SLO combination.
+It uses latency shifting, i.e. selectively reallocating GPU resources from SLO-satisfied requests to at-risk ones, orchestrated by flowing-decode scheduling and length-aware prefill scheduling.
+On the other hand, Kairos identifies prefill nodes as the bottleneck during bursts, and performs a per-request TBT-safe deflection decision instead of modifying global cluster configuration. 
+
+ PPD ( Li et al., 2026 ) also performs deflection to the decode node, but does so for Turn 2+ requests in a multi-turn setting, since these requests with high cached token counts slow down decode nodes less than Turn 1 prompts. While Kairos and PPD share the same idea of deflection to the decode node, Kairos is more general since any request can be deflected if there is headroom, and also incorporates run-time monitoring of nodes to make deflection decisions that do not violate TBT. 
+
+ Table 5 . Kairos vs. other related systems 
+
+ System 
+ | 
+
+ Mechanism 
+ | 
+
+ Scope 
+ | 
+
+ Target 
+ | 
+
+ Sarathi ( Agrawal et al., 2024a ) 
+ | 
+
+ Token chunked prefill 
+ | 
+
+ Intra-node 
+ | 
+
+ Decode stall 
+ | 
+
+ Nexus ( Shi et al., 2025 ) 
+ | 
+
+ Intra-GPU SM partition 
+ | 
+
+ Intra-GPU 
+ | 
+
+ Phase interference 
+ | 
+
+ PPD ( Li et al., 2026 ) 
+ | 
+
+ Append-prefill routing 
+ | 
+
+ Cross-node (multi-turn) 
+ | 
+
+ TTFT Turn 2+ 
+ | 
+
+ TaiChi ( Wang et al., 2025 ) 
+ | 
+
+ Aggreg.+disagg. sliders 
+ | 
+
+ Cluster config 
+ | 
+
+ Goodput under any SLO 
+ | 
+
+ Splitwise ( Patel et al., 2024 ) 
+ | 
+
+ Static PD split 
+ | 
+
+ Cluster topology 
+ | 
+
+ Phase separation 
+ | 
+
+ DistServe ( Zhong et al., 2024 ) 
+ | 
+
+ Placement optimization 
+ | 
+
+ Cluster provision 
+ | 
+
+ Node ratio 
+ | 
+
+ Kairos 
+ | 
+
+ Per-req TBT-safe chunk sweep 
+ | 
+
+ Cross-node deflection 
+ | 
+
+ Prefill bottleneck 
+ | 
+
+ 9. Conclusion 
+
+ This paper presents Kairos , a proactive deflection framework that utilizes unused decode node compute to serve deflected requests. For each incoming request, Kairos estimates its projected TTFT through the regular disaggregated and deflection paths, and deflects request to a decode node with available capacity when doing so meets SLO of incoming and existing requests. 
+
+ Our evaluation on production traces from Company X on DeepSeek-v2-Lite shows that Kairos reduces P95 TTFT by upto 81%, and can improve SLO attainment rate by upto 71% for realistic bursty workloads while adding negligible per-request scheduling overhead and respecting the same SLO. 
+
+ References 
+
+ Agrawal et al. (2024a) 
+ A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. Gulavani, A. Tumanov, and R. Ramjee 
+
+ Taming { \{ throughput-latency } \} tradeoff in { \{ llm } \} inference with { \{ sarathi-serve } \} .
+
+ In 18th USENIX symposium on operating systems design and implementation (OSDI 24) ,
+
+ pp. 117–134 .
+
+ Cited by: §1 ,
+ §2.3 ,
+ Table 5 ,
+ §8 .
+
+ Agrawal et al. (2024b) 
+ A. Agrawal, H. Qiu, J. Chen, Í. Goiri, C. Zhang, R. Shahid, R. Ramjee, A. Tumanov, and E. Choukse 
+
+ Medha: efficiently serving multi-million context length llm inference requests without approximations .
+
+ arXiv preprint arXiv:2409.17264 .
+
+ Cited by: §1 .
+
+ Chen et al. (2026) 
+ Y. Chen, W. Cui, H. Zhao, Z. Xu, X. Fan, X. Chen, Y. Zhou, S. Sun, B. He, and Q. Chen 
+
+ Towards high-goodput llm serving with prefill-decode multiplexing .
+
+ In Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 ,
+
+ pp. 2030–2047 .
+
+ Cited by: §8 .
+
+ Dao et al. (2022) 
+ T. Dao, D. Fu, S. Ermon, A. Rudra, and C. Ré 
+
+ Flashattention: fast and memory-efficient exact attention with io-awareness .
+
+ Advances in neural information processing systems 35 , pp. 16344–16359 .
+
+ Cited by: §8 .
+
+ DeepSeek-AI (2024) 
+ DeepSeek-AI 
+
+ DeepSeek-v2: a strong, economical, and efficient mixture-of-experts language model .
+
+ External Links: 2405.04434 
+
+ Cited by: §6.1.1 .
+
+ Hu et al. (2024) 
+ C. Hu, H. Huang, L. Xu, X. Chen, J. Xu, S. Chen, H. Feng, C. Wang, S. Wang, Y. Bao, et al. 
+
+ Inference without interference: disaggregate llm inference for mixed downstream workloads .
+
+ arXiv preprint arXiv:2401.11181 .
+
+ Cited by: §1 ,
+ §2.2 ,
+ §8 .
+
+ Kamath et al. (2025) 
+ A. K. Kamath, R. Prabhu, J. Mohan, S. Peter, R. Ramjee, and A. Panwar 
+
+ Pod-attention: unlocking full prefill-decode overlap for faster llm inference .
+
+ In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 ,
+
+ pp. 897–912 .
+
+ Cited by: §8 .
+
+ Kwon et al. (2023) 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica 
+
+ Efficient memory management for large language model serving with pagedattention .
+
+ In Proceedings of the 29th symposium on operating systems principles ,
+
+ pp. 611–626 .
+
+ Cited by: 4th item ,
+ §5 ,
+ §8 .
+
+ Li et al. (2026) 
+ Z. Li, J. Liu, Z. Xu, Y. Zhang, T. Rabbani, and C. Zhang 
+
+ Not all prefills are equal: ppd disaggregation for multi-turn llm serving .
+
+ arXiv preprint arXiv:2603.13358 .
+
+ Cited by: Table 5 ,
+ §8 .
+
+ Microsoft (2025) 
+ Microsoft 
+
+ Note: Azure Machine Learning Compute Cluster 
+
+ External Links: Link 
+
+ Cited by: §6.1 .
+
+ Microsoft (2026) 
+ Microsoft 
+
+ Note: Azure Accelerated Networking 
+
+ External Links: Link 
+
+ Cited by: §6.1 .
+
+ NVIDIA (2026a) 
+ NVIDIA 
+
+ Note: Nvidia Dynamo Documentation 
+
+ External Links: Link 
+
+ Cited by: §3 .
+
+ NVIDIA (2026b) 
+ NVIDIA 
+
+ Note: Nvidia Dynamo Documentation 
+
+ External Links: Link 
+
+ Cited by: §2.2 .
+
+ NVIDIA (2026c) 
+ NVIDIA 
+
+ Note: Nvidia InfiniBand 
+
+ External Links: Link 
+
+ Cited by: §6.1 .
+
+ Patel et al. (2024) 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, Í. Goiri, S. Maleki, and R. Bianchini 
+
+ Splitwise: efficient generative llm inference using phase splitting .
+
+ In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) ,
+
+ pp. 118–132 .
+
+ Cited by: §1 ,
+ §1 ,
+ §2.2 ,
+ 4th item ,
+ Table 5 ,
+ §8 .
+
+ Qin et al. (2024) 
+ R. Qin, Z. Li, W. He, J. Cui, H. Tang, F. Ren, T. Ma, S. Cai, Y. Zhang, M. Zhang, et al. 
+
+ Mooncake: a kvcache-centric disaggregated architecture for llm serving .
+
+ ACM Transactions on Storage .
+
+ Cited by: §1 ,
+ §1 ,
+ §2.2 ,
+ §8 .
+
+ Shi et al. (2025) 
+ X. Shi, C. Cai, J. Du, and Z. Jia 
+
+ Nexus: proactive intra-gpu disaggregation of prefill and decode in llm serving .
+
+ arXiv preprint arXiv:2507.06608 .
+
+ Cited by: Table 5 ,
+ §8 .
+
+ Wang et al. (2025) 
+ C. Wang, P. Zuo, Z. Chen, Y. Liang, Z. Yu, and M. Yang 
+
+ Prefill-decode aggregation or disaggregation? unifying both for goodput-optimized llm serving .
+
+ arXiv preprint arXiv:2508.01989 .
+
+ Cited by: 2nd item ,
+ Table 5 ,
+ §8 .
+
+ Ye et al. (2025) 
+ Z. Ye, L. Chen, R. Lai, W. Lin, Y. Zhang, S. Wang, T. Chen, B. Kasikci, V. Grover, A. Krishnamurthy, et al. 
+
+ Flashinfer: efficient and customizable attention engine for llm inference serving .
+
+ arXiv preprint arXiv:2501.01005 .
+
+ Cited by: §8 .
+
+ Zheng et al. (2024) 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, et al. 
+
+ Sglang: efficient execution of structured language model programs .
+
+ Advances in neural information processing systems 37 , pp. 62557–62583 .
+
+ Cited by: §8 .
+
+ Zhong et al. (2024) 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang 
+
+ { \{ distserve } \} : Disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ pp. 193–210 .
+
+ Cited by: §1 ,
+ §1 ,
+ §2.2 ,
+ 1st item ,
+ Table 5 ,
+ §8 .

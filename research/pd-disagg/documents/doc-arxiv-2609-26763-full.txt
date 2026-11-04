@@ -1,0 +1,1923 @@
+SARA: SLO-Aware Resource Allocation for Disaggregated Agentic LLM Services 
+
+ Shicong Liu
+
+ Xianghao Yu
+
+ Zhen Gao
+
+ Jun Zhang
+ † † thanks: 
+( Corresponding Author: Xianghao Yu. )
+Shicong Liu and Xianghao Yu are with the Department of Electrical Engineering, City University of Hong Kong, Hong Kong (email: sc.liu@my.cityu.edu.hk, alex.yu@cityu.edu.hk).
+Zhen Gao is with the Advanced Research Institute of Multidisciplinary Science (ARIMS), Beijing Institute of Technology.
+Jun Zhang is with the Department of Electronic and Computer Engineering, The Hong Kong University of Science and Technology, Hong
+Kong (email: eejzhang@ust.hk)
+
+ Abstract 
+
+ Recent advances in large language models (LLMs) are driving the emergence of multi-modal and agentic services for mobile users through cloud and edge infrastructures, where long-context workloads pose daunting challenges
+for inference latency.
+Existing disaggregated LLM serving systems largely rely on hardware profiling, configuration enumeration, or heuristic scheduling, offering limited analytical guidance for cost-efficient resource allocation.
+In this paper, we propose SARA, a S ervice level objectives (SLOs)- A ware R esource A llocation framework for disaggregated agentic LLM serving systems, which maximizes goodput under a deployment cost constraint and a series of quantile-based SLO constraints. By capitalizing on queuing theory, we first model the prefill, KV cache transfer, and decode stages as an M/G/ k p k_{\rm p} queue, an M/G/ 1 1 queue, and a generalized birth-death process, respectively.
+The analysis
+reveals that the prefill and decode stages are dominantly limited by computational capacity and high-bandwidth memory (HBM) resources, respectively.
+With these mathematical models, we further derive tractable tail behaviors of different stage-wise service level metrics for both light- and heavy-tailed workloads.
+These characterizations explicitly map workload, model architecture, and hardware parameters to stage-wise SLO constraints and minimum resource requirements.
+We also reveal that the required numbers of prefill and decode devices scale quadratically with the input and output lengths, respectively, and that stringent SLOs and heavy-tailed workloads substantially amplify the resource requirements beyond the stability condition.
+Finally, we develop an effective resource allocation framework to maximize system goodput under limited cost budgets.
+Simulation and hardware results demonstrate that the proposed framework accurately predicts the stage-wise SLO with mean errors below 𝟓 % \bf 5\% , and improves system goodput by 26.6 % \bf 26.6\% on average over state-of-the-art baseline methods under the same deployment cost. 
+
+ Index Terms:  
+Agentic artificial intelligence, disaggregated inference, large language model, queuing theory, resource allocation, service level objectives.
+
+ I Introduction 
+
+ Large language models (LLMs) are rapidly evolving from general-purpose conversational tools into foundational services for intelligent web search, code generation, multi-modal understanding, complex reasoning, and autonomous agentic workflows  [ 1 , 2 , 3 ] . As model capabilities and context windows continue to expand, LLM applications are moving beyond single-turn dialogue interactions toward multiple-turn agentic tasks involving high-effort reasoning  [ 4 ] and decision making  [ 5 ] .
+Unlike model training, online LLM inference must continuously serve large and fluctuating workloads under stringent service level objectives (SLOs), including quantile-based latency metrics such as time to first token (TTFT) and time per output token (TPOT).
+Consequently, inference is becoming a persistent and growing infrastructure workload, and its resource efficiency will largely determine whether LLM services can be deployed at scale with sustainable cost  [ 6 ] . 
+
+ The resource demands of LLM inference vary substantially across its execution process  [ 7 , 8 , 9 , 10 , 11 ] . Upon receiving a user request, which typically contains textual or multi-modal input data, the model first tokenizes and embeds the entire input into large-scale matrices for subsequent intensive matrix multiplication. This stage is commonly referred to as the prefill stage, which requires substantial computational resources. After the prefill stage, the model starts the autoregressive token generation process, i.e., the decode stage. This stage contains less parallel computation but frequent access to the intermediate results, which are stored in the key and value (KV) cache computed in the prefill stage. Therefore, the decode stage requires excessively high memory bandwidth. 
+
+ The heterogeneous resource requirements of the prefill and decode stages pose significant challenges for the design of LLM inference at data centers.
+When the two stages are executed within the same resource pool, they will interplay with each other, significantly elongate inference time  [ 7 ] , and reduce inference efficiency.
+Besides, colocated deployment reduces resource utilization and increases the cost of data center expansion as the number of user requests increases.
+To mitigate interference between the two stages and better match resources to their respective demands, a disaggregated prefill and decode (PD) deployment strategy has become an important design direction for large-scale LLM serving systems  [ 7 , 9 , 10 , 8 ] . Moreover, such disaggregation paves the way for edge-assisted LLM services for mobile users. The compute-intensive prefill is isolated in data centers, while the memory-intensive decode stage can be pushed toward edge nodes in proximity to users. 
+
+ However, the disaggregated LLM architecture also introduces several novel problems.
+First, the decode stage relies on the KV cache generated during the prefill stage. When the two stages are deployed separately, the KV cache must be transferred from the prefill to decode resource pool, making the transfer latency an important factor in inference efficiency. Second, it further introduces the problem of how resources should be provisioned and allocated across the disaggregated resource pools and communication link of the KV cache transfer. Finally, the heavy-tailed user request distributions typically encountered in agentic and multi-modal workloads further complicate performance analysis and resource planning.
+These challenges call for an analytical framework and resource allocation scheme for disaggregated LLM serving systems. 
+
+ I-A Related Work 
+
+ To meet increasingly stringent SLO requirements in LLM serving systems, research efforts have been devoted to improving LLM inference efficiency.
+From the perspective of model architecture, multi-query attention (MQA) and grouped-query attention (GQA) were proposed to reduce the computational complexity and memory access overhead by allowing multiple query matrices to share KV matrices  [ 12 , 13 ] . Besides,
+mixture-of-experts (MoE) models integrate multiple smaller domain-specific models into a unified architecture, employing dynamic gating based on the input user requests  [ 14 ] . Since only a sparse subset of these experts is activated during inference, the MoE architecture significantly enhances the inference efficiency.
+Furthermore, to accommodate the heterogeneous resource demands of Transformer-based LLMs, Sarathi-Serve partitions long user requests into smaller chunks and flexibly schedules their execution to improve resource utilization  [ 15 ] .
+Beyond fine-grained execution scheduling, several recent works have improved inference efficiency through workload-aware resource configuration and request routing.
+Specifically, DynamoLLM configures resource pools with different hardware compositions and routes requests according to their sequence characteristics to improve energy efficiency  [ 11 ] . ModServe dispatches modality-specific workloads to specialized resource pools to enhance resource utilization and inference throughput  [ 8 ] . In addition, Taiji dynamically adapts resource allocation and request scheduling according to the current SLO bottleneck to increase SLO achieving throughput  [ 16 ] . 
+
+ However, these approaches still colocate the prefill and decode stages on shared resource pools and thus cannot fundamentally eliminate their mutual interference.
+Moreover, even when scheduling mitigates such interference to some extent, the shared deployment couples the prefill and decode resources, limiting the independent scaling of the two stages according to their distinct workload characteristics and SLO bottlenecks. 
+
+ To eliminate the mutual interference between prefill and decode stages and further facilitate resource planning, recent studies have focused on the disaggregated LLM inference architecture, which executes the two stages on separate resource pools  [ 10 , 7 , 17 , 9 ] . In particular, Splitwise is one of the pioneer works that implements an LLM serving system onto separate prefill and decode resource pools, while still preserving a mixed resource pool for elastic workload balance  [ 10 ] . Moreover,
+DistServe then proposed to maximize the goodput, i.e., the throughput achieving designated SLO requirements, of the inference system, where the parallelism strategy and resource allocation are achieved via enumeration over a reduced search space  [ 7 ] .
+Furthermore, Mooncake develops a KV cache-centric disaggregated architecture and improves serving performance through carefully designed cache scheduling and transfer  [ 17 ] .
+In addition, PaaS leverages linear-complexity attention to reduce KV cache transfer overhead and introduces scheduling policies that jointly exploit cache availability and communication bandwidth  [ 9 ] . 
+
+ Despite these advances, existing disaggregated systems still rely primarily on hardware performance profiling  [ 10 ] , configuration enumeration  [ 7 ] , or heuristic scheduling  [ 17 , 9 ] . Although effective for particular platforms and workloads, these approaches offer limited theoretical guidance for offline data-center capacity planning or low-overhead online reconfiguration.
+In particular, they lack a tractable model that maps workload statistics and heterogeneous resource allocations to stage-wise SLO-attainment probabilities and minimum required resources.
+These gaps motivate our SLO-aware system modeling and characterization, as well as cost-constrained resource allocation framework for disaggregated LLM serving. 
+
+ I-B Contributions 
+
+ In this paper, we investigate SLO-aware resource allocation for disaggregated LLM serving systems to maximize the system goodput under cost constraints.
+The main contributions are summarized as follows. 
+
+ • 
+
+ To capture the heterogeneous resource demands of disaggregated LLM serving systems, we develop stochastic mathematical models including an M/G/ k k prefill queue, an M/G/ 1 1 KV cache transfer queue, and a continuous batching decode process model.
+The models explicitly incorporate key system parameters, and provide mathematical insights on the resource demands.
+Based on these models, we further derive the transition conditions between the compute- and memory-intensive regimes, validating that prefill and decode stages are predominantly constrained by computational capacity and memory bandwidth, respectively. 
+
+ • 
+
+ We derive tractable and analytical characterizations of the stage-wise latency quantiles, including TTFT, KV cache transfer latency, and TPOT to move beyond conventional empirical SLO assessments.
+Specifically, under limited cost constraint, heavy-traffic approximation is employed to characterize the waiting and sojourn latency for both the prefill and KV cache transfer queuing models, while the moment matching method is leveraged to characterize the latency quantile in the decode stage.
+The resulting analytical expressions explicitly connect system parameters and hardware resources to SLOs under both light- and heavy-tailed workloads. 
+
+ • 
+
+ We further propose a resource allocation framework to solve the goodput maximization problem for disaggregated LLM serving systems. In particular, stage-wise minimum resource requirements can be obtained directly from the derived closed-form expressions connecting SLOs and hardware demands, and the maximum goodput is obtained via a bisection search. 
+
+ • 
+
+ We finally conduct practical hardware measurements and simulations to validate the proposed analytical framework. The results verify the accuracy of the derived stage-wise latency quantiles with representative model architectures and both light- and heavy-tailed workloads, demonstrating the applicability of the proposed SLO-aware resource allocation framework. 
+
+ Notations : We use lowercase and uppercase boldface letters to denote vectors and matrices, respectively.
+The element at the k k -th row and the m m -th column of matrix 𝐇 \bf H is denoted as 𝐇 ⁡ [ k , m ] {\bf H}[k,m] , and the n n -th element in the vector 𝐡 \bf h is denoted by 𝐡 ⁡ [ n ] {\bf h}[n] . { 𝐇 n } n = 1 N \{{\bf H}_{n}\}_{n=1}^{N} represents a matrix set with the cardinality of N N . The superscripts ( ⋅ ) T (\cdot)^{T} and ( ⋅ ) H (\cdot)^{H} represent the transpose and conjugate transpose operators, respectively
+, and det ( ⋅ ) \det(\cdot) denotes the determinant operator.
+ ℝ \mathbb{R} and ℤ \mathbb{Z} denote the sets of real numbers and integers, respectively. We use ℬ ⁡ [ n , p ] {\mathcal{B}}[n,p] and ℒ ​ 𝒩 ​ [ μ , σ 2 ] {\mathcal{LN}}[\mu,\sigma^{2}] to denote binomial distribution with parameters { n , p } \{n,p\} and log-normal distribution with parameters { μ , σ 2 } \{\mu,\sigma^{2}\} , respectively. We use 𝔼 ⁡ [ X ] \mathbb{E}[X] and Var ⁡ ( X ) {\rm Var}(X) to denote the mean and variance of random variable X X . 
+
+ II Preliminaries 
+
+ In this section, we introduce basic concepts of a typical LLM inference system. 
+
+ II-A Generative Pre-Trained Transformer 
+
+ The generative pre-trained Transformer (GPT) has emerged as the dominant architecture for modern LLMs  [ 18 , 19 ] . It is first pre-trained on massive text-based or multi-modal corpora  [ 20 , 21 ] to predict the next token given preceding tokens, and can then be adapted or aligned for various downstream applications. Most LLMs adopt a decoder-only, multi-layer Transformer architecture  [ 22 , 23 , 24 ] , where each layer comprises a self-attention module and a feed-forward network  [ 25 ] , as illustrated in Fig.  1 . During a typical LLM inference process, the core computational operations are as follows: 
+
+ • 
+
+ Tokenization & Embedding : A user request typically involves textual or other multi-modal input data. They are first tokenized into a sequence with L i L_{\rm i} input tokens, which are then mapped to matrices 𝐗 ∈ ℝ L i × N mod \mathbf{X}\in\mathbb{R}^{L_{\rm i}\times N_{\mathrm{mod}}} via an embedding lookup table. 
+
+ • 
+
+ Attention : The input matrix 𝐗 {\bf X} experiences large-scale multiplications. Take classical multi-head attention (MHA) 1 1 
+ 1 
+
+ In modern LLMs, the attention module consists of hybrid structures, i.e., full attention  [ 25 , 13 , 12 ] and linear-complexity attention modules  [ 26 , 27 , 28 ] , which reduce the computational complexity and memory consumption.   [ 25 ] as an example, the input matrix is first mapped to N head N_{\rm head} query and KV matrices in shape L i × N attn L_{\rm i}\times N_{\rm attn} by 
+
+ | 
+ 𝐐 h = 𝐗𝐖 h Q , 𝐊 h = 𝐗𝐖 h K , 𝐕 h = 𝐗𝐖 h V , {\bf Q}_{h}={\bf X}{\bf W}^{Q}_{h},~~{\bf K}_{h}={\bf X}{\bf W}^{K}_{h},~~{\bf V}_{h}={\bf X}{\bf W}^{V}_{h}, | 
+ | 
+ (1) | 
+
+ respectively,
+where 1 ≤ h ≤ N head 1\leq h\leq N_{\rm head} denotes the index of attention heads, and 𝐖 h Q {\bf W}^{Q}_{h} , 𝐖 h K {\bf W}^{K}_{h} , and 𝐖 h V {\bf W}^{V}_{h} in shape N mod × N attn N_{\rm mod}\times N_{\rm attn} are the pre-trained weight matrices. Each head then performs scaled dot-product attention in parallel as 
+
+ | 
+ 𝐀 H ( h ) = softmax ⁡ ( 𝐐 h ​ 𝐊 h T N attn + 𝐌 ) ​ 𝐕 h ∈ ℝ L i × N attn , \!{\bf A}_{\rm H}^{(h)}={\rm softmax}\left(\frac{{\bf Q}_{h}{\bf K}_{h}^{T}}{\sqrt{N_{\rm attn}}}\!+\!{\bf M}\right){\bf V}_{h}\in\mathbb{R}^{L_{\rm i}\times N_{\rm attn}}, | 
+ | 
+ (2) | 
+
+ where 𝐌 {\bf M} in shape L i × L i L_{\rm i}\times L_{\rm i} denotes the causal mask matrix, whose upper-triangular entries are set to − ∞ -\infty , while the diagonal and lower-triangular entries are set to zero. This mask prevents each token from attending to future tokens during self-attention, and reduces the computational complexity by two-fold in ideal cases.
+The outputs of all heads are concatenated and multiplied by a pre-trained output projection matrix 𝐖 O {\bf W}_{\rm O} as 
+
+ | 
+ 𝐀 H = [ 𝐀 H ( 1 ) , ⋯ , 𝐀 H ( N head ) ] ​ 𝐖 O ∈ ℝ L i × N mod . {\bf A}_{\rm H}=\left[{\bf A}_{\rm H}^{(1)},\cdots,{\bf A}_{\rm H}^{(N_{\rm head})}\right]{\bf W}_{\rm O}\in\mathbb{R}^{L_{\rm i}\times N_{\rm mod}}. | 
+ | 
+ (3) | 
+
+ • 
+
+ Feed-Forward : The matrix 𝐀 H {\bf A}_{\rm H} is further processed by large-scale matrix operations involving two matrix multiplications and a non-linear activation function as 
+
+ | 
+ 𝐎 = σ ⁡ ( 𝐀 H ​ 𝐖 1 ) ​ 𝐖 2 ∈ ℝ L i × N mod , {\bf O}=\sigma\left({\bf A}_{\rm H}{\bf W}_{1}\right){\bf W}_{2}\in\mathbb{R}^{L_{\rm i}\times N_{\rm mod}}, | 
+ | 
+ (4) | 
+
+ where 𝐖 1 ∈ ℝ N mod × N hid {\bf W}_{1}\in\mathbb{R}^{N_{\rm mod}\times N_{\rm hid}} and 𝐖 2 ∈ ℝ N hid × N mod {\bf W}_{2}\in\mathbb{R}^{N_{\rm hid}\times N_{\rm mod}} are the feed-forward projection matrices. Output matrix 𝐎 {\bf O} acts as the input matrix 𝐗 {\bf X} of the next Transformer layer.
+After the last Transformer layer, the last row vector of 𝐎 {\bf O} is projected and normalized into a probability distribution, where the first output token is generated via sampling or greedy search  [ 29 ] . 
+
+ • 
+
+ Normalization : Normalization is applied to each row of 𝐎 {\bf O} (post-norm) or 𝐗 {\bf X} (pre-norm) independently to ensure numerical stability among layers. 
+
+ The computational complexity of Transformers is mainly determined by general matrix multiplications (GEMMs)  [ 7 ] .
+The number of multiplications in one Transformer layer is characterized as follows. The projection operations in ( 1 ), attention operation in ( 2 ), the aggregation operation in ( 3 ), and the feed-forward in ( 4 ) require 3 ​ L i ​ N mod 2 3L_{\rm i}N_{\rm mod}^{2} , ( L i 2 + L i ) ​ N mod \left(L_{\rm i}^{2}\!+\!L_{\rm i}\right)N_{\rm mod} , L i ​ N mod 2 L_{\rm i}N_{\rm mod}^{2} , and 2 ​ L i ​ N mod ​ N hid 2L_{\rm i}N_{\rm mod}N_{\rm hid} multiplications in the ideal case, respectively. Therefore, the overall number of multiplications for N layer N_{\rm layer} layers is given by 
+
+ | 
+ | 
+ N mul ​ ( L i ) \displaystyle N_{\rm mul}(L_{\rm i}) | 
+ | 
+ (5) | 
+
+ | 
+ = \displaystyle={} | 
+ N layer ​ ( 4 ​ L i ​ N mod 2 + ( L i 2 + L i ) ​ N mod + 2 ​ L i ​ N mod ​ N hid ) . \displaystyle N_{\rm layer}\!\left(4L_{\rm i}N_{\rm mod}^{2}\!+\!(L_{\rm i}^{2}\!+\!L_{\rm i})N_{\rm mod}\!+\!2L_{\rm i}N_{\rm mod}N_{\rm hid}\right). | 
+ | 
+
+ Note that for advanced attention variants such as multi-query attention (MQA)  [ 12 ] and grouped-query attention (GQA)  [ 13 ] , N KV ≤ N head N_{\rm KV}\leq N_{\rm head} key-value heads are shared among N head N_{\rm head} query heads in the attention operation ( 2 ). Let g = N KV / N head ∈ ( 0 , 1 ] g=N_{\rm KV}/N_{\rm head}\in(0,1] be the compressive factor and then the only difference in N mul N_{\rm mul} occurs in the projection operations of ( 1 ) as ( 1 + 2 ​ g ) ​ L i ​ N mod 2 (1+2g)L_{\rm i}N_{\rm mod}^{2} . 
+
+ Fig. 1: (a) Overall disaggregated LLM inference architecture. Key computational operations of one user request in the (b) prefill stage and (c) decode stage  [ 30 ] . 
+
+ II-B Disaggregated LLM Inference Architecture 
+
+ As introduced in Sec.  I , resource requirements vary significantly across the execution stages of LLM inference. Specifically, generating the first token requires a full execution of all Transformer layers, resulting in excessively high computational demand. During the subsequent autoregressive token generation, the intermediate KV matrices can be reused, which substantially reduces computational operations. However, frequent access to the KV cache makes memory bandwidth the major demand.
+Consequently, an inference process can be divided into three disaggregated and sequential stages according to their resource demands as follows. 
+
+ • 
+
+ Prefill : The prefill stage spans from user prompt input to the generation of the first output token. It includes intensive attention and feed-forward operations across all transformer layers, as shown in Fig.  1 (b) and introduced in Sec.  II-A .
+Note that the KV matrices { 𝐊 h } h = 1 N KV \{{\bf K}_{h}\}_{h=1}^{N_{\rm KV}} and { 𝐕 h } h = 1 N KV \{{\bf V}_{h}\}_{h=1}^{N_{\rm KV}} associated with attention operations are stored as the KV cache to support subsequent stages, while { 𝐐 h } h = 1 N head \{{\bf Q}_{h}\}_{h=1}^{N_{\rm head}} are discarded after the first token is generated.
+Owing to the intensive large-scale matrix multiplications involved, the resource bottleneck of this stage is the computational capacity  [ 7 ] . 
+
+ • 
+
+ KV Cache Transfer : The KV matrices { 𝐊 h } h = 1 N KV \{{\bf K}_{h}\}_{h=1}^{N_{\rm KV}} and { 𝐕 h } h = 1 N KV \{{\bf V}_{h}\}_{h=1}^{N_{\rm KV}} computed during the prefill stage remain fixed and are reused throughout the inference. Therefore, in the disaggregated LLM inference framework, these matrices are stored as KV cache and must be further transferred to the decode resource pool to accelerate further computations. 
+
+ • 
+
+ Decode : In this stage, the LLM autoregressively generates a token stream based on the entire KV cache 2 2 
+ 2 
+
+ The decode stage also produces incremental KV cache when generating new output tokens, which is appended to the total KV cache for subsequent inference, as illustrated in Fig.  1 (c). Yet, the additional computational overhead introduced here is usually negligible compared with the entire prefill stage. . Specifically, as illustrated in Fig.  1 (c), in each iteration of the decode stage, the previous token acts as the input and
+yields incremental query and KV vectors, which together with the KV cache finish the following attention operations to generate the next token.
+The decode iteration ends when an end-of-sequence (EOS) token is generated or the maximum output length is reached.
+Because of frequent memory accesses of the KV cache, this stage requires extremely high memory bandwidth for efficient inference. 
+
+ A typical disaggregated LLM inference process is illustrated in Fig.  1 .
+Specifically, each prefill resource pool employs k p k_{\rm p} prefill instances, which process incoming user requests in parallel. Upon completion, KV caches and the first output tokens of user requests are transferred to the decode resource pool, where output token streams are autoregressively generated in parallel via continuous batching  [ 31 ] . 
+
+ II-C KV Cache 
+
+ As we have introduced in Sec.  II-B , KV cache is the intermediate output mainly generated in the prefill stage and reused during the following LLM inference procedure. In the decode stage, it stores KV matrices computed by each Transformer layer using all previously input and output tokens, so that the subsequent autoregressive iterations can directly reuse them without repeated computations. 
+
+ However, for LLMs possessing several hundred billion of parameters, the resulting KV cache can also be extremely memory-consuming. For example, in an MHA-dominated architecture such as GPT-3 175B  [ 24 ] , the typical KV cache memory consumption with L i = 2048 L_{\rm i}=2048 input tokens and N bits = 16 N_{\rm bits}=16 bits quantization in the prefill stage is given by 
+
+ | 
+ Ω KV MHA ​ ( L i ) = 2 ​ L i ​ N layer ​ N mod ​ N bits 8 × 1024 3 = γ ​ L i = 9 ​ ( GiB ) , \displaystyle\Omega_{\rm KV}^{\rm MHA}(L_{\rm i})=\frac{2L_{\rm i}N_{\rm layer}N_{\rm mod}N_{\rm bits}}{8\times 1024^{3}}=\gamma L_{\rm i}=9~({\rm GiB}), | 
+ | 
+ (6) | 
+
+ where GPT-3 possesses N layer = 96 N_{\rm layer}=96 layers of Transformers with model dimension N mod = 12,288 N_{\rm mod}=12,288 , and γ = N layer ​ N mod ​ N bits / 4 / 1024 3 \gamma=N_{\rm layer}N_{\rm mod}N_{\rm bits}/4/1024^{3} is the KV cache scaling factor. Similarly, for GQA and MQA attention variants, the memory footprint is Ω KV ​ ( L i ) = g ​ γ ​ L i \Omega_{\rm KV}(L_{\rm i})=g\gamma L_{\rm i} . 
+
+ With the emergence of hybrid-attention architecture, where the MHA is replaced by the mixture of a small number of full-attention layers and a larger number of linear-complexity or bounded-state layers  [ 9 , 25 , 12 , 13 , 28 , 26 , 27 ] , the memory consumption of the KV cache is substantially reduced, making the KV cache transfer across data centers possible. 
+
+ III System Model 
+
+ In this section, we introduce the mathematical model developed for the disaggregated LLM service architecture. 
+
+ III-A M/G/ k p k_{\rm p} Queuing Prefill Model 
+
+ Consider a prefill resource pool that is composed of k p k_{\rm p} identical prefill instances with replications of the same LLMs. Each instance is equipped with GPU devices and high bandwidth memory (HBM) as shown in Fig.  1 (a), and serves one user request at a time. User requests waiting for available instances form a shared queue. 
+
+ Based on the behavior of prefill operations, we model the prefill stage as a queuing system with k p k_{\rm p} parallel servers.
+Since the LLM service requests typically come from a large number of independent users, the arrival process can be treated as a Poisson process with arrival rate λ \lambda   [ 15 , 7 ] .
+For a given input sequence with L i L_{\rm i} tokens at a prefill instance, according to ( 5 ),
+the computational latency of the prefill stage is calculated by 
+
+ | 
+ T p , 1 ​ ( L i ) = N mul ​ ( L i ) F p , T_{\rm p,1}(L_{\rm i})=\frac{N_{\rm mul}\left(L_{\rm i}\right)}{F_{\rm p}}, | 
+ | 
+ (7) | 
+
+ where F p F_{\rm p} denotes the compute capacity of each prefill instance in the resource pool. 
+
+ Besides computational operations, the prefill stage also introduces HBM traffic latency, which mainly consists of model weight loading and KV cache writing. Specifically, the memory footprints of the model weight and KV cache are given by Ω LLM \Omega_{\rm LLM} and Ω KV ​ ( L i ) \Omega_{\rm KV}(L_{\rm i}) in ( 6 ),
+respectively, which result in the memory prefill latency 
+
+ | 
+ T p , 2 ​ ( L i ) = Ω LLM + Ω KV ​ ( L i ) B HBM , T_{\rm p,2}\left(L_{\rm i}\right)=\frac{\Omega_{\rm LLM}+\Omega_{\rm KV}(L_{\rm i})}{B_{\rm HBM}}, | 
+ | 
+ (8) | 
+
+ where B HBM B_{\rm HBM} is the bandwidth of HBM. Hence, the overall service time T p T_{\rm p} is then modeled as 
+
+ | 
+ T p ​ ( L i ) = max ⁡ ( T p , 1 ​ ( L i ) , T p , 2 ​ ( L i ) ) . T_{\rm p}\left(L_{\rm i}\right)=\max\left(T_{\rm p,1}\left(L_{\rm i}\right),T_{\rm p,2}\left(L_{\rm i}\right)\right). | 
+ | 
+ (9) | 
+
+ In summary, we model the prefill stage as an M/G/ k p k_{\rm p} queue  [ 32 ] . Prefill utilization is given by ρ p = λ ​ 𝔼 ​ [ T p ​ ( L i ) ] / k p \rho_{\rm p}=\lambda\mathbb{E}[T_{\rm p}(L_{\rm i})]/k_{\rm p} , which must satisfy ρ p < 1 \rho_{\rm p}<1 to ensure the stability of the queue. 
+
+ III-B KV Cache Transfer 
+
+ After the prefill stage, the generated KV cache must be transferred to the decode resource pool.
+The departure traffic from the k p k_{\rm p} prefill instances is forwarded to the KV cache transfer stage. When k p k_{\rm p} is large and the departure traffics from k p k_{\rm p} instances are mutually independent, the superposed departure process of the KV cache can also be approximated as a Poisson process  [ 33 ] . For a stable prefill queue without request loss or abandonment, the KV cache transfer arrival rate λ KV \lambda_{\rm KV} equals the user request arrival rate of the prefill stage as λ KV = λ \lambda_{\rm KV}=\lambda .
+Let B B denote the link bandwidth for KV cache transfer, the service time is given by 
+
+ | 
+ T TR ​ ( L i ) = Ω KV ​ ( L i ) B = g ​ γ ​ L i B . T_{\rm TR}\left(L_{\rm i}\right)=\frac{\Omega_{\rm KV}\left(L_{\rm i}\right)}{B}=\frac{g\gamma L_{\rm i}}{B}. | 
+ | 
+ (10) | 
+
+ Therefore, the KV transfer stage can also be modeled as an M/G/ 1 1 queue, and the utilization is 
+
+ | 
+ ρ KV = λ ​ 𝔼 ​ [ T TR ​ ( L i ) ] = λ ​ 𝔼 ​ [ Ω KV ​ ( L i ) ] B < 1 . \rho_{\rm KV}=\lambda\mathbb{E}[T_{\rm TR}(L_{\rm i})]=\frac{\lambda\mathbb{E}[\Omega_{\rm KV}(L_{\rm i})]}{B}<1. | 
+ | 
+ (11) | 
+
+ III-C Generalized Birth-Death Decode Model 
+
+ As shown in Fig.  1 (c), in the decode stage, the next output token is generated based on the input and all previous output tokens.
+The reuse of KV cache significantly alleviates the computational overhead of token generation. To fully exploit the computational capability of the decode resource pool, requests containing the first output tokens generated by the prefill stage are executed via continuous batching  [ 31 ] . This enables the sharing of computation and HBM resources across k d k_{\rm d} GPU devices.
+In each decoding iteration, N bat N_{\rm bat} requests in a batch are decoded in parallel, each producing one output token at a time.
+As new requests arrive or existing requests terminate after different numbers of iterations, requests are dynamically admitted to or removed from the batch, so the value of N bat N_{\rm bat} varies over time. 
+
+ Let L io L_{\rm io} denote the
+total number of tokens
+within the batch of user requests as 
+
+ | 
+ L io = ∑ n = 1 N bat ( L i ( n ) + L o ( n ) ) , L_{\rm io}=\sum_{n=1}^{N_{\rm bat}}\left(L_{\rm i}^{(n)}+L_{\rm o}^{(n)}\right), | 
+ | 
+ (12) | 
+
+ where L i ( n ) L_{\rm i}^{(n)} and L o ( n ) L_{\rm o}^{(n)} denote the number of input tokens and the number of
+output tokens already generated for the n n -th user request, respectively.
+The required number of multiplications is then given by 
+
+ | 
+ | 
+ N mul , d ​ ( L io ) \displaystyle{N}_{\rm mul,d}(L_{\rm io}) | 
+ | 
+ (13) | 
+
+ | 
+ = \displaystyle={} | 
+ N layer ​ ( N bat ​ ( 2 ​ ( 1 + g ) ​ N mod 2 + 2 ​ N mod ​ N hid ) + 2 ​ N mod ​ L io ) . \displaystyle N_{\rm layer}\left(N_{\rm bat}\left({2(1+g)N_{\rm mod}^{2}}\!+\!{2N_{\rm mod}N_{\rm hid}}\right)\!+\!2N_{\rm mod}L_{\rm io}\right). | 
+ | 
+
+ Therefore, the decode computational latency is modeled as 
+
+ | 
+ T d , 1 ​ ( L io ) = N mul , d ​ ( L io ) k d ​ F d , T_{\rm d,1}(L_{\rm io})=\frac{N_{\rm mul,d}(L_{\rm io})}{k_{\rm d}F_{\rm d}}, | 
+ | 
+ (14) | 
+
+ where F d F_{\rm d} denotes the computational capacity of each decoding GPU. 
+
+ In each decoding iteration, all KV caches of the requests in a batch must be loaded into the computing units. Because of the large memory footprint of KV cache g ​ γ ​ L io g\gamma L_{\rm io} within the batch, the resulting latency 
+
+ | 
+ T d , 2 ​ ( L io ) = Ω LLM + g ​ γ ​ L io k d ​ B HBM T_{\rm d,2}(L_{\rm io})=\frac{\Omega_{\rm LLM}+\displaystyle g\gamma L_{\rm io}}{k_{\rm d}B_{\rm HBM}} | 
+ | 
+ (15) | 
+
+ is non-negligible. Assuming perfect parallelism between computation and HBM read/write operations, the overall decode service time
+can be written as 
+
+ | 
+ T d ​ ( L io ) = max ⁡ ( T d , 1 , T d , 2 ) . T_{\rm d}(L_{\rm io})=\max\left(T_{\rm d,1},T_{\rm d,2}\right). | 
+ | 
+ (16) | 
+
+ III-D Stage-Wise LLM Service Metrics 
+
+ To evaluate the SLO of LLM services, the following metrics are commonly considered. 
+
+ • 
+
+ Time to First Token (TTFT) : A critical latency metric in the prefill stage. TTFT is defined as the elapsed time from the arrival of a user request to the generation of the very first output token. It can be expressed by the sojourn time of the prefill queuing model as 
+
+ | 
+ T TTFT = T p W + T p ​ ( L i ) , T_{\rm TTFT}=T_{\rm p}^{\rm W}+T_{\rm p}\left(L_{\rm i}\right), | 
+ | 
+ (17) | 
+
+ where T p W T_{\rm p}^{\rm W} is the waiting time of the user request in the prefill stage.
+TTFT is affected by the number of input tokens L i L_{\rm i} , model footprint Ω LLM \Omega_{\rm LLM} , and hardware compute capacity F p F_{\rm p} .
+In real-time chatting or agentic workflows, minimizing TTFT is of great importance, as it directly reflects the user’s waiting time. 
+
+ • 
+
+ KV-Cache Transfer Latency : After the prefill stage, the generated KV cache and the first token ID are transferred to the decode resource pool.
+The transfer latency consists of the waiting time T TR W T_{\rm TR}^{\rm W} in the transfer queue and the actual transmission time T TR T_{\rm TR} given by 
+
+ | 
+ T KV = T TR W + T TR ​ ( L i ) . T_{\rm KV}=T_{\rm TR}^{\rm W}+T_{\rm TR}(L_{\rm i}). | 
+ | 
+ (18) | 
+
+ Although it is not commonly treated as a conventional SLO metric, it connects the prefill and decode stages and influences the overall service quality. We hence treat it as an independent stage-wise SLO metric. 
+
+ • 
+
+ Time per Output Token (TPOT) : A fundamental latency metric in the decode stage. TPOT is defined by the time required to generate each output token as 
+
+ | 
+ T TPOT = T d ​ ( L io ) , T_{\rm TPOT}=T_{\rm d}(L_{\rm io}), | 
+ | 
+ (19) | 
+
+ which is also a random variable affected by the context length L io L_{\rm io} , batch size N bat N_{\rm bat} , and other system parameters.
+Lower TPOT produces smoother and more responsive text generation, and a
+suitable TPOT should not exceed the time interval in which users can comfortably read. 
+
+ III-E Problem Formulation 
+
+ In this subsection, we formulate the SLO-aware resource allocation problem for the disaggregated LLM serving system described in the previous subsections. 
+
+ An SLO specifies a latency threshold that the related metric must remain below with a prescribed probability p SLO p_{\rm SLO} . Goodput denotes the user request throughput λ \lambda adhering to the latency SLO targets, i.e., ensuring that p SLO p_{\rm SLO} percent of the requests satisfy the designated latency requirements  [ 16 , 7 ] . In this work, we aim to maximize the system goodput by jointly allocating the overall cost.
+For the aforementioned three inference stages, let 𝐫 = { k p , B , k d , N bat } {\bf r}=\{k_{\rm p},B,k_{\rm d},N_{\rm bat}\} be the set of resources to be allocated,
+the goodput maximization problem is then defined by 
+
+ | 
+
+ | 
+ 𝒫 1 : max 𝐫 \displaystyle\!\!\mathcal{P}_{1}:~~\underset{{\bf r}}{\max}~~ | 
+ λ \displaystyle\lambda | 
+ | 
+ (20a) | 
+
+ | 
+ s . t . \displaystyle{\rm s.t.}~~ | 
+ k p ​ C p + B ​ C KV + k d ​ C d ≤ C max , \displaystyle k_{\rm p}C_{\rm p}+BC_{\rm KV}+k_{\rm d}C_{\rm d}\leq C_{\max}, | 
+ | 
+ (20b) | 
+
+ | 
+ | 
+ Pr ⁡ ( T TTFT ≤ τ pre ) ≥ p SLO , \displaystyle\!\Pr\left(T_{\rm TTFT}\leq\tau_{\rm pre}\right)\geq p_{\rm SLO}, | 
+ | 
+ (20c) | 
+
+ | 
+ | 
+ Pr ⁡ ( T KV ≤ τ KV ) ≥ p SLO , \displaystyle\!\Pr\left(T_{\rm KV}\leq\tau_{\rm KV}\right)\geq p_{\rm SLO}, | 
+ | 
+ (20d) | 
+
+ | 
+ | 
+ Pr ⁡ ( T TPOT ≤ τ dec ) ≥ p SLO , \displaystyle\!\Pr\left(T_{\rm TPOT}\leq\tau_{\rm dec}\right)\geq p_{\rm SLO}, | 
+ | 
+ (20e) | 
+
+ | 
+ | 
+ ρ p < 1 , ρ KV < 1 , k p , k d , N bat ∈ ℤ . \displaystyle\rho_{\rm p}<1,~\rho_{\rm KV}<1,~k_{\rm p},k_{\rm d},N_{\rm bat}\in\mathbb{Z}. | 
+ | 
+ (20f) | 
+
+ In problem 𝒫 1 \mathcal{P}_{1} , ( 20b ) denotes the cost constraint, where C p C_{\rm p} , C KV C_{\rm KV} , and C d C_{\rm d} are the unit costs of prefill instance, KV cache transfer bandwidth, and decode device, respectively, and C max C_{\rm max} is the maximum cost to be allocated. ( 20c )-( 20e ) are the SLO targets for prefill, KV cache transfer, and decode stages, respectively, where τ pre \tau_{\rm pre} , τ KV \tau_{\rm KV} , and τ dec \tau_{\rm dec} denote the latency thresholds for T TTFT T_{\rm TTFT} , T KV T_{\rm KV} , and T TPOT T_{\rm TPOT} , respectively. 
+
+ The probabilities in ( 20c )-( 20e ) typically do not admit closed-form expressions due to the complicated behaviors and heterogeneous stochastic mechanisms. Therefore, in the following sections, we will analyze the stage-wise latency distributions, derive tractable approximations for the SLO-attainment probabilities, and establish the corresponding resource requirements. 
+
+ IV Analysis 
+
+ In this section, we analyze the stage-wise p SLO p_{\rm SLO} -quantile latency tail of SLO constraints in 𝒫 1 \mathcal{P}_{1} , and derive the corresponding resource requirements with respect to corresponding decision variables.
+Under practical setups 3 3 
+ 3 
+
+ Unless otherwise stated, examples of practical system parameters in this paper refer to NVIDIA A100 GPU  [ 34 ] with F p = 156 × 10 12 F_{\rm p}=156\times 10^{12} multiplications per second and B HBM = 2 B_{\rm HBM}=2 TBps, LLaMA 3.1 8B LLM  [ 22 ] with N layer = 32 N_{\rm layer}=32 , N mod = 4,096 N_{\rm mod}=4,096 , N hid = 14,336 N_{\rm hid}=14,336 , g = 0.25 g=0.25 , and L i = 1,024 L_{\rm i}=1,024 . , the prefill and decode stages are bottlenecked by computational capacity and memory bandwidth under practical setups, respectively (See Appendix A for the proof). Therefore, we only consider latency arising from compute capacity in the prefill stage and memory bandwidth in the decode stage. 
+
+ IV-A Prefill Stage 
+
+ In this subsection, we derive the closed-form approximation of sojourn latency T TTFT = T p W + T p ​ ( L i ) T_{\rm TTFT}=T_{\rm p}^{\rm W}+T_{\rm p}\left(L_{\rm i}\right) in the prefill stage. 
+
+ We first derive the behavior of the prefill waiting time T p W T_{\rm p}^{\rm W} .
+With a limited overall cost C max C_{\rm max} , the prefill queue can operate at very high utilization, i.e., ρ p → 1 \rho_{\rm p}\to 1 . In this case, the Kingman’s approximation  [ 33 , 35 ] can be applied to the waiting time T p W T_{\rm p}^{\rm W} of M/G/ k p k_{\rm p} queue to analyze the tail behavior as 
+
+ | 
+ Pr ⁡ ( T p W ≥ τ ) ≈ C k p ​ ( A ) ​ e − τ w , \Pr\left(T_{\rm p}^{\rm W}\geq\tau\right)\approx C_{k_{\rm p}}\!\!\left(A\right)e^{-\frac{\tau}{w}}, | 
+ | 
+ (21) | 
+
+ where 
+
+ | 
+ C k p ​ ( A ) = A k p k p ! ​ 1 1 − ρ p ∑ n = 0 k p − 1 A n n ! + A k p k p ! ​ 1 1 − ρ p C_{k_{\rm p}}\!\!\left(A\right)=\frac{\dfrac{A^{k_{\rm p}}}{k_{\rm p}!}\dfrac{1}{1-\rho_{\rm p}}}{\displaystyle\sum_{n=0}^{k_{\rm p}-1}\frac{A^{n}}{n!}+\dfrac{A^{k_{\rm p}}}{k_{\rm p}!}\dfrac{1}{1-\rho_{\rm p}}} | 
+ | 
+ (22) | 
+
+ is the Erlang-C waiting probability with traffic intensity A = ρ p ​ k p A=\rho_{\rm p}k_{\rm p} , 
+
+ | 
+ w = 1 + c 2 2 ​ ρ p λ ⁡ ( 1 − ρ p ) w=\frac{1+c^{2}}{2}\frac{\rho_{\rm p}}{\lambda\left(1-\rho_{\rm p}\right)} | 
+ | 
+ (23) | 
+
+ is the approximation factor,
+and c = Var ⁡ [ L i ] / 𝔼 ⁡ [ L i ] c=\sqrt{{\rm Var}[L_{\rm i}]}/\mathbb{E}[L_{\rm i}] is the coefficient of variation (CV) of random variable L i L_{\rm i} . 
+
+ Next, we derive effective approximations for the service time in the prefill stage T p ​ ( L i ) T_{\rm p}\left(L_{\rm i}\right) .
+According to Appendix A, we have T p ≈ T p , 1 = N mul ​ ( L i ) / F p T_{\rm p}\approx T_{\rm p,1}=N_{\rm mul}(L_{\rm i})/F_{\rm p} . Under practical parameters 3 , the quadratic term in N mul ​ ( L i ) N_{\rm mul}(L_{\rm i}) shows a limited contribution as 
+
+ | 
+ N layer ​ N mod ​ L i 2 N mul ​ ( L i ) = 0.0256 , \frac{N_{\rm layer}N_{\rm mod}L_{\rm i}^{2}}{N_{\rm mul}(L_{\rm i})}=0.0256, | 
+ | 
+ (24) | 
+
+ which indicates that the quadratic term in N mul ​ ( L i ) N_{\rm mul}(L_{\rm i}) has a limited effect (below 2.6 % 2.6\% ) on the overall computational complexity. Therefore, the prefill service time can be further approximated as 
+
+ | 
+ T p ≈ α p ​ L i , T_{\rm p}\approx\alpha_{\rm p}L_{\rm i}, | 
+ | 
+ (25) | 
+
+ where α p = N layer ​ ( 2 ​ ( 1 + g ) ​ N mod 2 + ( 2 ​ N hid + 1 ) ​ N mod ) / F p \alpha_{\rm p}=N_{\rm layer}(2(1+g)N_{\rm mod}^{2}\!+\!(2N_{\rm hid}+1)N_{\rm mod})/F_{\rm p} . 
+
+ Since the waiting time T p W T_{\rm p}^{\rm W} and the service time T p ​ ( L i ) T_{\rm p}(L_{\rm i}) are independent, the CDF F TTFT ​ ( τ pre ) F_{\rm TTFT}(\tau_{\rm pre}) of sojourn time T TTFT T_{\rm TTFT} is obtained by the convolution as 
+
+ | 
+ | 
+ Pr ⁡ ( T TTFT ≤ τ pre ) \displaystyle\Pr\left(T_{\rm TTFT}\!\leq\!\tau_{\rm pre}\right) | 
+ | 
+ (26) | 
+
+ | 
+ = \displaystyle={} | 
+ ∫ 0 τ pre Pr ⁡ ( T p W ≤ τ pre − s ) ​ d ​ F T p ​ ( s ) \displaystyle\int_{0}^{\tau_{\rm pre}}\!\!\Pr\left(T_{\rm p}^{\rm W}\leq\tau_{\rm pre}-s\right){\rm d}F_{T_{\rm p}}(s) | 
+ | 
+
+ | 
+ ≈ \displaystyle\approx{} | 
+ ∫ 0 τ pre ( − C k p ​ ( A ) ​ e − τ pre − s w ) ​ d ​ F T p ​ ( s ) \displaystyle\int_{0}^{\tau_{\rm pre}}\!\!\!\left(1\!-\!C_{k_{\rm p}}\!\!\left(A\right)e^{-\frac{\tau_{\rm pre}-s}{w}}\right)\!{\rm d}F_{T_{\rm p}}(s) | 
+ | 
+
+ | 
+ = \displaystyle={} | 
+ F T p ​ ( τ pre ) − C k p ​ ( A ) ​ ∫ 0 τ pre e − τ pre − s w ​ d ​ F T p ​ ( s ) , \displaystyle F_{T_{\rm p}}(\tau_{\rm pre})-C_{k_{\rm p}}\!\!\left(A\right)\int_{0}^{\tau_{\rm pre}}\!\!e^{-\frac{\tau_{\rm pre}-s}{w}}{\rm d}F_{T_{\rm p}}(s), | 
+ | 
+
+ where F T p ​ ( ⋅ ) F_{T_{\rm p}}(\cdot) is the cumulative distribution function (CDF) of prefill service time T p T_{\rm p} .
+The latency SLO constraint ( 20c ) is then reformulated as 
+
+ | 
+ F T p ​ ( τ pre ) − C k p ​ ( A ) ​ ∫ 0 τ pre e − τ pre − s w ​ d ​ F T p ​ ( s ) ≥ p SLO . F_{T_{\rm p}}(\tau_{\rm pre})-C_{k_{\rm p}}\!\left(A\right)\int_{0}^{\tau_{\rm pre}}\!e^{-\frac{\tau_{\rm pre}-s}{w}}{\rm d}F_{T_{\rm p}}(s)\geq p_{\rm SLO}. | 
+ | 
+ (27) | 
+
+ In particular, ( 27 ) provides a unified characterization for any given distribution of L i L_{\rm i} .
+Based on
+application scenarios, the distribution 4 4 
+ 4 
+
+ While L i L_{\rm i} is a discrete random variable in practice, to facilitate analysis, we model its distribution in the continuous domain. Similar treatment applies to other random variables such as L o L_{\rm o} and L io L_{\rm io} in the remainder of this paper. of L i L_{\rm i} can be categorized into two types  [ 36 ] : 
+
+ • 
+
+ Light-tailed : Short interactive workloads, such as conversation and code completion, are commonly dominated by relatively short prompts and can be modeled by an exponential distribution  [ 10 , 11 ] , i.e., L i ∼ Exp ⁡ [ 1 / ℓ i ] L_{\rm i}\sim{\rm Exp}[1/\ell_{\rm i}] , where ℓ i = 𝔼 ⁡ [ L i ] \ell_{\rm i}=\mathbb{E}[L_{\rm i}] . In this case, ( 21 ) is an exact equality instead of an approximation. 
+
+ • 
+
+ Heavy-tailed : Long context workloads, such as multi-modal and agentic tasks with multi-turn dialogues, usually exhibit a heavy-tailed length distribution that can be modeled by a log-normal distribution  [ 8 ] , i.e., L i ∼ ℒ ​ 𝒩 ​ [ μ i , σ i 2 ] L_{\rm i}\sim\mathcal{LN}[\mu_{\rm i},\sigma_{\rm i}^{2}] . 
+
+ For light-tailed case with L i ∼ Exp ⁡ [ 1 / ℓ i ] L_{\rm i}\sim{\rm Exp}[1/\ell_{\rm i}] , the CDF of T p ​ ( L i ) T_{\rm p}(L_{\rm i}) is given by F T p ​ ( t ) = 1 − e − t α p ​ ℓ i F_{T_{\rm p}}(t)=1-e^{-\frac{t}{\alpha_{\rm p}\ell_{\rm i}}} . The integral form in ( 27 ) for constraint ( 20c ) is then reduced to 
+
+ | 
+ 1 − e − τ pre α p ​ ℓ i − w ​ C k p ​ ( A ) α p ​ ℓ i − w ​ ( e − τ pre α p ​ ℓ i − e − τ pre w ) ≥ p SLO . 1-e^{-\frac{\tau_{\rm pre}}{\alpha_{\rm p}\ell_{\rm i}}}-\frac{wC_{k_{\rm p}}(A)}{\alpha_{\rm p}\ell_{\rm i}-w}\left(e^{-\frac{\tau_{\rm pre}}{\alpha_{\rm p}\ell_{\rm i}}}-e^{-\frac{\tau_{\rm pre}}{w}}\right)\geq p_{\rm SLO}. | 
+ | 
+ (28) | 
+
+ However, for the heavy-tailed case with L i ∼ ℒ ​ 𝒩 ​ [ μ i , σ i 2 ] L_{\rm i}\sim\mathcal{LN}[\mu_{\rm i},\sigma_{\rm i}^{2}] , the convolution integral ( 27 ) does not admit a finite closed-form expression and should therefore be evaluated numerically.
+Since an SLO constraint physically corresponds to a minimal resource requirement, the unique optimal k p ⋆ k_{\rm p}^{\star} can be obtained via enumeration. 
+
+ Fig. 2: TTFT metric with varying p SLO p_{\rm SLO} thresholds for (a) light-tailed and (b) heavy-tailed workloads, respectively. 
+
+ The approximations in ( 21 ) and ( 25 ) are validated in Fig.  2 .
+In Fig.  2 (a), the only approximation stems from ( 25 ) since ( 21 ) is exact in the light-tailed case. In other words, we show that ( 25 ) is an accurate approximation.
+In Fig.  2 (b),
+the average deviation over the entire range of p SLO p_{\rm SLO} is within 5 % 5\% , which validates the accuracy of the closed - form approximations in ( 21 ) and ( 25 ) for the heavy-tailed case.
+In addition, the hardware measurements closely follow the theoretical predictions. The average relative error remains below 5 % 5\% for p SLO < 0.98 p_{\rm SLO}<0.98 , and the discrepancy becomes more visible only at the extreme tail percentiles. 
+
+ IV-B KV Cache Transfer Stage 
+
+ In this subsection, we analyze the sojourn latency T KV T_{\rm KV} in the KV cache transfer stage, and derive approximate closed-form solutions for the light-tailed and heavy-tailed cases, respectively. 
+
+ In the KV cache transfer stage, the communication link with bandwidth B B serves one KV cache transfer request. Therefore, the KV cache transfer stage is modeled as an M/G/ 1 1 queue. For user requests with light- and heavy-tailed characteristics, the sojourn latencies are analyzed as follows. 
+
+ IV-B 1 Light-Tailed 
+
+ For the number of tokens following a light-tailed exponential distribution as L i ∼ Exp ⁡ [ 1 / ℓ i ] L_{\rm i}\sim{\rm Exp}[1/\ell_{\rm i}] , the service time T TR = g ​ γ ​ L i / B T_{\rm TR}=g\gamma L_{\rm i}/B is also exponentially distributed. Therefore, the queuing model of the KV cache transfer stage degenerates to an M/M/ 1 1 queue.
+In this case, the waiting time T TR W T_{\rm TR}^{\rm W} also follows an exponential distribution with probability mass 1 − ρ KV 1-\rho_{\rm KV} at t = 0 t=0 . Therefore, the CDF
+of the waiting time is given by  [ 37 ] 
+
+ | 
+ Pr ⁡ ( T TR W ≤ t ) = 1 − ρ KV ​ e − t w KV , \Pr\left(T_{\rm TR}^{\rm W}\leq t\right)=1-\rho_{\rm KV}e^{-\frac{t}{w_{\rm KV}}}, | 
+ | 
+ (29) | 
+
+ where 
+
+ | 
+ w KV = ρ KV λ ⁡ ( 1 − ρ KV ) w_{\rm KV}=\frac{\rho_{\rm KV}}{\lambda\left(1-\rho_{\rm KV}\right)} | 
+ | 
+ (30) | 
+
+ is the tail decay factor. Since the waiting time and the service time of an arriving request are independent, the CDF of the sojourn latency T KV T_{\rm KV} can be obtained by the convolution as 
+
+ | 
+ Pr ⁡ ( T KV ≤ τ KV ) = \displaystyle\!\Pr\left(T_{\rm KV}\!\leq\!\tau_{\rm KV}\right)={} | 
+ ∫ 0 τ KV Pr ⁡ ( T TR W ≤ τ KV − t ) ​ d ​ Pr ⁡ ( T TR ≤ t ) \displaystyle\!\!\int_{0}^{\tau_{\rm KV}}\!\!\Pr\left(T_{\rm TR}^{\rm W}\leq\tau_{\rm KV}-t\right){\rm d}\Pr\left(T_{\rm TR}\leq t\right) | 
+ | 
+
+ | 
+ = \displaystyle={} | 
+ 1 − e − τ KV w KV . \displaystyle 1-e^{-\frac{\tau_{\rm KV}}{w_{\rm KV}}}. | 
+ | 
+ (31) | 
+
+ Therefore, the SLO constraint ( 20d ) is exactly characterized as 
+
+ | 
+ 1 − e − τ KV w KV ≥ p SLO , 1-e^{-\frac{\tau_{\rm KV}}{w_{\rm KV}}}\geq p_{\rm SLO}, | 
+ | 
+ (32) | 
+
+ which yields 
+
+ | 
+ B ≥ λ ​ g ​ γ ​ ℓ i + g ​ γ ​ ℓ i τ KV ​ log ⁡ 1 1 − p SLO . B\geq\lambda g\gamma\ell_{\rm i}+\frac{g\gamma\ell_{\rm i}}{\tau_{\rm KV}}\log\frac{1}{1-p_{\rm SLO}}. | 
+ | 
+ (33) | 
+
+ IV-B 2 Heavy-Tailed 
+
+ For multi-modal and agentic requests, the input length L i L_{\rm i} is modeled by a log-normal distribution as L i ∼ ℒ ​ 𝒩 ​ [ μ i , σ i 2 ] L_{\rm i}\sim\mathcal{LN}[\mu_{\rm i},\sigma_{\rm i}^{2}] , where μ i \mu_{\rm i} and σ i \sigma_{\rm i} are the corresponding distribution parameters.
+According to ( 10 ), the transfer service time also follows a log-normal distribution as 
+
+ | 
+ T TR ​ ( L i ) = g ​ γ ​ L i B ∼ ℒ ​ 𝒩 ​ [ μ i + log ⁡ ( g ​ γ B ) , σ i 2 ] . T_{\rm TR}(L_{\rm i})=\frac{g\gamma L_{\rm i}}{B}\sim\mathcal{LN}\left[\mu_{\rm i}+\log\left(\frac{g\gamma}{B}\right),\sigma_{\rm i}^{2}\right]. | 
+ | 
+ (34) | 
+
+ Unfortunately, with heavy-tailed service time behavior, the waiting time distribution of the M/G/ 1 1 queue does not admit the tractable exact expression available in the light-tailed case.
+Hence, we resort to the Kingman-type heavy traffic approximation  [ 33 , 35 ] similar to the prefill stage and obtain 
+
+ | 
+ B ≥ λ ​ g ​ γ ​ ℓ i + e σ i 2 2 ​ g ​ γ ​ ℓ i τ KV ​ log ⁡ ρ KV 1 − p SLO . B\geq\lambda g\gamma\ell_{\rm i}+\frac{e^{\sigma_{\rm i}^{2}}}{2}\frac{g\gamma\ell_{\rm i}}{\tau_{\rm KV}}\log\frac{\rho_{\rm KV}}{1-p_{\rm SLO}}. | 
+ | 
+ (35) | 
+
+ For detailed derivation, please refer to Appendix B. Hence, we can obtain optimal B ⋆ B^{\star} via one-dimensional line search. 
+
+ Fig. 3: KV cache transfer latency with varying p SLO p_{\rm SLO} thresholds for (a) light-tailed and (b) heavy-tailed workloads, respectively. 
+
+ Figs.  3 (a) and  3 (b) validate the accuracy of the closed-form expressions ( 33 ) and ( 35 ) for the light- and heavy-tailed cases, respectively. In particular, the theoretical predictions match the queue simulations and hardware measurement results with negligible errors. The deviations increase only at the extreme high tails, where system-level overheads that are not considered in the queuing model may have a stronger impact. 
+
+ Remark 1 . 
+
+ It is worth noting that for both light- and heavy-tailed workloads, the bandwidth B B requirements on the right-hand-side of ( 33 ) and ( 35 ) can be divided into a λ \lambda -related term and an SLO-related term, while the SLO-related
+bandwidth requirement is independent of the request arrival rate λ \lambda . This indicates that when λ \lambda changes, we only need to scale the λ \lambda -related bandwidth linearly with the factor g ​ γ ​ ℓ i g\gamma\ell_{\rm i} to meet the SLO target. 
+
+ IV-C Decode Stage 
+
+ In this subsection, we analyze the TPOT constraint ( 20e ) in 𝒫 1 \mathcal{P}_{1} . Different from the prefill and KV cache transfer stages, the resource allocation in the decode stage is determined by two variables, i.e., the number of decode GPU devices k d k_{\rm d} and the maximum batch size N bat N_{\rm bat} . Increasing N bat N_{\rm bat} improves the admission capability of user requests, but also increases the requirements of HBM capacity k d ​ Ω HBM k_{\rm d}\Omega_{\rm HBM} and total bandwidth k d ​ B HBM k_{\rm d}B_{\rm HBM} . In the following, we derive the relationships between k d k_{\rm d} and N bat N_{\rm bat} to determine the feasible region for resource allocation. 
+
+ According to Appendix A, the decode service time is mainly determined by the HBM bandwidth under practical configurations as 
+
+ | 
+ T TPOT ≈ T d , 2 = Ω LLM + g ​ γ ​ L io k d ​ B HBM . T_{\rm TPOT}\approx T_{\rm d,2}=\frac{\Omega_{\rm LLM}+\displaystyle g\gamma L_{\rm io}}{k_{\rm d}B_{\rm HBM}}. | 
+ | 
+ (36) | 
+
+ where the L io L_{\rm io} is the aggregated number of tokens within the batch defined by ( 12 ). Different from the prefill stage, where L i L_{\rm i} follows either a light-tailed exponential or heavy-tailed log-normal distribution, L o L_{\rm o} statistically follows an exponential distribution as L o ∼ Exp ⁡ [ 1 / ℓ o ] L_{\rm o}\sim{\rm Exp}[1/\ell_{\rm o}] , and is typically independent with L i L_{\rm i}   [ 11 , 8 , 36 ] . 
+
+ According to ( 36 ), the p SLO p_{\rm SLO} -quantile of TPOT is closely related to that of L io L_{\rm io} . Therefore, in the following, we analyze the TPOT SLO constraint under light- and heavy-tailed cases using moment matching  [ 38 , 39 ] , respectively. 
+
+ • 
+
+ Light-tailed : In this case, L io L_{\rm io} is the sum of N bat N_{\rm bat} exponential random variables L i ∼ Exp ⁡ [ 1 / ℓ i ] L_{\rm i}\sim{\rm Exp}[1/\ell_{\rm i}] and N bat N_{\rm bat} exponential random variables L o ∼ Exp ⁡ [ 1 / ℓ o ] L_{\rm o}\sim{\rm Exp}[1/\ell_{\rm o}] . Therefore, we can approximate the distribution of L io L_{\rm io} by using a Gamma distribution random variable with a constant bias  [ 39 ] . 
+
+ Specifically, let L io ′ = ℓ LT + L ~ io L_{\rm io}^{\prime}=\ell_{\rm LT}+\tilde{L}_{\rm io} be the approximated random variable of L io L_{\rm io} , where L ~ io ∼ Gamma ⁡ [ α LT , θ LT ] \tilde{L}_{\rm io}\sim{\rm Gamma}[\alpha_{\rm LT},\theta_{\rm LT}] is a Gamma-distributed random variable, and ℓ LT \ell_{\rm LT} is a constant bias.
+The parameters { ℓ LT , α LT , θ LT } \{\ell_{\rm LT},\alpha_{\rm LT},\theta_{\rm LT}\} can be obtained by matching the mean, variance, and skewness of L io L_{\rm io} as 
+
+ | 
+ { ℓ LT = N bat ​ ℓ i ​ ℓ o ​ ( ℓ i − ℓ o ) 2 ℓ i 3 + ℓ o 3 α LT = N bat ​ ( ℓ i 2 + ℓ o 2 ) 3 ( ℓ i 3 + ℓ o 3 ) 2 θ LT = ℓ i 3 + ℓ o 3 ℓ i 2 + ℓ o 2 . \begin{cases}\ell_{\rm LT}\!\!\!\!&=\displaystyle N_{\rm bat}\frac{\ell_{\rm i}\ell_{\rm o}\left(\ell_{\rm i}-\ell_{\rm o}\right)^{2}}{\ell_{\rm i}^{3}+\ell_{\rm o}^{3}}\\
+\alpha_{\rm LT}\!\!\!\!&=\displaystyle N_{\rm bat}\frac{\left(\ell_{\rm i}^{2}+\ell_{\rm o}^{2}\right)^{3}}{\left(\ell_{\rm i}^{3}+\ell_{\rm o}^{3}\right)^{2}}\\
+\theta_{\rm LT}\!\!\!\!&=\displaystyle\frac{\ell_{\rm i}^{3}+\ell_{\rm o}^{3}}{\ell_{\rm i}^{2}+\ell_{\rm o}^{2}}\end{cases}. | 
+ | 
+ (37) | 
+
+ Therefore, the p SLO p_{\rm SLO} -quantile of L io ′ L_{\rm io}^{\prime} is given by 
+
+ | 
+ ℓ ⁡ ( p SLO ) = ℓ LT + θ LT ​ P α LT − 1 ​ ( p SLO ) , \ell\left(p_{\rm SLO}\right)=\ell_{\rm LT}+\theta_{\rm LT}P^{-1}_{\alpha_{\rm LT}}(p_{\rm SLO}), | 
+ | 
+ (38) | 
+
+ where P α LT − 1 ​ ( ⋅ ) P^{-1}_{\alpha_{\rm LT}}(\cdot) is the inverse function of the regularized lower incomplete gamma function with parameter α LT \alpha_{\rm LT} . 
+
+ • 
+
+ Heavy-tailed : In this case, L io L_{\rm io} is the sum of N bat N_{\rm bat} log-normal random variables L i ∼ ℒ ​ 𝒩 ​ [ μ i , σ i 2 ] L_{\rm i}\sim\mathcal{LN}[\mu_{\rm i},\sigma_{\rm i}^{2}] and N bat N_{\rm bat} exponential random variables L o ∼ Exp ⁡ [ 1 / ℓ o ] L_{\rm o}\sim{\rm Exp}[1/\ell_{\rm o}] . Therefore, we can model L io L_{\rm io} using a log-normal random variable with a constant bias  [ 38 ] . 
+
+ Specifically, let L io ′ = ℓ HT + L ~ io L_{\rm io}^{\prime}=\ell_{\rm HT}+\tilde{L}_{\rm io} be the approximated random variable of L io L_{\rm io} , where L ~ io ∼ ℒ ​ 𝒩 ​ [ μ ℓ , σ ℓ 2 ] \tilde{L}_{\rm io}\sim\mathcal{LN}[\mu_{\ell},\sigma_{\ell}^{2}] is a log-normal random variable, and ℓ HT \ell_{\rm HT} is a constant bias.
+The parameters { ℓ HT , μ ℓ , σ ℓ } \{\ell_{\rm HT},\mu_{\ell},\sigma_{\ell}\} can be obtained by matching the mean, variance, and skewness of L io L_{\rm io} as 
+
+ | 
+ { ℓ HT = m − v x μ ℓ = 1 2 ​ log ⁡ v 1 + x 2 − log ⁡ x σ ℓ 2 = log ⁡ ( 1 + x 2 ) , \begin{cases}\ell_{\rm HT}\!\!\!\!&=\displaystyle m-\frac{\sqrt{v}}{x}\\
+\mu_{\ell}\!\!\!\!&=\displaystyle\frac{1}{2}\log\frac{v}{1+x^{2}}-\log x\\
+\sigma_{\ell}^{2}\!\!\!\!&=\displaystyle\log\left(1+x^{2}\right)\end{cases}, | 
+ | 
+ (39) | 
+
+ where 
+
+ | 
+ { m = N bat ​ ( ℓ o + e μ i + σ i 2 / 2 ) v = N bat ​ ( ℓ o 2 + ( e σ i 2 − 1 ) ​ e 2 ​ μ i + σ i 2 ) x = 2 ​ sinh ⁡ ( 1 3 ​ arcsinh ​ ( s 2 ) ) s = e 3 ​ μ i + 3 2 ​ σ i 2 ​ ( e σ i 2 + 2 ) ​ ( e σ i 2 − 1 ) 2 + 2 ​ ℓ o 3 N bat ​ ( e 2 ​ μ i + σ i 2 ​ ( e σ i 2 − 1 ) + ℓ o 2 ) 3 . \begin{cases}m\!\!\!\!&=\displaystyle N_{\rm bat}\left(\ell_{\rm o}+e^{\mu_{\rm i}+\sigma_{\rm i}^{2}/2}\right)\\
+v\!\!\!\!&=\displaystyle N_{\rm bat}\left(\ell_{\rm o}^{2}+(e^{\sigma_{\rm i}^{2}}-1)e^{2\mu_{\rm i}+\sigma_{\rm i}^{2}}\right)\\
+x\!\!\!\!&=\displaystyle 2\sinh\left(\frac{1}{3}{\rm arcsinh}\left(\frac{s}{2}\right)\right)\\
+s\!\!\!\!&=\displaystyle\frac{e^{3\mu_{\rm i}+\frac{3}{2}\sigma_{\rm i}^{2}}\left(e^{\sigma_{\rm i}^{2}}+2\right)\left(e^{\sigma_{\rm i}^{2}}-1\right)^{2}+2\ell_{\rm o}^{3}}{\sqrt{N_{\rm bat}\left(e^{2\mu_{\rm i}+\sigma_{\rm i}^{2}}\left(e^{\sigma_{\rm i}^{2}}-1\right)+\ell_{\rm o}^{2}\right)^{3}}}\end{cases}. | 
+ | 
+ (40) | 
+
+ Therefore, the p SLO p_{\rm SLO} -quantile of L io ′ L_{\rm io}^{\prime} is given by 
+
+ | 
+ ℓ ⁡ ( p SLO ) = ℓ HT + e μ ℓ + σ ℓ ​ Φ − 1 ​ ( p SLO ) , \ell(p_{\rm SLO})=\ell_{\rm HT}+e^{\mu_{\ell}+\sigma_{\ell}\Phi^{-1}\left(p_{\rm SLO}\right)}, | 
+ | 
+ (41) | 
+
+ where Φ ⁡ ( ⋅ ) \Phi(\cdot) is the CDF of the standard normal distribution. 
+
+ Therefore, the probability on the left-hand-side of ( 20e ) in 𝒫 1 \mathcal{P}_{1} can be represented by L io ′ L_{\rm io}^{\prime} as 
+
+ | 
+ Pr ⁡ ( T TPOT ≤ τ dec ) ≈ Pr ⁡ ( L io ′ ≤ τ dec ​ k d ​ B HBM − Ω LLM g ​ γ ) . \displaystyle\!\!\Pr\!\left(T_{\rm TPOT}\!\leq\!{\tau_{\rm dec}}\right)\!\approx\!\Pr\!\left(\!L_{\rm io}^{\prime}\!\leq\!\frac{\tau_{\rm dec}k_{\rm d}B_{\rm HBM}-\Omega_{\rm LLM}}{g\gamma}\!\right). | 
+ | 
+ (42) | 
+
+ Based on the workload characteristics, the SLO constraint ( 20e ) is equivalent to 
+
+ | 
+ C1 ⁡ ( L ) : k d ≥ g ​ γ ​ ( ℓ LT + θ LT ​ P α LT − 1 ​ ( p SLO ) ) + Ω LLM τ dec ​ B HBM {\rm C1\,(L)}:~~k_{\rm d}\geq\frac{g\gamma\left(\ell_{\rm LT}+\theta_{\rm LT}P^{-1}_{\alpha_{\rm LT}}(p_{\rm SLO})\right)+\Omega_{\rm LLM}}{\tau_{\rm dec}B_{\rm HBM}} | 
+ | 
+ (43) | 
+
+ for the light-tailed workload, or 
+
+ | 
+ C1 ⁡ ( H ) : k d ≥ g ​ γ ​ ( ℓ HT + e μ ℓ + σ ℓ ​ Φ − 1 ​ ( p SLO ) ) + Ω LLM τ dec ​ B HBM {\rm C1\,(H)}:~~k_{\rm d}\geq\frac{g\gamma\left(\ell_{\rm HT}+e^{\mu_{\ell}+\sigma_{\ell}\Phi^{-1}(p_{\rm SLO})}\right)+\Omega_{\rm LLM}}{\tau_{\rm dec}B_{\rm HBM}} | 
+ | 
+ (44) | 
+
+ for the heavy-tailed workload. These conditions ensure that p SLO p_{\rm SLO} percent of the requests satisfy the SLO ( 20e ). They provide one of the boundaries for decision variables { k d , N bat } \{k_{\rm d},N_{\rm bat}\} . 
+
+ Another boundary is given by the HBM capacity. Other than the model weights, each active user request needs to maintain the KV cache associated with its input tokens and currently generated output tokens. To ensure that the HBM capacity is not exhausted with probability p mem p_{\rm mem} , the following inequality must hold as 
+
+ | 
+ Ω LLM + g ​ γ ​ ℓ ​ ( p mem ) ≤ k d ​ Ω HBM , \Omega_{\rm LLM}+g\gamma\ell(p_{\rm mem})\leq k_{\rm d}\Omega_{\rm HBM}, | 
+ | 
+ (45) | 
+
+ which yields 
+
+ | 
+ C2 ⁡ ( L ) : k d ≥ g ​ γ ​ ( ℓ LT + θ LT ​ P α LT − 1 ​ ( p mem ) ) + Ω LLM Ω HBM \!{\rm C2\,(L)}:~k_{\rm d}\geq\frac{g\gamma\left(\ell_{\rm LT}+\theta_{\rm LT}P^{-1}_{\alpha_{\rm LT}}(p_{\rm mem})\right)+\Omega_{\rm LLM}}{\Omega_{\rm HBM}} | 
+ | 
+ (46) | 
+
+ or 
+
+ | 
+ C2 ⁡ ( H ) : k d ≥ g ​ γ ​ ( ℓ HT + e μ ℓ + σ ℓ ​ Φ − 1 ​ ( p mem ) ) + Ω LLM Ω HBM . \!{\rm C2\,(H)}:~k_{\rm d}\geq\frac{g\gamma\left(\ell_{\rm HT}+e^{\mu_{\ell}+\sigma_{\ell}\Phi^{-1}(p_{\rm mem})}\right)+\Omega_{\rm LLM}}{\Omega_{\rm HBM}}. | 
+ | 
+ (47) | 
+
+ Note that C1 \rm C1 and C2 \rm C2 both implicitly limit the batch size N bat N_{\rm bat} for a given k d k_{\rm d} , i.e., C1 \rm C1 limits N bat N_{\rm bat} to satisfy the TPOT SLO constraint, while C2 \rm C2 limits N bat N_{\rm bat} to prevent HBM capacity exhaustion.
+Nevertheless, the batch size N bat N_{\rm bat} cannot be arbitrarily small. There are also two major constraints that contribute to the other two boundaries.
+The first one is the stability condition given by 
+
+ | 
+ C3 : N bat > λ ​ Ω LLM k d ​ B HBM ​ p 0 − λ ​ g ​ γ ​ ( ℓ i + ℓ o ) , \!\!{\rm C3}:~N_{\rm bat}>\frac{\lambda\Omega_{\rm LLM}}{k_{\rm d}B_{\rm HBM}p_{0}-\lambda g\gamma\left(\ell_{\rm i}+\ell_{\rm o}\right)}, | 
+ | 
+ (48) | 
+
+ where p 0 p_{0} denotes the probability of reaching the EOS token for each request. Since the output length L o ( n ) L_{\rm o}^{(n)} follows an exponential distribution as L o ( n ) ∼ Exp ⁡ [ 1 / ℓ o ] L_{\rm o}^{(n)}\sim{\rm Exp}[1/\ell_{\rm o}] , and is independent of the input length L i ( n ) L_{\rm i}^{(n)}   [ 11 , 36 , 8 ] , p 0 p_{0} is further given by 
+
+ | 
+ p 0 = Pr ⁡ ( L o ≤ n + 1 ∣ L o ≥ n ) = 1 − e − 1 ℓ o . p_{0}=\Pr\left(L_{\rm o}\leq n+1\mid L_{\rm o}\geq n\right)=1-e^{-\frac{1}{\ell_{\rm o}}}. | 
+ | 
+ (49) | 
+
+ Please refer to Appendix C for more derivation details. 
+
+ The second one is the direct admission condition given by 
+
+ | 
+ C4 : N bat ≥ μ bat + σ bat ​ Φ − 1 ​ ( p join ) , {\rm C4}:~~N_{\rm bat}\geq\mu_{\rm bat}+\sigma_{\rm bat}\Phi^{-1}(p_{\rm join}), | 
+ | 
+ (50) | 
+
+ where μ bat \mu_{\rm bat} and σ bat \sigma_{\rm bat} are the mean and standard deviation of the number of requests in a batch, and p join p_{\rm join} is the probability that a request can directly join the decoding batch without waiting. Please refer to Appendix D for more details. 
+
+ C4 \rm C4 is typically a tighter condition than C3 \rm C3 , since it intrinsically implies the stability of the decoding process, and requires a larger batch size N bat N_{\rm bat} to reduce the waiting time. 
+
+ Fig. 4: The heavy-tailed decision boundaries C1 − C4 \rm C1-C4 and the corresponding feasible regions for (a)-(b) LLaMA 3.1 8B and (c)-(d) GPT-3 175B models. 
+
+ Fig. 5: TPOT with varying p SLO p_{\rm SLO} thresholds for (a) light-tailed and (b) heavy-tailed workloads, respectively. 
+
+ Fig.  4 depicts the feasible regions delineated by boundaries C1 − C4 \rm C1-C4 for LLaMA 3.1 and GPT-3 models under varying system parameters and heavy-tail user request distributions. For a fixed k d k_{\rm d} , C1 \rm C1 and C2 \rm C2 act as upper constraints of batch size N bat N_{\rm bat} , while C3 \rm C3 and C4 \rm C4 serve as lower constraints. 
+
+ Fig.  5 validates the proposed TPOT quantile characterization under both light- and heavy-tailed workloads. The analytical predictions closely match the simulation results. Meanwhile, the deviation between the analytical results and hardware measurements falls below 5 % 5\% over most of the considered p SLO p_{\rm SLO} range. These results demonstrate that the proposed model accurately captures the decoding latency behavior under practical hardware execution. 
+
+ Algorithm 1 Proposed Resource Allocation Algorithm 
+
+ 0: 
+
+  The cost budget C max C_{\max} , the prescribed SLO thresholds { τ pre , τ KV , τ dec } \{\tau_{\rm pre},\tau_{\rm KV},\tau_{\rm dec}\} and p SLO p_{\rm SLO} , the decode reliability parameters p mem p_{\rm mem} and p join p_{\rm join} for C2 \rm C2 and C4 \rm C4 , the unit costs C p C_{\rm p} , C KV C_{\rm KV} , and C d C_{\rm d} , and the parameters of model and hardware
+
+ 0: 
+
+  The maximum goodput λ ⋆ \lambda^{\star} 
+
+ 1: 
+
+  Initialize trial solution λ ( 0 ) \lambda^{(0)} and iteration index i = 0 i=0 
+
+ 2: 
+
+   repeat { i ← i + 1 i\leftarrow i+1 }
+
+ 3: 
+
+   Compute the minimum prefill instance requirement k p ​ ( λ ( i ) ) k_{\rm p}(\lambda^{(i)}) via ( 27 )
+
+ 4: 
+
+   Compute the minimum KV transfer bandwidth requirement B ⁡ ( λ ( i ) ) B(\lambda^{(i)}) via ( 33 ) or ( 35 )
+
+ 5: 
+
+   Compute the minimum decode device requirement k d ​ ( λ ( i ) , N bat ) k_{\rm d}(\lambda^{(i)},N_{\rm bat}) via C1 − C4 {\rm C1}-{\rm C4} 
+
+ 6: 
+
+   Compute the overall cost
+
+ | 
+ C ( i ) = k p ​ ( λ ( i ) ) ​ C p + B ⁡ ( λ ( i ) ) ​ C KV + k d ​ ( λ ( i ) , N bat ) ​ C d C^{(i)}=k_{\rm p}(\lambda^{(i)})C_{\rm p}+B(\lambda^{(i)})C_{\rm KV}+k_{\rm d}(\lambda^{(i)},N_{\rm bat})C_{\rm d} | 
+ | 
+
+ 7: 
+
+   Bisectionally update λ ( i ) \lambda^{(i)} by comparing C ( i ) C^{(i)} and C max C_{\rm max} 
+
+ 8: 
+
+   until | λ i − λ i − 1 | ≤ ε |\lambda^{i}-\lambda^{i-1}|\leq\varepsilon 
+
+ 9: 
+
+   return Maximum goodput λ ⋆ = λ i \lambda^{\star}=\lambda^{i} 
+
+ V SLO-Aware Resource Allocation 
+
+ In this section, we develop an SLO-aware resource allocation scheme for solving the goodput maximization problem 𝒫 1 \mathcal{P}_{1} . 
+
+ According to the analysis in Sec.  IV , the minimum required resources 𝐫 = { k p , B , k d , N bat } {\bf r}=\{k_{\rm p},B,k_{\rm d},N_{\rm bat}\} can be obtained given the arrival rate λ \lambda as well as SLOs, which yield the minimum deployment cost C min C_{\rm min} . Since C min C_{\rm min} increases monotonically with arrival rate λ \lambda , we can then obtain the maximum goodput via a bisection search.
+Therefore, we can solve the following cost minimization problem as 
+
+ | 
+
+ | 
+ 𝒫 2 : max 𝐫 \displaystyle\!\!\mathcal{P}_{2}:~~\underset{{\bf r}}{\max}~~ | 
+ λ \displaystyle\lambda | 
+ | 
+ (51a) | 
+
+ | 
+ s . t . \displaystyle{\rm s.t.}~~ | 
+ k p ​ C p + B ​ C KV + k d ​ C d ≤ C max , \displaystyle k_{\rm p}C_{\rm p}+BC_{\rm KV}+k_{\rm d}C_{\rm d}\leq C_{\max}, | 
+ | 
+ (51b) | 
+
+ | 
+ | 
+ ( 27 ) , \displaystyle\eqref{eq:qoslhs1}, | 
+ | 
+ (51c) | 
+
+ | 
+ | 
+ ( 33 ) ​ or ​ ( 35 ) \displaystyle\eqref{eq:kvlight}~{\rm or}~\eqref{eq:kvheavy} | 
+ | 
+ (51d) | 
+
+ | 
+ | 
+ C1 − C4 , , \displaystyle{\rm C1}-{\rm C4},, | 
+ | 
+ (51e) | 
+
+ | 
+ | 
+ ρ p < 1 , ρ KV < 1 , k p , k d , N bat ∈ ℤ . \displaystyle\rho_{\rm p}<1,~\rho_{\rm KV}<1,~k_{\rm p},k_{\rm d},N_{\rm bat}\in\mathbb{Z}. | 
+ | 
+ (51f) | 
+
+ where ( 51d ) is determined by the light-tailed or heavy-tailed workload type. The procedure of resource allocation is summarized in Algorithm   1 . 
+
+ VI Insights 
+
+ In this section, we revisit the analytical mappings established above and summarize the insights that are most relevant to the resource planning of disaggregated LLM serving systems. 
+
+ Fig. 6: (a) Token throughput over varying batch size. (b)-(d) The inference latency metrics over varying lengths of input user requests L i L_{\rm i} and output sequences L o L_{\rm o} . 
+
+ VI-A Token Throughput 
+
+ For LLM serving systems, the token generation rate, i.e., the token throughput, is another key performance metric that measures the total serving capacity of the system. Under the proposed analytical framework, each batched request generates exactly one token per decoding iteration, whose duration is dominated by the HBM access overhead in ( 36 ).
+Therefore, the token throughput is given by 
+
+ | 
+ Γ = N bat 𝔼 ⁡ [ T TPOT ] = k d ​ B HBM ​ N bat Ω LLM + g ​ γ ​ N bat ​ ( ℓ i + ℓ o ) , \Gamma=\frac{N_{\rm bat}}{\mathbb{E}\left[T_{\rm TPOT}\right]}=\frac{k_{\rm d}B_{\rm HBM}N_{\rm bat}}{\Omega_{\rm LLM}+g\gamma N_{\rm bat}\left(\ell_{\rm i}+\ell_{\rm o}\right)}, | 
+ | 
+ (52) | 
+
+ where N bat N_{\rm bat} denotes the number of concurrent requests within the decoding batch.
+Since ∂ Γ / ∂ N bat > 0 \partial\Gamma/\partial N_{\rm bat}>0 always holds, the token throughput always increases with the number of concurrent requests N bat N_{\rm bat} . However, the fact that ∂ 2 Γ / ∂ N bat 2 < 0 \partial^{2}\Gamma/\partial N_{\rm bat}^{2}<0 indicates that the throughput gain diminishes as the concurrency N bat N_{\rm bat} grows.
+As N bat N_{\rm bat} continues to increase, the token throughput Γ \Gamma saturates at 
+
+ | 
+ Γ max = lim N bat → ∞ Γ = k d ​ B HBM g ​ γ ​ ( ℓ i + ℓ o ) , \Gamma_{\max}=\lim_{N_{\rm bat}\to\infty}\Gamma=\frac{k_{\rm d}B_{\rm HBM}}{g\gamma\left(\ell_{\rm i}+\ell_{\rm o}\right)}, | 
+ | 
+ (53) | 
+
+ which depends only on the overall HBM bandwidth k d ​ B HBM k_{\rm d}B_{\rm HBM} of the decode pool and the KV cache footprint Ω KV = g ​ γ ​ ( ℓ i + ℓ o ) \Omega_{\rm KV}=g\gamma(\ell_{\rm i}+\ell_{\rm o}) .
+As shown in Fig.  6 (a), under identical hardware configurations, LLaMA 3.1 8B and Qwen2.5 32B achieve higher saturation throughputs Γ max \Gamma_{\max} than the GPT-3 175B, owing to their smaller per-token KV cache footprints and the use of GQA, characterized by γ \gamma and g g , respectively.
+It is also worth noting that in the feasible region delineated by C1 − C4 {\rm C1}-{\rm C4} , all models can achieve over 90 % 90\% of the maximum token throughput. 
+
+ VI-B Quadratic Impact of Input and Output Lengths 
+
+ With the popularization of agentic LLM workflows, scenarios with extremely long input user requests from multi-turn LLM conversations are becoming increasingly common. The expanding context lengths for both input L i L_{\rm i} and output L o L_{\rm o} impose distinct SLO pressures across different stages. 
+
+ First, as shown in Fig.  6 (b), the TTFT latency versus L i L_{\rm i} across different LLM models falls into three regions.
+For small L i L_{\rm i} , i.e., L i < L ~ i L_{\rm i}<\tilde{L}_{\rm i} , TTFT is dominated by HBM bandwidth and thus remains largely constant. As L i L_{\rm i} grows, TTFT scales approximately linearly. For sufficiently large L i L_{\rm i} , TTFT will increase quadratically with L i L_{\rm i} .
+This is because the increase of L i L_{\rm i} amplifies the impact of the quadratic term L i 2 L_{\rm i}^{2} in ( 5 ) during the prefill stage.
+Under the stability condition ρ p = λ ​ 𝔼 ​ [ T p ​ ( L i ) ] / k p < 1 \rho_{\rm p}=\lambda\mathbb{E}[T_{\rm p}(L_{\rm i})]/k_{\rm p}<1 , we have k p > λ ​ 𝔼 ​ [ T p ​ ( L i ) ] k_{\rm p}>\lambda\mathbb{E}[T_{\rm p}(L_{\rm i})] , which suggests that, in multi-modal or agentic multi-turn dialogue scenarios, the requirement of prefill devices k p k_{\rm p} also scales quadratically with the input length L i L_{\rm i} . 
+
+ Fig. 7: The resource requirements under varying SLO violation probability 1 − p SLO 1-p_{\rm SLO} and stability condition. 
+
+ Besides, both the input length L i L_{\rm i} and output length L o L_{\rm o} show a significant impact on the decode stage. Specifically, when the input (or output) sequence length L i L_{\rm i} (or L o L_{\rm o} ) is small, the LLM weight term Ω LLM \Omega_{\rm LLM} outweighs KV cache term g ​ γ ​ L io g\gamma L_{\rm io} in ( 15 ).
+However, as either L i L_{\rm i} or L o L_{\rm o} increases, TPOT will eventually exhibit linear growth with L i L_{\rm i} or L o L_{\rm o} , as illustrated in Fig.  6 (c). 
+
+ Furthermore,
+long output lengths L o L_{\rm o} in complex tasks lead to an approximately quadratic effect on total decode time, as shown in Fig.  6 (d).
+When ℓ o \ell_{\rm o} is sufficiently large, the probability of reaching EOS token is approximated by p 0 = 1 − e − 1 ℓ o ≈ 1 / ℓ o p_{0}=1-e^{-\frac{1}{\ell_{\rm o}}}\approx{1}/{\ell_{\rm o}} .
+According to the stability condition C3 \rm C3 , the requirement of decoding devices is given by 
+
+ | 
+ k d ≳ λ ⁡ ( ℓ o ​ Ω LLM + g ​ γ ​ N bat ​ ( ℓ i ​ ℓ o + ℓ o 2 ) ) N bat ​ B HBM ∼ 𝒪 ⁡ ( ℓ o 2 ) , k_{\rm d}\gtrsim\frac{\lambda\left(\ell_{\rm o}\Omega_{\rm LLM}+g\gamma N_{\rm bat}\left(\ell_{\rm i}\ell_{\rm o}+\ell_{\rm o}^{2}\right)\right)}{N_{\rm bat}B_{\rm HBM}}\sim\mathcal{O}(\ell_{\rm o}^{2}), | 
+ | 
+ (54) | 
+
+ indicating that k d k_{\rm d} scales quadratically with the output length when ℓ o \ell_{\rm o} is large. 
+
+ It is worth noting that these hardware requirements are derived from the stability condition, which are conservative estimates of the numbers of the prefill and decode devices required for stable operation.
+Satisfying more stringent SLOs typically requires additional hardware capacity and consequently a substantially larger device allocation. 
+
+ VI-C The SLO Tax 
+
+ Compared to the stability conditions, i.e., ρ p < 1 \rho_{\rm p}<1 , ρ KV < 1 \rho_{\rm KV}<1 , and C3 \rm C3 , which only guarantee the functionality of the LLM serving system, enforcing the SLO constraints ( 20c )-( 20e ) requires additional hardware resources. This extra cost is the SLO tax . Fig.  7 illustrates the SLO tax by showing the minimum requirements derived from both the stability conditions and SLO constraints as p SLO p_{\rm SLO} tightens. The evaluation adopts the GPT-3 175B model with A100 devices, λ = 20 \lambda=20 req/s, and ( τ pre , τ KV , τ dec ) = ( 1.5 , 0.2 , 0.02 ) (\tau_{\rm pre},\tau_{\rm KV},\tau_{\rm dec})=(1.5,0.2,0.02) s. Both exponential light-tailed ( CV = 1 {\rm CV}=1 ) and log-normal heavy-tailed ( CV ∈ { 1.5 , 2 } {\rm CV}\in\{1.5,2\} ) cases are considered. 
+
+ First, Fig.  7 (a) shows the minimum k p k_{\rm p} under the stability
+condition ρ p < 1 \rho_{\rm p}<1 and the SLO constraint ( 20c ) characterized by ( 27 ). It shows that k p k_{\rm p} diverges rapidly as p SLO → 1 p_{\rm SLO}\to 1 , and the heavy-tailed effect of input lengths significantly aggravates the hardware demand. 
+
+ Besides, Fig.  7 (b) shows the minimum bandwidth B B against 1 − p SLO 1-p_{\rm SLO} , characterized by ( 33 ) and ( 35 ) for light- and heavy-tailed workloads, respectively. According to ( 33 ) and ( 35 ), the SLO tax beyond the stability floor B > λ ​ g ​ γ ​ ℓ i B>\lambda g\gamma\ell_{\rm i} grows linearly with log ⁡ 1 1 − p SLO \log\frac{1}{1-p_{\rm SLO}} , with a slope proportional to e σ i 2 / 2 = ( 1 + c TR 2 ) / 2 e^{\sigma_{\rm i}^{2}}/2=(1+c_{\rm TR}^{2})/2 . In other words, the required bandwidth increases exponentially with p SLO p_{\rm SLO} , and the heavy-tailed effect further amplifies the exponential factor. 
+
+ Furthermore, Fig.  7 (c) shows the minimum k d k_{\rm d} against p SLO p_{\rm SLO} , where the SLO constraint follows from C1 {\rm C1} and the stability floor follows from C3 {\rm C3} . As p SLO p_{\rm SLO} increases, the quantile term θ LT ​ P α LT − 1 ​ ( p SLO ) \theta_{\rm LT}P^{-1}_{\alpha_{\rm LT}}(p_{\rm SLO}) or e μ ℓ + σ ℓ ​ Φ − 1 ​ ( p SLO ) e^{\mu_{\ell}+\sigma_{\ell}\Phi^{-1}(p_{\rm SLO})} in ( 43 ) or ( 44 ) inflates the context length within a batch that must be served within TPOT threshold τ dec \tau_{\rm dec} , and the device count increases accordingly. As p SLO → 1 p_{\rm SLO}\to 1 , the additional demand incurred by the SLO tax can reach about twice the stability condition, revealing the necessity of SLO-aware resource allocation. 
+
+ VI-D Latency Budget Allocation 
+
+ Fig. 8: Latency budget τ 0 \tau_{0} allocation across the prefill, KV cache transfer, and decode stages. (a) Marginal benefits curves with varying 𝝉 \boldsymbol{\tau} , (b) optimal budget shares versus budget τ 0 \tau_{0} , and (c) goodput versus budget τ 0 \tau_{0} compared with empirical and uniform baselines. 
+
+ We further investigate the latency thresholds in the SLO constraints ( 20c )-( 20e ). In agentic workflows, a single inference task may contain tens of user requests, and the completion time of every request directly affects the overall service latency.
+Therefore, in addition to TTFT and TPOT, the aggregate latency τ 0 \tau_{0} is also an important metric for LLM services. For each request, the overall budget of the aggregate latency τ 0 \tau_{0} can be expressed as 
+
+ | 
+ τ 0 ≥ τ pre + τ KV + ℓ o ​ τ dec . \tau_{0}\geq\tau_{\rm pre}+\tau_{\rm KV}+\ell_{\rm o}\tau_{\rm dec}. | 
+ | 
+ (55) | 
+
+ To achieve goodput maximization, we need to allocate the latency budget τ 0 \tau_{0} to three stages. Since the deployment cost C max C_{\rm max} increases monotonically with the achievable arrival rate λ \lambda , maximizing goodput is essentially equivalent to minimizing the deployment cost at a fixed λ \lambda . Hence, the allocation of τ 0 \tau_{0} is equivalent to minimizing the deployment cost 
+
+ | 
+ C ⁡ ( 𝝉 ) = k p ​ ( τ pre ) ​ C p + B ⁡ ( τ KV ) ​ C KV + k d ​ ( τ dec ) ​ C d , C(\boldsymbol{\tau})=k_{\rm p}(\tau_{\rm pre})C_{\rm p}+B(\tau_{\rm KV})C_{\rm KV}+k_{\rm d}(\tau_{\rm dec})C_{\rm d}, | 
+ | 
+ (56) | 
+
+ subject to ( 55 ), where 𝝉 = { τ pre , τ KV , τ dec } \boldsymbol{\tau}=\{\tau_{\rm pre},\tau_{\rm KV},\tau_{\rm dec}\} . The Lagrangian of the cost function ( 56 ) is given by 
+
+ | 
+ ℒ ⁡ ( 𝝉 ) = \displaystyle\mathcal{L}(\boldsymbol{\tau})={} | 
+ k p ​ ( τ pre ) ​ C p + B ⁡ ( τ KV ) ​ C KV + k d ​ ( τ dec ) ​ C d \displaystyle k_{\rm p}(\tau_{\rm pre})C_{\rm p}+B(\tau_{\rm KV})C_{\rm KV}+k_{\rm d}(\tau_{\rm dec})C_{\rm d} | 
+ | 
+ (57) | 
+
+ | 
+ | 
+ + ν ⁡ ( τ pre + τ KV + ℓ o ​ τ dec − τ 0 ) , \displaystyle+\nu\left(\tau_{\rm pre}+\tau_{\rm KV}+\ell_{\rm o}\tau_{\rm dec}-\tau_{0}\right), | 
+ | 
+
+ whose first-order optimal conditions yield 
+
+ | 
+ C p ​ ∂ k p ∂ τ pre = C KV ​ ∂ B ∂ τ KV = C d ℓ o ​ ∂ k d ∂ τ dec = − ν . C_{\rm p}\frac{\partial k_{\rm p}}{\partial\tau_{\rm pre}}=C_{\rm KV}\frac{\partial B}{\partial\tau_{\rm KV}}=\frac{C_{\rm d}}{\ell_{\rm o}}\frac{\partial k_{\rm d}}{\partial\tau_{\rm dec}}=-\nu. | 
+ | 
+ (58) | 
+
+ Since the minimum cost of each stage is a non-increasing function of its own latency budget, the solution to ( 58 ) is the unique global optimum. Therefore, the optimal latency budget allocation can be obtained by solving ( 58 ) numerically.
+The physical interpretation of ( 58 ) is that the marginal benefit of latency budget allocation is identical across three stages. 
+
+ Fig.  8 (a) shows the marginal benefit curves − ∂ C / ∂ τ -\partial C/\partial\tau of three stages, where the optimal allocation at τ 0 = 1 \tau_{0}=1 s is marked by the dashed line. It is validated that the marginal benefits − ∂ C / ∂ τ -\partial C/\partial\tau are decreasing over τ \tau , so the optimal budget allocation can be obtained via numerical methods. 
+
+ Fig.  8 (b) illustrates the latency budget allocation share among three stages. When the total budget τ 0 \tau_{0} is small, a larger fraction of the budget is allocated to the prefill stage.
+This is because a tight TTFT threshold τ pre \tau_{\rm pre} substantially increases the prefill queuing delay and the required number of prefill instances, resulting in a larger marginal cost reduction when τ pre \tau_{\rm pre} is relaxed. As τ 0 \tau_{0} increases, the prefill resource requirement gradually approaches its stability floor, while the KV cache transfer and decode requirements remain sensitive to their latency thresholds, so the latency shares these stages keep increasing. 
+
+ Fig.  8 (c) shows the goodput achieved by the optimal allocation, where an empirical latency budget allocation with 25 % : 25 % : 50 % 25\%:25\%:50\% share split and a uniform share split baselines are considered.
+The optimal allocation consistently attains the highest
+goodput, and the gain is most pronounced under tight budgets.
+As τ 0 \tau_{0} increases, the goodput of all schemes increases, while the proposed allocation scheme still achieves the highest goodput performance. 
+
+ TABLE I: Basic Parameters of the Evaluated LLMs. 
+
+ Parameter | 
+ LLaMA 3.1 8B | 
+ Qwen2.5 32B | 
+ GPT-3 175B | 
+
+ Attention Mechanism | 
+ GQA | 
+ GQA | 
+ MHA | 
+
+ N mod N_{\rm mod} | 
+ 4,096 4{,}096 | 
+ 5,120 5{,}120 | 
+ 12,288 12{,}288 | 
+
+ N head N_{\rm head} | 
+ 32 32 | 
+ 40 40 | 
+ 96 96 | 
+
+ N KV N_{\rm KV} | 
+ 8 8 | 
+ 8 8 | 
+ 96 96 | 
+
+ N attn N_{\rm attn} | 
+ 128 128 | 
+ 128 128 | 
+ 128 128 | 
+
+ N hid N_{\rm hid} | 
+ 14,336 14{,}336 | 
+ 27,648 27{,}648 | 
+ 49,152 49{,}152 | 
+
+ N layer N_{\rm layer} | 
+ 32 32 | 
+ 64 64 | 
+ 96 96 | 
+
+ g = N KV / N head g=N_{\rm KV}/N_{\rm head} | 
+ 0.25 0.25 | 
+ 0.2 0.2 | 
+ 1 1 | 
+
+ γ \gamma (GiB/token) | 
+ × 10 − 4 4.883\!\times\!10^{-4} | 
+ × 10 − 3 1.221\!\times\!10^{-3} | 
+ × 10 − 3 4.395\!\times\!10^{-3} | 
+
+ Ω LLM \Omega_{\rm LLM} (GiB) | 
+ 14.90 14.90 | 
+ 59.60 59.60 | 
+ 325.96 325.96 | 
+
+ VII Main Results 
+
+ In this section, we validate the modeling accuracy of the proposed closed-form approximations and evaluate the performance of the proposed resource allocation scheme. 
+
+ VII-A Parameter Setup 
+
+ Unless otherwise stated, in the following evaluation part, we conduct LLM inference experiments using the high-performance SGLang framework  [ 40 ] on multiple NVIDIA A100 GPU devices.
+In the simulation, the cost for each device is set to C p = C d = 5 C_{\rm p}=C_{\rm d}=5 USD per hour, and the cost for bandwidth is set to C KV = 0.1 C_{\rm KV}=0.1 USD per GiB per hour. The SLO constraint probability is p SLO = 0.95 p_{\rm SLO}=0.95 , and the typical latency thresholds τ pre \tau_{\rm pre} , τ KV \tau_{\rm KV} , and τ dec \tau_{\rm dec} are set to 0.5 0.5 , 0.15 0.15 , and 0.04 0.04 seconds, respectively.
+ p mem p_{\rm mem} and p join p_{\rm join} are both set to 0.99 0.99 .
+We mainly consider user requests with heavy-tailed workload, where L i L_{\rm i} follows a log-normal distribution as L i ∼ ℒ ​ 𝒩 ​ [ μ i , σ i 2 ] L_{\rm i}\sim\mathcal{LN}[\mu_{\rm i},\sigma_{\rm i}^{2}] with mean ℓ i = 𝔼 ⁡ [ L i ] = e μ i + σ i 2 / 2 = 1,024 \ell_{\rm i}=\mathbb{E}[L_{\rm i}]=e^{\mu_{\rm i}+\sigma_{\rm i}^{2}/2}=1,024 and CV σ i / μ i = 1.25 \sigma_{\rm i}/\mu_{\rm i}=1.25   [ 36 ] .
+The output length follows an exponential distribution L o ∼ Exp ⁡ [ 1 / ℓ o ] L_{\rm o}\sim{\rm Exp}[1/\ell_{\rm o}] with ℓ o = 256 \ell_{\rm o}=256 . 
+
+ Fig. 9: Goodput performance under light-tailed workload and varying cost budget C max C_{\rm max} for (a) LLaMA 3 8B, (b) Qwen2.5 32B, and (c) GPT-3 175B models. 
+
+ The baseline models cover a wide range of memory footprints, including LLaMA 3.1 8B  [ 22 ] , Qwen2.5 32B  [ 41 ] , and GPT - 3 175B  [ 24 ] . The parameters of these baseline models are illustrated in Table  I . 
+
+ VII-B Resource Allocation 
+
+ Fig. 10: Goodput performance under heavy-tailed workload and varying cost budget C max C_{\rm max} for (a) LLaMA 3 8B, (b) Qwen2.5 32B, and (c) GPT-3 175B models. 
+
+ We first evaluate the effectiveness of the proposed SLO-aware resource allocation, i.e., SARA, scheme in maximizing goodput under a fixed deployment cost. The baseline methods are as follows. 
+
+ • 
+
+ Exhaustive Search : Enumerates all feasible configurations of { k p , B , k d , N bat } \{k_{\rm p},B,k_{\rm d},N_{\rm bat}\} and selects the configuration that provides the best goodput performance under the given cost C max C_{\rm max} and SLO constraints ( 20c )-( 20e ). 
+
+ • 
+
+ Empirical : The overall cost C max C_{\rm max} is allocated with fixed proportions among the three stages. In this work, the proportion is set as 45 % : 10 % : 45 % 45\%:10\%:45\% . 
+
+ • 
+
+ Splitwise : Apart from the prefill and decode resource pools, this scheme considers a mixed resource pool where the short user requests are routed to. Prefill and decode stages are operated together within the mixed resource pool. 
+
+ • 
+
+ Colocated : Only one mixed pool is considered in this scheme, where the prefill and decode stages operate concurrently. The latency introduced by KV cache transfer is eliminated, while the interference between the two stages persists. 
+
+ Figs.  9 and  10 show the achievable goodput under light-tailed and heavy-tailed workloads, respectively. The goodput increases with the deployment cost for all methods because additional deployment costs lead to higher hardware capacity to support a higher request rate. For most of the cases, the proposed SARA method achieves the highest goodput performance, preceded only by the exhaustive search scheme, which reveals the superiority of the SARA scheme. For extremely large models, e.g., GPT-3 175B, with a limited cost budget C max C_{\rm max} , the colocated scheme achieves slightly higher goodput performance while all the disaggregated schemes fail to operate.
+Note that the goodput improvement becomes more significant for heavy-tailed workloads and higher cost budgets, showing the effectiveness of the proposed scheme in agentic workflows and large-scale deployments. 
+
+ Fig. 11: Goodput performance of the replayed seven-day trace  [ 11 ] with the LLaMA 3.1 8B model on A100 GPUs. 
+
+ We then replay the seven-day public Microsoft Azure LLM inference trace  [ 11 ] to evaluate the allocation schemes under a time-varying production workload. We employ the LLaMA 3.1 8B model with overall cost C max = 35 C_{\rm max}=35 USD/h on A100 GPUs. The resource allocation algorithms are executed once per hour, and the goodput results are shown in Fig.  11 .
+During off-peak hours, the goodput difference across the algorithms is marginal. However, pronounced differences can be observed during peak hours. The exhaustive search achieves the highest goodput performance and is tightly tracked by the proposed SARA scheme. The maximum performance gap between the two schemes is 3.8 % 3.8\% under extreme workloads. On the contrary, the splitwise, colocated, and empirical schemes fail to utilize resources efficiently, and the maximum performance degradations reach 21.5 % 21.5\% , 45.6 % 45.6\% , and 57.2 % 57.2\% during peak periods, respectively. These results demonstrate that the proposed scheme achieves superior resource utilization over the baselines. 
+
+ VII-C Computational Complexity 
+
+ TABLE II: Execution Time of Resource Allocation Schemes (seconds). 
+
+ | 
+ Light-Tailed | 
+ Heavy-Tailed | 
+
+ Method | 
+ LLaMA 3.1 8B | 
+ Qwen2.5 32B | 
+ GPT-3 175B | 
+ LLaMA 3.1 8B | 
+ Qwen2.5 32B | 
+ GPT-3 175B | 
+
+ Exhaustive Search | 
+ 1.44 × 10 3 1.44\times 10^{3} | 
+ 2.44 × 10 3 2.44\times 10^{3} | 
+ 6.19 × 10 2 6.19\times 10^{2} | 
+ 1.44 × 10 3 1.44\times 10^{3} | 
+ 2.44 × 10 3 2.44\times 10^{3} | 
+ 6.19 × 10 2 6.19\times 10^{2} | 
+
+ SARA | 
+ 0.70 \bf 0.70 | 
+ 1.60 \bf 1.60 | 
+ 0.61 \bf 0.61 | 
+ 0.44 \bf 0.44 | 
+ 1.11 \bf 1.11 | 
+ 1.02 \bf 1.02 | 
+
+ Splitwise | 
+ 60.9 60.9 | 
+ 78.6 78.6 | 
+ 2.02 2.02 | 
+ 60.8 60.8 | 
+ 78.5 78.5 | 
+ 2.01 2.01 | 
+
+ Colocated | 
+ 13.0 13.0 | 
+ 7.71 7.71 | 
+ 2.46 2.46 | 
+ 13.0 13.0 | 
+ 7.73 7.73 | 
+ 2.47 2.47 | 
+
+ We also investigate the computational complexity of the proposed resource allocation algorithm, and the results are shown in Table  II . Exhaustive search requires extremely high execution time as it enumerates millions of hardware combinations to find the optimal configuration. Both Splitwise and colocated schemes estimate the required resources and prune the search space, so the allocation search overheads are substantially reduced.
+Empirical allocation follows a resource allocation preset, and therefore exhibits no execution time at the cost of lower goodput performance.
+The proposed SARA completes the allocation with no more than 1.60 1.60 s, achieving an acceleration of several orders of magnitude over exhaustive search, and is faster than all baseline methods, especially when the resource requirement is sufficiently large.
+Combined with the goodput results in Figs.  9 and  10 , these results demonstrate that SARA is suitable for practical resource planning and system reconfiguration.
+It is worth noting that the execution time in Table  II drops significantly for the GPT-3 175B model. This is because its large memory footprint constrains the feasible solution space under limited resources. Meanwhile, the proposed SARA scheme consistently executes in around 1 1  s, as it reduces the solution space via closed-form expressions, eliminating the need for exhaustive enumeration. 
+
+ VIII Conclusion 
+
+ In this paper, we developed an SLO-aware resource allocation framework for disaggregated LLM serving systems. We modeled the prefill, KV cache transfer, and decode stages using an M/G/ k p k_{\rm p} queue, an M/G/ 1 1 queue, and a generalized birth-death process, respectively. Based on these models, we derived tractable latency quantile characterizations and resource requirements under both light-tailed and heavy-tailed workloads.
+Based on the proposed analytical framework, we found and validated several insights on data center planning and resource allocation. First, the saturated token throughput of the decode stage depends on the HBM bandwidth and the LLM parameters, and enlarging the batch size without violating the TPOT SLO helps improve the overall throughput. Besides, the required numbers of prefill and decode devices scale quadratically with the input and output lengths, revealing the fundamental resource pressure imposed by long-context agentic workloads. Furthermore, both the SLO constraints and the heavy-tailed workload significantly amplify the resource requirements, imposing hardware demands well beyond stability conditions. Finally, both the proposed latency budget allocation and the SARA schemes effectively improve the system goodput with low complexity, demonstrating the practicality of the proposed analytical framework. 
+
+ References 
+
+ [1] 
+ M. A. Ferrag, N. Tihanyi, and M. Debbah (2026) 
+
+ From LLM reasoning to autonomous ai agents: a comprehensive review .
+
+ IEEE Access 14 ( ), pp. 84237–84285 .
+
+ External Links: Document 
+
+ Cited by: §I .
+
+ [2] 
+ L. Qiao, M. B. Mashhadi, Z. Gao, R. Tafazolli, M. Bennis, and D. Niyato (2025) 
+
+ Token communications: a large model-driven framework for cross-modal context-aware semantic communications .
+
+ IEEE Wireless Commun. 32 ( 5 ), pp. 80–88 .
+
+ External Links: Document 
+
+ Cited by: §I .
+
+ [3] 
+ G. Shi, N. Lan, X. Xie, and J. Wu (2026) 
+
+ Rethinking intelligence in the era of large language models .
+
+ J. Commun. Inf. Netw. 11 ( 1 ), pp. 39–50 .
+
+ External Links: Document 
+
+ Cited by: §I .
+
+ [4] 
+ J. Wei, X. Wang, D. Schuurmans, M. Bosma, B. Ichter, F. Xia, E. H. Chi, Q. V. Le, and D. Zhou (2022) 
+
+ Chain-of-thought prompting elicits reasoning in large language models .
+
+ In Proc. Adv. Neural Inf. Process. Syst. (NeurIPS) ,
+
+ Red Hook, NY, USA .
+
+ Cited by: §I .
+
+ [5] 
+ C. Sun, S. Huang, and D. Pompili (2025) 
+
+ LLM-based multi-agent decision-making: challenges and future directions .
+
+ IEEE Robot. Autom. Lett. 10 ( 6 ), pp. 5681–5688 .
+
+ External Links: Document 
+
+ Cited by: §I .
+
+ [6] 
+ L. Cozzi et al. (2026) 
+
+ Key Questions on Energy and AI .
+
+ World Energy Outlook Special Report 
+
+ International Energy Agency , Paris, France .
+
+ Cited by: §I .
+
+ [7] 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang (2024) 
+
+ DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In Proc. USENIX Symp. Operating Syst. Design and Implement. (OSDI’24) ,
+
+ Santa Clara, CA, USA .
+
+ External Links: ISBN 978-1-939133-40-3 
+
+ Cited by: §I-A ,
+ §I-A ,
+ §I ,
+ §I ,
+ 1st item ,
+ §II-A ,
+ §III-A ,
+ §III-E .
+
+ [8] 
+ H. Qiu, A. Biswas, Z. Zhao, J. Mohan, A. Khare, E. Choukse, Í. Goiri, Z. Zhang, H. Shen, C. Bansal, R. Ramjee, and R. Fonseca (2026) 
+
+ ModServe: modality- and stage-aware resource disaggregation for scalable multimodal model serving .
+
+ In Proc. ACM Symp. on Cloud Comput. (SOCC’25) ,
+
+ Online , pp. 817–830 .
+
+ External Links: ISBN 9798400722769 ,
+ Document 
+
+ Cited by: Appendix C ,
+ §I-A ,
+ §I ,
+ §I ,
+ 2nd item ,
+ §IV-C ,
+ §IV-C .
+
+ [9] 
+ R. Qin, W. He, Y. Wang, Z. Li, X. Xu, Y. Wu, W. Zheng, and M. Zhang (2026) 
+
+ Prefill-as-a-service: KVCache of next-generation models could go cross-datacenter .
+
+ External Links: 2604.15039 ,
+ Link 
+
+ Cited by: §I-A ,
+ §I-A ,
+ §I ,
+ §I ,
+ §II-C .
+
+ [10] 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, Í. Goiri, S. Maleki, and R. Bianchini (2025) 
+
+ Splitwise: efficient generative LLM inference using phase splitting .
+
+ In Proc. Int. Symp. Comput. Archit. (ISCA’24) ,
+
+ Buenos Aires, Argentina , pp. 118–132 .
+
+ External Links: ISBN 9798350326581 ,
+ Link ,
+ Document 
+
+ Cited by: §A-A ,
+ §I-A ,
+ §I-A ,
+ §I ,
+ §I ,
+ 1st item .
+
+ [11] 
+ J. Stojkovic, C. Zhang, Goiri, Íñigo, J. Torrellas, and E. Choukse (2025) 
+
+ DynamoLLM: designing LLM inference clusters for performance and energy efficiency .
+
+ In Proc. IEEE Int. Symp. High-Perform. Comput. Archit. (HPCA’25) ,
+
+ Vol. , Las Vegas, NV, USA , pp. 1348–1362 .
+
+ External Links: Document 
+
+ Cited by: §A-A ,
+ Appendix C ,
+ §I-A ,
+ §I ,
+ 1st item ,
+ §IV-C ,
+ §IV-C ,
+ Fig. 11 ,
+ §VII-B .
+
+ [12] 
+ N. Shazeer (2019) 
+
+ Fast transformer decoding: one write-head is all you need .
+
+ External Links: 1911.02150 ,
+ Link 
+
+ Cited by: §I-A ,
+ §II-A ,
+ §II-C ,
+ footnote 1 .
+
+ [13] 
+ J. Ainslie, J. Lee-Thorp, M. de Jong, Y. Zemlyanskiy, F. Lebron, and S. Sanghai (2023) 
+
+ GQA: training generalized multi-query transformer models from multi-head checkpoints .
+
+ In Proc. Conf. Empirical Methods Nat. Lang. Process. (EMNLP) ,
+
+ Singapore , pp. 4895–4901 .
+
+ External Links: Document 
+
+ Cited by: §I-A ,
+ §II-A ,
+ §II-C ,
+ footnote 1 .
+
+ [14] 
+ N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le, G. Hinton, and J. Dean (2017) 
+
+ Outrageously large neural networks: the sparsely-gated mixture-of-experts layer .
+
+ In Proc. Int. Conf. Learn. Represent. (ICLR) ,
+
+ Toulon, France .
+
+ Cited by: §I-A .
+
+ [15] 
+ A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. Gulavani, A. Tumanov, and R. Ramjee (2024) 
+
+ Taming Throughput-Latency tradeoff in LLM inference with Sarathi-Serve .
+
+ In Proc. USENIX Symp. Operating Syst. Design Implement. (OSDI’24) ,
+
+ Santa Clara, CA , pp. 117–134 .
+
+ External Links: ISBN 978-1-939133-40-3 
+
+ Cited by: §I-A ,
+ §III-A .
+
+ [16] 
+ C. Wang, P. Zuo, Z. Chen, Y. Liang, Z. Yu, and M. Yang (2026) 
+
+ TaiJi: unifying prefill-decode disaggregation and aggregation for goodput-optimized LLM serving .
+
+ In Proc. Int. Conf. High Perform. Comput., Netw., Storage, Anal. (SC) ,
+
+ Chicago, IL, USA .
+
+ Cited by: §I-A ,
+ §III-E .
+
+ [17] 
+ R. Qin, Z. Li, W. He, J. Cui, H. Tang, F. Ren, T. Ma, S. Cai, Y. Zhang, M. Zhang, Y. Wu, W. Zheng, and X. Xu (2025) 
+
+ Mooncake: a KVCache-centric disaggregated architecture for LLM serving .
+
+ ACM Trans. Storage .
+
+ External Links: ISSN 1553-3077 
+
+ Cited by: §I-A ,
+ §I-A .
+
+ [18] 
+ A. Radford, K. Narasimhan, T. Salimans, and I. Sutskever (2018) 
+
+ Improving language understanding by generative pre-training .
+
+ Note: OpenAI Technical Report 
+
+ Cited by: §II-A .
+
+ [19] 
+ G. Yenduri, M. Ramalingam, G. C. Selvi, Y. Supriya, G. Srivastava, P. K. R. Maddikunta, G. D. Raj, R. H. Jhaveri, B. Prabadevi, W. Wang, A. V. Vasilakos, and T. R. Gadekallu (2024) 
+
+ GPT (generative pre-trained transformer)— a comprehensive review on enabling technologies, potential applications, emerging challenges, and future directions .
+
+ IEEE Access 12 ( ), pp. 54608–54649 .
+
+ External Links: Document 
+
+ Cited by: §II-A .
+
+ [20] 
+ H. Liu, C. Li, Q. Wu, and Y. J. Lee (2023) 
+
+ Visual instruction tuning .
+
+ In Proc. Adv. Neural Inf. Process. Syst. (NeurIPS) ,
+
+ Vol. 36 , New Orleans, LA, USA , pp. 34892–34916 .
+
+ Cited by: §II-A .
+
+ [21] 
+ G. Team, P. Georgiev, V. I. Lei, R. Burnell, L. Bai, A. Gulati, G. Tanzer, D. Vincent, Z. Pan, S. Wang, S. Mariooryad, Y. Ding, X. Geng, F. Alcober, R. Frostig, M. Omernick, L. Walker, C. Paduraru, C. Sorokin, A. Tacchetti, C. Gaffney, S. Daruki, O. Sercinoglu, Z. Gleicher, J. Love, P. Voigtlaender, R. Jain, G. Surita, K. Mohamed, R. Blevins, J. Ahn, T. Zhu, K. Kawintiranon, O. Firat, Y. Gu, Y. Zhang, M. Rahtz, M. Faruqui, N. Clay, J. Gilmer, J. Co-Reyes, I. Penchev, R. Zhu, N. Morioka, K. Hui, K. Haridasan, V. Campos, M. Mahdieh, M. Guo, S. Hassan, K. Kilgour, A. Vezer, H. Cheng, R. de Liedekerke, S. Goyal, P. Barham, D. Strouse, S. Noury, J. Adler, M. Sundararajan, S. Vikram, D. Lepikhin, M. Paganini, X. Garcia, F. Yang, D. Valter, M. Trebacz, K. Vodrahalli, C. Asawaroengchai, R. Ring, N. Kalb, L. B. Soares, S. Brahma, D. Steiner, T. Yu, F. Mentzer, A. He, L. Gonzalez, B. Xu, R. L. Kaufman, L. E. Shafey, J. Oh, T. Hennigan, G. van den Driessche, S. Odoom, M. Lucic, B. Roelofs, S. Lall, A. Marathe, B. Chan, S. Ontanon, L. He, D. Teplyashin, J. Lai, P. Crone, B. Damoc, L. Ho, S. Riedel, K. Lenc, C. Yeh, A. Chowdhery, Y. Xu, M. Kazemi, E. Amid, A. Petrushkina, K. Swersky, A. Khodaei, G. Chen, C. Larkin, M. Pinto, G. Yan, A. P. Badia, P. Patil, S. Hansen, D. Orr, S. M. R. Arnold, J. Grimstad, A. Dai, S. Douglas, R. Sinha, V. Yadav, X. Chen, E. Gribovskaya, J. Austin, J. Zhao, K. Patel, P. Komarek, S. Austin, S. Borgeaud, L. Friso, A. Goyal, B. Caine, K. Cao, D. Chung, M. Lamm, G. Barth-Maron, T. Kagohara, K. Olszewska, M. Chen, K. Shivakumar, R. Agarwal, H. Godhia, R. Rajwar, J. Snaider, X. Dotiwalla, Y. Liu, A. Barua, V. Ungureanu, Y. Zhang, B. Batsaikhan, M. Wirth, J. Qin, I. Danihelka, T. Doshi, M. Chadwick, J. Chen, S. Jain, Q. Le, A. Kar, M. Gurumurthy, C. Li, R. Sang, F. Liu, L. Lamprou, R. Munoz, N. Lintz, H. Mehta, H. Howard, M. Reynolds, L. Aroyo, Q. Wang, L. Blanco, A. Cassirer, J. Griffith, D. Das, S. Lee, J. Sygnowski, Z. Fisher, J. Besley, R. Powell, Z. Ahmed, D. Paulus, D. Reitter, Z. Borsos, R. Joshi, A. Pope, S. Hand, V. Selo, V. Jain, N. Sethi, M. Goel, T. Makino, R. May, Z. Yang, J. Schalkwyk, C. Butterfield, A. Hauth, A. Goldin, W. Hawkins, E. Senter, S. Brin, O. Woodman, M. Ritter, E. Noland, M. Giang, V. Bolina, L. Lee, T. Blyth, I. Mackinnon, M. Reid, O. Sarvana, D. Silver, A. Chen, L. Wang, L. Maggiore, O. Chang, N. Attaluri, G. Thornton, C. Chiu, O. Bunyan, N. Levine, T. Chung, E. Eltyshev, X. Si, T. Lillicrap, D. Brady, V. Aggarwal, B. Wu, Y. Xu, R. McIlroy, K. Badola, P. Sandhu, E. Moreira, W. Stokowiec, R. Hemsley, D. Li, A. Tudor, P. Shyam, E. Rahimtoroghi, S. Haykal, P. Sprechmann, X. Zhou, D. Mincu, Y. Li, R. Addanki, K. Krishna, X. Wu, A. Frechette, M. Eyal, A. Dafoe, D. Lacey, J. Whang, T. Avrahami, Y. Zhang, E. Taropa, H. Lin, D. Toyama, E. Rutherford, M. Sano, H. Choe, A. Tomala, C. Safranek-Shrader, N. Kassner, M. Pajarskas, M. Harvey, S. Sechrist, M. Fortunato, C. Lyu, G. Elsayed, C. Kuang, J. Lottes, E. Chu, C. Jia, C. Chen, P. Humphreys, K. Baumli, C. Tao, R. Samuel, C. N. dos Santos, A. Andreassen, N. Rakićević, D. Grewe, A. Kumar, S. Winkler, J. Caton, A. Brock, S. Dalmia, H. Sheahan, I. Barr, Y. Miao, P. Natsev, J. Devlin, F. Behbahani, F. Prost, Y. Sun, A. Myaskovsky, T. S. Pillai, D. Hurt, A. Lazaridou, X. Xiong, C. Zheng, F. Pardo, X. Li, D. Horgan, J. Stanton, M. Ambar, F. Xia, A. Lince, M. Wang, B. Mustafa, A. Webson, H. Lee, R. Anil, M. Wicke, T. Dozat, A. Sinha, E. Piqueras, E. Dabir, S. Upadhyay, A. Boral, L. A. Hendricks, C. Fry, J. Djolonga, Y. Su, J. Walker, J. Labanowski, R. Huang, V. Misra, J. Chen, R. Skerry-Ryan, A. Singh, S. Rijhwani, D. Yu, A. Castro-Ros, B. Changpinyo, R. Datta, S. Bagri, A. M. Hrafnkelsson, M. Maggioni, D. Zheng, Y. Sulsky, S. Hou, T. L. Paine, A. Yang, J. Riesa, D. Rogozinska, D. Marcus, D. E. Badawy, Q. Zhang, L. Wang, H. Miller, J. Greer, L. L. Sjos, A. Nova, H. Zen, R. Chaabouni, M. Rosca, J. Jiang, C. Chen, R. Liu, T. Sainath, M. Krikun, A. Polozov, J. Lespiau, J. Newlan, Z. Cankara, S. Kwak, Y. Xu, P. Chen, A. Coenen, C. Meyer, K. Tsihlas, A. Ma, J. Gottweis, J. Xing, C. Gu, J. Miao, C. Frank, Z. Cankara, S. Ganapathy, I. Dasgupta, S. Hughes-Fitt, H. Chen, D. Reid, K. Rong, H. Fan, J. van Amersfoort, V. Zhuang, A. Cohen, S. S. Gu, A. Mohananey, A. Ilic, T. Tobin, J. Wieting, A. Bortsova, P. Thacker, E. Wang, E. Caveness, J. Chiu, E. Sezener, A. Kaskasoli, S. Baker, K. Millican, M. Elhawaty, K. Aisopos, C. Lebsack, N. Byrd, H. Dai, W. Jia, M. Wiethoff, E. Davoodi, A. Weston, L. Yagati, A. Ahuja, I. Gao, G. Pundak, S. Zhang, M. Azzam, K. C. Sim, S. Caelles, J. Keeling, A. Sharma, A. Swing, Y. Li, C. Liu, C. G. Bostock, Y. Bansal, Z. Nado, A. Anand, J. Lipschultz, A. Karmarkar, L. Proleev, A. Ittycheriah, S. H. Yeganeh, G. Polovets, A. Faust, J. Sun, A. Rrustemi, P. Li, R. Shivanna, J. Liu, C. Welty, F. Lebron, A. Baddepudi, S. Krause, E. Parisotto, R. Soricut, Z. Xu, D. Bloxwich, M. Johnson, B. Neyshabur, J. Mao-Jones, R. Wang, V. Ramasesh, Z. Abbas, A. Guez, C. Segal, D. D. Nguyen, J. Svensson, L. Hou, S. York, K. Milan, S. Bridgers, W. Gworek, M. Tagliasacchi, J. Lee-Thorp, M. Chang, A. Guseynov, A. J. Hartman, M. Kwong, R. Zhao, S. Kashem, E. Cole, A. Miech, R. Tanburn, M. Phuong, F. Pavetic, S. Cevey, R. Comanescu, R. Ives, S. Yang, C. Du, B. Li, Z. Zhang, M. Iinuma, C. H. Hu, A. Roy, S. Bijwadia, Z. Zhu, D. Martins, R. Saputro, A. Gergely, S. Zheng, D. Jia, I. Antonoglou, A. Sadovsky, S. Gu, Y. Bi, A. Andreev, S. Samangooei, M. Khan, T. Kocisky, A. Filos, C. Kumar, C. Bishop, A. Yu, S. Hodkinson, S. Mittal, P. Shah, A. Moufarek, Y. Cheng, A. Bloniarz, J. Lee, P. Pejman, P. Michel, S. Spencer, V. Feinberg, X. Xiong, N. Savinov, C. Smith, S. Shakeri, D. Tran, M. Chesus, B. Bohnet, G. Tucker, T. von Glehn, C. Muir, Y. Mao, H. Kazawa, A. Slone, K. Soparkar, D. Shrivastava, J. Cobon-Kerr, M. Sharman, J. Pavagadhi, C. Araya, K. Misiunas, N. Ghelani, M. Laskin, D. Barker, Q. Li, A. Briukhov, N. Houlsby, M. Glaese, B. Lakshminarayanan, N. Schucher, Y. Tang, E. Collins, H. Lim, F. Feng, A. Recasens, G. Lai, A. Magni, N. D. Cao, A. Siddhant, Z. Ashwood, J. Orbay, M. Dehghani, J. Brennan, Y. He, K. Xu, Y. Gao, C. Saroufim, J. Molloy, X. Wu, S. Arnold, S. Chang, J. Schrittwieser, E. Buchatskaya, S. Radpour, M. Polacek, S. Giordano, A. Bapna, S. Tokumine, V. Hellendoorn, T. Sottiaux, S. Cogan, A. Severyn, M. Saleh, S. Thakoor, L. Shefey, S. Qiao, M. Gaba, S. Chang, C. Swanson, B. Zhang, B. Lee, P. K. Rubenstein, G. Song, T. Kwiatkowski, A. Koop, A. Kannan, D. Kao, P. Schuh, A. Stjerngren, G. Ghiasi, G. Gibson, L. Vilnis, Y. Yuan, F. T. Ferreira, A. Kamath, T. Klimenko, K. Franko, K. Xiao, I. Bhattacharya, M. Patel, R. Wang, A. Morris, R. Strudel, V. Sharma, P. Choy, S. H. Hashemi, J. Landon, M. Finkelstein, P. Jhakra, J. Frye, M. Barnes, M. Mauger, D. Daun, K. Baatarsukh, M. Tung, W. Farhan, H. Michalewski, F. Viola, F. de Chaumont Quitry, C. L. Lan, T. Hudson, Q. Wang, F. Fischer, I. Zheng, E. White, A. Dragan, J. Alayrac, E. Ni, A. Pritzel, A. Iwanicki, M. Isard, A. Bulanova, L. Zilka, E. Dyer, D. Sachan, S. Srinivasan, H. Muckenhirn, H. Cai, A. Mandhane, M. Tariq, J. W. Rae, G. Wang, K. Ayoub, N. FitzGerald, Y. Zhao, W. Han, C. Alberti, D. Garrette, K. Krishnakumar, M. Gimenez, A. Levskaya, D. Sohn, J. Matak, I. Iturrate, M. B. Chang, J. Xiang, Y. Cao, N. Ranka, G. Brown, A. Hutter, V. Mirrokni, N. Chen, K. Yao, Z. Egyed, F. Galilee, T. Liechty, P. Kallakuri, E. Palmer, S. Ghemawat, J. Liu, D. Tao, C. Thornton, T. Green, M. Jasarevic, S. Lin, V. Cotruta, Y. Tan, N. Fiedel, H. Yu, E. Chi, A. Neitz, J. Heitkaemper, A. Sinha, D. Zhou, Y. Sun, C. Kaed, B. Hulse, S. Mishra, M. Georgaki, S. Kudugunta, C. Farabet, I. Shafran, D. Vlasic, A. Tsitsulin, R. Ananthanarayanan, A. Carin, G. Su, P. Sun, S. V, G. Carvajal, J. Broder, I. Comsa, A. Repina, W. Wong, W. W. Chen, P. Hawkins, E. Filonov, L. Loher, C. Hirnschall, W. Wang, J. Ye, A. Burns, H. Cate, D. G. Wright, F. Piccinini, L. Zhang, C. Lin, I. Gog, Y. Kulizhskaya, A. Sreevatsa, S. Song, L. C. Cobo, A. Iyer, C. Tekur, G. Garrido, Z. Xiao, R. Kemp, H. S. Zheng, H. Li, A. Agarwal, C. Ngani, K. Goshvadi, R. Santamaria-Fernandez, W. Fica, X. Chen, C. Gorgolewski, S. Sun, R. Garg, X. Ye, S. M. A. Eslami, N. Hua, J. Simon, P. Joshi, Y. Kim, I. Tenney, S. Potluri, L. N. Thiet, Q. Yuan, F. Luisier, A. Chronopoulou, S. Scellato, P. Srinivasan, M. Chen, V. Koverkathu, V. Dalibard, Y. Xu, B. Saeta, K. Anderson, T. Sellam, N. Fernando, F. Huot, J. Jung, M. Varadarajan, M. Quinn, A. Raul, M. Le, R. Habalov, J. Clark, K. Jalan, K. Bullard, A. Singhal, T. Luong, B. Wang, S. Rajayogam, J. Eisenschlos, J. Jia, D. Finchelstein, A. Yakubovich, D. Balle, M. Fink, S. Agarwal, J. Li, D. Dvijotham, S. Pal, K. Kang, J. Konzelmann, J. Beattie, O. Dousse, D. Wu, R. Crocker, C. Elkind, S. R. Jonnalagadda, J. Lee, D. Holtmann-Rice, K. Kallarackal, R. Liu, D. Vnukov, N. Vats, L. Invernizzi, M. Jafari, H. Zhou, L. Taylor, J. Prendki, M. Wu, T. Eccles, T. Liu, K. Kopparapu, F. Beaufays, C. Angermueller, A. Marzoca, S. Sarcar, H. Dib, J. Stanway, F. Perbet, N. Trdin, R. Sterneck, A. Khorlin, D. Li, X. Wu, S. Goenka, D. Madras, S. Goldshtein, W. Gierke, T. Zhou, Y. Liu, Y. Liang, A. White, Y. Li, S. Singh, S. Bahargam, M. Epstein, S. Basu, L. Lao, A. Ozturel, C. Crous, A. Zhai, H. Lu, Z. Tung, N. Gaur, A. Walton, L. Dixon, M. Zhang, A. Globerson, G. Uy, A. Bolt, O. Wiles, M. Nasr, I. Shumailov, M. Selvi, F. Piccinno, R. Aguilar, S. McCarthy, M. Khalman, M. Shukla, V. Galic, J. Carpenter, K. Villela, H. Zhang, H. Richardson, J. Martens, M. Bosnjak, S. R. Belle, J. Seibert, M. Alnahlawi, B. McWilliams, S. Singh, A. Louis, W. Ding, D. Popovici, L. Simicich, L. Knight, P. Mehta, N. Gupta, C. Shi, S. Fatehi, J. Mitrovic, A. Grills, J. Pagadora, T. Munkhdalai, D. Petrova, D. Eisenbud, Z. Zhang, D. Yates, B. Mittal, N. Tripuraneni, Y. Assael, T. Brovelli, P. Jain, M. Velimirovic, C. Akbulut, J. Mu, W. Macherey, R. Kumar, J. Xu, H. Qureshi, G. Comanici, J. Wiesner, Z. Gong, A. Ruddock, M. Bauer, N. Felt, A. GP, A. Arnab, D. Zelle, J. Rothfuss, B. Rosgen, A. Shenoy, B. Seybold, X. Li, J. Mudigonda, G. Erdogan, J. Xia, J. Simsa, A. Michi, Y. Yao, C. Yew, S. Kan, I. Caswell, C. Radebaugh, A. Elisseeff, P. Valenzuela, K. McKinney, K. Paterson, A. Cui, E. Latorre-Chimoto, S. Kim, W. Zeng, K. Durden, P. Ponnapalli, T. Sosea, C. A. Choquette-Choo, J. Manyika, B. Robenek, H. Vashisht, S. Pereira, H. Lam, M. Velic, D. Owusu-Afriyie, K. Lee, T. Bolukbasi, A. Parrish, S. Lu, J. Park, B. Venkatraman, A. Talbert, L. Rosique, Y. Cheng, A. Sozanschi, A. Paszke, P. Kumar, J. Austin, L. Li, K. Salama, B. Perz, W. Kim, N. Dukkipati, A. Baryshnikov, C. Kaplanis, X. Sheng, Y. Chervonyi, C. Unlu, D. de Las Casas, H. Askham, K. Tunyasuvunakool, F. Gimeno, S. Poder, C. Kwak, M. Miecnikowski, V. Mirrokni, A. Dimitriev, A. Parisi, D. Liu, T. Tsai, T. Shevlane, C. Kouridi, D. Garmon, A. Goedeckemeyer, A. R. Brown, A. Vijayakumar, A. Elqursh, S. Jazayeri, J. Huang, S. M. Carthy, J. Hoover, L. Kim, S. Kumar, W. Chen, C. Biles, G. Bingham, E. Rosen, L. Wang, Q. Tan, D. Engel, F. Pongetti, D. de Cesare, D. Hwang, L. Yu, J. Pullman, S. Narayanan, K. Levin, S. Gopal, M. Li, A. Aharoni, T. Trinh, J. Lo, N. Casagrande, R. Vij, L. Matthey, B. Ramadhana, A. Matthews, C. Carey, M. Johnson, K. Goranova, R. Shah, S. Ashraf, K. Dasgupta, R. Larsen, Y. Wang, M. R. Vuyyuru, C. Jiang, J. Ijazi, K. Osawa, C. Smith, R. S. Boppana, T. Bilal, Y. Koizumi, Y. Xu, Y. Altun, N. Shabat, B. Bariach, A. Korchemniy, K. Choo, O. Ronneberger, C. Iwuanyanwu, S. Zhao, D. Soergel, C. Hsieh, I. Cai, S. Iqbal, M. Sundermeyer, Z. Chen, E. Bursztein, C. Malaviya, F. Biadsy, P. Shroff, I. Dhillon, T. Latkar, C. Dyer, H. Forbes, M. Nicosia, V. Nikolaev, S. Greene, M. Georgiev, P. Wang, N. Martin, H. Sedghi, J. Zhang, P. Banzal, D. Fritz, V. Rao, X. Wang, J. Zhang, V. Patraucean, D. Du, I. Mordatch, I. Jurin, L. Liu, A. Dubey, A. Mohan, J. Nowakowski, V. Ion, N. Wei, R. Tojo, M. A. Raad, D. A. Hudson, V. Keshava, S. Agrawal, K. Ramirez, Z. Wu, H. Nguyen, J. Liu, M. Sewak, B. Petrini, D. Choi, I. Philips, Z. Wang, I. Bica, A. Garg, J. Wilkiewicz, P. Agrawal, X. Li, D. Guo, E. Xue, N. Shaik, A. Leach, S. M. Khan, J. Wiesinger, S. Jerome, A. Chakladar, A. W. Wang, T. Ornduff, F. Abu, A. Ghaffarkhah, M. Wainwright, M. Cortes, F. Liu, J. Maynez, A. Terzis, P. Samangouei, R. Mansour, T. Kępa, F. Aubet, A. Algymr, D. Banica, A. Weisz, A. Orban, A. Senges, E. Andrejczuk, M. Geller, N. D. Santo, V. Anklin, M. A. Merey, M. Baeuml, T. Strohman, J. Bai, S. Petrov, Y. Wu, D. Hassabis, K. Kavukcuoglu, J. Dean, and O. Vinyals (2024) 
+
+ Gemini 1.5: unlocking multimodal understanding across millions of tokens of context .
+
+ External Links: 2403.05530 ,
+ Link 
+
+ Cited by: §II-A .
+
+ [22] 
+ A. Grattafiori, A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Vaughan, A. Yang, A. Fan, A. Goyal, A. Hartshorn, A. Yang, A. Mitra, A. Sravankumar, A. Korenev, A. Hinsvark, A. Rao, A. Zhang, A. Rodriguez, A. Gregerson, A. Spataru, B. Roziere, B. Biron, B. Tang, B. Chern, C. Caucheteux, C. Nayak, C. Bi, C. Marra, C. McConnell, C. Keller, C. Touret, C. Wu, C. Wong, C. C. Ferrer, C. Nikolaidis, D. Allonsius, D. Song, D. Pintz, D. Livshits, D. Wyatt, D. Esiobu, D. Choudhary, D. Mahajan, D. Garcia-Olano, D. Perino, D. Hupkes, E. Lakomkin, E. AlBadawy, E. Lobanova, E. Dinan, E. M. Smith, F. Radenovic, F. Guzmán, F. Zhang, G. Synnaeve, G. Lee, G. L. Anderson, G. Thattai, G. Nail, G. Mialon, G. Pang, G. Cucurell, H. Nguyen, H. Korevaar, H. Xu, H. Touvron, I. Zarov, I. A. Ibarra, I. Kloumann, I. Misra, I. Evtimov, J. Zhang, J. Copet, J. Lee, J. Geffert, J. Vranes, J. Park, J. Mahadeokar, J. Shah, J. van der Linde, J. Billock, J. Hong, J. Lee, J. Fu, J. Chi, J. Huang, J. Liu, J. Wang, J. Yu, J. Bitton, J. Spisak, J. Park, J. Rocca, J. Johnstun, J. Saxe, J. Jia, K. V. Alwala, K. Prasad, K. Upasani, K. Plawiak, K. Li, K. Heafield, K. Stone, K. El-Arini, K. Iyer, K. Malik, K. Chiu, K. Bhalla, K. Lakhotia, L. Rantala-Yeary, L. van der Maaten, L. Chen, L. Tan, L. Jenkins, L. Martin, L. Madaan, L. Malo, L. Blecher, L. Landzaat, L. de Oliveira, M. Muzzi, M. Pasupuleti, M. Singh, M. Paluri, M. Kardas, M. Tsimpoukelli, M. Oldham, M. Rita, M. Pavlova, M. Kambadur, M. Lewis, M. Si, M. K. Singh, M. Hassan, N. Goyal, N. Torabi, N. Bashlykov, N. Bogoychev, N. Chatterji, N. Zhang, O. Duchenne, O. Çelebi, P. Alrassy, P. Zhang, P. Li, P. Vasic, P. Weng, P. Bhargava, P. Dubal, P. Krishnan, P. S. Koura, P. Xu, Q. He, Q. Dong, R. Srinivasan, R. Ganapathy, R. Calderer, R. S. Cabral, R. Stojnic, R. Raileanu, R. Maheswari, R. Girdhar, R. Patel, R. Sauvestre, R. Polidoro, R. Sumbaly, R. Taylor, R. Silva, R. Hou, R. Wang, S. Hosseini, S. Chennabasappa, S. Singh, S. Bell, S. S. Kim, S. Edunov, S. Nie, S. Narang, S. Raparthy, S. Shen, S. Wan, S. Bhosale, S. Zhang, S. Vandenhende, S. Batra, S. Whitman, S. Sootla, S. Collot, S. Gururangan, S. Borodinsky, T. Herman, T. Fowler, T. Sheasha, T. Georgiou, T. Scialom, T. Speckbacher, T. Mihaylov, T. Xiao, U. Karn, V. Goswami, V. Gupta, V. Ramanathan, V. Kerkez, V. Gonguet, V. Do, V. Vogeti, V. Albiero, V. Petrovic, W. Chu, W. Xiong, W. Fu, W. Meers, X. Martinet, X. Wang, X. Wang, X. E. Tan, X. Xia, X. Xie, X. Jia, X. Wang, Y. Goldschlag, Y. Gaur, Y. Babaei, Y. Wen, Y. Song, Y. Zhang, Y. Li, Y. Mao, Z. D. Coudert, Z. Yan, Z. Chen, Z. Papakipos, A. Singh, A. Srivastava, A. Jain, A. Kelsey, A. Shajnfeld, A. Gangidi, A. Victoria, A. Goldstand, A. Menon, A. Sharma, A. Boesenberg, A. Baevski, A. Feinstein, A. Kallet, A. Sangani, A. Teo, A. Yunus, A. Lupu, A. Alvarado, A. Caples, A. Gu, A. Ho, A. Poulton, A. Ryan, A. Ramchandani, A. Dong, A. Franco, A. Goyal, A. Saraf, A. Chowdhury, A. Gabriel, A. Bharambe, A. Eisenman, A. Yazdan, B. James, B. Maurer, B. Leonhardi, B. Huang, B. Loyd, B. D. Paola, B. Paranjape, B. Liu, B. Wu, B. Ni, B. Hancock, B. Wasti, B. Spence, B. Stojkovic, B. Gamido, B. Montalvo, C. Parker, C. Burton, C. Mejia, C. Liu, C. Wang, C. Kim, C. Zhou, C. Hu, C. Chu, C. Cai, C. Tindal, C. Feichtenhofer, C. Gao, D. Civin, D. Beaty, D. Kreymer, D. Li, D. Adkins, D. Xu, D. Testuggine, D. David, D. Parikh, D. Liskovich, D. Foss, D. Wang, D. Le, D. Holland, E. Dowling, E. Jamil, E. Montgomery, E. Presani, E. Hahn, E. Wood, E. Le, E. Brinkman, E. Arcaute, E. Dunbar, E. Smothers, F. Sun, F. Kreuk, F. Tian, F. Kokkinos, F. Ozgenel, F. Caggioni, F. Kanayet, F. Seide, G. M. Florez, G. Schwarz, G. Badeer, G. Swee, G. Halpern, G. Herman, G. Sizov, Guangyi, Zhang, G. Lakshminarayanan, H. Inan, H. Shojanazeri, H. Zou, H. Wang, H. Zha, H. Habeeb, H. Rudolph, H. Suk, H. Aspegren, H. Goldman, H. Zhan, I. Damlaj, I. Molybog, I. Tufanov, I. Leontiadis, I. Veliche, I. Gat, J. Weissman, J. Geboski, J. Kohli, J. Lam, J. Asher, J. Gaya, J. Marcus, J. Tang, J. Chan, J. Zhen, J. Reizenstein, J. Teboul, J. Zhong, J. Jin, J. Yang, J. Cummings, J. Carvill, J. Shepard, J. McPhie, J. Torres, J. Ginsburg, J. Wang, K. Wu, K. H. U, K. Saxena, K. Khandelwal, K. Zand, K. Matosich, K. Veeraraghavan, K. Michelena, K. Li, K. Jagadeesh, K. Huang, K. Chawla, K. Huang, L. Chen, L. Garg, L. A, L. Silva, L. Bell, L. Zhang, L. Guo, L. Yu, L. Moshkovich, L. Wehrstedt, M. Khabsa, M. Avalani, M. Bhatt, M. Mankus, M. Hasson, M. Lennie, M. Reso, M. Groshev, M. Naumov, M. Lathi, M. Keneally, M. Liu, M. L. Seltzer, M. Valko, M. Restrepo, M. Patel, M. Vyatskov, M. Samvelyan, M. Clark, M. Macey, M. Wang, M. J. Hermoso, M. Metanat, M. Rastegari, M. Bansal, N. Santhanam, N. Parks, N. White, N. Bawa, N. Singhal, N. Egebo, N. Usunier, N. Mehta, N. P. Laptev, N. Dong, N. Cheng, O. Chernoguz, O. Hart, O. Salpekar, O. Kalinli, P. Kent, P. Parekh, P. Saab, P. Balaji, P. Rittner, P. Bontrager, P. Roux, P. Dollar, P. Zvyagina, P. Ratanchandani, P. Yuvraj, Q. Liang, R. Alao, R. Rodriguez, R. Ayub, R. Murthy, R. Nayani, R. Mitra, R. Parthasarathy, R. Li, R. Hogan, R. Battey, R. Wang, R. Howes, R. Rinott, S. Mehta, S. Siby, S. J. Bondu, S. Datta, S. Chugh, S. Hunt, S. Dhillon, S. Sidorov, S. Pan, S. Mahajan, S. Verma, S. Yamamoto, S. Ramaswamy, S. Lindsay, S. Lindsay, S. Feng, S. Lin, S. C. Zha, S. Patil, S. Shankar, S. Zhang, S. Zhang, S. Wang, S. Agarwal, S. Sajuyigbe, S. Chintala, S. Max, S. Chen, S. Kehoe, S. Satterfield, S. Govindaprasad, S. Gupta, S. Deng, S. Cho, S. Virk, S. Subramanian, S. Choudhury, S. Goldman, T. Remez, T. Glaser, T. Best, T. Koehler, T. Robinson, T. Li, T. Zhang, T. Matthews, T. Chou, T. Shaked, V. Vontimitta, V. Ajayi, V. Montanez, V. Mohan, V. S. Kumar, V. Mangla, V. Ionescu, V. Poenaru, V. T. Mihailescu, V. Ivanov, W. Li, W. Wang, W. Jiang, W. Bouaziz, W. Constable, X. Tang, X. Wu, X. Wang, X. Wu, X. Gao, Y. Kleinman, Y. Chen, Y. Hu, Y. Jia, Y. Qi, Y. Li, Y. Zhang, Y. Zhang, Y. Adi, Y. Nam, Yu, Wang, Y. Zhao, Y. Hao, Y. Qian, Y. Li, Y. He, Z. Rait, Z. DeVito, Z. Rosnbrick, Z. Wen, Z. Yang, Z. Zhao, and Z. Ma (2024) 
+
+ The llama 3 herd of models .
+
+ External Links: 2407.21783 ,
+ Link 
+
+ Cited by: §II-A ,
+ §VII-A ,
+ footnote 3 .
+
+ [23] 
+ A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu (2025) 
+
+ Qwen3 technical report .
+
+ External Links: 2505.09388 ,
+ Link 
+
+ Cited by: §II-A .
+
+ [24] 
+ T. Brown, B. Mann, N. Ryder, M. Subbiah, J. D. Kaplan, P. Dhariwal, A. Neelakantan, P. Shyam, G. Sastry, A. Askell, S. Agarwal, A. Herbert-Voss, G. Krueger, T. Henighan, R. Child, A. Ramesh, D. Ziegler, J. Wu, C. Winter, C. Hesse, M. Chen, E. Sigler, M. Litwin, S. Gray, B. Chess, J. Clark, C. Berner, S. McCandlish, A. Radford, I. Sutskever, and D. Amodei (2020) 
+
+ Language models are few-shot learners .
+
+ In Proc. Adv. Neural Inf. Process. Syst. (NeurIPS) ,
+
+ Vol. 33 , pp. 1877–1901 .
+
+ Cited by: §II-A ,
+ §II-C ,
+ §VII-A .
+
+ [25] 
+ A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin (2017) 
+
+ Attention is all you need .
+
+ In Proc. Adv. Neural Inf. Process. Syst. (NeurIPS) ,
+
+ Vol. 30 , Long Beach, CA, USA , pp.  .
+
+ Cited by: 2nd item ,
+ §II-A ,
+ §II-C ,
+ footnote 1 .
+
+ [26] 
+ K. Team, Y. Zhang, Z. Lin, X. Yao, J. Hu, F. Meng, C. Liu, X. Men, S. Yang, Z. Li, W. Li, E. Lu, W. Liu, Y. Chen, W. Xu, L. Yu, Y. Wang, Y. Fan, L. Zhong, E. Yuan, D. Zhang, Y. Zhang, T. Y. Liu, H. Wang, S. Fang, W. He, S. Liu, Y. Li, J. Su, J. Qiu, B. Pang, J. Yan, Z. Jiang, W. Huang, B. Yin, J. You, C. Wei, Z. Wang, C. Hong, Y. Chen, G. Chen, Y. Wang, H. Zheng, F. Wang, Y. Liu, M. Dong, Z. Zhang, S. Pan, W. Wu, Y. Wu, L. Guan, J. Tao, G. Fu, X. Xu, Y. Wang, G. Lai, Y. Wu, X. Zhou, Z. Yang, and Y. Du (2025) 
+
+ Kimi linear: an expressive, efficient attention architecture .
+
+ External Links: 2510.26692 ,
+ Link 
+
+ Cited by: §II-C ,
+ footnote 1 .
+
+ [27] 
+ I. Beltagy, M. E. Peters, and A. Cohan (2020) 
+
+ Longformer: the long-document transformer .
+
+ External Links: 2004.05150 ,
+ Link 
+
+ Cited by: §II-C ,
+ footnote 1 .
+
+ [28] 
+ OpenAI, S. Agarwal, L. Ahmad, J. Ai, S. Altman, A. Applebaum, E. Arbus, R. K. Arora, Y. Bai, B. Baker, H. Bao, B. Barak, A. Bennett, T. Bertao, N. Brett, E. Brevdo, G. Brockman, S. Bubeck, C. Chang, K. Chen, M. Chen, E. Cheung, A. Clark, D. Cook, M. Dukhan, C. Dvorak, K. Fives, V. Fomenko, T. Garipov, K. Georgiev, M. Glaese, T. Gogineni, A. Goucher, L. Gross, K. G. Guzman, J. Hallman, J. Hehir, J. Heidecke, A. Helyar, H. Hu, R. Huet, J. Huh, S. Jain, Z. Johnson, C. Koch, I. Kofman, D. Kundel, J. Kwon, V. Kyrylov, E. Y. Le, G. Leclerc, J. P. Lennon, S. Lessans, M. Lezcano-Casado, Y. Li, Z. Li, J. Lin, J. Liss, L. Liu, J. Liu, K. Lu, C. Lu, Z. Martinovic, L. McCallum, J. McGrath, S. McKinney, A. McLaughlin, S. Mei, S. Mostovoy, T. Mu, G. Myles, A. Neitz, A. Nichol, J. Pachocki, A. Paino, D. Palmie, A. Pantuliano, G. Parascandolo, J. Park, L. Pathak, C. Paz, L. Peran, D. Pimenov, M. Pokrass, E. Proehl, H. Qiu, G. Raila, F. Raso, H. Ren, K. Richardson, D. Robinson, B. Rotsted, H. Salman, S. Sanjeev, M. Schwarzer, D. Sculley, H. Sikchi, K. Simon, K. Singhal, Y. Song, D. Stuckey, Z. Sun, P. Tillet, S. Toizer, F. Tsimpourlas, N. Vyas, E. Wallace, X. Wang, M. Wang, O. Watkins, K. Weil, A. Wendling, K. Whinnery, C. Whitney, H. Wong, L. Yang, Y. Yang, M. Yasunaga, K. Ying, W. Zaremba, W. Zhan, C. Zhang, B. Zhang, E. Zhang, and S. Zhao (2025) 
+
+ GPT-OSS-120b & GPT-OSS-20b model card .
+
+ External Links: 2508.10925 ,
+ Link 
+
+ Cited by: §II-C ,
+ footnote 1 .
+
+ [29] 
+ Y. Leviathan, M. Kalman, and Y. Matias (2023) 
+
+ Fast inference from transformers via speculative decoding .
+
+ In Proc. Mach. Learn. Res. , A. Krause, E. Brunskill, K. Cho, B. Engelhardt, S. Sabato, and J. Scarlett (Eds.) ,
+
+ Vol. 202 , pp. 19274–19286 .
+
+ Cited by: 3rd item .
+
+ [30] 
+ C. Shi, Y. Chen, Y. Chen, X. Miao, and B. Cui (2026) 
+
+ Multi-segment attention: enabling efficient KV-cache management for faster large language model serving .
+
+ External Links: 2606.02964 ,
+ Link 
+
+ Cited by: Fig. 1 .
+
+ [31] 
+ G. Yu, J. S. Jeong, G. Kim, S. Kim, and B. Chun (2022) 
+
+ Orca: a distributed serving system for Transformer-Based generative models .
+
+ In Proc. USENIX Symp. Operating Syst. Design and Implement. (OSDI’22) ,
+
+ Carlsbad, CA , pp. 521–538 .
+
+ External Links: ISBN 978-1-939133-28-1 
+
+ Cited by: §II-B ,
+ §III-C .
+
+ [32] 
+ J. F. C. Kingman (2009) 
+
+ The first erlang century—and the next .
+
+ Queueing Syst. 63 ( 1 ), pp. 3 .
+
+ External Links: Document ,
+ ISSN 1572-9443 ,
+ Link 
+
+ Cited by: §III-A .
+
+ [33] 
+ J.F.C. Kingman (1992) 
+
+ Poisson processes .
+
+ Oxford Studies in Probability , Clarendon Press .
+
+ External Links: ISBN 9780191591242 ,
+ LCCN 92025532 
+
+ Cited by: Appendix B ,
+ §III-B ,
+ §IV-A ,
+ §IV-B2 .
+
+ [34] 
+ NVIDIA Corporation (2022) 
+
+ NVIDIA A100 Tensor Core GPU .
+
+ Cited by: footnote 3 .
+
+ [35] 
+ W. Whitt (2002) 
+
+ Stochastic-process limits: an introduction to stochastic-process limits and their application to queues .
+
+ 1 edition , Springer Series in Operations Research and Financial Engineering , Springer New York, NY .
+
+ External Links: Document ,
+ ISBN 978-0-387-95358-8 ,
+ ISSN 1431-8598 
+
+ Cited by: Appendix B ,
+ §IV-A ,
+ §IV-B2 .
+
+ [36] 
+ Y. Xiang, X. Li, K. Qian, Y. Zhang, W. Yu, E. Zhai, X. Jin, and J. Zhou (2026) 
+
+ ServeGen: workload characterization and generation of large language model serving in production .
+
+ In Proc. USENIX Symp. Netw. Syst. Design Implement. (NSDI’26) ,
+
+ Renton, WA, USA , pp. 1845–1859 .
+
+ External Links: ISBN 978-1-939133-54-0 
+
+ Cited by: §A-A ,
+ Appendix C ,
+ §IV-A ,
+ §IV-C ,
+ §IV-C ,
+ §VII-A .
+
+ [37] 
+ A. O. Allen (1990) 
+
+ Probability, statistics, and queueing theory with computer science applications .
+
+ Academic Press Professional, Inc. , USA .
+
+ External Links: ISBN 0120510510 
+
+ Cited by: §IV-B1 .
+
+ [38] 
+ L. Fenton (1960) 
+
+ The sum of log-normal probability distributions in scatter transmission systems .
+
+ IRE Trans. Commun. Syst. 8 ( 1 ), pp. 57–67 .
+
+ External Links: Document 
+
+ Cited by: 2nd item ,
+ §IV-C .
+
+ [39] 
+ Y. Liu, M. Derakhshani, and S. Lambotharan (2018) 
+
+ Outage analysis and power allocation in uplink non-orthogonal multiple access systems .
+
+ IEEE Commun. Lett. 22 ( 2 ), pp. 336–339 .
+
+ External Links: Document 
+
+ Cited by: 1st item ,
+ §IV-C .
+
+ [40] 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng (2024) 
+
+ SGLang: efficient execution of structured language model programs .
+
+ In Proc. 38th Int. Conf. Neural Inf. Process. Syst. (NIPS’24) ,
+
+ Red Hook, NY, USA .
+
+ External Links: ISBN 9798331314385 
+
+ Cited by: §VII-A .
+
+ [41] 
+ Qwen, :, A. Yang, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Li, D. Liu, F. Huang, H. Wei, H. Lin, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Lin, K. Dang, K. Lu, K. Bao, K. Yang, L. Yu, M. Li, M. Xue, P. Zhang, Q. Zhu, R. Men, R. Lin, T. Li, T. Tang, T. Xia, X. Ren, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Wan, Y. Liu, Z. Cui, Z. Zhang, and Z. Qiu (2025) 
+
+ Qwen2.5 technical report .
+
+ External Links: 2412.15115 ,
+ Link 
+
+ Cited by: §VII-A .
+
+ [42] 
+ F. Pollaczek (1930) 
+
+ Über eine Aufgabe der Wahrscheinlichkeitstheorie. I .
+
+ Mathematische Zeitschrift 32 ( 1 ), pp. 64–100 .
+
+ External Links: ISSN 1432-1823 ,
+ Document 
+
+ Cited by: Appendix B .
+
+ [43] 
+ J. Abate, G. L. Choudhury, and W. Whitt (1994) 
+
+ Waiting-time tail probabilities in queues with long-tail service-time distributions .
+
+ Queueing Syst. 16 ( 3 ), pp. 311–338 .
+
+ External Links: Document ,
+ ISSN 1572-9443 
+
+ Cited by: Appendix B .
+
+ Appendix A Latency Dominant Factors 
+
+ According to ( 9 ) and ( 16 ), the service time in the prefill and decode stage is determined by multiple system parameters. To facilitate efficient analysis of 𝒫 1 \mathcal{P}_{1} , in this subsection, we first identify the dominant performance parameters under practical configurations. 
+
+ A-A Compute-Bound Prefill Service Time 
+
+ In the prefill stage, according to ( 7 ) and ( 8 ), the prefill service time T p T_{\rm p} is determined by the compute capacity F p F_{\rm p} and HBM bandwidth B HBM B_{\rm HBM} . To further investigate the dominant factors of service time T p T_{\rm p} , we first solve T p , 1 ​ ( L i ) > T p , 2 ​ ( L i ) T_{\rm p,1}(L_{\rm i})>T_{\rm p,2}(L_{\rm i}) , which yields a quadratic form of L i L_{\rm i} as 
+
+ | 
+ a ​ L i 2 + b ​ L i + c > 0 aL_{\rm i}^{2}+bL_{\rm i}+c>0 | 
+ | 
+ (59) | 
+
+ with b = B HBM ​ N layer ​ N mod ​ ( 1 + 2 ​ N hid + 2 ​ ( 1 + g ) ​ N mod ) − F p ​ g ​ γ b=B_{\rm HBM}N_{\rm layer}N_{\rm mod}\left(1+2N_{\rm hid}+2(1+g)N_{\rm mod}\right)-F_{\rm p}g\gamma , a = B HBM ​ N layer ​ N mod a=B_{\rm HBM}N_{\rm layer}N_{\rm mod} , and c = − F p ​ Ω LLM c=-F_{\rm p}\Omega_{\rm LLM} . For practical LLM serving systems 3 ,
+the quadratic term a ​ L i 2 aL_{\rm i}^{2} is negligible compared with the linear term b ​ L i bL_{\rm i} as 
+
+ | 
+ a ​ L i 2 b ​ L i \displaystyle\frac{aL_{\rm i}^{2}}{bL_{\rm i}} | 
+ = L i B HBM ​ N layer ​ N mod ​ ( + 2 ​ N hid + 2 ​ ( + g ) ​ N mod ) − F p ​ g ​ γ \displaystyle=\frac{L_{\rm i}}{B_{\rm HBM}N_{\rm layer}N_{\rm mod}\left(1\!+\!2N_{\rm hid}\!+\!2(1\!+\!g)N_{\rm mod}\right)\!-\!F_{\rm p}g\gamma} | 
+ | 
+
+ | 
+ | 
+ ≈ 0.004 ≪ 1 . \displaystyle\approx 0.004\ll 1. | 
+ | 
+ (60) | 
+
+ Hence, ( 59 ) can be approximately reduced to a linear inequality b ​ L i + c > 0 bL_{\rm i}+c>0 , which yields the length threshold 
+
+ | 
+ L ~ i = F p ​ Ω LLM B HBM ​ N layer ​ N mod ​ ( + 2 ​ N hid + 2 ​ ( + g ) ​ N mod ) − F p ​ g ​ γ , \tilde{L}_{\rm i}=\frac{F_{\rm p}\Omega_{\rm LLM}}{B_{\rm HBM}N_{\rm layer}N_{\rm mod}\left(1\!+\!2N_{\rm hid}\!+\!2(1\!+\!g)N_{\rm mod}\right)\!-\!F_{\rm p}g\gamma}, | 
+ | 
+
+ above which ( 59 ) holds.
+Based on practical parameter setups 3 , the length threshold is around L ~ i ≈ 156 \tilde{L}_{\rm i}\approx 156 tokens, as shown in Fig.  12 (a). Due to prompt prefixes and accumulated input and output context in multi-turn conversations of LLM user requests, the input token length L i L_{\rm i} 
+in realistic scenarios is typically around thousands of tokens, which is
+much longer than L ~ i \tilde{L}_{\rm i}   [ 10 , 11 , 36 ] . Consequently, the prefill service time is mainly determined by compute capacity, i.e., T p ≈ T p , 1 T_{\rm p}\approx T_{\rm p,1} . 
+
+ A-B HBM Bandwidth-Bound Decode Service Time 
+
+ Similarly, we first calculate T d , 1 ​ ( L io ) < T d , 2 ​ ( L io ) T_{\rm d,1}(L_{\rm io})<T_{\rm d,2}(L_{\rm io}) according to ( 14 ) and ( 15 ), which yields 
+
+ | 
+ | 
+ ( g ​ γ ​ F d − 2 ​ B HBM ​ N layer ​ N mod ) ​ L io \displaystyle\left(g\gamma F_{\rm d}-2B_{\rm HBM}N_{\rm layer}N_{\rm mod}\right)L_{\rm io} | 
+ | 
+ (61) | 
+
+ | 
+ > \displaystyle>{} | 
+ 2 ​ B HBM ​ N layer ​ N bat ​ ( ( + g ) ​ N mod 2 + N mod ​ N hid ) − F d ​ Ω LLM . \displaystyle 2B_{\rm HBM}N_{\rm layer}N_{\rm bat}\!\left((1\!+\!g)N_{\rm mod}^{2}\!+\!N_{\rm mod}N_{\rm hid}\right)\!-\!F_{\rm d}\Omega_{\rm LLM}. | 
+ | 
+
+ Since g ​ γ ​ F d − 2 ​ B HBM ​ N layer ​ N mod > 0 g\gamma F_{\rm d}-2B_{\rm HBM}N_{\rm layer}N_{\rm mod}>0 typically holds true under practical parameters 3 ,
+the threshold of L io L_{\rm io} is given by 
+
+ | 
+ | 
+ L ~ io \displaystyle\tilde{L}_{\rm io} | 
+ | 
+ (62) | 
+
+ | 
+ = \displaystyle= | 
+ 2 ​ B HBM ​ N layer ​ N bat ​ ( ( + g ) ​ N mod 2 + N mod ​ N hid ) − F d ​ Ω LLM F d ​ g ​ γ − 2 ​ B HBM ​ N layer ​ N mod . \displaystyle\frac{2B_{\rm HBM}N_{\rm layer}N_{\rm bat}\!\left((1\!+\!g)N_{\rm mod}^{2}\!+\!N_{\rm mod}N_{\rm hid}\right)\!-\!F_{\rm d}\Omega_{\rm LLM}}{F_{\rm d}g\gamma-2B_{\rm HBM}N_{\rm layer}N_{\rm mod}}. | 
+ | 
+
+ The resource bottleneck is HBM bandwidth B HBM B_{\rm HBM} for L io ≥ L ~ io L_{\rm io}\geq\tilde{L}_{\rm io} , and is compute capacity F d F_{\rm d} otherwise.
+With practical batch size such as N bat = 128 N_{\rm bat}=128 , the token threshold L ~ io \tilde{L}_{\rm io} is even negative as shown in Fig.  12 (b),
+so the decode service time is mainly determined by the HBM bandwidth B HBM B_{\rm HBM} , i.e., T d ≈ T d , 2 T_{\rm d}\approx T_{\rm d,2} . 
+
+ Fig. 12: Token thresholds for (a) prefill and (b) decode stages under practical parameters stated in Footnote  3 . 
+
+ Appendix B Heavy-Tailed Analysis for KV Cache Transfer 
+
+ According to Kingman-type heavy traffic approximation  [ 33 , 35 ] , we resort to analyze the waiting time as 
+
+ | 
+ Pr ⁡ ( T TR W ≥ t ) ≈ ρ KV ​ e − t w TR , \Pr\left(T_{\rm TR}^{\rm W}\geq t\right)\approx\rho_{\rm KV}e^{-\frac{t}{w_{\rm TR}}}, | 
+ | 
+ (63) | 
+
+ where 
+
+ | 
+ w TR = 1 + c TR 2 2 ​ ρ KV λ ⁡ ( 1 − ρ KV ) = e σ i 2 2 ​ g ​ γ ​ ℓ i B − λ ​ g ​ γ ​ ℓ i w_{\rm TR}=\frac{1+c_{\rm TR}^{2}}{2}\frac{\rho_{\rm KV}}{\lambda\left(1-\rho_{\rm KV}\right)}=\frac{e^{\sigma_{\rm i}^{2}}}{2}\frac{g\gamma\ell_{\rm i}}{B-\lambda g\gamma\ell_{\rm i}} | 
+ | 
+
+ is the modified tail decay factor, ℓ i = 𝔼 ⁡ [ L i ] = e μ i + σ i 2 / 2 \ell_{\rm i}=\mathbb{E}[L_{\rm i}]=e^{\mu_{\rm i}+{\sigma_{\rm i}^{2}}/{2}} , and c TR = e σ i 2 − 1 c_{\rm TR}=\sqrt{e^{\sigma_{\rm i}^{2}}-1} is the CV of T TR T_{\rm TR} . Under high utilization ρ KV → 1 \rho_{\rm KV}\to 1 , the waiting time T TR W T_{\rm TR}^{\rm W} asymptotically dominates the sojourn time as  [ 42 , 43 ] 
+
+ | 
+ lim ρ KV → 1 𝔼 ⁡ [ T TR W ] 𝔼 ⁡ [ T TR ] = lim ρ KV → 1 ρ KV ​ ( 1 + c TR 2 ) 2 ​ ( 1 − ρ KV ) ≫ 1 , \lim_{\rho_{\rm KV}\to 1}\frac{\mathbb{E}[T_{\rm TR}^{\rm W}]}{\mathbb{E}[T_{\rm TR}]}=\lim_{\rho_{\rm KV}\to 1}\frac{\rho_{\rm KV}\left(1+c_{\rm TR}^{2}\right)}{2(1-\rho_{\rm KV})}\gg 1, | 
+ | 
+ (64) | 
+
+ and 
+
+ | 
+ lim ρ KV → 1 Var ⁡ ( T TR W ) Var ⁡ ( T TR ) = lim ρ KV → 1 ρ KV ​ e 3 ​ σ i 2 3 ​ ( 1 − ρ KV ) + ρ KV 2 ​ e 2 ​ σ i 2 4 ​ ( 1 − ρ KV ) 2 e σ i 2 − 1 ≫ 1 . \!\!\lim_{\rho_{\rm KV}\to 1}\frac{{\rm Var}(T_{\rm TR}^{\rm W})}{{\rm Var}(T_{\rm TR})}=\!\!\lim_{\rho_{\rm KV}\to 1}\frac{\frac{\rho_{\rm KV}e^{3\sigma_{\rm i}^{2}}}{3(1-\rho_{\rm KV})}+\frac{\rho_{\rm KV}^{2}e^{2\sigma_{\rm i}^{2}}}{4(1-\rho_{\rm KV})^{2}}}{e^{\sigma_{\rm i}^{2}}-1}\gg 1. | 
+ | 
+ (65) | 
+
+ Eqs. ( 64 ) and ( 65 ) indicate that T TR T_{\rm TR} is a random variable with much smaller expectation value and variance than T TR W T_{\rm TR}^{\rm W} .
+Hence, we can safely approximate the tail behavior of sojourn latency using the waiting time T TR W T_{\rm TR}^{\rm W} as 
+
+ | 
+ T KV ≈ T TR W , T_{\rm KV}\approx T_{\rm TR}^{\rm W}, | 
+ | 
+ (66) | 
+
+ which simplifies the analytical framework without incurring noticeable error. Hence, the SLO constraint ( 20d ) is characterized as 
+
+ | 
+ τ KV ≥ w TR ​ log ⁡ ρ KV 1 − p SLO , \tau_{\rm KV}\geq w_{\rm TR}\log\frac{\rho_{\rm KV}}{1-p_{\rm SLO}}, | 
+ | 
+ (67) | 
+
+ which yields 
+
+ | 
+ B ≥ λ ​ g ​ γ ​ ℓ i + e σ i 2 2 ​ g ​ γ ​ ℓ i τ KV ​ log ⁡ ρ KV 1 − p SLO . B\geq\lambda g\gamma\ell_{\rm i}+\frac{e^{\sigma_{\rm i}^{2}}}{2}\frac{g\gamma\ell_{\rm i}}{\tau_{\rm KV}}\log\frac{\rho_{\rm KV}}{1-p_{\rm SLO}}. | 
+ | 
+ (68) | 
+
+ Appendix C Derivation of Condition C3 \rm C3 
+
+ Statistically, the output length L o ( n ) L_{\rm o}^{(n)} follows an exponential distribution as L o ( n ) ∼ Exp ⁡ [ 1 / ℓ o ] L_{\rm o}^{(n)}\sim{\rm Exp}[1/\ell_{\rm o}] , and is independent with the input length L i ( n ) L_{\rm i}^{(n)}   [ 11 , 36 , 8 ] . Therefore, in each decoding iteration, the probability of reaching the EOS token for each request is 
+
+ | 
+ p 0 = Pr ⁡ ( L o ≤ n + 1 ∣ L o ≥ n ) = 1 − e − 1 ℓ o . p_{0}=\Pr\left(L_{\rm o}\leq n+1\mid L_{\rm o}\geq n\right)=1-e^{-\frac{1}{\ell_{\rm o}}}. | 
+ | 
+ (69) | 
+
+ The number of departing requests D k D_{k} then follows a binomial distribution D k ∼ ℬ ⁡ [ N bat ( k ) , p 0 ] D_{k}\sim{\mathcal{B}}[N_{\rm bat}^{(k)},p_{0}] . Let the number of arrivals in the k k -th decoding iteration be A k ∼ Poisson ⁡ [ λ ​ T d ] A_{k}\sim{\rm Poisson}[\lambda T_{\rm d}] , so the number of requests to be processed in the ( k + 1 ) (k+1) -th iteration is 
+
+ | 
+ N bat ( k + 1 ) = N bat ( k ) − D k + A k . N_{\rm bat}^{(k+1)}=N_{\rm bat}^{(k)}-D_{k}+A_{k}. | 
+ | 
+ (70) | 
+
+ At the steady state of N bat ( k ) N_{\rm bat}^{(k)} , i.e., k → ∞ k\to\infty , we should have 
+
+ | 
+ lim k → ∞ ( 𝔼 ⁡ [ N bat ( k + 1 ) ] − 𝔼 ⁡ [ N bat ( k ) ] ) = 0 \lim_{k\to\infty}\left(\mathbb{E}\left[N_{\rm bat}^{(k+1)}\right]-\mathbb{E}\left[N_{\rm bat}^{(k)}\right]\right)=0 | 
+ | 
+ (71) | 
+
+ to ensure the stability of the decoding system.
+In this case, taking the conditional expectation on both sides of ( 70 ), we have 
+
+ | 
+ 𝔼 ⁡ [ N bat ( k + 1 ) ∣ N bat ( k ) ] = 𝔼 ⁡ [ N bat ( k ) − D k ∣ N bat ( k ) ] + 𝔼 ⁡ [ A k ∣ N bat ( k ) ] = N bat ( k ) ​ e − 1 ℓ o + λ ⁡ ( Ω LLM + g ​ γ ​ N bat ( k ) ​ ( ℓ i + ℓ o ) ) k d ​ B HBM , \!\!\!\!\begin{aligned} &\mathbb{E}\left[N_{\rm bat}^{(k+1)}\mid N_{\rm bat}^{(k)}\right]\\
+={}&\mathbb{E}\left[N_{\rm bat}^{(k)}-D_{k}\mid N_{\rm bat}^{(k)}\right]+\mathbb{E}\left[A_{k}\mid N_{\rm bat}^{(k)}\right]\\
+={}&N_{\rm bat}^{(k)}e^{-\frac{1}{\ell_{\rm o}}}+\frac{\lambda\left(\Omega_{\rm LLM}+g\gamma N_{\rm bat}^{(k)}\left(\ell_{\rm i}+\ell_{\rm o}\right)\right)}{k_{\rm d}B_{\rm HBM}},\end{aligned} | 
+ | 
+ (72) | 
+
+ where ℓ i = 𝔼 ⁡ [ L i ] \ell_{\rm i}=\mathbb{E}[L_{\rm i}] . Taking the conditional mean over N bat ( k ) N_{\rm bat}^{(k)} on both sides of ( 72 ) yields 
+
+ | 
+ 𝔼 ⁡ [ N bat ( k + 1 ) ] = 𝔼 ⁡ [ N bat ( k ) ] ​ e − 1 ℓ o + λ ⁡ ( Ω LLM + g ​ γ ​ 𝔼 ​ [ N bat ( k ) ] ​ ( ℓ i + ℓ o ) ) k d ​ B HBM . \mathbb{E}\!\left[N_{\rm bat}^{(k+1)}\right]\!=\!\mathbb{E}\!\left[N_{\rm bat}^{(k)}\right]\!e^{-\frac{1}{\ell_{\rm o}}}\!+\!\frac{\lambda\!\left(\!\Omega_{\rm LLM}\!+\!g\gamma\mathbb{E}\!\left[N_{\rm bat}^{(k)}\right]\!\left(\ell_{\rm i}\!+\!\ell_{\rm o}\right)\!\right)\!}{k_{\rm d}B_{\rm HBM}}. | 
+ | 
+ (73) | 
+
+ Substituting ( 71 ) into ( 73 ), we obtain the steady state mean 
+
+ | 
+ lim k → ∞ 𝔼 ⁡ [ N bat ( k ) ] = λ ​ Ω LLM k d ​ B HBM ​ p 0 − λ ​ g ​ γ ​ ( ℓ i + ℓ o ) \lim_{k\to\infty}\mathbb{E}\left[N_{\rm bat}^{(k)}\right]=\frac{\lambda\Omega_{\rm LLM}}{k_{\rm d}B_{\rm HBM}p_{0}-\lambda g\gamma\left(\ell_{\rm i}+\ell_{\rm o}\right)} | 
+ | 
+ (74) | 
+
+ subject to k d ​ B HBM ​ p 0 > λ ​ g ​ γ ​ ( ℓ i + ℓ o ) k_{\rm d}B_{\rm HBM}p_{0}>\lambda g\gamma\left(\ell_{\rm i}+\ell_{\rm o}\right) , which further yields 
+
+ | 
+ C3 : N bat > λ ​ Ω LLM k d ​ B HBM ​ p 0 − λ ​ g ​ γ ​ ( ℓ i + ℓ o ) . \!\!{\rm C3}:~N_{\rm bat}>\frac{\lambda\Omega_{\rm LLM}}{k_{\rm d}B_{\rm HBM}p_{0}-\lambda g\gamma\left(\ell_{\rm i}+\ell_{\rm o}\right)}. | 
+ | 
+ (75) | 
+
+ Appendix D Derivation of Condition C4 \rm C4 
+
+ Following the notation in Appendix  C , the conditional variance of N bat ( k + 1 ) N_{\rm bat}^{(k+1)} is given by 
+
+ | 
+ Var ⁡ ( N bat ( k + 1 ) ∣ N bat ( k ) ) = Var ⁡ ( N bat ( k ) − D k ∣ N bat ( k ) ) + Var ⁡ ( A k ∣ N bat ( k ) ) = N bat ( k ) ​ p 0 ​ ( 1 − p 0 ) + λ ⁡ ( Ω LLM + g ​ γ ​ N bat ( k ) ​ ( ℓ i + ℓ o ) ) k d ​ B HBM . \!\!\!\!\begin{aligned} &{\rm Var}\left(N_{\rm bat}^{(k+1)}\mid N_{\rm bat}^{(k)}\right)\\
+={}&{\rm Var}\left(N_{\rm bat}^{(k)}-D_{k}\mid N_{\rm bat}^{(k)}\right)+{\rm Var}\left(A_{k}\mid N_{\rm bat}^{(k)}\right)\\
+={}&N_{\rm bat}^{(k)}p_{0}(1-p_{0})+\frac{\lambda\left(\Omega_{\rm LLM}+g\gamma N_{\rm bat}^{(k)}\left(\ell_{\rm i}+\ell_{\rm o}\right)\right)}{k_{\rm d}B_{\rm HBM}}.\end{aligned} | 
+ | 
+ (76) | 
+
+ According to the law of total variance, we have 
+
+ | 
+ Var ⁡ ( N bat ( k + 1 ) ) = \displaystyle{\rm Var}\left(N_{\rm bat}^{(k+1)}\right)={} | 
+ 𝔼 ⁡ [ Var ⁡ ( N bat ( k + 1 ) ∣ N bat ( k ) ) ] \displaystyle\mathbb{E}\left[{\rm Var}\left(N_{\rm bat}^{(k+1)}\mid N_{\rm bat}^{(k)}\right)\right] | 
+ | 
+ (77) | 
+
+ | 
+ | 
+ + Var ⁡ ( 𝔼 ⁡ [ N bat ( k + 1 ) ∣ N bat ( k ) ] ) , \displaystyle+{\rm Var}\left(\mathbb{E}\left[N_{\rm bat}^{(k+1)}\mid N_{\rm bat}^{(k)}\right]\right), | 
+ | 
+
+ and the variance of steady state N bat ( k ) N_{\rm bat}^{(k)} is given by 
+
+ | 
+ | 
+ Var ⁡ ( N bat ( ∞ ) ) = \displaystyle\rm{\displaystyle Var}\left(N_{\rm bat}^{(\infty)}\right)= | 
+ | 
+ (78) | 
+
+ | 
+ | 
+ λ ​ Ω LLM k d ​ B HBM + ( p 0 ​ ( 1 − p 0 ) + λ ​ g ​ γ ​ ( ℓ i + ℓ o ) k d ​ B HBM ) ​ 𝔼 ​ [ N bat ( ∞ ) ] 1 − ( 1 − p 0 + λ ​ g ​ γ ​ ( ℓ i + ℓ o ) k d ​ B HBM ) 2 \displaystyle\frac{\displaystyle\frac{\lambda\Omega_{\rm LLM}}{k_{\rm d}B_{\rm HBM}}+\left(p_{0}(1-p_{0})+\frac{\lambda g\gamma(\ell_{\rm i}+\ell_{\rm o})}{k_{\rm d}B_{\rm HBM}}\right)\mathbb{E}\left[N_{\rm bat}^{(\infty)}\right]}{\displaystyle 1-\left(1-p_{0}+\frac{\lambda g\gamma(\ell_{\rm i}+\ell_{\rm o})}{k_{\rm d}B_{\rm HBM}}\right)^{2}} | 
+ | 
+
+ Note that given a practically large number of parallel requests within the batch, the steady state distribution of N bat N_{\rm bat} is the sum of i.i.d. Bernoulli D k D_{k} and Poisson A k A_{k} components. Hence, if there is no limit on the maximum batch size, the distribution of requests within the batch is approximately Gaussian according to the central limit theorem (CLT), i.e., N bat ∼ 𝒩 ⁡ ( μ bat , σ bat 2 ) N_{\rm bat}\sim\mathcal{N}(\mu_{\rm bat},\sigma_{\rm bat}^{2}) , where μ bat = 𝔼 ⁡ [ N bat ( ∞ ) ] \mu_{\rm bat}=\mathbb{E}[N_{\rm bat}^{(\infty)}] and σ bat 2 = Var ⁡ ( N bat ( ∞ ) ) \sigma_{\rm bat}^{2}={\rm Var}(N_{\rm bat}^{(\infty)}) .
+Therefore, we can empirically assign a large batch size to avoid excessive waiting time in the decode stage by 
+
+ | 
+ C4 : N bat ≥ μ bat + σ bat ​ Φ − 1 ​ ( p join ) , {\rm C4}:~~N_{\rm bat}\geq\mu_{\rm bat}+\sigma_{\rm bat}\Phi^{-1}(p_{\rm join}), | 
+ | 
+ (79) | 
+
+ where p join p_{\rm join} is the probability of directly joining the decoding batch without waiting.

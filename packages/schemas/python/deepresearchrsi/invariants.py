@@ -131,6 +131,11 @@ def check_e1_substring(
 
     cache: dict[str, str] = {}
 
+    # documents.csv 里记着每份快照的**真实路径**。校验时优先信任它，
+    # 而不是按 document_id 猜文件名——见 bodies_for 里的说明。
+    _meta = root / "documents.csv"
+    meta_rows: list[dict[str, str]] = read_csv(_meta) if _meta.is_file() else []
+
     def candidate_stems(did: str) -> list[str]:
         """该 document_id / source_id 可能对应的快照文件名主干（不含扩展名）。
 
@@ -168,15 +173,49 @@ def check_e1_substring(
            各自成立；两者都不中才是真问题。
         """
         out: list[str] = []
+        seen: set[str] = set()
+
+        def take(p: Path) -> None:
+            if not p.is_file():
+                return
+            key = str(p.resolve())
+            if key in seen:
+                return
+            seen.add(key)
+            if key not in cache:
+                cache[key] = p.read_text(encoding="utf-8", errors="replace")
+            out.append(cache[key])
+
+        # ① 先按 documents.csv 里**显式记录的 snapshot 路径**找。
+        #
+        # ⚠️ 这是实测踩出来的：`pd-disagg` 归档里工程文档的 document_id
+        #    是 `doc-sglang-pd`，而快照文件名是 `sglang-pd.txt`——两者
+        #    并不按 doc- 前缀对应。于是 4 条工程文档引文全部落到
+        #    「无快照」，报成 e1_unverifiable。
+        #
+        #    问题不在数据：documents.csv 的 snapshot 字段一直写着正确
+        #    路径（documents/sglang-pd.txt）。是校验器**没读那个字段**，
+        #    改用「document_id + 后缀」猜文件名。猜出来的规则只对
+        #    arxiv 那批成立（doc-arxiv-x -> doc-arxiv-x-full.txt），
+        #    对工程文档不成立。
+        #
+        #    这与本仓库反复出现的失效模式同型：**用推断代替已记录的事实**。
+        #    故改为优先读记录，猜文件名只作兜底。
+        for row in meta_rows:
+            if (row.get("document_id") or "").strip() != did:
+                continue
+            snap = (row.get("snapshot") or "").strip()
+            if not snap:
+                continue
+            cand = root / snap
+            if not cand.is_file():
+                cand = docdir / Path(snap).name
+            take(cand)
+
+        # ② 兜底：按 document_id 猜文件名（保留旧行为，兼容未写 snapshot 的归档）
         for stem in candidate_stems(did):
             for ext in (".txt", ".md"):
-                p = docdir / f"{stem}{ext}"
-                if p.is_file():
-                    key = str(p)
-                    if key not in cache:
-                        cache[key] = p.read_text(encoding="utf-8",
-                                                 errors="replace")
-                    out.append(cache[key])
+                take(docdir / f"{stem}{ext}")
         return out
 
     def norm(s: str) -> str:

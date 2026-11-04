@@ -1,0 +1,905 @@
+ARK: Avoiding Routing Collisions for KV Cache Transfer in Disaggregated LLM Inference 
+ Conference:  ACM SIGCOMM Workshop on Networks for AI Computing; August 17–21, 2026; Denver, CO, USA ACM SIGCOMM Workshop on Networks for AI Computing (NAIC ’26), August 17–21, 2026, Denver, CO, USA DOI:  10.1145/3789240.3828750 ISBN:  979-8-4007-2467-1/26/08 CCS:  Networks Network simulations CCS:  Networks Data center networks CCS:  Networks Network resources allocation CCS:  Computing methodologies Simulation evaluation CCS:  Computing methodologies Discrete-event simulation 
+
+ Hung-Chun Lin
+
+ Note:  Both authors contributed equally to this research.
+
+ Affiliation:  Georgia Institute of Technology , Atlanta , GA , USA 
+
+ email: hlin464@gatech.edu 
+
+ , 
+ Ting-Wei Hsu
+
+ Affiliation:  Georgia Institute of Technology , Atlanta , GA , USA 
+
+ email: thsu49@gatech.edu 
+
+ , 
+ Chung-En Ho
+
+ Affiliation:  Georgia Institute of Technology , Atlanta , GA , USA 
+
+ email: cho322@gatech.edu 
+
+ and 
+ Ahmed Saeed
+
+ Affiliation:  Georgia Institute of Technology , Atlanta , GA , USA 
+
+ email: asaeed@cc.gatech.edu 
+
+ © cc 
+
+ Abstract. 
+
+ Disaggregated LLM inference separates the prefill and decode phases across GPU pools, generating massive KV-cache transfers. Because these transfers last hundreds of milliseconds to seconds, they behave as mega elephant flows that dominate link bandwidth utilization. In this regime, stateless ECMP can perform poorly: hash collisions may overload one spine link while leaving others idle, stretching transfer times by seconds. Yet this same persistence makes coordination practical. Since these flows are long-lived, even lightweight one-to-all coordination can be amortized over their lifetime. We present ARK, a distributed elephant-flow path reservation mechanism. ARK coordinates senders to choose source ports whose hashes map concurrent flows onto distinct spines, without requiring switch changes or receiver-side packet reordering. Packet-level RDMA simulations show that ARK reduces mean and P95 FCT by up to 27.3% and 34.0% under moderate load, and further reduces mean TTFT by up to 12.9%. 
+
+ Keywords:  LLM serving, disaggregated inference, network load balancing
+ † † cc-license: by 
+
+ 1. Introduction 
+
+ The rise of large language models (LLMs) is reshaping data-center utilization. Modern LLM serving pipelines split execution into two phases with disjoint resource profiles: a compute-bound prefill phase that ingests the user prompt, and a memory-bandwidth-bound decode phase that emits tokens autoregressively. Co-locating both phases on the same GPU pool over-provisions one resource for the other, motivating recent serving systems—DistServe  ( Zhong et al., 2024 ) and Splitwise  ( Patel et al., 2024 ) —to physically disaggregate prefill from decode across separate GPU pools.
+The price of this architecture is a new dominant communication pattern: the key–value (KV) cache produced by a prefill GPU must be shipped over the data-center fabric to the decode GPU before token generation can begin. Open-source inference platforms such as vLLM  ( Kwon et al., 2023 ) , SGLang  ( Zheng et al., 2024 ) , NVIDIA Dynamo  ( NVIDIA, 2025 ) , and llm-d  ( The llm-d Project, 2025 ) already implement this prefill–decode disaggregation pattern, and major LLM operators have adopted it at production scale: Moonshot AI’s Kimi runs on the Mooncake disaggregated architecture  ( Qin et al., 2025 ) , and DeepSeek-V3 is served via SGLang’s disaggregated reference deployment  ( SGLang Team, 2025 ) . 
+
+ KV cache flows are unlike anything the fabric has seen. Where a traditional data-center “elephant flow” typically peaks around tens of megabytes  ( Song et al., 2023 ) , a single 100K-token KV cache for LLaMA-3.1-405B already reaches 48 GB. 1 1 
+ 1 
+
+ KV-cache footprint per token is 2 ⋅ L h ⋅ H k ​ v ⋅ d h ⋅ s 2\cdot L_{h}\cdot H_{kv}\cdot d_{h}\cdot s , where L h L_{h} is the number of decoder layers, H k ​ v H_{kv} the number of KV heads, d h d_{h} the head dimension, and s s the precision in bytes. For LLaMA-3.1-405B (126 layers, 8 KV heads, d h = 128 d_{h}{=}128 , FP16), it has 504 KB per token. A single such flow can saturate a 400 Gbps link for 960 ms. Because this transfer sits on the critical path of every request, even a small increase in flow completion time (FCT) directly amplifies time-to-first-token (TTFT), potentially leading to Service Level Objective (SLO) violations. 
+
+ Production fabrics commonly use Equal-Cost Multi-Path (ECMP) routing to spread flows across redundant equal-cost paths.
+ECMP selects a next hop by hashing the packet 5-tuple (source IP, destination IP, source port, destination port, and protocol), thereby pinning each flow to a single path.
+Modern AI cluster fabrics retain ECMP rather than replace it: Meta’s RoCE deployment for distributed training  ( Gangidi et al., 2024 ) and Alibaba HPN  ( Qian et al., 2024 ) both keep commodity ECMP and engineer around its weaknesses, and the production inference stacks surveyed in § 2 ship on the same baseline.
+The hash, however, is oblivious to flow size, so two KV cache mega-flows that happen to hash to the same spine collide and share its capacity for the multi-second lifetime of the transfer,
+potentially leaving other paths idle. Existing techniques for avoiding such collisions in the network  ( Al-Fares et al., 2010 ; Alizadeh et al., 2014 ; Vanini et al., 2017 ; Qureshi et al., 2022 ; Song et al., 2023 ) introduce significant cost either through hardware changes or specific software requirements. 
+
+ We propose ARK,
+a lightweight distributed elephant-flow path reservation mechanism that runs entirely in commodity end-host software while leaving the switch data plane untouched. Each host maintains a replicated reservation table recording which spines are currently occupied by active KV cache transfers; when a new flow arrives, the local controller selects an unreserved spine and dispatches the flow with a precomputed source-port offset that maps to it under ECMP, and broadcasts the reservation to peers via a low-bandwidth control channel. Because the mechanism only manipulates the source port—a field every host already controls—the data plane requires no switch modification and no packet reordering at the receiver. We evaluate ARK in a packet-level RDMA simulator (SimAI/NS-3) driven by realistic disaggregated-inference workloads from Vidur  ( Agrawal et al., 2024 ) . In a two-tier fat-tree of 16 GPUs (8 prefill / 8 decode) under a LLaMA-3-8B Zipf workload, ARK reduces mean / P95 flow completion time (FCT) by up to 27.3% / 34.0% and end-to-end time-to-first-token (TTFT) by up to 12.9%, with the largest gains in the load regime where the leaf–spine fabric is congested but not yet saturated. 
+
+ Figure 1 . (a) Network topology (b) ARK path reservation controller (c) ARK deployment with separated control and data planes 
+
+ 2. Background and Motivation 
+
+ Prefill–decode disaggregation. 
+LLM serving alternates between compute-bound prefill (attention Θ ⁡ ( L 2 ) \Theta(L^{2}) in FLOPs) and high-bandwidth memory (HBM) bandwidth-bound decode (each iteration reads the full KV cache from HBM)  ( Patel et al., 2024 ; Zhong et al., 2024 ) . Co-locating both phases either inflates inter-token latency through prefill–decode interference or forces a coupled pool to over-provision against the independent TTFT and time-per-output-token (TPOT) service-level objectives (SLOs), each gated by a different resource axis  ( Zhong et al., 2024 ) . Disaggregating onto separate pools lets each pool be sized to its own bottleneck, optionally with a different accelerator model per phase  ( Patel et al., 2024 ) .
+Disaggregated serving is now common practice. Mooncake  ( Qin et al., 2025 ) , which serves Moonshot AI’s Kimi chatbot, operates disaggregated KV-cache pipelines at production scale, while the SGLang reference deployment of DeepSeek-V3 on 96 H100 GPUs adopts prefill–decode disaggregation  ( SGLang Team, 2025 ) . In the open-source ecosystem, both vLLM  ( Kwon et al., 2023 ) and SGLang  ( Zheng et al., 2024 ) support disaggregated serving. More recently, two industry-led efforts—NVIDIA Dynamo  ( NVIDIA, 2025 ) and llm-d  ( The llm-d Project, 2025 ) —have made prefill–decode disaggregation a central architectural principle. 
+
+ Application-level KV cache optimizations 
+Once prefill–decode disaggregation is taken as given, two orthogonal lines of work address the resulting communication cost: one above the fabric, on the KV cache itself, and one inside the fabric, on how its bytes are routed. Multi-tier KV stores externalize the cache into pooled memory hierarchies so state can be shared across machines and reused across requests—MemServe  ( Hu et al., 2024 ) provides an elastic memory pool with locality-aware routing, and LMCache  ( Cheng et al., 2025 ) exposes a cross-engine KV layer for transfer between different serving entities. A complementary transfer-optimization thread shrinks or reroutes the bytes themselves: CacheGen  ( Liu et al., 2024 ) compresses and adaptively streams the cache to shrink bytes-on-wire, DualPath  ( Wu et al., 2026 ) routes reads through decode engines to rebalance storage NIC load, and Yue et al.  ( Yue et al., 2025 ) analyze per-block protocol overhead in geo-distributed deployments. None of these approaches controls which equal-cost path the remaining bytes traverse once admitted to the fabric—a dimension that ARK addresses and that compounds with, rather than competes against, the bytes-on-wire reductions above. We turn next to how production fabrics balance the bytes that do hit the wire. 
+
+ Load balancing in modern AI fabrics. 
+Industry has demonstrated willingness to build custom hardware and software for AI workloads whenever the cost-benefit warrants it. For elephant-flow load balancing on AI fabrics, however, the deployed reality is uniformly commodity ECMP. Meta’s RoCE deployment for distributed training  ( Gangidi et al., 2024 ) chose to enrich the input space (“Enhanced ECMP”) and layer centralized traffic engineering rather than replace ECMP outright; Alibaba HPN  ( Qian et al., 2024 ) kept ECMP and rebuilt the topology as a dual-plane, dual top-of-rack (ToR) fabric to suppress hash polarization. 
+
+ The relevant question for an in-network elephant-flow mechanism is therefore comparative cost on top of this baseline, not technical feasibility. CONGA  ( Alizadeh et al., 2014 ) adds custom congestion-aware leaf ASICs across the fabric; ConWeave  ( Song et al., 2023 ) requires programmable ToRs paired with per-flow reordering buffers; LetFlow  ( Vanini et al., 2017 ) adds switch-level flowlet detection. While packet spraying effectively mitigates ECMP collisions, it delivers packets out of order; for mega-flows like KV cache transfers, reassembling them imposes a heavy CPU burden at the receiver. Host-side PLB  ( Qureshi et al., 2022 ) avoids switch upgrades but is reactive : it only repaths after M M consecutive ECN-marked rounds, and only when the connection is idle, since mid-flow IPv6 Flow Label changes cause reordering that RoCEv2 RNICs misread as loss  ( Song et al., 2023 ) . This reactive, congestion-control-first posture matches TCP workloads where flow size and arrival are unknown, but it is a poor fit for KV cache transfers, whose size and destination are known the instant the prefill engine finalizes the cache. Worse, RDMA’s hardware-paced KV transfers leave essentially no idle gaps  ( Song et al., 2023 ) , so PLB’s safe-repath precondition rarely fires within a KV flow’s lifetime. ARK instead exploits this admission-time knowledge (§ 3.2 ) to fix the path before the first byte ships , sidestepping congestion-control feedback, reactive lag, and the idle-gap requirement. 
+
+ Opportunity for coordination. 
+
+KV cache flows differ from the flows that motivated prior datacenter load balancers along two axes that, together, expose a design space earlier mechanisms could not exploit. 
+
+ Flow lifetime is long enough to amortize coordination. A 1.6 GB mean KV transfer occupies a 100 Gbps spine link for at least 128 ms, and longer when sharing the spine—three to four orders of magnitude above the millisecond-class flows targeted by reactive flowlet schemes  ( Vanini et al., 2017 ; Qureshi et al., 2022 ) . Millisecond-scale admission-time coordination therefore amortizes well under 1% of flow lifetime, where reactive flowlet schemes have no comparable budget. 
+
+ Each flow’s identity is known at admission. The destination GPU, byte count, and start time of every KV transfer are determined the moment the prefill engine finalizes the cache; no runtime elephant detection (as in Hedera  ( Al-Fares et al., 2010 ) ) is required. The equal-cost paths are likewise enumerable at the host, so both the flow and its paths are exactly known before any byte ships. 
+
+ ARK exploits both. At admission, a local controller picks an unreserved spine from a host-replicated reservation table, dispatches the flow with a precomputed source-port offset that hashes onto it, and broadcasts the reservation to peers. The decision needs no runtime elephant detection and no in-flight congestion signaling (CONGA  ( Alizadeh et al., 2014 ) ); each flow uses a single path, so no receiver-side reordering is required. 
+
+ 3. ARK System Design 
+
+ ARK enables ECMP hash collision avoidance through a distributed path reservation controller on each server.
+By maintaining a local replica of the reservation table via lightweight broadcasts between peers, each controller is aware of which paths are currently available when it admits an outgoing KV cache flow. 
+
+ ARK as minimal scheduling. 
+Avoiding ECMP collisions is fundamentally a scheduling problem, and ARK sits at the lightweight end of a wide design space. Centralized schedulers
+coordinate the whole fabric through an arbiter—Fastpass  ( Perry et al., 2014 ) 
+per packet, Flowtune  ( Perry et al., 2017 ) per flowlet—while a more recent
+line schedules collective communication for AI training
+(FAST  ( Lei et al., 2026 ) for MoE alltoallv , Crux  ( Cao et al., 2024 ) for
+training collectives). ARK occupies the opposite extreme by design: it
+needs no central arbiter and no traffic matrix, scheduling only the choice of
+spine, once per flow at admission. This is a fit to the long-lived,
+admission-known KV workload, not a shortcut. 
+
+ Assumptions. 
+We make two assumptions. First, the KV cache transfer application uses a single, well-known destination port across all peers, leading to fixed src IP, dst IP, dst port, and IP protocol per peer pair, so only the source port varies (the precompute below relies on this; multi-dport scenarios extend trivially to a per-(peer, dport) table). Second, host clocks are synchronized to within the broadcast delay (a few microseconds in our deployment), achievable on commodity datacenter fabrics via PTP  ( IEEE, 2019 ) . This assumption is needed by the race-condition resolution rule in § 3.2 . 
+
+ 3.1. Path Reservation Controller 
+
+ Topology: 
+We model the disaggregated LLM inference fabric as a two-tier spine-leaf network  ( Al-Fares et al., 2008 ) (Fig.  1 (a)) consisting of N S N_{S} spine switches V S = { s 1 , … , s N S } V_{S}=\{s_{1},\ldots,s_{N_{S}}\} , N L N_{L} leaf (top-of-rack) switches V L = { ℓ 1 , … , ℓ N L } V_{L}=\{\ell_{1},\ldots,\ell_{N_{L}}\} , and a set of GPU hosts V H V_{H} in which h i , m h_{i,m} denotes the m m -th host attached to leaf ℓ i \ell_{i} . Each leaf is fully connected to every spine, and every host has a single uplink to its leaf. For any cross-leaf host pair ( h i , m , h j , n ) (h_{i,m},h_{j,n}) , the fabric exposes K = N S K=N_{S} equal-cost paths 
+
+ (1) | 
+ | 
+ 𝒫 ⁡ ( h i , m , h j , n ) \displaystyle\mathcal{P}(h_{i,m},h_{j,n}) | 
+ = { p 1 , … , p K } , \displaystyle=\;\{p_{1},\ldots,p_{K}\}, | 
+ | 
+
+ | 
+ p k \displaystyle p_{k} | 
+ = ( h i , m → ℓ i → s k → ℓ j → h j , n ) , \displaystyle=\;(h_{i,m}\to\ell_{i}\to s_{k}\to\ell_{j}\to h_{j,n}), | 
+ | 
+
+ each traversing exactly one spine. For derivation convenience we present the formalism on a two-tier spine-leaf instance, taking Alibaba HPN  ( Qian et al., 2024 ) as a representative production example, while ARK extends to deeper Clos fabrics such as Meta’s multi-tier RoCE deployment  ( Gangidi et al., 2024 ) by inverting the ECMP hash at each ECMP decision along the path. 
+
+ ECMP routing and hash collisions: 
+Switches forward each flow f i f_{i} using standard ECMP, hashing the 5-tuple 𝐪 i = ( srcIP i , dstIP i , srcPort i , dstPort i , proto i ) \mathbf{q}_{i}=(\mathrm{srcIP}_{i},\allowbreak\mathrm{dstIP}_{i},\allowbreak\mathrm{srcPort}_{i},\allowbreak\mathrm{dstPort}_{i},\allowbreak\mathrm{proto}_{i}) and selecting 
+
+ (2) | 
+ | 
+ π i = p k i , k i = ℋ ⁡ ( 𝐪 i ) mod K , \pi_{i}\;=\;p_{k_{i}},\qquad k_{i}\;=\;\mathcal{H}(\mathbf{q}_{i})\bmod K, | 
+ | 
+
+ where ℋ \mathcal{H} is the switch hash function. Because ℋ \mathcal{H} is oblivious to flow size, two elephant flows whose hashes coincide modulo K K share the same spine link and split its bandwidth, regardless of whether sibling spines are idle. AI Clos fabrics commonly oversubscribe the leaf–spine layer for cost reasons, which further amplifies collision impact: with less spare bandwidth, collision-induced queueing fills buffers faster. Their flow completion times T i FCT T_{i}^{\mathrm{FCT}} scale roughly with the number of competing flows on that link, with RDMA retransmissions further amplifying the penalty when buffers overflow. We write τ i \tau_{i} for the time at which flow f i f_{i} is injected into the fabric. 
+
+ Reservation table: 
+Each host runs a path reservation controller that maintains a local
+path reservation table ℛ ⁡ ( t ) ⊆ 𝒫 \mathcal{R}(t)\subseteq\mathcal{P} ,
+recording the paths currently occupied by active elephant flows across
+the fabric. 
+
+ Boot-time precompute: 
+Under this assumption, the controller precomputes a per-peer src
+port-to-path mapping 
+
+ (3) | 
+ | 
+ ℳ h j ​ ( p k ) = { δ : ℋ ⁡ ( 𝐪 δ ) mod K = k } , \mathcal{M}_{h_{j}}(p_{k})\;=\;\bigl\{\,\delta\;:\;\mathcal{H}(\mathbf{q}^{\delta})\bmod K=k\,\bigr\}, | 
+ | 
+
+ once at server boot, where p k ∈ 𝒫 ⁡ ( self , h j ) p_{k}\in\mathcal{P}(\mathrm{self},h_{j}) is
+the k k -th path toward h j h_{j} and ℳ h j ​ ( p k ) \mathcal{M}_{h_{j}}(p_{k}) enumerates
+the src-port offsets that route flows toward h j h_{j} onto p k p_{k} . 
+
+ Flow arrival: 
+When a new flow f i f_{i} arrives at the host at time τ i \tau_{i} , the
+controller selects an unreserved path and reads any one offset from
+the corresponding bucket: 
+
+ (4) | 
+ | 
+ π i ARK = p k i ∗ , k i ∗ = min ⁡ { k : p k ∉ ℛ ⁡ ( τ i ) } , \pi_{i}^{\mathrm{ARK}}\;=\;p_{k_{i}^{*}},\quad k_{i}^{*}\;=\;\min\bigl\{\,k\;:\;p_{k}\notin\mathcal{R}(\tau_{i})\,\bigr\}, | 
+ | 
+
+ a short scan of ℛ \mathcal{R} that probes at most K K paths. The corresponding source-port offset δ i ∗ \delta_{i}^{*} is then taken from the precomputed bucket ℳ dst i ​ ( p k i ∗ ) \mathcal{M}_{\mathrm{dst}_{i}}(p_{k_{i}^{*}}) . Upon assignment, the chosen path is added to the local path reservation table and broadcast to all peers: 
+
+ (5) | 
+ | 
+ ℛ ⁡ ( τ i + ) = ℛ ⁡ ( τ i ) ∪ { p k i ∗ } . \mathcal{R}(\tau_{i}^{+})\;=\;\mathcal{R}(\tau_{i})\cup\bigl\{\,p_{k_{i}^{*}}\,\bigr\}. | 
+ | 
+
+ When the flow completes, the path is released from the table and a
+corresponding RELEASE message is broadcast: 
+
+ (6) | 
+ | 
+ ℛ ⁡ ( ( τ i + T i FCT ) + ) = ℛ ⁡ ( τ i + T i FCT ) ∖ { p k i ∗ } . \mathcal{R}\bigl((\tau_{i}+T_{i}^{\mathrm{FCT}})^{+}\bigr)\;=\;\mathcal{R}\bigl(\tau_{i}+T_{i}^{\mathrm{FCT}}\bigr)\setminus\bigl\{\,p_{k_{i}^{*}}\,\bigr\}. | 
+ | 
+
+ Peer controllers apply incoming RESERVE/RELEASE updates to their own path reservation tables, keeping them eventually consistent across the fabric.
+When all paths are reserved, i.e., | ℛ ⁡ ( t ) | = K |\mathcal{R}(t)|=K , the controller falls back to vanilla ECMP by randomly drawing a path index k i ∗ ∈ { 1 , … , K } k_{i}^{*}\in\{1,\ldots,K\} and taking δ i ∗ \delta_{i}^{*} from ℳ dst i ​ ( p k i ∗ ) \mathcal{M}_{\mathrm{dst}_{i}}(p_{k_{i}^{*}}) .
+The full procedure is summarized in Algorithm  1 . 
+
+ Algorithm 1 ARK Path Reservation Controller 
+
+ 1: 
+
+ Path set 𝒫 \mathcal{P} ; switch hash ℋ ⁡ ( ⋅ ) \mathcal{H}(\cdot) ;
+host identifier id \mathrm{id} ; peer set 𝒱 \mathcal{V} 
+
+ 2: 
+
+ ℛ ← ∅ \mathcal{R}\leftarrow\emptyset 
+ ⊳ \triangleright p k ↦ ( t , id ) p_{k}\mapsto(t,\,\mathrm{id}) 
+
+ 3: 
+
+ 4: 
+
+ procedure Initialize ⊳ \triangleright run once at server boot
+
+ 5: 
+
+     for each peer h j ∈ 𝒱 h_{j}\in\mathcal{V} do 
+
+ 6: 
+
+      ℳ h j ​ [ p k ] ← ∅ \mathcal{M}_{h_{j}}[p_{k}]\leftarrow\emptyset for all p k ∈ 𝒫 ⁡ ( self , h j ) p_{k}\in\mathcal{P}(\mathrm{self},h_{j}) 
+
+ 7: 
+
+      for δ = 0 , 1 , … , δ max \delta=0,1,\ldots,\delta_{\max} do 
+
+ 8: 
+
+        𝐪 δ ← \mathbf{q}^{\delta}\leftarrow 5-tuple to h j h_{j} with src port = δ =\delta 
+
+ 9: 
+
+        k ← ℋ ⁡ ( 𝐪 δ ) mod K k\leftarrow\mathcal{H}(\mathbf{q}^{\delta})\bmod K 
+
+ 10: 
+
+        ℳ h j ​ [ p k ] ← ℳ h j ​ [ p k ] ∪ { δ } \mathcal{M}_{h_{j}}[p_{k}]\leftarrow\mathcal{M}_{h_{j}}[p_{k}]\cup\{\delta\} 
+
+ 11: 
+
+      end for 
+
+ 12: 
+
+     end for 
+
+ 13: 
+
+ end procedure 
+
+ 14: 
+
+ 15: 
+
+ procedure OnFlowArrival ( f i f_{i} )
+
+ 16: 
+
+     t i ← t_{i}\leftarrow current timestamp
+
+ 17: 
+
+     if | ℛ | = K |\mathcal{R}|=K then 
+ ⊳ \triangleright Fall back to ECMP
+
+ 18: 
+
+      k i ∗ ← k_{i}^{*}\leftarrow random k ∈ { 1 , … , K } k\in\{1,\ldots,K\} ; 
+ δ i ∗ ← \delta_{i}^{*}\leftarrow any δ ∈ ℳ dst i ​ [ p k i ∗ ] \delta\in\mathcal{M}_{\mathrm{dst}_{i}}[p_{k_{i}^{*}}] 
+
+ 19: 
+
+     else 
+
+ 20: 
+
+      k i ∗ ← min ⁡ { k : p k ∉ ℛ } k_{i}^{*}\leftarrow\min\{k:p_{k}\notin\mathcal{R}\} 
+
+ 21: 
+
+      δ i ∗ ← \delta_{i}^{*}\leftarrow any δ ∈ ℳ dst i ​ [ p k i ∗ ] \delta\in\mathcal{M}_{\mathrm{dst}_{i}}[p_{k_{i}^{*}}] 
+
+ 22: 
+
+      ℛ ⁡ [ p k i ∗ ] ← ( t i , id ) \mathcal{R}[p_{k_{i}^{*}}]\leftarrow(t_{i},\,\mathrm{id}) 
+
+ 23: 
+
+      Broadcast 
+ ( p k i ∗ , RESERVE , t i , id ) (p_{k_{i}^{*}},\,\text{RESERVE},\,t_{i},\,\mathrm{id}) to peers
+
+ 24: 
+
+     end if 
+
+ 25: 
+
+     π i ← p k i ∗ \pi_{i}\leftarrow p_{k_{i}^{*}} 
+
+ 26: 
+
+     Create RDMA queue pair for f i f_{i} with src port δ i ∗ \delta_{i}^{*} 
+
+ 27: 
+
+     Register OnFlowCompletion ( f i , k i ∗ f_{i},k_{i}^{*} ) callback
+
+ 28: 
+
+ end procedure 
+
+ 29: 
+
+ 30: 
+
+ procedure OnFlowCompletion ( f i , k i ∗ f_{i},k_{i}^{*} )
+
+ 31: 
+
+     ℛ ← ℛ ∖ { p k i ∗ } \mathcal{R}\leftarrow\mathcal{R}\setminus\{p_{k_{i}^{*}}\} 
+
+ 32: 
+
+     Broadcast ( p k i ∗ , RELEASE ) (p_{k_{i}^{*}},\,\text{RELEASE}) to peers
+
+ 33: 
+
+ end procedure 
+
+ 34: 
+
+ 35: 
+
+ procedure OnRemoteUpdate ( p k , op , t p , id p p_{k},\,\text{op},\,t_{p},\,\mathrm{id}_{p} )
+
+ 36: 
+
+     if op = RELEASE \text{op}=\text{RELEASE} then 
+
+ 37: 
+
+      ℛ ← ℛ ∖ { p k } \mathcal{R}\leftarrow\mathcal{R}\setminus\{p_{k}\} 
+
+ 38: 
+
+     else if p k ∉ ℛ p_{k}\notin\mathcal{R} then 
+
+ 39: 
+
+      ℛ ⁡ [ p k ] ← ( t p , id p ) \mathcal{R}[p_{k}]\leftarrow(t_{p},\,\mathrm{id}_{p}) 
+
+ 40: 
+
+     else if ( t p , id p ) < ℛ ⁡ [ p k ] (t_{p},\,\mathrm{id}_{p})<\mathcal{R}[p_{k}] then 
+ ⊳ \triangleright Race condition
+
+ 41: 
+
+      ℛ ⁡ [ p k ] ← ( t p , id p ) \mathcal{R}[p_{k}]\leftarrow(t_{p},\,\mathrm{id}_{p}) 
+
+ 42: 
+
+      OnFlowArrival ( f f )
+ ⊳ \triangleright Re-hash local flow on p k p_{k} 
+
+ 43: 
+
+     end if 
+
+ 44: 
+
+ end procedure 
+
+ 3.2. ARK Deployment 
+
+ Each host runs the controller of § 3.1 as user-space code. Following Fig.  1 (c), ARK separates the two kinds of traffic the controller produces into a control plane and a data plane. 
+
+ Control plane: 
+The control plane carries the RESERVE/RELEASE broadcasts that synchronize the path reservation table ℛ \mathcal{R} across hosts. These messages are tiny and latency-sensitive: the broadcast latency directly bounds the race window between two hosts contending for the same path. We therefore deploy the control plane on a low-bandwidth network or an existing management channel, so reservation latency is bounded by propagation rather than by queueing behind elephant flows on the data fabric. This is a deployment choice, not an algorithmic requirement: ARK still functions when control messages share the data fabric, but the race window grows under load. 
+
+ Data plane: 
+The data plane carries the KV cache flows themselves over the regular RDMA fabric. On each flow arrival the controller determines δ i ∗ \delta_{i}^{*} and hands it to the RDMA stack, which creates the queue pair using δ i ∗ \delta_{i}^{*} and transmits the KV cache; switches apply standard ECMP hashing over the 5-tuple as in vanilla deployments, so no switch modification is required. 
+
+ Handling race condition: 
+Because ℛ \mathcal{R} is replicated and updated asynchronously, two hosts may reserve the same path within a broadcast delay window. The conflict is resolved by a deterministic timestamp-based rule: each RESERVE broadcast carries the key ( t i , id ) (t_{i},\,\mathrm{id}) , the smaller key wins, and the loser re-hashes to another path (Algorithm  1 , OnRemoteUpdate ). The ( t i , id ) (t_{i},\,\mathrm{id}) ordering relies on the clock-synchronization assumption stated in § 3 .
+Existing approaches, such as sub- μ \mu s precision via PTP  ( IEEE, 2019 ) , Sundial  ( Li et al., 2020 ) , and Huygens  ( Geng et al., 2018 ) , more than meet this requirement. 
+
+ 4. Experiments and Results 
+
+ We evaluate ARK by integrating an LLM inference serving simulator with a packet-level network simulator. 
+
+ Our evaluation answers the following questions: 
+
+ • 
+
+ Q1: Does ARK reduce per-flow flow completion time (FCT) compared to vanilla ECMP, and how does the gap scale with load? (§ 4.2 ) 
+
+ • 
+
+ Q2: Does ARK improve fabric utilization by distributing flows more evenly across spines? (§ 4.2 ) 
+
+ • 
+
+ Q3: How do network-level FCT improvements translate to user-visible end-to-end serving latency (TTFT)? (§ 4.3 ) 
+
+ • 
+
+ Q4: What is ARK’s runtime overhead, and is it negligible compared to KV transmission time? (§ 4.4 ) 
+
+ 4.1. Experimental Setup 
+
+ Simulation platform: 
+SimAI  ( Wang et al., 2025 ) models compute through Vidur  ( Agrawal et al., 2024 ) , which predicts prefill and decode latency from RandomForest regressors trained on per-layer LLaMA-3-8B profiles measured on an NVIDIA H100 GPU (varying token count, batch size, and prefill chunk size).
+KV cache transfers are simulated at packet level on the ECMP-based NS-3 backend from AstraSim  ( Rashidi et al., 2020 ) , on top of which we implement the ARK path reservation controller as a host-side application. 
+
+ Topology: 
+We use a two-tier spine-leaf Clos topology  ( Al-Fares et al., 2008 ) , matching the architecture published by Alibaba HPN  ( Qian et al., 2024 ) .
+The specific instance we evaluate has 16 GPUs across two 8-GPU servers, two leaf switches, and four spines, with each GPU-leaf and leaf-spine link running at 100 Gbps. This yields 800 Gbps aggregate ingress per leaf against 400 Gbps egress to the spines, creating a 2:1 oversubscription ratio that amplifies the impact of ECMP collisions under elephant-flow workloads. 
+
+ Workload: 
+We model disaggregated LLaMA-3-8B inference (chosen for its public H100 latency profile) with Server 1 (GPU 1-8) as prefill nodes and Server 2 (GPU 9-16) as decode nodes; each flow is assigned a random prefill-decode pair. Prompt token counts are drawn from a Zipf distribution with α = 0.7 \alpha=0.7 , capturing the heavy-tailed prompt-size pattern of real LLM serving traces and emphasizing the elephant-flow regime ARK targets. The mean of ∼ \sim 13,300 tokens yields KV cache flows from 125 MB to 6.7 GB (mean 1.6 GB) at 128 KB per token  ( Cheng et al., 2025 ) . Requests arrive as a Poisson process with varying queries per second (QPS). Each experiment contains 1000 requests. 
+
+ 4.2. Multi-Flow Evaluation with Realistic Workload 
+
+ To evaluate the effectiveness of ARK, we first conduct experiments individually on the NS-3 network backend, with either ARK or ECMP configured. We replay the LLM inference request trace and inject the request to NS-3 as flows, where the flow size is equivalent to the KV cache that the request generates. 
+
+ QPS Sensitivity Analysis: 
+
+ (a) Mean FCT 
+
+ (b) P95 FCT 
+
+ Figure 2 . Mean and P95 flow completion time (FCT) as a function of request rate (QPS) under Poisson arrival. ARK consistently reduces both mean and tail FCT, with the largest improvement at QPS = 25 (mean FCT  − -  27.3%, P95  − -  34.0%). Two line plots overlaid on the same axes. The y-axis shows FCT in milliseconds (mean and P95), and the x-axis shows request rate from 1 to 30 QPS. Both metrics rise with QPS for ECMP and \system; the \systemcurves consistently sit below the ECMP curves, with the gap widening as QPS increases. 
+
+ We sweep the request rate from QPS = 1 to 30 under Poisson arrival (Fig.  2 ).
+At QPS = 1, flows rarely overlap and ECMP collisions are unlikely, so ARK provides only marginal FCT reduction ( − - 1.9% mean, − - 1.2% P95).
+As QPS increases, ARK delivers progressively larger improvements by distributing elephant flows across spines, peaking at QPS = = 25 with 27.3% mean and 34.0% P95 reduction. At QPS = 30 the leaf–spine fabric approaches saturation, so the benefit narrows to 13.8% mean / 12.4% P95. 
+
+ Spine Utilization: 
+
+ Figure 3 . Per-spine active-flow heatmap at QPS = 25 (top: ECMP, bottom: ARK). ECMP drives persistent hotspots of up to 18 concurrent flows onto Spines 2 and 3 while Spines 1 and 4 stay lightly loaded; ARK keeps peaks below ∼ {\sim} 8 across all four spines. 
+
+ Fig.  3 visualizes the number of concurrent flows on each spine switch over time at QPS = 25. With ECMP, hash collisions concentrate load on Spines 2 and 3 (peaking at 18 concurrent flows) while Spines 1 and 4 remain intermittently idle. This imbalance directly drives the FCT degradation observed in Fig.  2 , as flows routed onto a congested 100 Gbps spine experience queueing delays proportional to the number of competing flows sharing that link. ARK, in contrast, spreads load uniformly across all four spines, leading to hotspot reduction and 34.0% P95 FCT improvement. 
+
+ 4.3. End-to-End Serving Evaluation 
+
+ (a) Mean TTFT 
+
+ (b) P95 TTFT 
+
+ Figure 4 . TTFT across the same QPS sweep as Fig.  2 . Two line plots sharing a common QPS axis from 1 to 30. The left panel shows mean TTFT and the right panel shows P95 TTFT, both rising with load. The ARK curve sits below ECMP at every QPS, with the gap widening from a few percent at low load to roughly twelve percent at QPS twenty-five for the mean and twelve percent for P95 at QPS thirty. 
+
+ We translate the network-layer FCT improvements into user-visible serving latency. For each request, 
+
+ | 
+ TTFT = T prefill ​ ( L ) + T KV + T decode-1 ​ ( L ) , \text{TTFT}\;=\;T_{\text{prefill}}(L)\;+\;T_{\text{KV}}\;+\;T_{\text{decode-1}}(L), | 
+ | 
+
+ where L L is the prompt token count, T KV T_{\text{KV}} is the per-flow NS-3 FCT, and T prefill T_{\text{prefill}} , T decode-1 T_{\text{decode-1}} are predicted from the Vidur Llama-3-8B with H100 profiling table. 
+
+ Figure  4 extends the QPS sweep of Fig.  2 from network FCT to user-visible TTFT. The advantage of ARK widens steadily with load: a marginal 2% reduction in mean TTFT at QPS  = =  5 grows to roughly 13% on the mean (QPS  = =  25) and 12% on the P95 tail (QPS  = =  30). Prefill ( ∼ \sim 840 ms) and the first decode step ( ∼ \sim 10 ms) contribute a fixed offset to every request; only T KV T_{\text{KV}} scales with QPS, so as load rises the relative TTFT gain converges toward the FCT gain. TPOT, dominated by GPU-local per-token decode, is unaffected by the routing scheme. 
+
+ 4.4. Computation Time 
+
+ Table 1 . ARK’s controller microbenchmarks on an Intel i9 CPU (single thread, single core), and a reference KV transmission time. 
+
+ Phase / Operation | 
+ Time | 
+
+ Microbenchmarks (per call) | 
+
+    Hash computation | 
+ 4.10  μ \mu s | 
+
+    Reservation-table lookup | 
+ 0.87  μ \mu s | 
+
+ Boot phase (one-time per peer) | 
+
+     Initialize ( δ max = 2 16 \delta_{\max}=2^{16} ) | 
+ ∼ \sim 326 ms | 
+
+ Runtime per flow (worst case) | 
+
+     OnFlowArrival at K = 4 K=4 paths | 
+ ≤ \leq 3.48  μ \mu s | 
+
+     OnFlowArrival at K = 1000 K=1000 paths | 
+ ≤ \leq 870  μ \mu s | 
+
+ Reference | 
+
+    1.6 GB KV cache transfer at 100 Gbps | 
+ ∼ \sim 137 ms | 
+
+     K = 4 K{=}4 reservation / KV transfer ratio | 
+ ≈ \approx 0.0025% | 
+
+ We measure ARK’s path reservation controller on an Intel i9 CPU (single thread, single core); Table  1 summarizes the results. Hash computation takes 4.10  μ ​ s \mu s per call and a path-table lookup 0.87  μ ​ s \mu s . Initialize populates Eq. ( 3 ) with δ max = 2 16 \delta_{\max}=2^{16} src-port offsets per peer at ∼ \sim 326 ms per peer, paid once at boot. At runtime, OnFlowArrival probes at most K K paths in ℛ \mathcal{R} ; the ℳ \mathcal{M} access is a static array dereference. The per-flow cost is therefore at most 4 × 0.87 = 3.48 ​ μ ​ s 4\times 0.87=3.48~\mu s at K = 4 K=4 and scales linearly to ∼ \sim 870  μ ​ s \mu s at K = 1000 K=1000 , well under 1% of the ∼ \sim 137 ms needed to transmit a 1.6 GB KV cache flow at 100 Gbps. The controller overhead is therefore negligible compared to KV cache transmission and supports real-time KV cache flow orchestration. 
+
+ 5. Conclusion 
+
+ Prefill–decode disaggregation in modern LLM serving has elevated KV cache transfers to a scale that traditional data-center fabrics were never designed to absorb. We presented ARK, a distributed collision-avoidance framework that pairs (i) a path-reservation controller steering KV cache flows onto non-overlapping spines to reduce per-flow FCT and improve spine utilization, with (ii) a deployment that separates lightweight reservation broadcasts from KV cache transfers, enabling deployment on commodity switches. Experiments show ARK reduces mean FCT by up to 27.3% and P95 FCT by 34.0%, translating to up to 12.9% mean TTFT reduction in end-to-end serving. 
+
+ Ethics Statement 
+
+ This work does not raise any ethical concerns. It relies entirely on
+packet-level network simulation with synthetically generated workloads, and
+involves no human subjects, user data, or experiments on production systems. 
+
+ References 
+
+ Agrawal et al. (2024) 
+ A. Agrawal, N. Kedia, J. Mohan, A. Panwar, N. Kwatra, B. S. Gulavani, R. Ramjee, and A. Tumanov 
+
+ Vidur: a large-scale simulation framework for LLM inference .
+
+ In Proceedings of the 7th Conference on Machine Learning and Systems (MLSys) ,
+
+ Proceedings of Machine Learning and Systems , Vol. 6 , Santa Clara, CA, USA , pp. 351–366 .
+
+ External Links: Link 
+
+ Cited by: §1 ,
+ §4.1 .
+
+ Al-Fares et al. (2008) 
+ M. Al-Fares, A. Loukissas, and A. Vahdat 
+
+ A scalable, commodity data center network architecture .
+
+ In Proceedings of the ACM SIGCOMM 2008 Conference on Data Communication ,
+
+ Seattle, WA, USA , pp. 63–74 .
+
+ External Links: Document 
+
+ Cited by: §3.1 ,
+ §4.1 .
+
+ Al-Fares et al. (2010) 
+ M. Al-Fares, S. Radhakrishnan, B. Raghavan, N. Huang, and A. Vahdat 
+
+ Hedera: dynamic flow scheduling for data center networks .
+
+ In 7th USENIX Symposium on Networked Systems Design and Implementation (NSDI ’10) ,
+
+ San Jose, CA, USA , pp. 281–296 .
+
+ External Links: Link 
+
+ Cited by: §1 ,
+ §2 .
+
+ Alizadeh et al. (2014) 
+ M. Alizadeh, T. Edsall, S. Dharmapurikar, R. Vaidyanathan, K. Chu, A. Fingerhut, V. T. Lam, F. Matus, R. Pan, N. Yadav, and G. Varghese 
+
+ CONGA: distributed congestion-aware load balancing for datacenters .
+
+ In Proceedings of the 2014 ACM Conference on SIGCOMM (SIGCOMM ’14) ,
+
+ Chicago, IL, USA , pp. 503–514 .
+
+ External Links: Document 
+
+ Cited by: §1 ,
+ §2 ,
+ §2 .
+
+ Cao et al. (2024) 
+ J. Cao, Y. Guan, K. Qian, J. Gao, W. Xiao, J. Dong, B. Fu, D. Cai, and E. Zhai 
+
+ Crux: GPU-efficient communication scheduling for deep learning training .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ Sydney, NSW, Australia , pp. 1–15 .
+
+ External Links: Document 
+
+ Cited by: §3 .
+
+ Cheng et al. (2025) 
+ Y. Cheng, Y. Liu, J. Yao, Y. An, X. Chen, S. Feng, Y. Huang, S. Shen, K. Du, and J. Jiang 
+
+ LMCache: an efficient KV cache layer for enterprise-scale LLM inference .
+
+ Note: arXiv preprint arXiv:2510.09665 
+
+ External Links: Document ,
+ Link 
+
+ Cited by: §2 ,
+ §4.1 .
+
+ Gangidi et al. (2024) 
+ A. Gangidi, R. Miao, S. Zheng, S. J. Bondu, G. Goes, H. Morsy, R. Puri, M. Riftadi, A. J. Shetty, J. Yang, S. Zhang, M. J. Fernandez, S. Gandham, and H. Zeng 
+
+ RDMA over Ethernet for distributed AI training at Meta scale .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ Sydney, NSW, Australia .
+
+ External Links: Document 
+
+ Cited by: §1 ,
+ §2 ,
+ §3.1 .
+
+ Geng et al. (2018) 
+ Y. Geng, S. Liu, Z. Yin, A. Naik, B. Prabhakar, M. Rosenblum, and A. Vahdat 
+
+ Exploiting a natural network effect for scalable, fine-grained clock synchronization .
+
+ In 15th USENIX Symposium on Networked Systems Design and Implementation (NSDI ’18) ,
+
+ pp. 81–94 .
+
+ Cited by: §3.2 .
+
+ Hu et al. (2024) 
+ C. Hu, H. Huang, J. Hu, J. Xu, X. Chen, T. Xie, C. Wang, S. Wang, Y. Bao, N. Sun, and Y. Shan 
+
+ MemServe: context caching for disaggregated LLM serving with elastic memory pool .
+
+ Note: arXiv preprint arXiv:2406.17565 
+
+ External Links: Link 
+
+ Cited by: §2 .
+
+ IEEE (2019) 
+ IEEE 
+
+ IEEE standard for a precision clock synchronization protocol for networked measurement and control systems .
+
+ Note: IEEE Std 1588-2019 (Revision of IEEE Std 1588-2008) 
+
+ External Links: Document 
+
+ Cited by: §3.2 ,
+ §3 .
+
+ Kwon et al. (2023) 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica 
+
+ Efficient memory management for large language model serving with PagedAttention .
+
+ In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP ’23) ,
+
+ Koblenz, Germany , pp. 611–626 .
+
+ External Links: Document 
+
+ Cited by: §1 ,
+ §2 .
+
+ Lei et al. (2026) 
+ Y. Lei, D. Lee, L. Zhao, D. Kurniawan, C. Kim, H. Jeong, C. Kim, H. Choi, L. Yu, A. Krishnamurthy, J. Sherry, and E. Nurvitadhi 
+
+ FAST: an efficient scheduler for all-to-all GPU communication .
+
+ In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) ,
+
+ Renton, WA, USA , pp. 2515–2523 .
+
+ External Links: ISBN 978-1-939133-54-0 ,
+ Link 
+
+ Cited by: §3 .
+
+ Li et al. (2020) 
+ Y. Li, R. Miao, M. Alizadeh, and M. Yu 
+
+ Sundial: fault-tolerant clock synchronization for datacenters .
+
+ In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI ’20) ,
+
+ pp. 1171–1186 .
+
+ Cited by: §3.2 .
+
+ Liu et al. (2024) 
+ Y. Liu, H. Li, Y. Cheng, S. Ray, Y. Huang, Q. Zhang, K. Du, J. Yao, S. Lu, G. Ananthanarayanan, M. Maire, H. Hoffmann, A. Holtzman, and J. Jiang 
+
+ CacheGen: KV cache compression and streaming for fast large language model serving .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ Sydney, NSW, Australia , pp. 38–56 .
+
+ External Links: Document 
+
+ Cited by: §2 .
+
+ NVIDIA (2025) 
+ NVIDIA 
+
+ NVIDIA Dynamo: a datacenter-scale distributed inference serving framework .
+
+ Note: Open-source project, https://github.com/ai-dynamo/dynamo Announced at NVIDIA GTC 2025; accessed 2026-04-30 
+
+ Cited by: §1 ,
+ §2 .
+
+ Patel et al. (2024) 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, Í. Goiri, S. Maleki, and R. Bianchini 
+
+ Splitwise: efficient generative LLM inference using phase splitting .
+
+ In Proceedings of the 51st Annual International Symposium on Computer Architecture (ISCA) ,
+
+ Buenos Aires, Argentina , pp. 118–132 .
+
+ External Links: Document 
+
+ Cited by: §1 ,
+ §2 .
+
+ Perry et al. (2017) 
+ J. Perry, H. Balakrishnan, and D. Shah 
+
+ Flowtune: flowlet control for datacenter networks .
+
+ In 14th USENIX Symposium on Networked Systems Design and Implementation (NSDI ’17) ,
+
+ Boston, MA, USA , pp. 421–436 .
+
+ External Links: ISBN 978-1-931971-37-9 ,
+ Link 
+
+ Cited by: §3 .
+
+ Perry et al. (2014) 
+ J. Perry, A. Ousterhout, H. Balakrishnan, D. Shah, and H. Fugal 
+
+ Fastpass: a centralized “zero-queue” datacenter network .
+
+ In Proceedings of the 2014 ACM Conference on SIGCOMM (SIGCOMM ’14) ,
+
+ Chicago, IL, USA , pp. 307–318 .
+
+ External Links: Document 
+
+ Cited by: §3 .
+
+ Qian et al. (2024) 
+ K. Qian, Y. Xi, J. Cao, J. Gao, Y. Xu, Y. Guan, B. Fu, X. Shi, F. Zhu, R. Miao, C. Wang, P. Wang, P. Zhang, X. Zeng, E. Ruan, Z. Yao, E. Zhai, and D. Cai 
+
+ Alibaba HPN: a data center network for large language model training .
+
+ In Proceedings of the ACM SIGCOMM 2024 Conference ,
+
+ Sydney, NSW, Australia , pp. 691–706 .
+
+ External Links: Document 
+
+ Cited by: §1 ,
+ §2 ,
+ §3.1 ,
+ §4.1 .
+
+ Qin et al. (2025) 
+ R. Qin, Z. Li, W. He, J. Cui, F. Ren, M. Zhang, Y. Wu, W. Zheng, and X. Xu 
+
+ Mooncake: trading more storage for less computation — a KVCache-centric architecture for serving LLM chatbot .
+
+ In 23rd USENIX Conference on File and Storage Technologies (FAST 25) ,
+
+ Santa Clara, CA, USA , pp. 155–170 .
+
+ External Links: Link 
+
+ Cited by: §1 ,
+ §2 .
+
+ Qureshi et al. (2022) 
+ M. A. Qureshi, Y. Cheng, Q. Yin, Q. Fu, G. Kumar, M. Moshref, J. Yan, V. Jacobson, D. Wetherall, and A. Kabbani 
+
+ PLB: congestion signals are simple and effective for network load balancing .
+
+ In Proceedings of the ACM SIGCOMM 2022 Conference (SIGCOMM ’22) ,
+
+ Amsterdam, Netherlands , pp. 207–218 .
+
+ External Links: Document 
+
+ Cited by: §1 ,
+ §2 ,
+ §2 .
+
+ Rashidi et al. (2020) 
+ S. Rashidi, S. Sridharan, S. Srinivasan, and T. Krishna 
+
+ ASTRA-SIM: enabling SW/HW co-design exploration for distributed DL training platforms .
+
+ In 2020 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) ,
+
+ Boston, MA, USA , pp. 81–92 .
+
+ External Links: Document 
+
+ Cited by: §4.1 .
+
+ SGLang Team (2025) 
+ SGLang Team 
+
+ Deploying DeepSeek with PD disaggregation and large-scale expert parallelism on 96 H100 GPUs .
+
+ Note: LMSYS Blog Post, https://www.lmsys.org/blog/2025-05-05-large-scale-ep/ Accessed 2026-04-30 
+
+ Cited by: §1 ,
+ §2 .
+
+ Song et al. (2023) 
+ C. H. Song, X. Z. Khooi, R. Joshi, I. Choi, J. Li, and M. C. Chan 
+
+ Network load balancing with in-network reordering support for RDMA .
+
+ In Proceedings of the ACM SIGCOMM 2023 Conference (ACM SIGCOMM ’23) ,
+
+ New York, NY, USA , pp. 816–831 .
+
+ External Links: Document 
+
+ Cited by: §1 ,
+ §1 ,
+ §2 .
+
+ The llm-d Project (2025) 
+ The llm-d Project 
+
+ llm-d: kubernetes-native distributed inference for large language models .
+
+ Note: Open-source project, https://llm-d.ai Accessed 2026-04-30 
+
+ Cited by: §1 ,
+ §2 .
+
+ Vanini et al. (2017) 
+ E. Vanini, R. Pan, M. Alizadeh, P. Taheri, and T. Edsall 
+
+ Let it flow: resilient asymmetric load balancing with flowlet switching .
+
+ In 14th USENIX Symposium on Networked Systems Design and Implementation (NSDI ’17) ,
+
+ Boston, MA, USA , pp. 407–420 .
+
+ External Links: ISBN 978-1-931971-37-9 ,
+ Link 
+
+ Cited by: §1 ,
+ §2 ,
+ §2 .
+
+ Wang et al. (2025) 
+ X. Wang, Q. Li, Y. Xu, G. Lu, D. Li, L. Chen, H. Zhou, L. Zheng, S. Zhang, Y. Zhu, Y. Liu, P. Zhang, K. Qian, K. He, J. Gao, E. Zhai, D. Cai, and B. Fu 
+
+ SimAI: unifying architecture design and performance tuning for large-scale large language model training with scalability and precision .
+
+ In 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) ,
+
+ Philadelphia, PA, USA , pp. 541–558 .
+
+ External Links: ISBN 978-1-939133-46-5 ,
+ Link 
+
+ Cited by: §4.1 .
+
+ Wu et al. (2026) 
+ Y. Wu, S. Chen, Y. Zhong, R. Huang, Y. Tan, W. Zhang, L. Zhang, S. Zhou, Y. Liu, S. Zhou, M. Zhang, X. Jin, and P. Huang 
+
+ DualPath: breaking the storage bandwidth bottleneck in agentic LLM inference .
+
+ Note: arXiv preprint arXiv:2602.21548 
+
+ External Links: Document ,
+ Link 
+
+ Cited by: §2 .
+
+ Yue et al. (2025) 
+ S. Yue, M. Wang, Y. Yan, W. Cheng, Z. Jiang, and Z. Zhang 
+
+ RTT- or bandwidth-bound? demystifying the kv cache transfer in large language model serving .
+
+ In Proceedings of the 2nd Workshop on Networks for AI Computing ,
+
+ NAIC ’25 , New York, NY, USA , pp. 5–7 .
+
+ External Links: ISBN 9798400720826 ,
+ Link ,
+ Document 
+
+ Cited by: §2 .
+
+ Zheng et al. (2024) 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng 
+
+ SGLang: efficient execution of structured language model programs .
+
+ Advances in Neural Information Processing Systems 37 , pp. 62557–62583 .
+
+ Cited by: §1 ,
+ §2 .
+
+ Zhong et al. (2024) 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang 
+
+ DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ Santa Clara, CA, USA , pp. 193–210 .
+
+ External Links: Link 
+
+ Cited by: §1 ,
+ §2 .

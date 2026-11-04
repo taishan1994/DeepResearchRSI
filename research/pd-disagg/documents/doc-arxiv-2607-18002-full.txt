@@ -1,0 +1,1401 @@
+ExpertPlex: A High-Goodput Disaggregated Serving System for MoE LLMs with Adaptive Persistent Kernels 
+
+ Bingyang Wu 1   Chao Jin 1   Zili Zhang 1   Xinming Wei 1 
+ Yinmin Zhong 1   Ruidong Zhu 1   Chengxu Yang 2   Xin Jin 1   Yuliang Liu 2 
+ 1 Peking University    2 Independent Researcher 
+
+ Abstract. 
+
+ LLMs scale Mixture-of-Experts (MoE) parameters for superior intelligence, but massive weights and dynamic computation impede efficient serving.
+Existing instance-level prefill-decode disaggregation isolates the phases on separate full-model replicas.
+As MoE weights grow, each instance may span tens to hundreds of GPUs, making resource allocation increasingly coarse.
+Configured prefill-to-decode ratios thus often mismatch demand, overprovisioning one phase while overloading the other.
+Prefill-decode colocation avoids this duplication, but existing Green Context solutions partition each GPU by phase and fix phase resources during a kernel.
+They cannot track resource changes across operations or layerwise variation in routed expert load, causing head-of-line blocking or idle reserved resources.
+Partitioning every GPU also leaves each phase with fewer local resources, forces wider parallelism and more communication, and lets prefill and decode traffic interfere on the shared network. 
+
+ We present ExpertPlex, which shares massive MoE experts across phases while disaggregating lightweight attention modules.
+Expert sharing eliminates over 95% duplicate model weights and multiplexes dynamically sparse computation, while attention disaggregation reduces attention communication cost.
+ExpertPlex further uses (1) adaptive persistent kernels to schedule dynamic expert computation at tile granularity for efficient, isolated execution;
+(2) attention-initiated MoE communication to avoid network interference and enable cross-phase communication-computation overlap; and
+(3) a tile-to-cluster model to optimize these mechanisms for maximum goodput.
+Experiments serving MiniMax-M2.7 and GLM-5.1-FP8 show that ExpertPlex improves goodput by up to 2.01 × \times over instance-level prefill-decode disaggregation and 1.66 × \times over prefill-decode colocation. 
+
+ 1. Introduction 
+
+ Scaling laws continue to reward larger model capacity  ( Kaplan et al., 2020 ; Brown et al., 2020 ) .
+Frontier LLMs therefore increasingly use sparse Mixture-of-Experts (MoE) modules that dynamically activate a few experts to add parameters without proportionally increasing computation  ( DeepSeek-AI, 2024 ; MiniMax, 2025 ; GLM-4.5 Team, 2025 ; Kimi Team, 2025 ; Qwen Team, 2025 ; Xiaomi LLM-Core Team, 2026 ) .
+It is still challenging to serve them efficiently, because instances must still store massive expert weights, while token-dependent routing makes expert computation and communication vary across tokens. 
+
+ Modern LLM serving systems typically use prefill-decode disaggregation (PDD) to serve MoE LLMs to avoid interference between the compute-intensive prefill phase from the latency-sensitive decode phase  ( Zhong et al., 2024 ; Patel et al., 2023 ; Hu et al., 2024 ; DeepSeek-AI, 2024 ; Qin et al., 2025 ) .
+For better performance, PDD also needs to allocate resources according to the P:D ratio that matches the resource demands of two phases.
+However, existing instance-level PDD provisions a complete model replica for each phase, so its allocation granularity grows with the model.
+A reported DeepSeek-V3 deployment uses 32 GPUs for prefill and 320 GPUs for decode in one unit  ( DeepSeek-AI, 2024 ) to achieve this ratio.
+Small clusters cannot realize this ratio, leading to resource waste.
+Large clusters can achieve this ratio, but suffer from larger failure blast radius that a rank failure in hierarchical communication can stall the entire unit  ( DeepSeek-AI, 2025b ; Sun et al., 2026 ) and can only scale the cluster at the granularity of the large deployment unit when traffic shifts.
+Duplicated expert weights also displace KV cache.
+PDD therefore obtains isolation at the cost of memory efficiency, elasticity, and fault containment. 
+
+ Prefill-decode colocation solutions instead use Green Context  ( NVIDIA, 2026 ) to reserve SMs for each phase to achieve weights deduplication and computation multiplexing  ( Shi et al., 2025 ; Chen et al., 2026 ; Hong et al., 2025 ) , but they cannot follow the dynamic demands of MoE LLMs.
+When using Green Context, resources are fixed for a kernel, and reconfiguration is limited at the prefill layer level because it requires CPU intervention.
+However, MoE and attention modules in a layer and communication and computation operations in MoE modules have different demands  ( StepFun, 2025 ; Zhu et al., 2025b ) .
+Dynamic expert computation also creates layer-to-layer changes in expert activation on each GPU  ( Wei et al., 2026 ; He et al., 2021 ; He et al., 2022 ) .
+Coarse reconfiguration therefore creates head-of-line blocking and resource bubbles (§ 2 ).
+Partitioning GPU also reduces the local resources available to each phase, increasing its required degree of parallelism with more communication while leaving cross-phase network interference unmanaged. 
+
+ To address these problems, our key insight is a hybrid disaggregation-colocation architecture that shares experts across phases but disaggregates their attention modules.
+MoE weights contribute over 95% of model parameters, sharing eliminates their cross-phase memory duplication and multiplexes dynamic per-rank expert loads, letting computation from either phase fill bubbles in the other’s attention–expert pipeline.
+Attention holds under 5% of parameters, so disaggregation enables independent per-phase allocation in single-GPU units without duplicating massive expert weights.
+Because attention is more compute-intensive  ( Zhu et al., 2025b ; StepFun, 2025 ) ,
+giving each phase whole attention GPUs rather than intra-GPU partitions preserves local compute capacity for each phase in a GPU. Partitioning attention GPUs would require wider per-phase parallelism for equivalent resources, increase communication, and introduce cross-phase attention network interference.
+This architecture lets ExpertPlex match phase demands with fewer GPUs and less traffic, improving utilization, scaling granularity, and fault containment. 
+
+ However, sharing the experts requires finer GPU control than existing mechanisms provide.
+CUDA stream priorities  ( NVIDIA, 2025 ) and API interception  ( Wu et al., 2023 ) cannot preempt long-running prefill kernels that may significantly block latency-sensitive decode kernels, while Green Context  ( NVIDIA, 2026 ) , MPS  ( , 2025 ) , and MIG  ( NVIDIA Corporation, 2024 ) cannot reallocate resources at fine granularity between phases, leading to resource bubbles.
+Shared experts also couple the phases through communication.
+The traffic from two phases to the same MoE module can interfere with each other, and conventional two-sided MoE communication requires MoE-side coordination that can cause deadlock when different ranks are used by different phases. 
+
+ To address these challenges, we propose ExpertPlex, a disaggregated serving system for MoE LLMs with adaptive persistent kernels.
+ExpertPlex runs an Adaptive Persistent Kernel (APK) on each MoE GPU.
+APK schedules MoE computation at tile boundaries, providing bounded preemption for urgent decode work and reallocating idle CTA clusters to prefill without CPU intervention or kernel relaunch.
+The bound is independent of sequence length, while persistent execution preserves CUDA Graph compatibility and GPU utilization.
+ExpertPlex further uses attention-initiated one-sided MoE communication to use mostly disjoint network paths to transfer activations between attention and final MoE-side buffers without APK coordination.
+It therefore removes MoE-side polling, avoids cross-phase deadlock and interference, and overlaps communication from one phase with computation from the other.
+Because these mechanisms introduce coupled choices in placement, parallelism, computation-communication overlap, and tile scheduling,
+ExpertPlex proposes a cross-stack placement optimizer that models them jointly to maximize goodput.
+Evaluations serving MiniMax-M2.7 and GLM-5.1-FP8 on real-world workloads shows that ExpertPlex improves goodput by up to 2.01 × \times over instance-level prefill-decode disaggregation, and 1.66 × \times over Green Context-based prefill-decode colocation. 
+
+ This paper makes the following contributions. 
+
+ • 
+
+ We introduce a hybrid architecture that eliminates cross-phase MoE weight duplication, multiplexes dynamically sparse expert computation, and disaggregates attention to reduce per-phase degree of parallelism with less communication while preserving fine-grained isolation. 
+
+ • 
+
+ We design APKs for tile-level preemption and reallocation and attention-initiated one-sided communication to reduce network interference and enable cross-phase overlap between communication and computation. 
+
+ • 
+
+ We jointly optimize them cross the stack and evaluate ExpertPlex on two frontier MoE LLMs, demonstrating goodput improvements over state-of-the-art baselines. 
+
+ 2. Background and Motivation 
+
+ 2.1. MoE LLM Inference 
+
+ An LLM stacks Transformer layers, each with an attention module and a feed-forward network (FFN) module.
+Attention mixes information across tokens and materializes key-value tensors as the KV cache, which later iterations reuse.
+The FFN instead transforms each token independently.
+Frontier MoE LLMs replace conventional FFNs with mixture-of-experts (MoE) modules and scale their expert weights aggressively  ( DeepSeek-AI, 2024 ; MiniMax, 2025 ; Kimi Team, 2025 ; Qwen Team, 2025 ; Xiaomi LLM-Core Team, 2026 ) .
+These weights now dominate the model footprint, such as 95% in DeepSeek-V4-Pro  ( AI, 2026a ) , 96% in GLM-5.1-FP8  ( AI, 2026d ) , and 98% in MiniMax-M2.7  ( AI, 2026c ) . 
+
+ An MoE module partitions the FFN into many experts.
+ Shared experts process all tokens, while a router dynamically selects a small top- k k subset of routed experts for each token at each layer.
+The router dispatches the token activation to the activated experts and combines their outputs before the next layer.
+This sparse activation increases model capacity without proportionally increasing computation per token. 
+
+ Inference has two phases with different objectives.
+ Prefill processes all input tokens in parallel, builds their KV cache, and produces the first output token, which makes it throughput-oriented.
+ Decode then generates one token per iteration from the preceding token based on the prefix KV cache.
+It is latency-sensitive because inter-token latency is user-visible and orders of magnitude shorter than prefill. 
+
+ 2.2. GPU Execution Model 
+
+ Figure 1. GPU execution model. 
+
+ Figure 2. Limitations of prefill-decode colocation solutions. 
+
+ MoE modules are primarily grouped general matrix multiplications (GEMMs) on GPUs, so their performance depends on the GPU execution model.
+As Figure  1 shows, a GPU contains many streaming multiprocessors (SMs).
+Each SM integrates Tensor Cores, CUDA cores, Tensor Memory Accelerator (TMA) units, registers, an L1 cache, and software-managed shared memory.
+All SMs share the L2 cache and global memory, which is also visible to peer GPUs and NICs.
+Recent GPUs allow a thread-block cluster to coordinate across SMs through distributed shared memory (DSMEM) and to multicast a global-memory tile through TMA. 
+
+ GPU work is launched as kernels through CUDA streams.
+Kernels in one stream execute in order, while kernels in different streams may overlap when resources are available.
+Within a kernel, threads form warps, warps form cooperative thread arrays (CTAs), and CTAs may form clusters.
+A CTA runs on one SM until completion, while CTAs in a cluster can cooperate across SMs.
+High-performance GEMM kernels specialize warps for data movement and Tensor Core computation, then pipeline them to hide memory latency  ( DeepSeek-AI, 2025b ; Zhao et al., 2025 ) . 
+
+ 2.3. Large-scale MoE LLM Serving 
+
+ MoE weights often exceed one GPU’s memory, so serving systems use expert parallelism (EP) to shard experts across GPUs.
+Because routing decisions vary by token, dispatch sends activations to the ranks hosting the selected experts and combine returns their outputs.
+Both operations are commonly implemented as all-to-all communication  ( DeepSeek-AI, 2025b ) .
+Serving systems can hide part of this cost with two-batch overlap (TBO), which overlaps one microbatch’s communication with another’s computation, or single-batch overlap (SBO), which overlaps communication with shared-expert computation in the same microbatch. 
+
+ Attention admits a different parallelization because its weights are much smaller.
+Data parallelism (DP) replicates attention to favor throughput and KV-cache capacity with little communication.
+Tensor parallelism (TP) shards attention to reduce per-request latency, but adds communication and may reduce effective KV-cache capacity when entries are replicated.
+Therefore, the resource demand and best configurations of attention and MoE often differ  ( Zhu et al., 2025b ; StepFun, 2025 ) . 
+
+ 2.4. Prefill-Decode Disaggregation 
+
+ Prefill-decode disaggregation (PDD) places the two phases on different GPU instances to eliminate cross-phase interference and specialize each instance for its phase  ( Zhong et al., 2024 ; Patel et al., 2023 ; Hu et al., 2024 ; Qin et al., 2025 ) .
+Prefill benefits from hierarchical dispatch and combine due to the large number of activations  ( DeepSeek-AI, 2025b ) .
+An activation crosses the scale-out network once to a remote node and is then multicast over its faster scale-up fabric, avoiding redundant scale-out transfers when several activated experts reside on that node.
+Decode moves far less data per iteration, so direct transfers to the relevant ranks reduce latency.
+PDD also specializes expert computation  ( Zhao et al., 2025 ) .
+Prefill packs many expert inputs into a contiguous layout to reduce memory.
+Decode has too few tokens to amortize this packing, so a masked layout avoids copies. 
+
+ Limitations. 
+The isolation, however, creates a rigid and increasingly coarse deployment granularity.
+Each prefill or decode instance must hold a complete model replica, so growing MoE weights directly increase its minimum GPU count and duplicated weights displace KV-cache capacity.
+PDD must then provision these indivisible instances in a prefill-to-decode resource ratio that matches the phases’ asymmetric demands.
+The smallest combination that realizes this ratio defines the deployment unit, which becomes much larger than either phase’s instance alone.
+One reported DeepSeek-V3 unit combines 32 prefill and 320 decode GPUs to realize its target ratio  ( DeepSeek-AI, 2024 ) .
+Another use 176 GPUs as a single unit for a different load  ( DeepSeek-AI, 2025a ) .
+Kimi-K2 has likewise been deployed on 128 H200 GPUs  ( Mooncake Team, 2025 ) . 
+
+ This compounding effect makes the target ratio impossible to realize in a small cluster, while deviating from it makes one phase overloaded and leaves another phase overprovisioned.
+For a large cluster with sufficient GPUs, each scaling step changes capacity by hundreds of GPUs and cannot match moderate traffic shifts efficiently.
+Larger units also widen the failure blast radius.
+Unlike direct transfers, hierarchical communication couples many ranks into one group, so a single rank failure can stall the entire unit and is difficult to recover  ( Sun et al., 2026 ; DeepSeek-AI, 2025b ) .
+PDD therefore obtains isolation at the cost of memory efficiency, elasticity, and fault containment. 
+
+ 2.5. Prefill-Decode Colocation 
+
+ Colocation avoids separate model replicas by sharing one instance across phases.
+To avoid interference, many techniques are proposed.
+Chunked prefill splits a long input into chunks that can be mixed with decode iterations to mitigate interference  ( Agrawal et al., 2024 ; Kamath et al., 2024 ) .
+However, it introduces memory access overhead from rereading prefix cache entries and model weights  ( Zhong et al., 2024 ) .
+Recent systems colocate the phases through spatial GPU partitioning  ( Chen et al., 2026 ; Shi et al., 2025 ; Hong et al., 2025 ) .
+They commonly use Green Contexts  ( NVIDIA, 2026 ) to reserve separate SMs for prefill and decode, avoiding duplicate model replicas while providing compute isolation. 
+
+ Limitations. 
+However, spatial partitioning is inefficient to handle temporal resource demand variations along three dimensions.
+First, under EP, both the number of activated experts and tokens on a GPU change across layers, so the MoE load varies by rank and layer  ( Wei et al., 2026 ; He et al., 2021 ; He et al., 2022 ) .
+Second, attention and MoE have different resource demands even within the same layer  ( StepFun, 2025 ; Zhu et al., 2025b ) .
+Third, each MoE module alternates among dispatch, expert computation, and combine, shifting its bottleneck between communication and computation  ( AI, 2026b ) .
+A fixed partition cannot follow these changes.
+Changing an allocation requires CPU coordination and kernel-completion waits make per-kernel changes impractical.
+Existing systems therefore repartition at the prefill layer boundary  ( Chen et al., 2026 ; Shi et al., 2025 ) . 
+
+ As Figure  2 illustrates, a poor partition creates two failure modes.
+If prefill holds too many SMs when decode becomes ready, latency-sensitive decode waits behind a non-preemptible prefill kernel.
+This head-of-line blocking can be severe because a prefill kernel may run for tens to hundreds of milliseconds while a decode kernel finishes in hundreds of microseconds, a difference of orders of magnitude.
+If resources remain reserved for decode when it has no ready work, prefill cannot use them and the GPU develops a resource bubble.
+Rank-varying EP load and different module characteristics compound both problems. 
+
+ Existing solutions also leave communication unisolated.
+Prefill and decode dispatch and combine share the same NICs and links, where a large prefill transfer can throttle a small latency-sensitive decode transfer.
+Conventional two-sided communication further requires matching two-side progress.
+Independent scheduling can leave some MoE ranks serving prefill while others serve decode, so each phase waits for receiver work on ranks occupied by the other and the system deadlocks.
+Finally, partitioning every GPU gives each phase fewer local resources.
+As Figure  2 shows, meeting the same latency target may then require a larger degree of parallelism, which increases communication and further amplifies network interference. 
+
+ 3. ExpertPlex Overview 
+
+ Figure 3. Architecture of ExpertPlex. 
+
+ | 
+
+ API Interception   ( Wu et al., 2023 ; Han et al., 2022 ; Fan et al., 2025 ) 
+ | 
+
+ CUDA streams   ( NVIDIA, 2025 ) 
+ | 
+
+ NVIDIA MPS   ( , 2025 ) 
+ | 
+
+ Green Context   ( NVIDIA, 2026 ) 
+ | 
+
+ NVIDIA MIG   ( NVIDIA Corporation, 2024 ) 
+ | 
+
+ ExpertPlex 
+ | 
+ | 
+
+ CUDA Graph Compatibility | 
+ | 
+
+ ✓ \checkmark 
+ | 
+
+ ✓ \checkmark 
+ | 
+
+ ✓ \checkmark 
+ | 
+
+ ✓ \checkmark 
+ | 
+
+ ✓ \checkmark 
+ | 
+ | 
+
+ Time Multiplexing | 
+
+ ✓ \checkmark 
+ | 
+
+ ✓ \checkmark 
+ | 
+ | 
+ | 
+ | 
+
+ ✓ \checkmark 
+ | 
+ | 
+
+ Spatial Multiplexing | 
+ | 
+ | 
+
+ ✓ \checkmark 
+ | 
+
+ ✓ \checkmark 
+ | 
+
+ Limited 
+ | 
+
+ ✓ \checkmark 
+ | 
+ | 
+
+ Bounded Fast Preemption | 
+ | 
+ | 
+ | 
+ | 
+ | 
+
+ ✓ \checkmark 
+ | 
+ | 
+
+ Bounded Fast Reallocation | 
+ | 
+ | 
+ | 
+ | 
+ | 
+
+ ✓ \checkmark 
+ | 
+ | 
+
+ Table 1. Comparison between ExpertPlex and existing GPU sharing solutions. 
+
+ To address these problems, we propose ExpertPlex, a disaggregated serving system for MoE LLMs with adaptive persistent kernels.
+ExpertPlex shares MoE experts across phases while disaggregating attention by phase.
+As shown in Figure  3 , each node assigns a configurable subset of GPUs to prefill servers, another subset to decode servers, and the remaining GPUs to MoE servers. Prefill and decode servers in each node can be empty.
+Prefill and decode servers run their respective attention modules, while MoE servers host the MoE experts and execute expert computation for both phases.
+Because attention weights occupy only a small fraction of the model while MoE weights account for over 95% of it, sharing MoE servers eliminates massive MoE weight duplication and multiplexes dynamically sparse expert computation.
+Disaggregating attention gives each phase full GPUs instead of GPU partitions, reducing its required degree of parallelism and communication while eliminating cross-phase attention network interference.
+This MoE-weight-independent boundary matches phase demands with fewer GPUs and enables finer elastic scaling with a smaller failure blast radius. 
+
+ Each MoE server runs an Adaptive Persistent Kernel (APK) that keeps the GPU busy with adaptive scheduling (§ 4 ).
+APK preserves CUDA Graph compatibility and supports spatial and time multiplexing to maximize computation efficiency.
+Its tile-level scheduler follows real-time expert load, preempts prefill for decode within a sequence-length-independent bound, and reallocates idle SMs without CPU intervention or kernel relaunch while preserving prefill phase performance. 
+
+ ExpertPlex uses attention-initiated one-sided primitives for MoE communication (§ 5 ).
+Attention servers push dispatch data into and pull combine results from final MoE-side buffers.
+Direct final-buffer access removes MoE-side coordination and polling, avoids deadlock, and overlaps communication with computation across phases.
+To reduce network interference, prefill scale-out traffic travels between attention modules whenever possible, while decode communicates directly between attention and MoE servers. 
+
+ Finally, a cross-stack optimizer models ExpertPlex from the tile level to the cluster level (§ 6 ).
+It jointly selects APK policies, placements, resource ratios, parallelism, and overlap strategies to maximize goodput under both phase SLOs. 
+
+ 4. Adaptive Persistent Kernel 
+
+ 4.1. GPU Sharing Design Space 
+
+ Across MoE LLMs, prefill processes all input tokens, whereas each decode iteration processes only one new token per request.
+The duration gap between their operations therefore grows with input length.
+For example, with EP4 on MiniMax-M2.7, grouped GEMMs for decode with eight active experts take 17.7–34.7  μ \mu s, while matched prefill GEMMs with 16K tokens take 1.8–2.9 ms, or 84–101 × \times longer.
+The exact ratio is model dependent, but this trend is universal.
+Because every layer invokes an MoE operation, blocking can recur at every layer and accumulate into end-to-end decode latency.
+Static partitioning avoids this interference only by leaving resources idle whenever a phase is communicating or has no ready operation.
+A useful sharing mechanism must prevent repeated blocking without stranding this idle capacity. 
+
+ Efficient sharing therefore requires five complementary properties, summarized in Table  1 .
+CUDA Graph compatibility avoids per-operation CPU intervention and its launch and synchronization overhead on short decode paths.
+Spatial multiplexing lets different SM subsets execute both phases concurrently.
+It lends SMs to the computing phase while the other communicates and changes the split across layers as routing shifts the expert load on each rank.
+Time multiplexing lets the same SM switch phases over time when its current phase has no ready operation.
+Bounded preemption prevents a long prefill operation from causing severe head-of-line blocking, while bounded reallocation lets a newly ready phase reclaim SMs quickly enough to avoid bubbles. 
+
+ Launch-time mechanisms miss several properties.
+API interception  ( Wu et al., 2023 ; Fan et al., 2025 ; Han et al., 2022 ) offers only launch-boundary time multiplexing.
+It lacks CUDA Graph compatibility, spatial multiplexing, and bounded preemption and reallocation.
+CUDA streams with priorities  ( NVIDIA, 2025 ) support graph replay and launch-time ordering, but provide no spatial isolation or bounded resource handoff once a kernel begins execution. 
+
+ Hardware partitioning provides spatial isolation but remains static.
+MPS  ( , 2025 ) and Green Context  ( NVIDIA, 2026 ) support graph-compatible spatial multiplexing, but fix the allocation during a kernel.
+They lack in-kernel time multiplexing and bounded preemption and reallocation.
+MPS also leaves cache and shared-memory interference on a shared SM unpredictable.
+MIG  ( NVIDIA Corporation, 2024 ) provides hard but highly restricted spatial isolation.
+H100 exposes only 1g, 2g, 3g, 4g, and 7g profiles, so the only two-way split that lets two phases collectively use the GPU’s full compute capacity is 3g–4g.
+MIG lacks time multiplexing and preemption, and driver-level reconfiguration cannot bound reallocation latency.
+It therefore cannot follow the layer-level load changes described above for either phase. 
+
+ 4.2. Tile-Level Scheduling 
+
+ These requirements favor a scheduling unit that is short and native to optimized GPU operations.
+APK chooses a tile, the smallest independently completable unit of these operations.
+Registers, shared memory, TMA buffers, and Tensor Core shapes bound its dimensions, so longer inputs add tiles without enlarging them.
+For example, our SM90 DeepGEMM configuration  ( Zhao et al., 2025 ) uses CTA tiles of at most a 128 × \times 192 output block with a 128-wide reduction tile.
+Across MoE-side operations, tile boundaries occur every 2.2–25.3  μ \mu s, independent of the total operation length (Figure  15 ).
+Input length stretches an operation by adding scheduling units rather than lengthening each scheduling interval. 
+
+ APK switches phases only after the current tile commits.
+No accumulator, TMA transaction, shared-memory buffer, or communication state remains live at this boundary, so switching needs no checkpoint, restore, or recomputation.
+Finer preemption would preserve pipeline state, while kernel- or layer-level scheduling would retain long blocking intervals.
+APK keeps each operation’s native CTA or cluster shape, TMA multicast, and warp-specialized pipeline.
+The scheduler changes only the next tile, leaving each operation’s pipeline and synchronization intact throughout execution. 
+
+ Before APK starts, ExpertPlex builds an operation template including buffers and TMA descriptors for every MoE operation.
+At runtime, an attention server signals a ready operation.
+CTA 0 instantiates its template into the decode or prefill queue and updates runtime fields such as the layer, token count, and SM budget.
+APK schedules at CTA-cluster granularity because CTAs connected by TMA multicast must execute the same tile.
+The cluster leader selects an tile and broadcasts its metadata to peer CTAs.
+Different clusters execute different phases for spatial multiplexing, while each cluster switches phases at tile boundaries for time multiplexing and fast reallocation.
+Because APK is long lived and all scheduling occurs on the GPU, this process requires neither CPU intervention nor kernel relaunch and remains compatible with CUDA Graph replay throughout execution. 
+
+ 4.3. Bounded Tile-level Preemption 
+
+ Figure 4. Tile-level preemption mechanism. 
+
+ Independent tile-boundary checks are unsafe because high-performance operations pipeline both warps and CTAs across tiles.
+Within a CTA, a TMA warp may load tile k + 1 k+1 while math warps consume tile k k .
+If one warp switches phases, another can wait forever for data or an mbarrier event from the old phase.
+Across a CTA cluster, an independently switching CTA can similarly strand peers at a TMA multicast or cluster barrier.
+Stalling the entire cluster after every tile prevents both deadlocks but serializes a microsecond-scale pipeline and defeats fine-grained scheduling. 
+
+ APK instead propagates one cooperative decision through the memory hierarchy shown in Figure  4 .
+An attention server signals an urgent decode operation through the system-scope word P P .
+CTA 0 checks P P at a tile boundary of its current operation and writes one device-scope word p i p_{i} for each cluster i i .
+Each cluster reads only its p i p_{i} , avoiding repeated system-scope accesses and a grid-wide barrier.
+At its next tile boundary, the leader CTA broadcasts the decision through DSMEM so every CTA participating in TMA multicast stays on the same operation.
+Within each CTA, the first pipeline warp reads the decision, broadcasts it within the warp, and uses an mbarrier handoff to notify later warps before they claim another tile.
+The decision remains fixed within a check epoch, so no CTA can claim another old-phase tile after observing it.
+The slowest CTA therefore finishes at most its current tile before the cluster converges on the new phase.
+The propagation follows the GPU memory hierarchy through system memory, device memory, DSMEM, shared memory, and warp broadcast.
+It prevents mixed-phase dependencies both within a CTA and across a CTA cluster without draining the pipeline after every tile.
+Preemption is bounded by one tile execution time plus one local cluster check epoch.
+This bound remains independent of the interrupted operation’s total length. 
+
+ 5. Attention-initiated MoE Communication 
+
+ 5.1. Concurrent Communication over a Shared Network 
+
+ Disaggregating prefill and decode attention onto different servers eliminates cross-phase interference for attention communication.
+The remaining contention point is therefore MoE communication, because both phases dispatch routed activations to, and combine expert outputs from, the same MoE server pool.
+Existing MoE communication usually uses a two-sided protocol for two reasons.
+Token routing reveals destinations and transfer sizes only at runtime, and the communication operator is decoupled from the compute operator that consumes its output.
+The sender therefore streams data into a bounded receiver-side ring buffer, while the receiver polls and drains that buffer, scatters arrivals into the final tensor, and returns credits that prevent the sender from overwriting unread slots.
+The ring buffer bounds memory use, but progress now requires both sides.
+With concurrent prefill and decode, independent GPU scheduling can leave some MoE ranks running prefill kernels and others running decode kernels.
+Each phase then waits for receiver kernels on ranks occupied by the other phase, so neither ring buffer is drained nor returns the credits needed for its senders to finish.
+The blocked sender cannot retire and release its GPU resources for the other phase’s receiver kernel.
+This cross-phase cycle can deadlock an otherwise correct protocol. 
+
+ Reserving receiver-side polling SMs avoids this liveness failure only by wasting compute capacity.
+MoE traffic is bursty, so these SMs spin between dispatches and cannot execute ready expert tiles.
+Letting compute borrow them is unsafe because receiver progress would again depend on whether enough SMs become available at every rank.
+Network contention remains as well.
+Optimized MoE transfers can saturate the fabric  ( DeepSeek-AI, 2025b ) , while scale-out bandwidth is scarce.
+For example, DeepSeek-V3 reports 160 GB/s intra-node NVLink bandwidth but only 50 GB/s cross-node InfiniBand bandwidth on H800, a 3.2 × \times bandwidth gap  ( DeepSeek-AI, 2024 ) .
+A prefill burst can delay latency-sensitive decode even when the phases use different GPUs. 
+
+ 5.2. One-Sided Dispatch and Combine 
+
+ Our key insight is to remove MoE-side progress with one-sided transfers initiated by attention servers.
+ExpertPlex uses both push and pull primitives of the scale-up links, i.e., NVLink and scale-out links, i.e., RDMA.
+APK already preallocates each operation’s buffers for its maximum routed-token volume.
+This requirement follows from APK’s persistent execution because its operation templates, tensor addresses, and communication descriptors must be fixed before runtime scheduling.
+ExpertPlex exposes these final dispatch and combine buffers to attention servers and removes the intermediate ring buffer.
+Transfers consequently need neither receiver-side draining and scattering nor credit feedback to throttle a sender.
+MoE servers expose only buffers and readiness words, with no matching communication kernel or reserved polling SMs.
+Dispatch uses an attention-side push.
+After routing determines each expert’s destination and final offset, the attention server writes activations into that location through NVLink peer stores or one-sided RDMA writes.
+It publishes a ready signal only after the payload is visible.
+APK does not coordinate this transfer and schedules the MoE task after observing that signal at a tile boundary. 
+
+ Combine reverses the data flow but remains attention initiated.
+After expert computation writes the final combine buffer and publishes a done signal, a small WaitDone kernel on the attention GPU observes completion and the attention server pulls the result through NVLink loads or one-sided RDMA reads.
+ WaitDone is a single-thread kernel, so it can coexist with TBO or SBO and preserve their attention-side overlap.
+It runs on the communication stream and blocks only the dependent pull, while the compute stream continues the work exposed by the selected overlap strategy.
+Meanwhile, removing MoE-side communication kernels lets APK overlap one phase’s MoE computation with the other phase’s dispatch or combine, as Figure  5 shows.
+For example, APK can execute prefill tiles while decode waits to combine, or execute urgent decode tiles while a prefill transfer is in flight.
+This mechanism is compatible with each phase’s original overlap strategy but adds cross-phase opportunities.
+Prefill and decode follow independent dependency chains, so this overlap is not limited by the intra-phase dependencies that constrain TBO and SBO and can keep the SMs busy as long as there is work available. 
+
+ 5.3. Hierarchical Prefill Path and Traffic Isolation 
+
+ One-sided transfers remove MoE-side coordination, but prefill and decode can still contend for scarce RDMA bandwidth.
+Our key insight is to route most prefill scale-out traffic between prefill attention servers, reserving direct attention-to-MoE paths primarily for decode.
+Latency-sensitive decode accesses each MoE server directly through local NVLink or remote RDMA.
+For a remote node with a prefill server, the source sends each activation once over RDMA to prefill server with the same local rank on that node.
+The receiver multicasts it out over NVLink to all activated experts chunk by chunk.
+For combine, the same server gathers outputs over NVLink and returns the combined result through the prefill-only RDMA path.
+This path preserves hierarchical deduplication because activations for multiple experts on one remote node cross the scarce scale-out link only once.
+The placement optimizer spreads prefill servers across nodes to make this path common (§ 6 ).
+When a destination node lacks a prefill server, ExpertPlex uses direct one-sided RDMA but assigns prefill a lower-priority InfiniBand virtual lane than decode.
+Topology thus separates the phases whenever possible, while virtual-lane priority protects latency-sensitive decode when they must share a scale-out link. 
+
+ Figure 5. Cross-phase overlap enabled by attention-initiated one-sided transfers. 
+
+ 6. Cross-stack Placement Optimizer 
+
+ 6.1. Cross-stack Scheduling Problem 
+
+ Although the mechanisms above expose enough control to adaptively schedule prefill and decode with stricter isolation at finer granularity, they also couple decisions conventionally made by different layers of the serving stack.
+For example, changing the number of prefill servers simultaneously changes the degree of parallelism, the KV-cache capacity, and the communication path.
+Optimizing placement, overlap, or GPU sharing in isolation can therefore select a locally efficient configuration that violates an SLO once these effects interact.
+We instead jointly search the attention and MoE parallelism, server placement, overlap strategy, and APK sharing policy. 
+
+ We formalize a configuration as a layout ℓ \ell and a decode SM budget q q under contention.
+For ( ℓ , q ) (\ell,q) , let B p B_{p} and B d B_{d} denote the largest prefill and decode batches whose modeled iteration latencies T p T_{p} and T d T_{d} meet their respective SLOs, and let O ¯ \bar{O} be the average output length.
+The request-level goodput is defined as 
+
+ (1) | 
+ | 
+ G ⁡ ( ℓ , q ) = min ⁡ ( B p T p , B d T d ​ O ¯ ) . G(\ell,q)=\min\left(\frac{B_{p}}{T_{p}},\frac{B_{d}}{T_{d}\bar{O}}\right). | 
+ | 
+
+ The minimum captures pipeline balance because each request consumes one prefill iteration but O ¯ \bar{O} decode iterations.
+We admit only candidates satisfying both phase SLOs and maximize G G over the feasible candidates, rather than overprovisioning either phase in isolation. 
+
+ 6.2. Tile-aware Latency Model 
+
+ Evaluating every candidate on a full cluster would make the search prohibitively expensive.
+ExpertPlex instead profiles attention and MoE kernels, including APK overhead, on only a few representative GPUs and interpolates their per-rank latency.
+Network time requires no profiling GPU. The model computes it directly from routed bytes, measured RDMA or NVLink bandwidth, and the hierarchical path in § 5 .
+For each layout, it derives the work on every rank from the attention and MoE parallelism, placement, routing, and sharing policy. 
+
+ For a profiled component c c , we fit a small set of input samples with 
+
+ (2) | 
+ | 
+ t ^ c ​ ( x , s ) = α c + β c ​ x + γ c ​ x ​ s + δ c ​ x ​ s 2 . \hat{t}_{c}(x,s)=\alpha_{c}+\beta_{c}x+\gamma_{c}xs+\delta_{c}xs^{2}. | 
+ | 
+
+ For attention, x x is the local batch size and s s is the sequence length.
+Our key observation is that raw routed-token count is insufficient for MoE computation because its latency follows the number of executed tiles.
+If expert e e receives m e m_{e} token rows and the kernel tile height is M t M_{t} , the MoE footprint is 
+
+ (3) | 
+ | 
+ x moe = ∑ e | m e > 0 ⌈ m e M t ⌉ x_{\mathrm{moe}}=\sum_{e\mid m_{e}>0}\left\lceil\frac{m_{e}}{M_{t}}\right\rceil | 
+ | 
+
+ and we evaluate the fitted form with x = x moe x=x_{\mathrm{moe}} and s = 1 s=1 .
+Figure  6 illustrates this distinction. Batches with the same number of tokens can have different latency when they activate different numbers of experts.
+This behavior is fundamental to tiled MoE kernels rather than specific to one model or GPU.
+Tensor Core and TMA pipelines operate on aligned tiles, and each active expert triggers at least one tile’s metadata, weight transfer, and computation even if it receives only a few tokens.
+Thus sparse routing changes latency through both token volume and its per-expert packing.
+By predicting the per-expert token vector and interpolating on x moe x_{\mathrm{moe}} , the model captures this general effect with a small GPU profile set instead of profiling every full-cluster layout. 
+
+ Figure 6. Latency of MoE Grouped GEMMs under different numbers of active experts and tokens. 
+
+ 6.3. Offline Search Algorithm 
+
+ Algorithm  1 jointly searches these choices for the workload’s expected input and output lengths.
+The generator enumerates layouts ℒ \mathcal{L} , where each ℓ \ell specifies the number of MoE servers, the number of attention servers, the prefill-to-decode server ratio, and the layout of all servers.
+ FitsMemory first rejects layouts that cannot hold attention and expert weights or sufficient KV caches. 
+
+ Algorithm 1 Cross-stack placement search 
+
+ 1: 
+
+ b e s t ← ⊥ best\leftarrow\bot 
+
+ 2: 
+
+ for all ℓ ∈ ℒ \ell\in\mathcal{L} do 
+
+ 3: 
+
+    if ¬ FitsMemory ​ ( ℓ ) \neg\textsc{FitsMemory}(\ell) then 
+
+ 4: 
+
+     continue 
+
+ 5: 
+
+    for all q ∈ 𝒬 ℓ q\in\mathcal{Q}_{\ell} do 
+
+ 6: 
+
+     ( B p , 𝑜𝑘 p ) ← MaxFeasibleBatch ​ ( ℓ , q , prefill ) (B_{p},\mathit{ok}_{p})\leftarrow\textsc{MaxFeasibleBatch}(\ell,q,\mathrm{prefill}) 
+
+ 7: 
+
+     ( B d , 𝑜𝑘 d ) ← MaxFeasibleBatch ​ ( ℓ , q , decode ) (B_{d},\mathit{ok}_{d})\leftarrow\textsc{MaxFeasibleBatch}(\ell,q,\mathrm{decode}) 
+
+ 8: 
+
+     if 𝑜𝑘 p ∧ 𝑜𝑘 d \mathit{ok}_{p}\wedge\mathit{ok}_{d} then 
+
+ 9: 
+
+       g ← G ⁡ ( ℓ , q ) g\leftarrow G(\ell,q) 
+
+ 10: 
+
+       if b e s t = ⊥ ∨ g > b e s t . g best=\bot\vee g>best.g then 
+
+ 11: 
+
+        b ​ e ​ s ​ t ← ( ℓ , q , B p , B d , g ) best\leftarrow(\ell,q,B_{p},B_{d},g) 
+
+ 12: 
+
+ return b ​ e ​ s ​ t best 
+
+ Figure 7. SLO attainment of ExpertPlex and baselines on the MiniMax-M2.7 and ShareGPT datasets. 
+
+ Figure 8. SLO attainment of ExpertPlex and baselines on the MiniMax-M2.7 and LooGLE datasets. 
+
+ Figure 9. SLO attainment of ExpertPlex and baselines on the GLM-5.1-FP8 and ShareGPT datasets. 
+
+ Figure 10. SLO attainment of ExpertPlex and baselines on the GLM-5.1-FP8 and LooGLE datasets. 
+
+ For every remaining layout, 𝒬 ℓ \mathcal{Q}_{\ell} enumerates decode SM budgets.
+For each ( ℓ , q ) (\ell,q) , MaxFeasibleBatch binary-searches up to the configured and KV-cache bounds for each phase (lines 6–7).
+At each probe, the model from § 6.2 estimates the attention latency, the tile-aware MoE computation latency under q q SMs, and the communication latency.
+The overall iteration latency is then estimated as the sum of latencies on the critical-path.
+Under TBO, ExpertPlex uses one microbatch’s attention overlaps another’s communication and MoE computation, so the iteration latency is the maximum of these two paths.
+Under SBO, ExpertPlex uses shared-expert computation overlaps routed-expert computation and communication within one microbatch, so the iteration latency is their maximum plus the attention latency.
+Lines 8–11 retain only configurations feasible for both phases and select the one with maximum G G .
+The selected configuration jointly fixes the parallelism, placement, overlap strategy, and the expected decode SM budget. 
+
+ 6.4. Online SM Reallocation 
+
+ The offline solution targets an average workload, whereas routing changes x moe x_{\mathrm{moe}} across layers and servers, and either phase may temporarily have no ready MoE computation.
+APK therefore interprets q q as a contention policy rather than a static partition.
+When only one phase is ready, it uses all CTA clusters.
+Under contention, it scales q q by the ratio of the current decode footprint x moe x_{\mathrm{moe}} to the offline expectation x moe ⋆ x_{\mathrm{moe}}^{\star} as follows. 
+
+ (4) | 
+ | 
+ q ′ = min ⁡ ( Q max , ⌈ q ​ x moe x moe ⋆ ⌉ c ) , q^{\prime}=\min\left(Q_{\max},\left\lceil\frac{qx_{\mathrm{moe}}}{x_{\mathrm{moe}}^{\star}}\right\rceil_{c}\right), | 
+ | 
+
+ Here, ⌈ ⋅ ⌉ c \lceil\cdot\rceil_{c} rounds up to a CTA-cluster multiple, Q max Q_{\max} preserves prefill progress, and prefill receives the remaining clusters.
+The reason of protecting decode share first is that decode is more latency-sensitive, and that outputs for already-started requests should be served before inputs for new requests.
+For the prefill phase, APK uses all the remaining SMs to preserve throughput as high as possible. 
+
+ 7. Evaluation 
+
+ 7.1. Experiment Setup 
+
+ Implementation. 
+We implement ExpertPlex by modifying DeepGEMM  ( Zhao et al., 2025 ) , DeepEP v1  ( DeepSeek-AI, 2025b ) , and SGLang  ( Zheng et al., 2024 ) .
+The adaptive persistent kernel (APK) is implementated based on DeepGEMM and DeepEP v1.
+We fuse two grouped GEMMs, activation functions, MoE data preprocessing, MoE data post-processing and CTA-cluster scheduler into one long-lived persistent kernel on each MoE GPU.
+For each operation, the host determines tile sizes before launch and JIT-compiles them as constants at startup to reduce register pressure. 
+
+ We also replace DeepEP’s receiver-driven all-to-all path with the attention-initiated M-to-N path described in Figure  3 and Figure  5 .
+Dispatch writes routed activations and metadata directly into the target MoE buffers without receiver-side coordination.
+Combine is initiated from the attention side through pull semantics, so the MoE server only publishes finished expert outputs and ready signals.
+For the Infiniband GPUDirect Async (IBGDA) path, we customize nvshmemi_ibgda_get_nbi_warp to support fine-grained pulls from remote combine buffers over a specific RDMA connection.
+In SGLang, we add support for the disaggregated attention and shared-MoE layout, the MoE token dispatcher for this layout, and a OperationsStrategy for communication overlap. 
+
+ Models. 
+We use MiniMax-M2.7 for single-node experiments and GLM-5.1-FP8 for multi-node experiments.
+Both models use 256 routed experts per MoE layer and activate eight routed experts per token.
+MiniMax-M2.7 has a 230 GB FP8 model footprint in our deployment, and each token activates about 7.0B routed expert parameters across layers.
+GLM-5.1-FP8 has a 756 GB FP8 model footprint and 724.8B routed expert parameters, of which each token activates about 22.6B.
+The former uses full attention, the latter uses DSA. 
+
+ Figure 11. Pareto frontier of GPU sharing mechanisms. 
+
+ Testbed. 
+Single-node experiments run on one NVIDIA H800 node with eight GPUs connected by NVLink.
+Multi-node experiments use up to three machines.
+Each machine has eight NVIDIA H800 GPUs connected by NVLink.
+Machines are connected by eight 200 Gbps InfiniBand NICs per node.
+All throughput numbers are reported as requests per second per node when systems use different numbers of nodes. 
+
+ Baselines. 
+Because ExpertPlex is implemented in SGLang, all baselines use SGLang-based implementations to isolate system-level differences.
+ SGLang-Colocated is the original SGLang serving mode.
+It enables DP for attention and EP for MoE.
+When memory allows, it enables two-batch overlap to improve throughput.
+ SGLang-ChunkedPrefill additionally enables chunked prefill with the best chunk size found in prior tuning for the corresponding workload and model.
+Other settings match SGLang-Colocated.
+ SGLang-PDD implements widely used prefill-decode disaggregation.
+Because MoE weights consume most GPU memory, MiniMax-M2.7 uses a 1P1D deployment.
+GLM-5.1-FP8 runs out of memory under this PDD layout on 24 GPUs, so we do not report GLM-5.1-FP8 PDD numbers.
+ SGLang-PDMux is based on the open-source MuxWise implementation.
+MuxWise targets dense models and uses Green Context to partition GPU resources, so we modify it to support MoE models.
+Because its implementation is compatible only with tensor parallel attention, it uses TP for attention and EP for MoE.
+Several baselines cannot express ExpertPlex’s 24-GPU fine-grained layout under their parallelism constraints.
+For GLM-5.1-FP8, those baselines run on the largest compatible 16-GPU layout, and we compare request rate per node for fair comparison. 
+
+ Workloads. 
+Following prior works, we sample input and output lengths from ShareGPT and LooGLE to represent short and long requests.
+Request arrivals follow a Poisson process.
+Because SGLang-PDD leaves less GPU memory for the KV cache after duplicating MoE weights across prefill and decode instances, we cap sampled sequence lengths at the PDD KV-cache capacity. 
+
+ Metrics. 
+The main metric is P90 goodput, defined as the highest arrival rate at which at least 90% of requests meet both their time to first token (TTFT) and time per output token (TPOT) SLOs.
+For MiniMax-M2.7 on ShareGPT, the TTFT SLO is 1 s and the TPOT SLO is 50 ms.
+For MiniMax-M2.7 on LooGLE, the TTFT SLO is 10 s and the TPOT SLO is 100 ms.
+For GLM-5.1-FP8 on ShareGPT, the TTFT SLO is 2 s and the TPOT SLO is 100 ms.
+For GLM-5.1-FP8 on LooGLE, the TTFT SLO is 20 s and the TPOT SLO is 100 ms.
+These SLOs follow the range used by prior disaggregated and high-goodput serving work  ( StepFun, 2025 ; Zhu et al., 2025b ; Zhang et al., 2026 ; Chen et al., 2026 ) . 
+
+ 7.2. End-to-End Performance 
+
+ Figures  7 , 8 , 9 , and 10 show the goodput of all systems on different models and workloads.
+Across the four settings, ExpertPlex improves goodput by matching phase resources at the MoE-attention boundary instead of duplicating the whole model or partitioning every GPU by phase. 
+
+ For MiniMax-M2.7 on ShareGPT, ExpertPlex reaches 11.3 requests per second per node under the joint SLO.
+This is 5.65 × \times higher than SGLang-ChunkedPrefill, 2.72 × \times higher than SGLang-Colocated, 2.01 × \times higher than SGLang-PDD, and 1.41 × \times higher than SGLang-PDMux. 
+
+ Figure 12. Case study of preemption slowdown. 
+
+ Chunked prefill performs worst.
+Each chunk rereads model weights and the KV cache and repeats MoE communication.
+Large chunks still interfere with decode, whereas small chunks reduce prefill efficiency.
+Colocated serving runs prefill aggressively to build larger batches and improve throughput, but lets long prefill delay decode iterations.
+SGLang-PDD removes prefill-decode interference, but it duplicates massive MoE weights and leaves less room for KV cache.
+Instance-level disaggregation also leads to resource mismatch, so the prefill phase uses only part of the available resources even when decode is not the bottleneck.
+SGLang-PDMux improves over colocated serving by using Green Context, yet its GPU partitions cannot follow the actual number of active experts on each MoE rank.
+It also introduces cross-phase communication interference and requires a larger degree of parallelism.
+ExpertPlex avoids these failure modes by sharing the MoE pool with APKs while disaggregating attention modules. 
+
+ On MiniMax-M2.7 with LooGLE, longer requests magnify the difference.
+SGLang-ChunkedPrefill cannot sustain the SLO over the evaluated load range because longer inputs amplify its memory-access overhead.
+They also amplify interference in SGLang-Colocated, over which ExpertPlex improves goodput by 4.12 × \times ; the improvement over SGLang-PDMux is 1.28 × \times on this workload. 
+
+ GLM-5.1-FP8 shows similar improvements in multi-node deployments.
+Compared with SGLang-ChunkedPrefill, ExpertPlex improves goodput by 3.3 × \times on ShareGPT and 5.0 × \times on LooGLE.
+Compared with SGLang-Colocated, ExpertPlex improves goodput by 1.5 × \times on ShareGPT and 2.5 × \times on LooGLE.
+On ShareGPT, ExpertPlex and SGLang-PDMux achieve similar joint goodput of about 1.5 requests per second per node.
+PDMux’s tensor-parallel attention gives each short request more parallelism and thus a TTFT advantage, but adds communication and allocates resources without regard to MoE sparsity.
+On LooGLE, this advantage fades and ExpertPlex improves goodput over SGLang-PDMux by 1.66 × \times .
+Long requests expose network interference and Green Context’s inability to maximize GPU utilization while preserving TPOT. 
+
+ (a) Contiguous layout. 
+ (b) Masked layout. 
+ Figure 13. Overhead of adaptive persistent kernels. 
+
+ 7.3. Effectiveness of APKs 
+
+ We evaluate APK’s GPU sharing mechanism with concurrent prefill- and decode-shaped grouped GEMMs from GLM-5.1-FP8 on one GPU.
+The decode grouped GEMM is launched 10  μ \mu s after the prefill grouped GEMM.
+The number of tokens is 128 in the decode phase an 8192 in the prefill phase, and all activate eight experts.
+We compare APK with exclusive execution, priority CUDA streams, MPS, and Green Context. 
+
+ Figure  11 plots the Pareto frontier.
+CUDA stream priorities order kernel launches but provide no isolation after launch, so decode waits behind a running prefill GEMM, leading to significant head-of-line blocking.
+Green Context spatially isolates the phases, but its fixed partition prevents either phase from borrowing the other’s idle SMs, leading to resource bubbles.
+MPS multiplexes space more flexibly, but still cannot time-multiplex an SM at tile granularity within a running kernel.
+APK is the only mechanism that reaches the low-latency region for the decode phase while keeping the prefill phase high performance. 
+
+ Figure  12 shows the result under the decode-latency protection target.
+CUDA streams increase decode latency by 13.79 × \times over exclusive execution.
+MPS and Green Context keep latency of the decode phase close to exclusive execution, but their fixed allocations slow prefill by 3.33 × \times and 4.07 × \times .
+In contrast, ExpertPlex adds only 8% overhead to the decode phase and slows prefill by only 1.12 × \times .
+The reason is that decode GEMMs are short and intermittent, APK gives all idle CTA clusters to prefill, only preempts prefill when decode arrives, and reallocates idle SMs back to prefill when decode completes the execution. 
+
+ (a) Normal mode. 
+ (b) Low-latency mode. 
+ Figure 14. Overhead of attention-initiated communication. 
+
+ 7.4. Overhead of Tile-Level Scheduling 
+
+ Tile-level scheduling adds queue checks, task selection, and CTA-budget enforcement to grouped GEMM.
+We measure its overhead against DeepGEMM using the configuration from § 7.3 .
+Figure  13 (a) evaluates the contiguous layout used by prefill.
+The x-axis varies per-expert batch size, the dominant factor in prefill GEMM time.
+Scheduling adds less than 12% overhead because it runs once per tile group without changing the TMA or Tensor Core pipelines. 
+
+ Figure  13 (b) evaluates the masked layout used by decode.
+For decode, execution time depends more on the number of active experts than on the number of tokens.
+Scheduling adds less than 20  μ \mu s across all measured active-expert counts.
+This small cost replaces a much longer wait behind prefill kernels. Moreover, because each token can activate eight experts, its relative overhead falls below 10% for grouped GEMMs with many active experts. 
+
+ 7.5. Overhead of Attention-Initiated MoE Communication 
+
+ Figure  14 measures the attention-initiated MoE communication described in § 5 .
+On 16 GPUs, we compare DeepEP v1 with ExpertPlex’s attention-initiated one-sided dispatch and combine under both normal and low-latency execution. 
+
+ In normal mode, dispatch and combine track DeepEP v1 within about 5%, preserving hierarchical communication’s bandwidth benefit.
+Low-latency dispatch and combine expose measurement noise, yet the difference remains within about 45  μ \mu s.
+Thus, removing MoE-side coordination and using pull-based combine integrates communication with APK without sacrificing communication efficiency, while leaving MoE-server SMs available to the other phase. 
+
+ 7.6. Analysis of Preemption Intervals 
+
+ Figure 15. Preemption interval of different tasks. 
+
+ ExpertPlex tunes GEMM and data-processing tiles for operation performance rather than shrinking them to improve preemption.
+Under these tile sizes, Figure  15 shows that all MiniMax-M2.7 MoE operations have intervals below 25.3  μ \mu s, and particularly GEMM intervals stay below 10.7  μ \mu s.
+The interval depends on tile execution time, not token count, allowing a short decode operation to preempt work from a prefill request with thousands of input tokens. 
+
+ We compare against the best reported delays of LithOS, Bless, GPreempt, PipeSwitch, and REEF  ( Bai et al., 2020 ; Han et al., 2022 ; Coppock et al., 2025 ; Fan et al., 2025 ; Zhang et al., 2025a ) only as reference points, since they do not target MoE LLM workloads and lack the support of modern MoE kernel features such as TMA multicast, CTA clusters, warp specialization, and CUDA Graph.
+APK instead schedules at natural tile boundaries, performs useful work throughout each interval, and requires no checkpoint, restore, or recomputation.
+Even REEF’s best reported delay is 35  μ \mu s and requires recomputing the preempted kernel, which is costly when millisecond-scale prefill GEMMs are frequently interrupted by decode.
+APK therefore achieves finer-grained preemption with lower pause and resume costs for MoE serving workloads. 
+
+ 8. Related Work 
+
+ LLM serving systems. 
+Many techniques are propsoed to adapt to accelerate LLM serving.
+Prefill-decode disaggregation (PDD) provisions independent prefill and decode instances to avoid interference between two phases  ( Zhong et al., 2024 ; Patel et al., 2023 ; Hu et al., 2024 ; Qin et al., 2025 ) .
+As discussed in § 2 , instance-level PDD is inefficient to deploy on small clusters, enlarges the rank-failure blast radius and only supports coarse elastic scaling.
+Chunked prefill instead split prefill work into smaller chunks to reduce interference  ( Agrawal et al., 2024 ; Kamath et al., 2024 ) , while repeated chunk execution introduce extra memory access.
+Recent GPU partitioning systems let prefill and decode share a GPU by assigning resources through mechanisms such as Green Context  ( Chen et al., 2026 ; Shi et al., 2025 ; Hong et al., 2025 ; Lin et al., 2025 ) .
+However, as desribed in § 2 , these systems can introduce bubbles, head-of-line blocking, network interference, and larger degree of parallelism.
+More recent attention-expert disaggregation systems disaggregate attention and expert computation to fit their different characteristics  ( Zhu et al., 2025b ; StepFun, 2025 ; Zhang et al., 2026 ) .
+However, these designs are built on instance-level PDD, so they inherit the same limitations and further introduce pipeline bubbles  ( AI, 2026b ) .
+In contrast, ExpertPlex shares the MoE servers between phases, which maximizes GPU occupancy and reduces bubbles.
+Its attention-initiated communication further introduce communication-computation overlap across phases.
+Attention-side techniques such as sequence parallelism  ( Wu et al., 2024 ; Wu et al., 2025 ) , attention offloading  ( Wang et al., 2025 ; Liang et al., 2025 ; Lin et al., 2024 ) are orthogonal to ExpertPlex.
+MoE load-balancing  ( He et al., 2021 ; He et al., 2022 ; Li et al., 2023 ; Zhai et al., 2023 ; Wei et al., 2026 ) solutions are also orthogonal, while ExpertPlex can absorb phase-level load shifts through multiplexing. 
+
+ Kernel scheduling. 
+Many systems improve GPU efficiency by scheduling work below the operator boundary.
+Megakernel systems break kernel boundaries, fuse small or memory-bound operations, and exploit inter-operator parallelism  ( Ma et al., 2020 ; Spector et al., 2025 ; Jin et al., 2026 ; Zhu et al., 2025a ; Guo et al., 2025 ; Cheng et al., 2026 ; Tile-AI, 2025 ) .
+These techniques target small batch sizes or intra-phase efficiency, but ExpertPlex targets high-goodput MoE serving with concurrent prefill and decode phases, where the scheduler must protect decode SLOs while keeping prefill throughput high.
+Other systems overlap computation and communication through fine-grained pipelining or kernel fusion  ( Zhang et al., 2025b ; Chang et al., 2024 ; AI, 2026b ) .
+They overlap operations within one phase or one layer pipeline.
+ExpertPlex keeps these optimizations compatible, but it can also overlap communication from one phase with computation from the other phase. 
+
+ GPU sharing and preemption systems provide another line of fine-grained scheduling  ( Wu et al., 2023 ; Coppock et al., 2025 ; Han et al., 2022 ; Bai et al., 2020 ; Fan et al., 2025 ; , 2025 ; NVIDIA Corporation, 2024 ) .
+These systems target multitasking across models or applications rather than multiple phases of one MoE model.
+They also do not supports some modern GPU kernel features such as TMA multicast, CTA clusters, warp specialization, and CUDA Graph.
+More importantly, their preemption mechanisms also introduce checkpoint, restore, or recomputation overhead.
+ExpertPlex uses tile-level scheduling to avoid these issues to guarantee bounded low preemption and reallocation overhead with temporal and spatial multiplexing support. 
+
+ 9. Conclusion 
+
+ We presented ExpertPlex, a high-goodput MoE LLM serving system that disaggregates attention by phase while sharing massive MoE experts.
+ExpertPlex shares MoE weights for memory efficiency, disaggregates attention to reduce attention communication of wide parallelism, uses adaptive persistent kernels to multiplex dynamic sparse MoE computation with performance isolation, and initiates one-sided MoE communication from attention servers to avoid cross-phase interference and overlap communication with computation.
+Evaluations on MiniMax-M2.7 and GLM-5.1-FP8 show that ExpertPlex improves goodput by up to 5.65 × \times over chunked prefill, 2.01 × \times over instance-level prefill-decode disaggregation, 1.66 × \times over Green Context-based prefill-decode colocation, and 4.12 × \times over naive colocated serving systems. 
+
+ References 
+
+ Agrawal et al. (2024) 
+ A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. Gulavani, A. Tumanov, and R. Ramjee 
+
+ Taming Throughput-Latency tradeoff in LLM inference with Sarathi-Serve .
+
+ In USENIX OSDI ,
+
+ Cited by: §2.5 ,
+ §8 .
+
+ AI (2026a) 
+ D. AI 
+
+ Deepseek-v4: towards highly efficient million-token context intelligence .
+
+ arXiv .
+
+ Cited by: §2.1 .
+
+ AI (2026b) 
+ D. AI 
+
+ Revealing the challenges of attention-ffn disaggregation for modern moe models and hardware systems .
+
+ arXiv .
+
+ Cited by: §2.5 ,
+ §8 ,
+ §8 .
+
+ AI (2026c) 
+ M. AI 
+
+ The minimax-m2 series: mini activations unleashing max real-world intelligence .
+
+ arXiv .
+
+ Cited by: §2.1 .
+
+ AI (2026d) 
+ Z. AI 
+
+ Glm-5: from vibe coding to agentic engineering .
+
+ arXiv .
+
+ Cited by: §2.1 .
+
+ Bai et al. (2020) 
+ Z. Bai, Z. Zhang, Y. Zhu, and X. Jin 
+
+ Pipeswitch: fast pipelined context switching for deep learning applications .
+
+ In USENIX OSDI ,
+
+ Cited by: §7.6 ,
+ §8 .
+
+ Brown et al. (2020) 
+ T. B. Brown, B. Mann, N. Ryder, M. Subbiah, J. Kaplan, P. Dhariwal, A. Neelakantan, P. Shyam, G. Sastry, A. Askell, S. Agarwal, A. Herbert-Voss, G. Krueger, T. Henighan, R. Child, A. Ramesh, D. M. Ziegler, J. Wu, C. Winter, C. Hesse, M. Chen, E. Sigler, M. Litwin, S. Gray, B. Chess, J. Clark, C. Berner, S. McCandlish, A. Radford, I. Sutskever, and D. Amodei 
+
+ Language models are few-shot learners .
+
+ Cited by: §1 .
+
+ Chang et al. (2024) 
+ L. Chang, W. Bao, Q. Hou, C. Jiang, N. Zheng, Y. Zhong, X. Zhang, Z. Song, C. Yao, Z. Jiang, H. Lin, X. Jin, and X. Liu 
+
+ FLUX: fast software-based communication overlap on GPUs through kernel fusion .
+
+ In arXiv ,
+
+ Cited by: §8 .
+
+ Chen et al. (2026) 
+ Y. Chen, W. Cui, H. Zhao, Z. Xu, X. Fan, X. Chen, Y. Zhou, S. Sun, B. He, and Q. Chen 
+
+ Towards high-goodput llm serving with prefill-decode multiplexing .
+
+ In ACM ASPLOS ,
+
+ Cited by: §1 ,
+ §2.5 ,
+ §2.5 ,
+ §7.1 ,
+ §8 .
+
+ Cheng et al. (2026) 
+ X. Cheng, Z. Zhang, Y. Zhou, J. Ji, J. Jiang, Z. Zhao, Z. Xiao, Z. Ye, Y. Huang, R. Lai, H. Jin, B. Hou, M. Wu, Y. Dong, A. Yip, Z. Ye, S. Wang, W. Yang, X. Miao, T. Chen, and Z. Jia 
+
+ MPK: a compiler and runtime for mega-kernelizing tensor programs .
+
+ In USENIX OSDI ,
+
+ Cited by: §8 .
+
+ Coppock et al. (2025) 
+ P. H. Coppock, B. Zhang, E. H. Solomon, V. Kypriotis, L. Yang, B. Sharma, D. Schatzberg, T. C. Mowry, and D. Skarlatos 
+
+ LithOS: an operating system for efficient machine learning on GPUs .
+
+ In ACM SOSP ,
+
+ Cited by: §7.6 ,
+ §8 .
+
+ [12] 
+ (2025) 
+
+ CUDA Multi-Process Service .
+
+ Note: https://docs.nvidia.com/deploy/pdf/CUDA_Multi_Process_Service_Overview.pdf 
+
+ Cited by: §1 ,
+ Table 1 ,
+ §4.1 ,
+ §8 .
+
+ DeepSeek-AI (2024) 
+ DeepSeek-AI 
+
+ DeepSeek-v3 technical report .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §1 ,
+ §2.1 ,
+ §2.4 ,
+ §5.1 .
+
+ DeepSeek-AI (2025a) 
+ DeepSeek-AI 
+
+ Day 6: one more thing, deepseek-v3/r1 inference system overview .
+
+ Note: https://github.com/deepseek-ai/open-infra-index/blob/main/202502OpenSourceWeek/day_6_one_more_thing_deepseekV3R1_inference_system_overview.md 
+
+ Cited by: §2.4 .
+
+ DeepSeek-AI (2025b) 
+ DeepSeek-AI 
+
+ DeepEP: an efficient expert-parallel communication library .
+
+ Note: https://github.com/deepseek-ai/DeepEP 
+
+ Cited by: §1 ,
+ §2.2 ,
+ §2.3 ,
+ §2.4 ,
+ §2.4 ,
+ §5.1 ,
+ §7.1 .
+
+ Fan et al. (2025) 
+ R. Fan, T. Ren, M. Xie, S. Gao, J. Shu, and Y. Lu 
+
+ GPREEMPT: GPU preemptive scheduling made general and efficient .
+
+ In USENIX ATC ,
+
+ Cited by: Table 1 ,
+ §4.1 ,
+ §7.6 ,
+ §8 .
+
+ GLM-4.5 Team (2025) 
+ GLM-4.5 Team 
+
+ GLM-4.5: agentic, reasoning, and coding (ARC) foundation models .
+
+ In arXiv ,
+
+ Cited by: §1 .
+
+ Guo et al. (2025) 
+ W. Guo, M. Mishra, X. Cheng, I. Stoica, and T. Dao 
+
+ SonicMoE: accelerating MoE with IO and tile-aware optimizations .
+
+ In arXiv ,
+
+ Cited by: §8 .
+
+ Han et al. (2022) 
+ M. Han, H. Zhang, R. Chen, and H. Chen 
+
+ Microsecond-scale preemption for concurrent GPU-accelerated DNN inferences .
+
+ In USENIX OSDI ,
+
+ Cited by: Table 1 ,
+ §4.1 ,
+ §7.6 ,
+ §8 .
+
+ He et al. (2021) 
+ J. He, J. Qiu, A. Zeng, Z. Yang, J. Zhai, and J. Tang 
+
+ Fastmoe: a fast mixture-of-expert training system .
+
+ arXiv .
+
+ Cited by: §1 ,
+ §2.5 ,
+ §8 .
+
+ He et al. (2022) 
+ J. He, J. Zhai, T. Antunes, H. Wang, F. Luo, S. Shi, and Q. Li 
+
+ Fastermoe: modeling and optimizing training of large-scale dynamic pre-trained models .
+
+ In ACM PPoPP ,
+
+ Cited by: §1 ,
+ §2.5 ,
+ §8 .
+
+ Hong et al. (2025) 
+ K. Hong, L. Chen, Z. Wang, X. Li, Q. Mao, J. Ma, C. Xiong, G. Wu, B. Han, G. Dai, Y. Liang, and Y. Wang 
+
+ Semi-pd: towards efficient llm serving via phase-wise disaggregated computation and unified storage .
+
+ arXiv .
+
+ Cited by: §1 ,
+ §2.5 ,
+ §8 .
+
+ Hu et al. (2024) 
+ C. Hu, H. Huang, L. Xu, X. Chen, J. Xu, S. Chen, H. Feng, C. Wang, S. Wang, Y. Bao, N. Sun, and Y. Shan 
+
+ Inference without interference: disaggregate llm inference for mixed downstream workloads .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §2.4 ,
+ §8 .
+
+ Jin et al. (2026) 
+ H. Jin, B. Hou, G. Wang, R. Lai, J. Chen, Z. Ye, Y. Cai, Y. Dong, X. Cheng, Z. Zhang, Y. Zhao, Y. Huang, L. Yang, J. Jiang, G. Oliaro, J. Ji, X. Miao, V. Grover, T. C. Mowry, Z. Jia, and T. Chen 
+
+ Event tensor: a unified abstraction for compiling dynamic megakernel .
+
+ In Conference on Machine Learning and Systems ,
+
+ Cited by: §8 .
+
+ Kamath et al. (2024) 
+ A. K. Kamath, R. Prabhu, J. Mohan, S. Peter, R. Ramjee, and A. Panwar 
+
+ POD-attention: unlocking full prefill-decode overlap for faster LLM inference .
+
+ In arXiv ,
+
+ Cited by: §2.5 ,
+ §8 .
+
+ Kaplan et al. (2020) 
+ J. Kaplan, S. McCandlish, T. Henighan, T. B. Brown, B. Chess, R. Child, S. Gray, A. Radford, J. Wu, and D. Amodei 
+
+ Scaling laws for neural language models .
+
+ Cited by: §1 .
+
+ Kimi Team (2025) 
+ Kimi Team 
+
+ Kimi K2: open agentic intelligence .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Li et al. (2023) 
+ J. Li, Y. Jiang, Y. Zhu, C. Wang, and H. Xu 
+
+ Accelerating distributed MoE training and inference with lina .
+
+ In USENIX ATC ,
+
+ Cited by: §8 .
+
+ Liang et al. (2025) 
+ Y. Liang, Z. Chen, P. Zuo, Z. Zhou, X. Chen, and Z. Yu 
+
+ Injecting adrenaline into llm serving: boosting resource utilization and throughput via attention disaggregation .
+
+ arXiv .
+
+ Cited by: §8 .
+
+ Lin et al. (2024) 
+ B. Lin, T. Peng, C. Zhang, M. Sun, L. Li, H. Zhao, W. Xiao, Q. Xu, X. Qiu, S. Li, Z. Ji, Y. Li, and W. Lin 
+
+ Infinite-llm: efficient llm service for long context with distattention and distributed kvcache .
+
+ In arXiv ,
+
+ Cited by: §8 .
+
+ Lin et al. (2025) 
+ Z. Lin, H. Xu, G. Chen, X. Zhang, and Y. Lu 
+
+ Bullet: boosting gpu utilization for llm serving via dynamic spatial-temporal orchestration .
+
+ arXiv .
+
+ Cited by: §8 .
+
+ Ma et al. (2020) 
+ L. Ma, Z. Xie, Z. Yang, J. Xue, Y. Miao, W. Cui, W. Hu, F. Yang, L. Zhang, and L. Zhou 
+
+ Rammer: enabling holistic deep learning compiler optimizations with rTasks .
+
+ In USENIX OSDI ,
+
+ Cited by: §8 .
+
+ MiniMax (2025) 
+ MiniMax 
+
+ MiniMax-m1: scaling test-time compute efficiently with lightning attention .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Mooncake Team (2025) 
+ Mooncake Team 
+
+ Deploying Kimi K2 with PD disaggregation and large-scale expert parallelism on 128 H200 GPUs .
+
+ Note: https://www.lmsys.org/blog/2025-07-20-k2-large-scale-ep/ 
+
+ Cited by: §2.4 .
+
+ NVIDIA Corporation (2024) 
+ NVIDIA Corporation 
+
+ NVIDIA multi-instance GPU user guide .
+
+ Note: https://docs.nvidia.com/datacenter/tesla/mig-user-guide/ 
+
+ Cited by: §1 ,
+ Table 1 ,
+ §4.1 ,
+ §8 .
+
+ NVIDIA (2025) 
+ NVIDIA 
+
+ CUDA programming guide .
+
+ Note: https://docs.nvidia.com/cuda/cuda-c-programming-guide 
+
+ Cited by: §1 ,
+ Table 1 ,
+ §4.1 .
+
+ NVIDIA (2026) 
+ NVIDIA 
+
+ Green Contexts .
+
+ Note: https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/green-contexts.html 
+
+ Cited by: §1 ,
+ §1 ,
+ §2.5 ,
+ Table 1 ,
+ §4.1 .
+
+ Patel et al. (2023) 
+ P. Patel, E. Choukse, C. Zhang, Í. Goiri, A. Shah, S. Maleki, and R. Bianchini 
+
+ Splitwise: efficient generative llm inference using phase splitting .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §2.4 ,
+ §8 .
+
+ Qin et al. (2025) 
+ R. Qin, Z. Li, W. He, J. Cui, H. Tang, F. Ren, T. Ma, S. Cai, Y. Zhang, M. Zhang, Y. Wu, W. Zheng, and X. Xu 
+
+ Mooncake: a kvcache-centric disaggregated architecture for llm serving .
+
+ ACM Trans. Storage .
+
+ Cited by: §1 ,
+ §2.4 ,
+ §8 .
+
+ Qwen Team (2025) 
+ Qwen Team 
+
+ Qwen3 technical report .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Shi et al. (2025) 
+ X. Shi, C. Cai, J. Du, Z. Zhu, X. Wei, and Z. Jia 
+
+ Nexus: taming throughput-latency tradeoff in llm serving via efficient gpu sharing .
+
+ arXiv .
+
+ Cited by: §1 ,
+ §2.5 ,
+ §2.5 ,
+ §8 .
+
+ Spector et al. (2025) 
+ B. Spector, J. Juravsky, S. Sul, O. Dugan, D. Lim, D. Fu, S. Arora, and C. Re 
+
+ Look ma, no bubbles! designing a low-latency megakernel for Llama-1B .
+
+ Note: https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles 
+
+ Cited by: §8 .
+
+ StepFun (2025) 
+ StepFun 
+
+ Step-3 is large yet affordable: model-system co-design for cost-effective decoding .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §1 ,
+ §2.3 ,
+ §2.5 ,
+ §7.1 ,
+ §8 .
+
+ Sun et al. (2026) 
+ X. Sun, S. Chen, P. Ma, Y. Chen, Z. Yuan, Z. Cao, H. Han, S. Cai, T. Ma, X. Shang, et al. 
+
+ Surviving partial rank failures in wide expert-parallel moe inference .
+
+ arXiv .
+
+ Cited by: §1 ,
+ §2.4 .
+
+ Tile-AI (2025) 
+ Tile-AI 
+
+ TileRT: tile-based runtime for ultra-low-latency LLM inference .
+
+ GitHub .
+
+ Note: https://github.com/tile-ai/TileRT 
+
+ Cited by: §8 .
+
+ Wang et al. (2025) 
+ C. Wang, P. Zuo, Z. Chen, Y. Liang, Z. Yu, and M. Yang 
+
+ Prefill-decode aggregation or disaggregation? unifying both for goodput-optimized llm serving .
+
+ arXiv .
+
+ Cited by: §8 .
+
+ Wei et al. (2026) 
+ X. Wei, C. Jin, T. Dai, Y. Zhong, S. Yu, C. Yang, B. Wu, Z. Zhang, J. Mai, Q. Zhu, et al. 
+
+ UltraEP: unleash moe training and inference on rack-scale nodes with near-optimal load balancing .
+
+ arXiv .
+
+ Cited by: §1 ,
+ §2.5 ,
+ §8 .
+
+ Wu et al. (2024) 
+ B. Wu, S. Liu, Y. Zhong, P. Sun, X. Liu, and X. Jin 
+
+ Loongserve: efficiently serving long-context large language models with elastic sequence parallelism .
+
+ In ACM SOSP ,
+
+ Cited by: §8 .
+
+ Wu et al. (2023) 
+ B. Wu, Z. Zhang, Z. Bai, X. Liu, and X. Jin 
+
+ Transparent GPU sharing in container clouds for deep learning workloads .
+
+ In USENIX NSDI ,
+
+ Cited by: §1 ,
+ Table 1 ,
+ §4.1 ,
+ §8 .
+
+ Wu et al. (2025) 
+ B. Wu, Z. Zhang, Y. Zhong, G. Huang, Y. Zhu, X. Liu, and X. Jin 
+
+ TokenLake: a unified segment-level prefix cache pool for fine-grained elastic long-context llm serving .
+
+ arXiv .
+
+ Cited by: §8 .
+
+ Xiaomi LLM-Core Team (2026) 
+ Xiaomi LLM-Core Team 
+
+ MiMo-V2-Flash technical report .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §2.1 .
+
+ Zhai et al. (2023) 
+ M. Zhai, J. He, Z. Ma, Z. Zong, R. Zhang, and J. Zhai 
+
+ SmartMoE: efficiently training Sparsely-Activated models through combining offline and online parallelization .
+
+ In USENIX ATC ,
+
+ Cited by: §8 .
+
+ Zhang et al. (2025a) 
+ S. Zhang, Q. Chen, W. Cui, H. Zhao, C. Xue, Z. Zheng, W. Lin, and M. Guo 
+
+ Improving gpu sharing performance through adaptive bubbleless spatial-temporal sharing .
+
+ In EuroSys ,
+
+ Cited by: §7.6 .
+
+ Zhang et al. (2025b) 
+ S. Zhang, N. Zheng, H. Lin, Z. Jiang, W. Bao, C. Jiang, Q. Hou, W. Cui, S. Zheng, L. Chang, Q. Chen, and X. Liu 
+
+ Comet: fine-grained computation-communication overlapping for mixture-of-experts .
+
+ In arXiv ,
+
+ Cited by: §8 .
+
+ Zhang et al. (2026) 
+ Z. Zhang, Y. Wang, Y. Zhao, J. Xiao, Q. Yang, X. Wang, J. Jiang, Q. Weng, R. Chen, S. Shi, A. N. Toosi, Y. Chen, and M. Yu 
+
+ Janus: disaggregating attention and experts for scalable MoE inference .
+
+ In arXiv ,
+
+ Cited by: §7.1 ,
+ §8 .
+
+ Zhao et al. (2025) 
+ C. Zhao, Z. Xu, L. Zhao, J. Li, C. Xu, A. Xu, S. Liu, K. Zhou, and K. Yu 
+
+ DeepGEMM: clean and efficient blas kernel library on gpu .
+
+ GitHub .
+
+ Note: https://github.com/deepseek-ai/DeepGEMM 
+
+ Cited by: §2.2 ,
+ §2.4 ,
+ §4.2 ,
+ §7.1 .
+
+ Zheng et al. (2024) 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng 
+
+ SGLang: efficient execution of structured language model programs .
+
+ In Neural Information Processing Systems ,
+
+ Cited by: §7.1 .
+
+ Zhong et al. (2024) 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang 
+
+ DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving .
+
+ In USENIX OSDI ,
+
+ Cited by: §1 ,
+ §2.4 ,
+ §2.5 ,
+ §8 .
+
+ Zhu et al. (2025a) 
+ K. Zhu, Y. Gao, Y. Zhao, L. Zhao, G. Zuo, Y. Gu, D. Xie, T. Tang, Q. Xu, Z. Ye, K. Kamahori, C. Lin, Z. Wang, S. Wang, A. Krishnamurthy, and B. Kasikci 
+
+ NanoFlow: towards optimal large language model serving throughput .
+
+ In USENIX OSDI ,
+
+ Cited by: §8 .
+
+ Zhu et al. (2025b) 
+ R. Zhu, Z. Jiang, C. Jin, P. Wu, C. A. Stuardo, D. Wang, X. Zhang, H. Zhou, H. Wei, Y. Cheng, J. Xiao, X. Zhang, L. Liu, H. Lin, L. Chang, J. Ye, X. Yu, X. Liu, X. Jin, and X. Liu 
+
+ MegaScale-Infer: serving mixture-of-experts at scale with disaggregated expert parallelism .
+
+ In arXiv ,
+
+ Cited by: §1 ,
+ §1 ,
+ §2.3 ,
+ §2.5 ,
+ §7.1 ,
+ §8 .
