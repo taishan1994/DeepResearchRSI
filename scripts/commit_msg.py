@@ -104,6 +104,21 @@ kernel 生成的方法谱系。核心判断：进展集中在生成质量，而�
 
 MESSAGES = {"framework": FRAMEWORK, "archives": ARCHIVES}
 
+TOOL = """\\
+chore(scripts): 加提交信息辅助脚本，避免 PowerShell 写入 BOM
+
+Windows PowerShell 的 Out-File -Encoding utf8 会写 BOM（EF BB BF），
+git commit -F 把它当成标题首字符，于是 git log --oneline 显示的
+标题前有个不可见字符，复制去搜索也匹配不上。
+
+本轮实际踩到：第一次提交的标题成了 ﻿feat(framework): ...，
+用 git reset --soft + 本脚本重写了一遍。
+
+用 Python 以 utf-8（无 BOM）+ LF 写文件，再交给 git commit -F。
+"""
+
+MESSAGES["tool"] = TOOL
+
 
 def main() -> int:
     key = sys.argv[1] if len(sys.argv) > 1 else ""
