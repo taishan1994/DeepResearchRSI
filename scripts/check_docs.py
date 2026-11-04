@@ -97,15 +97,17 @@ def main() -> int:
             # 而两处口径不一致时，检查器会误报「文档过期」。
             text = f.read_text(encoding="utf-8", errors="replace")
             total_lines += sum(1 for L in text.splitlines() if L.strip())
-    m = re.search(r"真实代码量 \| (\d+) 行", evo)
+    # 文档里写成「约 6400 行非空」——不写精确值，因为它随提交持续增长，
+    # 精确值必然过期。这里只校验量级（±25%），防止写成 640 或 64000。
+    m = re.search(r"真实代码量 \| 约 (\d+) 行", evo)
     if m:
         doc_lines = int(m.group(1))
         # 允许 ±5% 误差：文档写的是当时快照，且本脚本自身也在增加行数
-        if abs(total_lines - doc_lines) / max(doc_lines, 1) > 0.05:
-            FAILS.append(f"代码行数: 文档写 {doc_lines}，实际 {total_lines}"
-                         f"（差 {abs(total_lines - doc_lines)} 行，超 5%）")
+        if abs(total_lines - doc_lines) / max(doc_lines, 1) > 0.25:
+            FAILS.append(f"代码量级: 文档写约 {doc_lines}，实际 {total_lines}"
+                         f"（超 25%，量级可能写错）")
         else:
-            OKS.append(f"代码行数 = {doc_lines}（实际 {total_lines}，在 5% 内）")
+            OKS.append(f"代码量级 约 {doc_lines}（实际 {total_lines}，在 25% 内）")
 
     # ---- 各归档计数 ----
     # 文档第 5 节的表格：| `name` | 3002 | 0 | **0%** |
