@@ -1,0 +1,1374 @@
+Beyond Experience: Knowledge-Guided Evolution for NPU Kernel Generation 
+
+ Xi Chen
+
+ Affiliation:  Shenzhen Loop Area Institute (SLAI)
+
+ Affiliation:  Guangzhou University
+
+ Ming Shen
+
+ Affiliation:  Shenzhen Loop Area Institute (SLAI)
+
+ Affiliation:  Shanghai Jiao Tong University
+
+ Haotian Yan
+
+ Affiliation:  Shenzhen Loop Area Institute (SLAI)
+
+ Affiliation:  Southwestern University of Finance and Economics
+
+ Ruoyu Sun
+
+ Affiliation:  Shenzhen Loop Area Institute (SLAI)
+
+ Affiliation:  The Chinese University of Hong Kong, Shenzhen*Equal contribution
+
+ Tianjun Yao
+
+ Affiliation:  Shenzhen Loop Area Institute (SLAI)
+
+ Abstract 
+
+ LLM agents have become capable kernel engineers on mainstream GPU stacks, but
+they struggle on emerging accelerators such as Ascend NPUs, whose programming
+model is barely represented in pretraining data. Recent NPU agents address this
+gap largely through experience: they accumulate memory from their own
+generation and optimization trials and reuse it on later tasks. We argue that
+experience alone is not enough for kernel generation. An agent can only
+remember what it has tried, and it rarely tries a mechanism it does not know.
+As a result, such memory offers little help when a new operator calls for a
+different mechanism, and even familiar operators raise unseen situations as
+optimization proceeds. We present AscendEvolve , which grounds every step of an
+evolutionary kernel search in a large external knowledge base built from
+platform documentation, toolkit headers, and operator repositories. Because
+this corpus far exceeds any context window, AscendEvolve indexes it and routes
+each agent to a small, task-specific slice of evidence instead of the corpus
+itself. The retrieved knowledge seeds diverse implementation strategies, guides
+repair when a candidate fails, and constrains how strong candidates are
+recombined. On 53 Ascend C operators from CANN-Bench spanning four difficulty
+levels, AscendEvolve achieves an overall score of 71.39, improving over
+Reflexion and OpenEvolve by 11.6% and 17.2%. 
+
+ | 
+
+ 1 Introduction 
+
+ Trial-and-error agents learn from the programs they actually generate and evaluate. As a result, a memory built from past trials is naturally limited by what the agent has explored: it can reuse and refine discovered mechanisms, but does not guarantee access to mechanisms that have never appeared in its search. This motivates knowledge beyond self-generated experience. 
+
+ Recent work has demonstrated substantial progress in LLM-based kernel
+generation and optimization for GPUs. On CUDA and related programming stacks,
+iterative workflows that combine generation with compilation, execution, and
+profiling feedback can progressively improve both correctness and performance
+ ( Ouyang et al., 2025 ; Zhang et al., 2025 ; Wei et al., 2025 ; Baronio et al., 2025 ) .
+These results establish iterative execution feedback as an effective ingredient
+for kernel optimization on mature GPU ecosystems. The problem becomes
+considerably more challenging on specialized accelerator programming stacks for
+which general-purpose LLMs have demonstrated substantially lower capability—a
+difficulty well documented for domain-specific programming languages more
+broadly ( Joel et al., 2025 ) . On Huawei’s Ascend NPU
+ ( Liao et al., 2021 ) , recent work reports that general-purpose LLMs achieve
+very low success rates on complex kernel-generation tasks without
+domain-specific adaptation ( Cao et al., 2026 ) . 
+
+ Figure 1: Three situations in which an agent’s own trials offer no usable
+precedent while primary platform sources do: (a) a mechanism family absent
+from past trials, (b) a first-time failure midway through optimization, and
+(c) a motif carried across toolkit versions. Illustrative, not measured. 
+
+ Recent systems have addressed this difficulty in part by accumulating reusable
+experience from previous generation and optimization trajectories. Value-driven
+memory substantially improves functional correctness over zero-shot prompting
+ ( Zheng et al., 2026 ) , and experience mined from optimization trajectories
+yields consistent speedups on existing operators
+ ( Wu et al., 2026 ; Zhang et al., 2026 ) . These results provide strong
+evidence that reusable experience can substantially improve both feasibility
+and optimization efficiency. However, these systems necessarily construct their
+reusable evidence from trajectories that the agent has already proposed and
+evaluated. This suggests a complementary limitation: the usefulness of
+experience depends not only on how much is retained, but also on what the agent
+has managed to explore. 
+
+ We refer to this coverage constraint as
+ experience closure : the reusable evidence in a self-generated memory is
+derived from trajectories the agent has actually proposed and evaluated. As a
+result, such memory may provide limited guidance for mechanisms that have not
+yet appeared in those trajectories—particularly on platforms where the
+model’s familiarity with the programming stack is limited to begin with. 
+
+ Figure  1 shows three settings where self-generated
+experience provides limited guidance: 
+
+ (i) 
+
+ Coverage gap. An operator may
+require a mechanism family that no previous trajectory has explored; since such
+a mechanism is rarely proposed, it is also unlikely to be recorded. 
+
+ (ii) 
+
+ Repair gap. A familiar operator may encounter, midway through optimization,
+a constraint that has not appeared before—compiler diagnostics often identify
+the violated constraint without directly providing a valid alternative
+implementation. 
+
+ (iii) 
+
+ Validity gap. Experience collected under one
+software or hardware configuration may not transfer unchanged to another. 
+
+ Self-generated experience is not the only source of
+implementation evidence. Accelerator ecosystems expose additional information
+through programming guides, API definitions, installed headers, reference
+implementations, and vendor-maintained operator libraries  ( NVIDIA Corporation, 2017 ; Zhao et al., 2021 ) . These sources can
+provide mechanism and constraint information before the agent has encountered
+the corresponding trajectory itself. We therefore view primary platform
+knowledge and execution experience as complementary: platform knowledge can
+broaden the set of mechanisms the agent considers, while execution experience
+provides empirical evidence about which candidates are correct and efficient on
+the target device ( Wen et al., 2026 ) . Our goal is not to replace trial-and-error with retrieval, but to inform it. 
+
+ We present AscendEvolve , a system that grounds every stage of an evolutionary
+kernel search in primary platform sources. The design follows three principles: 
+
+ ①   Hierarchical and version-aware. Platform information is organized hierarchically and with version
+awareness: a shared, versioned corpus of documentation, installed headers, and
+vendor operator libraries is distilled into per-operator evidence before search
+begins, avoiding repeated processing of a large heterogeneous corpus. 
+
+ ②   Demand-driven retrieval. Rather than placing the corpus in context,
+ AscendEvolve routes each concrete implementation or optimization question to a
+small set of relevant sources. 
+
+ ③   Bidirectional interaction. Retrieved platform evidence and execution
+experience interact bidirectionally: retrieved mechanisms seed candidate
+implementations, each trial records an empirical verdict on the knowledge it
+was grounded in, and outcomes influence subsequent retrieval. 
+
+ Because retrieved
+evidence may suggest multiple plausible implementation mechanisms rather than a
+single canonical solution, AscendEvolve maintains several mechanism-distinct
+implementation lines and progressively selects and recombines promising design
+choices through evolutionary search. 
+
+ On 53 Ascend C operators spanning four difficulty levels,
+ AscendEvolve achieves an overall score of 71.39 , improving over
+Reflexion  ( Shinn et al., 2023 ) and OpenEvolve  ( Sharma, 2025 ) by
+ 11.6% and 17.2% , respectively, with the
+largest gains on the operator categories where prior agents have the
+lowest correctness coverage. On L4 operators, AscendEvolve reaches 35.0% 
+correctness coverage compared with 4.38% for Reflexion and 1.25% for
+OpenEvolve. Removing the knowledge base nearly halves the L3 score,
+showing how platform knowledge helps generate correct kernels.
+Our contributions are as follows: 
+
+ ① Experience closure. 
+We identify experience closure—a coverage limitation of
+experience-driven kernel agents on platforms outside the model’s
+familiarity—and characterize three settings where it is most pronounced. 
+
+ ② Method. 
+We propose AscendEvolve , which couples primary platform knowledge with
+procedural experience through hierarchical, demand-driven retrieval and
+bidirectional feedback within an evolutionary search that maintains
+mechanism-diverse implementation lines. 
+
+ ③ Evaluation. 
+We evaluate on 53 Ascend C operators from CANN-Bench  ( Gao et al., 2026 ) and show
+that knowledge grounding yields substantial gains, particularly on
+hard operators where experience-only methods have very low correctness
+coverage. We isolate the contribution of the knowledge base through
+ablation. 
+
+ 2 Problem Formulation 
+
+ Notation. 
+
+ Let o o denote an operator specified by an executable reference implementation and a set of test cases 𝒯 = { ( 𝐱 i , 𝐲 i ) } i = 1 N \mathcal{T}=\{(\mathbf{x}_{i},\mathbf{y}_{i})\}_{i=1}^{N} , where each ( 𝐱 i , 𝐲 i ) (\mathbf{x}_{i},\mathbf{y}_{i}) is an input–output pair.
+A candidate kernel x x is a compilable Ascend C program that implements o o .
+We write C ⁡ ( x ) ∈ [ 0 , 1 ] C(x)\in[0,1] for the fraction of test cases that x x passes under a fixed numerical-tolerance criterion, and L ⁡ ( x ) L(x) for the wall-clock latency of x x measured on the target device under a fixed profiling protocol.
+ 𝒦 G \mathcal{K}_{G} is a shared, static knowledge base of platform documentation, vendor libraries and machine-observed facts.
+ 𝒦 o \mathcal{K}_{o} is a per-operator knowledge base that fixes the task contract and links it to 𝒦 G \mathcal{K}_{G} .
+ ℰ \mathcal{E} is a dynamic experience store that accumulates trial records during search.
+ R ⁡ ( q ∣ 𝒦 o , 𝒦 G , ℰ ) R(q\mid\mathcal{K}_{o},\mathcal{K}_{G},\mathcal{E}) is a retrieval function that, given a concrete question q q , returns a small evidence pack 𝒞 \mathcal{C} from the knowledge bases, filtered by experience. 
+
+ Problem setup. 
+
+ The goal is to produce a kernel x ⋆ x^{\star} that is correct on all test cases and as fast as possible on the target device. We compare candidates with a correctness-first fitness 
+
+ | 
+ F ⁡ ( x ) = ( C ⁡ ( x ) , − L ⁡ ( x ) ) , F(x)=\bigl(C(x),\,-L(x)\bigr), | 
+ | 
+ (1) | 
+
+ ordered lexicographically: latency is compared only between candidates of equal correctness.
+The search is conducted by an LLM-based agent that, at each step t t , conditions on an evidence pack 
+
+ | 
+ 𝒞 t = R ⁡ ( q t ∣ 𝒦 o , 𝒦 G , ℰ < t ) \mathcal{C}_{t}=R\bigl(q_{t}\mid\mathcal{K}_{o},\mathcal{K}_{G},\mathcal{E}_{<t}\bigr) | 
+ | 
+ (2) | 
+
+ to propose, evaluate and refine candidates. The agent must maximize F F within T T LLM calls. 
+
+ 3 Method 
+
+ 3.1 Overview 
+
+ Existing agents search the space of candidate kernels with an LLM policy conditioned on experience ℰ < t \mathcal{E}_{<t} gathered from earlier trials. On a platform the LLM barely knows, this conditioning is not enough: the policy can only revisit and recombine what it has already tried, and a mechanism that lies outside its prior is never sampled in the first place. AscendEvolve adds a second source of information that does not depend on the agent’s own behavior: every decision is conditioned on the evidence pack 𝒞 t \mathcal{C}_{t} (Eq.  2 ), which retrieves version-checked platform facts and expert implementation patterns from the knowledge bases 𝒦 G \mathcal{K}_{G} and 𝒦 o \mathcal{K}_{o} , filtered by accumulated experience. The rest of this section describes how the knowledge bases are built (§ 3.2 ), how R R retrieves from a corpus far larger than any context window (§ 3.3 ), how knowledge and experience interact (§ 3.4 ), and how both drive a two-stage evolutionary search (§ 3.5 ). Figure  2 gives an overview. 
+
+ Figure 2: Overview of AscendEvolve . Retrieval draws a task-specific evidence
+pack from 𝒦 G \mathcal{K}_{G} and 𝒦 o \mathcal{K}_{o} . Stage I explores M M 
+mechanism-distinct lines as trees, keeping rejected branches as negative
+experience; Stage II transplants a donor mechanism into the best base after a
+compatibility check. Each trial writes a record that steers later retrieval. 
+
+ 3.2 Knowledge Base Construction 
+
+ Writing a kernel requires answers to three questions: what the operator must compute, what the platform permits, and how experts implement similar operators on it. The first is specific to each task. The other two are shared across tasks. We organize knowledge along this line. 
+
+ Shared knowledge base. 
+
+ 𝒦 G \mathcal{K}_{G} holds platform knowledge and is built from primary sources, not from hand-written summaries. It contains the official programming guide, API reference and compilable examples; the vendor’s open-source operator libraries, which expose production implementations across operator families; and facts recorded from the target machine, such as installed headers and the compiler in use. Each source d ∈ 𝒦 G d\in\mathcal{K}_{G} carries metadata m ⁡ ( d ) m(d) that records its toolkit version, hardware scope and trust level; this metadata induces an authority order ≻ \succ used during retrieval (§ 3.3 ). 𝒦 G \mathcal{K}_{G} is immutable during search. Appendix  A lists the sources and their statistics. 
+
+ Per-operator knowledge base. 
+
+ 𝒦 o \mathcal{K}_{o} fixes the task and tells the agent where to look. It has two parts. The contract freezes the operator semantics, the executable reference, the shape and dtype inventory, the target environment and the acceptance criteria; it is the sole authority on what the kernel must compute. The retrieval brief links the operator to 𝒦 G \mathcal{K}_{G} : it names the operator family, the closest sibling implementations and the relevant API entries, and it records any disagreement found between these sources and the contract. 𝒦 o \mathcal{K}_{o} is produced fully automatically by a preparation pass that runs once per operator before search begins, with no human editing, and it stores references into 𝒦 G \mathcal{K}_{G} , never copies. In one of our tasks, for example, the pass found that a closely related vendor operator places a numerical-stability constant differently from the executable reference. The brief records this mismatch, so later agents borrow the vendor’s tiling without its arithmetic. 
+
+ 3.3 Retrieval from a Large Knowledge Base 
+
+ 𝒦 G \mathcal{K}_{G} exceeds the context window by orders of magnitude, and most of it is irrelevant to any single decision. Two properties of kernel code make standard dense retrieval  ( Lewis et al., 2021 ) a poor fit. Queries are frequently exact symbols, and a nearly identical passage from a mismatched toolkit version is actively harmful, since it leads to code that looks right and does not compile. We therefore design R R as a hierarchical, demand-driven procedure with three steps. 
+
+ ①   Route. Retrieval is triggered by one concrete question q t q_{t} , such as how a given API handles tail elements, and never by the task as a whole. The retrieval brief in 𝒦 o \mathcal{K}_{o} , backed by a global index over 𝒦 G \mathcal{K}_{G} , maps q t q_{t} to a short list of candidate sources. This step reduces the search space from the whole corpus to a handful of files. 
+
+ ②   Filter. Candidates are checked against the target environment using m ⁡ ( d ) m(d) . Sources of a mismatched version are either dropped or kept as explicitly labeled leads. When two candidates disagree, the authority order ≻ \succ breaks the tie: facts observed on the target machine outrank official sources of the matching version, which outrank other versions and informal material. The disagreement itself is retained in the pack so that the agent is aware of it. 
+
+ ③   Read. The agent reads the surviving sources directly, locating the relevant region by exact symbol or path. Implementation patterns are returned with their surrounding code, because a tiling loop is meaningless without the declarations it relies on. 
+
+ If a question remains unresolved after these steps, the scope widens one level along the index. Each item in 𝒞 t \mathcal{C}_{t} keeps its source identity, so that decisions in the final kernel are traceable to evidence. Appendix  B gives the full procedure and an example pack. 
+
+ 3.4 Interaction between Knowledge and Experience 
+
+ Knowledge and experience answer different questions. Knowledge states what is possible and legal; experience states what worked, on this operator and this device. Neither is sufficient alone. Knowledge without experience cannot say which of several legal mechanisms is fastest, and experience without knowledge is confined to the mechanisms the LLM already knows. AscendEvolve couples the two in both directions. 
+
+ Knowledge shapes experience. 
+
+ Every trial starts from a hypothesis h t h_{t} that is grounded in an evidence pack, and the record written after evaluation keeps this link: 
+
+ | 
+ e t = ( p t , h t , 𝒞 t , F ⁡ ( x t ) , ℓ t ) , e_{t}=\bigl(p_{t},\;h_{t},\;\mathcal{C}_{t},\;F(x_{t}),\;\ell_{t}\bigr), | 
+ | 
+ (3) | 
+
+ where p t p_{t} is the parent candidate and ℓ t \ell_{t} is a short lesson. An experience record is thus more than a score attached to a code change. It is an empirical verdict on a piece of knowledge in a specific context, such as “the vectorized path from a sibling operator is valid here and reduces latency on large shapes” or “this API is documented but rejected by the installed compiler.” Because trials are seeded by retrieved mechanisms, the experience the agent accumulates covers regions of the design space that it would not have reached from its prior. 
+
+ Experience directs retrieval. 
+
+ The retrieval function in Eq.  2 is conditioned on ℰ < t \mathcal{E}_{<t} : the outcome of the last trial determines the next question (a compilation error routes to headers, a numerical mismatch to the reference and dtype constraints, a regression to profiles); evidence refuted for this operator is excluded from later packs; and when accumulated failures show that the current evidence is insufficient, retrieval widens its scope. In this way experience handles situations that arise only during optimization and that no static brief could anticipate. When knowledge and measurement disagree, the on-device result overrides documentation for the task at hand; the verdict is written to the task-local experience, never to 𝒦 G \mathcal{K}_{G} , keeping platform facts free of candidate-specific outcomes. 
+
+ 3.5 Knowledge-Grounded Evolutionary Search 
+
+ The search has two stages (Algorithm  1 ). Stage I explores mechanism-distinct implementation lines, and Stage II recombines the best of them. 
+
+ Stage I: tree exploration. 
+
+ The planner first proposes M M implementation lines that differ in mechanism, for example in tiling scheme, vectorization strategy or dtype-specialized path. Diversity comes from the different mechanisms found in the retrieved evidence, not from prompt perturbation. Each line then runs for K K iterations. In one iteration, following the role decomposition common to iterative code agents  ( Madaan et al., 2023 ; Shinn et al., 2023 ) , a planner selects an accepted parent and states one falsifiable hypothesis with its expected effect; a coder realizes it as a child candidate; a debugger applies bounded repairs that preserve the hypothesis; and an evaluator runs the build, correctness and latency gates in order. If the child improves F F , it becomes the next parent. Otherwise the line backtracks to an earlier accepted node and the planner forms a different hypothesis. The history of a line is therefore a tree. Rejected branches are kept as negative experience  ( Andrychowicz et al., 2017 ) , which prevents a harmful change from contaminating later candidates and records which assumptions are already falsified. 
+
+ Stage II: mechanism-level crossover. 
+
+ Stage I returns the best correct candidate of every line together with a summary of its mechanism, its per-case latency and its known weaknesses. Stage II treats these candidates as a population. The best candidate under F F serves as the base, and a donor is selected only if its mechanism addresses a specific weakness of the base, such as a slow shape regime or an inefficient tail path. Here the two information sources play complementary roles again: experience identifies which mechanism wins in which regime, and the knowledge base verifies whether the two mechanisms can coexist, in terms of tiling structure, dtype behavior and platform constraints. Crossover transplants the donor mechanism into the base instead of concatenating implementations. An offspring that improves F F becomes the new base, and a failed combination is recorded so that the pairing is not tried again. The search ends when the budget B B is spent or no compatible hypothesis remains, and the finalists are re-measured under the same protocol before the best kernel is returned. 
+
+ Algorithm 1 AscendEvolve 
+
+ 0: 
+
+  operator o o , shared KB 𝒦 G \mathcal{K}_{G} , lines M M , iterations K K , crossover budget B B 
+
+ 1: 
+
+   𝒦 o ← Prepare ​ ( o , 𝒦 G ) \mathcal{K}_{o}\leftarrow\textsc{Prepare}(o,\mathcal{K}_{G}) ;   ℰ ← ∅ \mathcal{E}\leftarrow\emptyset 
+
+ 2: 
+
+  propose M M mechanism-distinct lines from R ( ⋅ ∣ 𝒦 o , 𝒦 G , ℰ ) R(\cdot\mid\mathcal{K}_{o},\mathcal{K}_{G},\mathcal{E}) 
+
+ 3: 
+
+  {Stage I: tree exploration}
+
+ 4: 
+
+   for each line i = 1 , … , M i=1,\dots,M and k = 1 , … , K k=1,\dots,K do 
+
+ 5: 
+
+   select an accepted parent p p ; form question q q from ℰ \mathcal{E} 
+
+ 6: 
+
+    𝒞 ← R ⁡ ( q ∣ 𝒦 o , 𝒦 G , ℰ ) \mathcal{C}\leftarrow R(q\mid\mathcal{K}_{o},\mathcal{K}_{G},\mathcal{E}) ⊳ \triangleright route, filter, read
+
+ 7: 
+
+   plan hypothesis h h ; generate child x x ; repair if needed
+
+ 8: 
+
+   evaluate F ⁡ ( x ) F(x) ;   ℰ ← ℰ ∪ { ( p , h , 𝒞 , F ⁡ ( x ) , ℓ ) } \mathcal{E}\leftarrow\mathcal{E}\cup\{(p,h,\mathcal{C},F(x),\ell)\} 
+
+ 9: 
+
+   accept x x as new parent if F F improves, else backtrack
+
+ 10: 
+
+   end for 
+
+ 11: 
+
+   x ⋆ ← x^{\star}\leftarrow best candidate over all lines
+
+ 12: 
+
+  {Stage II: mechanism-level crossover}
+
+ 13: 
+
+   for b = 1 , … , B b=1,\dots,B do 
+
+ 14: 
+
+   choose donor x ′ x^{\prime} whose mechanism addresses a weakness of x ⋆ x^{\star} ⊳ \triangleright from ℰ \mathcal{E} 
+
+ 15: 
+
+    if mechanisms are incompatible under 𝒦 o , 𝒦 G \mathcal{K}_{o},\mathcal{K}_{G} then continue 
+
+ 16: 
+
+    x ′′ ← Crossover ​ ( x ⋆ , x ′ ) x^{\prime\prime}\leftarrow\textsc{Crossover}(x^{\star},x^{\prime}) ; evaluate; update ℰ \mathcal{E} 
+
+ 17: 
+
+    if F ⁡ ( x ′′ ) ≻ F ⁡ ( x ⋆ ) F(x^{\prime\prime})\succ F(x^{\star}) then x ⋆ ← x ′′ x^{\star}\leftarrow x^{\prime\prime} 
+
+ 18: 
+
+   end for 
+
+ 19: 
+
+   return x ⋆ x^{\star} after re-measurement
+
+ 4 Experiments 
+
+ 4.1 Experimental Setup 
+
+ Dataset. 
+
+ We evaluate on CANN-Bench  ( Gao et al., 2026 ) , using all 53 public operators across four difficulty levels, with 20 test cases per operator (1,060 cases in total). The benchmark progresses from relatively simple elementwise and Vector-Core operators (L1–L2) to increasingly complex fused Vector–Cube workloads (L3–L4), allowing us to examine how the methods behave as implementation requirements become more specialized. 
+
+ Baselines. 
+
+ We compare against two test-time search paradigms that form a natural progression. Reflexion   ( Shinn et al., 2023 ) represents sequential experience-based refinement using execution feedback. OpenEvolve   ( Sharma, 2025 ) represents population-based evolutionary search. All methods use GPT-5.5 with medium reasoning effort as the backbone, with Codex as Reflexion’s agent harness, and the same benchmark inputs and evaluator throughout. 
+
+ Evaluation. 
+
+ We follow the staged evaluation logic of CANN-Bench  ( Gao et al., 2026 ) but recalibrate its performance component for our target NPU. Build is a binary result for each operator’s selected kernel. Runtime measures whether each test case executes without failure, and correctness checks its output against the reference implementation. A case receives performance credit only if it passes correctness and both the candidate and torch_npu have valid positive latency measurements. Build coverage is operator-level; all other coverage is case-level. 
+
+ Since the published CANN-Bench performance anchors are hardware-specific, we use the latency of the corresponding torch_npu implementation as a common baseline. Let b o b_{o} indicate whether operator o o builds, and let r o , i r_{o,i} and c o , i c_{o,i} indicate whether case i i runs and passes correctness, respectively. We define R o , i = b o ​ r o , i R_{o,i}=b_{o}r_{o,i} and A o , i = R o , i ​ c o , i A_{o,i}=R_{o,i}c_{o,i} , so a build failure gives all 20 cases zero credit. The first score component is ∑ i = 1 20 R o , i \sum_{i=1}^{20}R_{o,i} : each case that runs after a successful build earns one point. The score for operator o o is 
+
+ | 
+ S o = 100 ​ [ 1 20 ​ ∑ i = 1 20 ( 0.2 ​ R o , i + A o , i ​ ( 0.3 + 0.5 ​ P o , i ) ) ] , S_{o}=100\left[\frac{1}{20}\sum_{i=1}^{20}\left(0.2R_{o,i}+A_{o,i}\left(0.3+0.5P_{o,i}\right)\right)\right], | 
+ | 
+ (4) | 
+
+ where P o , i = clip ⁡ ( T torch , o , i / T cand , o , i ,  0.5 ,  4 ) P_{o,i}=\operatorname{clip}\!\bigl(\sqrt{T_{\mathrm{torch},o,i}/T_{\mathrm{cand},o,i}},\;0.5,\;4\bigr) when both latencies are valid and positive, and P o , i = 0 P_{o,i}=0 otherwise. Thus, 100 corresponds to full correctness with torch_npu -level performance when all cases have valid latencies, while faster correct kernels may score above 100. We macro-average operator scores so each contributes equally. 
+
+ 4.2 Main Results 
+
+ Table 1: Main results on CANN-Bench. Build is reported over operators; runtime, correctness and performance coverage are reported over test cases. Best score per level in bold . 
+
+ Level | 
+ Method | 
+
+ Build 
+
+ (%) 
+ | 
+
+ Runtime 
+
+ cases (%) 
+ | 
+
+ Correct 
+
+ cases (%) 
+ | 
+
+ Perf. 
+
+ cases (%) 
+ | 
+
+ Score 
+
+ ↑ \uparrow 
+ | 
+
+ L1 (8) | 
+ Reflexion | 
+ 100.00 | 
+ 100.00 | 
+ 96.25 | 
+ 96.25 | 
+ 109.58 | 
+
+ OpenEvolve | 
+ 100.00 | 
+ 100.00 | 
+ 100.00 | 
+ 100.00 | 
+ 100.37 | 
+
+ AscendEvolve | 
+ 100.00 | 
+ 100.00 | 
+ 95.63 | 
+ 95.63 | 
+ 111.18 | 
+
+ L2 (16) | 
+ Reflexion | 
+ 100.00 | 
+ 100.00 | 
+ 99.06 | 
+ 91.56 | 
+ 81.38 | 
+
+ OpenEvolve | 
+ 100.00 | 
+ 100.00 | 
+ 77.50 | 
+ 65.94 | 
+ 71.27 | 
+
+ AscendEvolve | 
+ 100.00 | 
+ 100.00 | 
+ 85.63 | 
+ 78.75 | 
+ 87.84 | 
+
+ L3 (21) | 
+ Reflexion | 
+ 100.00 | 
+ 85.48 | 
+ 61.19 | 
+ 41.90 | 
+ 53.56 | 
+
+ OpenEvolve | 
+ 85.71 | 
+ 79.76 | 
+ 66.43 | 
+ 47.86 | 
+ 57.84 | 
+
+ AscendEvolve | 
+ 100.00 | 
+ 90.48 | 
+ 59.76 | 
+ 48.33 | 
+ 56.94 | 
+
+ L4 (8) | 
+ Reflexion | 
+ 87.50 | 
+ 48.13 | 
+ 4.38 | 
+ 0.00 | 
+ 10.94 | 
+
+ OpenEvolve | 
+ 50.00 | 
+ 41.25 | 
+ 1.25 | 
+ 0.63 | 
+ 8.78 | 
+
+ AscendEvolve | 
+ 87.50 | 
+ 86.88 | 
+ 35.00 | 
+ 35.00 | 
+ 36.63 | 
+
+ Overall (53) | 
+ Reflexion | 
+ 98.11 | 
+ 86.42 | 
+ 69.34 | 
+ 58.77 | 
+ 63.98 | 
+
+ OpenEvolve | 
+ 86.79 | 
+ 83.11 | 
+ 65.00 | 
+ 54.06 | 
+ 60.91 | 
+
+ AscendEvolve | 
+ 98.11 | 
+ 94.25 | 
+ 69.25 | 
+ 62.64 | 
+ 71.39 | 
+
+ AscendEvolve achieves the highest overall score (71.39), improving over Reflexion and OpenEvolve by 11.6% and 17.2%, respectively (Table  1 ). The source of the gain changes with difficulty. On L1–L2, where executability is already high, improvements come from stronger optimization rather than broader coverage. On L4, the bottleneck shifts to implementation feasibility: AscendEvolve reaches 35.0% correctness coverage, compared with 4.38% for Reflexion and 1.25% for OpenEvolve. L3 is more mixed: OpenEvolve obtains a slightly higher final score, while AscendEvolve achieves substantially higher build and runtime coverage. 
+
+ Observation 1. External knowledge becomes increasingly important when the challenge is no longer merely optimizing a valid implementation, but finding a valid implementation mechanism . 
+
+ 4.3 Where Do the Gains Come From? 
+
+ Table 2: Overall score decomposition. Successful runs contribute ∑ i R o , i \sum_{i}R_{o,i} points per operator, one per case that runs after a successful build. 
+
+ Method | 
+
+ Successful 
+
+ runs (pts) 
+ | 
+
+ Correct. 
+
+ score 
+ | 
+
+ Perf. 
+
+ score 
+ | 
+
+ Score 
+
+ ↑ \uparrow 
+ | 
+
+ Build 
+
+ (%) 
+ | 
+
+ Runtime 
+
+ cases (%) 
+ | 
+
+ Correct 
+
+ cases (%) 
+ | 
+
+ Perf. 
+
+ cases (%) 
+ | 
+
+ AscendEvolve | 
+ 18.85 | 
+ 20.77 | 
+ 31.77 | 
+ 71.39 | 
+ 98.11 | 
+ 94.25 | 
+ 69.25 | 
+ 62.64 | 
+
+ Reflexion | 
+ 17.28 | 
+ 20.80 | 
+ 25.90 | 
+ 63.98 | 
+ 98.11 | 
+ 86.42 | 
+ 69.34 | 
+ 58.77 | 
+
+ OpenEvolve | 
+ 16.62 | 
+ 19.50 | 
+ 24.79 | 
+ 60.91 | 
+ 86.79 | 
+ 83.11 | 
+ 65.00 | 
+ 54.06 | 
+
+ The gain over Reflexion comes primarily from optimization rather than additional correctness: the two methods have nearly identical correctness coverage (69.25% vs. 69.34%), while AscendEvolve ’s performance score increases from 25.90 to 31.77 and accounts for 79.2% of the overall improvement (Table  2 ). Against OpenEvolve, runtime, correctness and performance all improve. 
+
+ Observation 2. Knowledge grounding serves two roles : it improves the quality of valid kernels and prevents search from being lost in invalid implementations. 
+
+ 4.4 Does External Knowledge Help Beyond Experience? 
+
+ Table 3: Level 3 knowledge-base ablation. 
+
+ Metric 
+ | 
+ No KB | 
+ With KB | 
+ Δ \Delta | 
+
+ Build coverage 
+ | 
+ 61.90% | 
+ 100.00% | 
+ ↑ \uparrow  38.10 | 
+
+ Runtime-case coverage 
+ | 
+ 57.86% | 
+ 90.48% | 
+ ↑ \uparrow  32.62 | 
+
+ Correct-case coverage 
+ | 
+ 40.24% | 
+ 59.76% | 
+ ↑ \uparrow  19.52 | 
+
+ Performance-case coverage 
+ | 
+ 17.86% | 
+ 48.33% | 
+ ↑ \uparrow  30.48 | 
+
+ Score ↑ \uparrow 
+ | 
+ 29.49 | 
+ 56.94 | 
+ ↑ \uparrow  27.45 | 
+
+ Table 4: Stage-wise synthesis outcomes. 
+
+ Level | 
+
+ Stage 2 vs. Stage 1 
+
+ relative gain (%) ↑ \uparrow 
+ | 
+
+ Adoption 
+
+ rate (%) ↑ \uparrow 
+ | 
+
+ L1 | 
+ 4.02 | 
+ 62.5 | 
+
+ L2 | 
+ 3.26 | 
+ 87.5 | 
+
+ L3 | 
+ 1.88 | 
+ 25.0 | 
+
+ Removing the knowledge base causes failures throughout the evaluation pipeline: build coverage falls from 100% to 61.9%, and performance coverage from 48.3% to 17.9% (Table  4 ). The effect is therefore not limited to making correct kernels faster. External knowledge allows substantially more implementations to survive compilation, execution and correctness validation before performance optimization can even begin. As a result, the L3 score nearly doubles from 29.49 to 56.94. 
+
+ This effect is also visible in strategy diversity (Table  6 ): the KB increases planned strategies only from 5.25 to 6.75 per operator, but increases full-correct strategies from 0.25 to 1.30 —a more than 5 × \bm{\times} increase. Knowledge therefore does not merely make the agent propose more strategies; it makes a much larger fraction of distinct strategies survive platform and correctness constraints. 
+
+ Observation 3. Knowledge improves effective , not merely nominal, exploration. 
+
+ 4.5 When Does Mechanism-Level Synthesis Help? 
+
+ Stage 2 improves the final set over Stage 1 by 4.02% on L1, 3.26% on L2 and 1.88% on L3 (Table  4 ). Adoption is highest on L2 at 87.5%, followed by L1 at 62.5% and L3 at 25.0%. The results indicate that synthesis is most effective when optimization mechanisms can be transferred while preserving validated semantics. 
+
+ Stage 2 is effective when a donor mechanism matches a recurring input regime and can be integrated without changing the validated computation. Cases outside that regime retain the Stage 1 path and show little change. Crossover can be neutral or harmful when it addresses only a narrow correctness edge case, replaces a parallel implementation with a less efficient path, or introduces no substantive mechanism change. This pattern is consistent with the high adoption rate at L2 and the lower adoption and limited uplift at L3.
+Appendix  F gives representative stage-wise case studies. 
+
+ Observation 4. Synthesis is most effective when mechanisms can be composed without altering correctness-sensitive computation . 
+
+ 4.6 Does Knowledge Enable More Effective Exploration? 
+
+ Table 5: Archive-visible implementation diversity on 20 common Level 2–3 operators. AscendEvolve is evaluated using its Stage 1 warmup candidates. 
+
+ Method | 
+
+ Strategy 
+
+ sig./op 
+
+ ↑ \uparrow 
+ | 
+
+ Kernel 
+
+ src./op 
+
+ ↑ \uparrow 
+ | 
+
+ Pairwise 
+
+ src. disagr. 
+
+ ↑ \uparrow 
+ | 
+
+ Pairwise 
+
+ struct. dist. 
+
+ ↑ \uparrow 
+ | 
+
+ AscendEvolve (S1) | 
+ 6.75 | 
+ 13.90 | 
+ 95.1% | 
+ 0.303 | 
+
+ Reflexion | 
+ 1.60 | 
+ 2.70 | 
+ 50.7% | 
+ 0.081 | 
+
+ OpenEvolve | 
+ 1.30 | 
+ 1.65 | 
+ 19.6% | 
+ 0.049 | 
+
+ Table 6: Correctness-effective planned-strategy diversity during warmup on 20 Level 3 operators. 
+
+ Metric 
+ | 
+
+ With 
+
+ KB 
+ | 
+
+ No 
+
+ KB 
+ | 
+
+ Planned strategy sig. / op 
+ | 
+ 6.75 | 
+ 5.25 | 
+
+ Full-correct-eff. sig. / op 
+ | 
+ 1.30 | 
+ 0.25 | 
+
+ Full-correct strategy survival 
+ | 
+ 19.3% | 
+ 4.8% | 
+
+ Ops with ≥ 1 \geq 1 full-correct 
+ | 
+ 40.0% | 
+ 20.0% | 
+
+ AscendEvolve explores substantially more mechanism-distinct implementations than Reflexion and OpenEvolve (Table  6 ). More importantly, this diversity is not merely syntactic: with knowledge grounding, substantially more planned mechanisms survive correctness filtering (Table  6 ). The KB increases full-correct strategy survival from 4.8% to 19.3%, supporting the role of the knowledge base as a source of viable mechanisms rather than simply additional prompting context. 
+
+ 5 Related Work 
+
+ LLM-based kernel generation. 
+
+ LLM-based kernel generation has progressed rapidly on CUDA and Triton.
+ KernelBench   ( Ouyang et al., 2025 ) established a systematic benchmark for functional correctness and performance, while subsequent work explored multi-agent refinement  ( Zhang et al., 2025 ; Wei et al., 2025 ) , reinforcement learning with execution feedback  ( Baronio et al., 2025 ; Li et al., 2025 ; Woo et al., 2025 ; Zhu et al., 2025 ) , and evolutionary search  ( Novikov et al., 2025 ; Liao et al., 2025 ) .
+Kernel generation is more challenging on specialized accelerator stacks such as Ascend C, where general-purpose LLMs show limited out-of-the-box capability  ( Cao et al., 2026 ) .
+Recent work addresses this gap through domain adaptation  ( Cao et al., 2026 ) , constrained intermediate representations  ( Wen et al., 2025 ) , external knowledge augmentation  ( Wen et al., 2026 ; Qiu et al., 2026 ) , and reusable experience accumulated from previous search trajectories  ( Zheng et al., 2026 ; Wu et al., 2026 ) .
+Our work focuses on the complementarity between the latter two directions. 
+
+ Test-time search and experience for code agents. 
+
+ Test-time scaling improves agent performance through additional refinement, search, memory, or population-based exploration  ( Madaan et al., 2023 ; Shinn et al., 2023 ; Yao et al., 2023 ; Wang et al., 2023 ; Novikov et al., 2025 ) .
+For kernel generation, compilation and execution provide strong verification signals, motivating iterative and evolutionary search guided by previous outcomes  ( Liao et al., 2025 ; Zhang et al., 2026 ; Zheng et al., 2026 ) .
+However, increasing the number of trials does not necessarily increase the diversity of mechanisms explored when new candidates are generated primarily from previously discovered trajectories.
+Our method complements experience-driven search with retrieved platform knowledge, using external evidence to seed mechanism-diverse implementation lines and execution feedback to evolve them.
+Appendix  C relates our setting to automated kernel optimization before LLMs and to retrieval-augmented generation for code. 
+
+ 6 Conclusion and Limitations 
+
+ AscendEvolve combines trial experience with hierarchical, demand-driven platform knowledge for evolutionary kernel search. On 53 Ascend C operators, it improves over Reflexion and OpenEvolve by 11.6% and 17.2%; ablations show that knowledge expands both the pool of candidates eligible for optimization and the diversity of correct mechanisms. 
+
+ Limitations. 
+
+ Performance varies by difficulty: on the hardest operators, retrieved knowledge improves executability more than numerical correctness, but cannot guarantee semantic correctness. 
+
+ AI Use Statement 
+
+ Large language models (LLMs) were used as general-purpose assistance tools in a limited capacity during the preparation of this work. Specifically, they assisted with grammar and spelling correction, implementation support for the proposed method and experiments, and manuscript formatting. The research ideas, methodological choices, experimental design, analysis and interpretation of results, and conclusions were developed and determined by the authors. All LLM-assisted code and textual revisions were independently reviewed, tested, and verified by the authors before being incorporated into this work. The authors take full responsibility for the scientific content and final presentation of the paper. 
+
+ References 
+
+ Andrychowicz et al. (2017) 
+ M. Andrychowicz, F. Wolski, A. Ray, J. Schneider, R. Fong, P. Welinder, B. McGrew, J. Tobin, P. Abbeel, and W. Zaremba 
+
+ Hindsight experience replay .
+
+ Advances in neural information processing systems 30 .
+
+ Cited by: §3.5 .
+
+ Baghdadi et al. (2019) 
+ R. Baghdadi, J. Ray, M. B. Romdhane, E. Del Sozzo, A. Akkas, Y. Zhang, P. Suriana, S. Kamil, and S. Amarasinghe 
+
+ Tiramisu: a polyhedral compiler for expressing fast and portable code .
+
+ In 2019 IEEE/ACM International Symposium on Code Generation and Optimization (CGO) ,
+
+ Cited by: Appendix C .
+
+ Baronio et al. (2025) 
+ C. Baronio, P. Marsella, B. Pan, S. Guo, and S. Alberti 
+
+ Kevin: multi-turn RL for generating CUDA kernels .
+
+ arXiv preprint arXiv:2507.11948 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Bondhugula et al. (2008) 
+ U. Bondhugula, A. Hartono, J. Ramanujam, and P. Sadayappan 
+
+ A practical automatic polyhedral parallelizer and locality optimizer .
+
+ In The ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI) ,
+
+ Cited by: Appendix C .
+
+ Cao et al. (2026) 
+ X. Cao, J. Zhai, P. Li, Z. Hu, C. Yan, B. Mu, G. Fang, B. She, J. Li, Y. Su, et al. 
+
+ AscendKernelGen: a systematic study of LLM-based kernel generation for neural processing units .
+
+ arXiv preprint arXiv:2601.07160 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Chen et al. (2018) 
+ T. Chen, T. Moreau, Z. Jiang, L. Zheng, E. Yan, H. Shen, M. Cowan, L. Wang, Y. Hu, L. Ceze, et al. 
+
+ TVM: an automated end-to-end optimizing compiler for deep learning .
+
+ In The 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+
+ pp. 578–594 .
+
+ Cited by: Appendix C .
+
+ Gao et al. (2026) 
+ X. Gao, D. Pan, Y. Su, J. Li, B. Du, F. Zhu, C. Ma, J. Fan, Q. Liao, C. Hu, et al. 
+
+ CANN bench: benchmarking agent generated kernels against real npu and algorithmic limits .
+
+ arXiv preprint arXiv:2607.20518 .
+
+ Cited by: 3rd item ,
+ §4.1 ,
+ §4.1 .
+
+ Joel et al. (2025) 
+ S. Joel, J. J. Wu, and F. H. Fard 
+
+ A survey on llm-based code generation for low-resource and domain-specific programming languages .
+
+ External Links: 2410.03981 ,
+ Link 
+
+ Cited by: §1 .
+
+ Kocetkov et al. (2022) 
+ D. Kocetkov, R. Li, L. B. Allal, J. Li, C. Mou, C. M. Ferrandis, Y. Jernite, M. Mitchell, S. Hughes, T. Wolf, et al. 
+
+ The stack: 3 tb of permissively licensed source code .
+
+ arXiv preprint arXiv:2211.15533 .
+
+ Cited by: Appendix C .
+
+ Lewis et al. (2021) 
+ P. Lewis, E. Perez, A. Piktus, F. Petroni, V. Karpukhin, N. Goyal, H. Küttler, M. Lewis, W. Yih, T. Rocktäschel, S. Riedel, and D. Kiela 
+
+ Retrieval-augmented generation for knowledge-intensive NLP tasks .
+
+ External Links: 2005.11401 ,
+ Link 
+
+ Cited by: Appendix C ,
+ §3.3 .
+
+ Li et al. (2025) 
+ S. Li, Z. Wang, Y. He, Y. Li, Q. Shi, J. Li, Y. Hu, W. Che, X. Han, Z. Liu, et al. 
+
+ AutoTriton: automatic triton programming with reinforcement learning in LLMs .
+
+ arXiv preprint arXiv:2507.05687 .
+
+ Cited by: §5 .
+
+ Liao et al. (2025) 
+ G. Liao, H. Qin, Y. Wang, A. Golden, M. Kuchnik, Y. Yetim, J. J. Ang, C. Fu, Y. He, S. Hsia, et al. 
+
+ KernelEvolve: scaling agentic kernel coding for heterogeneous AI accelerators at meta .
+
+ arXiv preprint arXiv:2512.23236 .
+
+ Cited by: §5 ,
+ §5 .
+
+ Liao et al. (2021) 
+ H. Liao, J. Tu, J. Xia, H. Liu, X. Zhou, H. Yuan, and Y. Hu 
+
+ Ascend: a scalable and unified architecture for ubiquitous deep neural network computing : industry track paper .
+
+ In 2021 IEEE International Symposium on High-Performance Computer Architecture (HPCA) ,
+
+ Vol. , pp. 789–801 .
+
+ External Links: Document 
+
+ Cited by: §1 .
+
+ Lu et al. (2022) 
+ S. Lu, N. Duan, H. Han, D. Guo, S. Hwang, and A. Svyatkovskiy 
+
+ ReACC: a retrieval-augmented code completion framework .
+
+ External Links: 2203.07722 ,
+ Link 
+
+ Cited by: Appendix C .
+
+ Madaan et al. (2023) 
+ A. Madaan, N. Tandon, P. Gupta, S. Hallinan, L. Gao, S. Wiegreffe, U. Alon, N. Dziri, S. Prabhumoye, Y. Yang, S. Gupta, B. P. Majumder, K. Hermann, S. Welleck, A. Yazdanbakhsh, and P. Clark 
+
+ Self-refine: iterative refinement with self-feedback .
+
+ External Links: 2303.17651 ,
+ Link 
+
+ Cited by: §3.5 ,
+ §5 .
+
+ Novikov et al. (2025) 
+ A. Novikov, N. Vũ, M. Eisenberger, E. Dupont, P. Huang, A. Z. Wagner, S. Shirobokov, B. Kozlovskii, F. J. R. Ruiz, A. Mehrabian, M. P. Kumar, A. See, S. Chaudhuri, G. Holland, A. Davies, S. Nowozin, P. Kohli, and M. Balog 
+
+ AlphaEvolve: a coding agent for scientific and algorithmic discovery .
+
+ External Links: 2506.13131 ,
+ Link 
+
+ Cited by: §5 ,
+ §5 .
+
+ NVIDIA Corporation (2017) 
+ NVIDIA Corporation 
+
+ CUTLASS: CUDA templates for linear algebra subroutines .
+
+ Note: https://github.com/NVIDIA/cutlass Accessed: 2026-05-07 
+
+ Cited by: §1 .
+
+ Ouyang et al. (2025) 
+ A. Ouyang, S. Guo, S. Arora, A. L. Zhang, W. Hu, C. Ré, and A. Mirhoseini 
+
+ KernelBench: can LLMs write efficient GPU kernels? .
+
+ arXiv preprint arXiv:2502.10517 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Parvez et al. (2021) 
+ M. R. Parvez, W. Ahmad, S. Chakraborty, B. Ray, and K. Chang 
+
+ Retrieval augmented code generation and summarization .
+
+ In Findings of the Association for Computational Linguistics: EMNLP 2021 , M. Moens, X. Huang, L. Specia, and S. W. Yih (Eds.) ,
+
+ Punta Cana, Dominican Republic , pp. 2719–2734 .
+
+ External Links: Link ,
+ Document 
+
+ Cited by: Appendix C .
+
+ Qiu et al. (2026) 
+ J. Qiu, Z. Wang, Y. Sun, Z. Ma, P. Guo, and Q. Zhang 
+
+ AgenticCANN: automated ascend c operator generation via knowledge-augmented agentic evolution .
+
+ arXiv preprint arXiv:2607.26661 .
+
+ Cited by: Appendix C ,
+ §5 .
+
+ Ragan-Kelley et al. (2013) 
+ J. Ragan-Kelley, C. Barnes, A. Adams, S. Paris, F. Durand, and S. Amarasinghe 
+
+ Halide: a language and compiler for optimizing parallelism, locality, and recomputation in image processing pipelines .
+
+ In The 34th ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI) ,
+
+ Cited by: Appendix C .
+
+ Sharma (2025) 
+ A. Sharma 
+
+ OpenEvolve: an open-source evolutionary coding agent .
+
+ Note: https://github.com/algorithmicsuperintelligence/openevolve 
+
+ External Links: Link 
+
+ Cited by: §1 ,
+ §4.1 .
+
+ Shinn et al. (2023) 
+ N. Shinn, F. Cassano, A. Gopinath, K. Narasimhan, and S. Yao 
+
+ Reflexion: language agents with verbal reinforcement learning .
+
+ Advances in neural information processing systems 36 , pp. 8634–8652 .
+
+ Cited by: §1 ,
+ §3.5 ,
+ §4.1 ,
+ §5 .
+
+ Verdoolaege et al. (2013) 
+ S. Verdoolaege, J. Carlos Juega, A. Cohen, J. Ignacio Gomez, C. Tenllado, and F. Catthoor 
+
+ Polyhedral parallel code generation for CUDA .
+
+ ACM Transactions on Architecture and Code Optimization (TACO) 9 ( 4 ), pp. 1–23 .
+
+ Cited by: Appendix C .
+
+ Wang et al. (2023) 
+ G. Wang, Y. Xie, Y. Jiang, A. Mandlekar, C. Xiao, Y. Zhu, L. Fan, and A. Anandkumar 
+
+ Voyager: an open-ended embodied agent with large language models .
+
+ arXiv preprint arXiv:2305.16291 .
+
+ Cited by: §5 .
+
+ Wei et al. (2025) 
+ A. Wei, T. Sun, Y. Seenichamy, H. Song, A. Ouyang, A. Mirhoseini, K. Wang, and A. Aiken 
+
+ Astra: a multi-agent system for GPU kernel performance optimization .
+
+ arXiv preprint arXiv:2509.07506 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Wen et al. (2026) 
+ J. Wen, R. Zhuang, Y. Xu, P. Li, R. Zou, H. Chen, C. Wan, P. Yang, W. Chen, and Y. Wang 
+
+ Hawk: harnessing hardware-aware knowledge for high-performance npu kernel generation .
+
+ arXiv preprint arXiv:2607.01590 .
+
+ Cited by: Appendix C ,
+ §1 ,
+ §5 .
+
+ Wen et al. (2025) 
+ Z. Wen, S. Shao, Z. Li, Y. Ge, T. Xu, Y. Lin, and T. Zhang 
+
+ AscendCraft: automatic ascend npu kernel generation via dsl-guided transcompilation .
+
+ arXiv preprint arXiv:2601.22760 .
+
+ Cited by: §5 .
+
+ Woo et al. (2025) 
+ J. Woo, S. Zhu, A. Nie, Z. Jia, Y. Wang, and Y. Park 
+
+ TritonRL: training LLMs to think and code triton without cheating .
+
+ arXiv preprint arXiv:2510.17891 .
+
+ Cited by: §5 .
+
+ Wu et al. (2026) 
+ J. Wu, Z. Huang, W. Li, C. Shen, J. Sheng, and X. Wang 
+
+ AscendOptimizer: episodic agent for ascend npu operator optimization .
+
+ arXiv preprint arXiv:2603.23566 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Yao et al. (2023) 
+ S. Yao, D. Yu, J. Zhao, I. Shafran, T. L. Griffiths, Y. Cao, and K. Narasimhan 
+
+ Tree of thoughts: deliberate problem solving with large language models .
+
+ External Links: 2305.10601 ,
+ Link 
+
+ Cited by: §5 .
+
+ Zhai et al. (2023) 
+ Y. Zhai, Y. Zhang, S. Liu, X. Chu, J. Peng, J. Ji, and Y. Zhang 
+
+ TLP: a deep learning-based cost model for tensor program tuning .
+
+ In The 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) ,
+
+ Cited by: Appendix C .
+
+ Zhang et al. (2023) 
+ F. Zhang, B. Chen, Y. Zhang, J. Keung, J. Liu, D. Zan, Y. Mao, J. Lou, and W. Chen 
+
+ RepoCoder: repository-level code completion through iterative retrieval and generation .
+
+ In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , H. Bouamor, J. Pino, and K. Bali (Eds.) ,
+
+ Singapore , pp. 2471–2484 .
+
+ External Links: Link ,
+ Document 
+
+ Cited by: Appendix C .
+
+ Zhang et al. (2026) 
+ G. Zhang, S. Zhu, A. Wei, Z. Song, A. Nie, Z. Jia, N. Vijaykumar, Y. Wang, and K. Olukotun 
+
+ Accelopt: a self-improving llm agentic system for ai accelerator kernel optimization .
+
+ Proceedings of Machine Learning and Systems 8 , pp. 541–568 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Zhang et al. (2025) 
+ Z. Zhang, R. Wang, S. Li, Y. Luo, M. Hong, and C. Ding 
+
+ CudaForge: an agent framework with hardware feedback for cuda kernel optimization .
+
+ arXiv preprint arXiv:2511.01884 .
+
+ Cited by: §1 ,
+ §5 .
+
+ Zhao et al. (2021) 
+ J. Zhao, B. Li, W. Nie, Z. Geng, R. Zhang, X. Gao, B. Cheng, C. Wu, Y. Cheng, Z. Li, et al. 
+
+ AKG: automatic kernel generation for neural processing units using polyhedral transformations .
+
+ In The 42nd ACM SIGPLAN International Conference on Programming Language Design and Implementation (PLDI) ,
+
+ Cited by: Appendix C ,
+ §1 .
+
+ Zheng et al. (2020) 
+ L. Zheng, C. Jia, M. Sun, Z. Wu, C. H. Yu, A. Haj-Ali, Y. Wang, J. Yang, D. Zhuo, K. Sen, et al. 
+
+ Ansor: generating high-performance tensor programs for deep learning .
+
+ In The 14th USENIX symposium on operating systems design and implementation (OSDI) ,
+
+ Cited by: Appendix C .
+
+ Zheng et al. (2021) 
+ L. Zheng, R. Liu, J. Shao, T. Chen, J. E. Gonzalez, I. Stoica, and A. H. Ali 
+
+ TenSet: a large-scale program performance dataset for learned tensor compilers .
+
+ In The 35th Conference on Neural Information Processing Systems (NeurIPS) Datasets and Benchmarks Track ,
+
+ Cited by: Appendix C .
+
+ Zheng et al. (2026) 
+ Y. Zheng, Z. Li, S. Zhang, H. Wang, J. Sheng, J. Wang, J. Yan, W. Zhang, Y. Wen, B. Tang, et al. 
+
+ Towards cold-start drafting and continual refining: a value-driven memory approach with application to npu kernel synthesis .
+
+ arXiv preprint arXiv:2603.10846 .
+
+ Cited by: §1 ,
+ §5 ,
+ §5 .
+
+ Zhou et al. (2023) 
+ S. Zhou, U. Alon, F. F. Xu, Z. Jiang, and G. Neubig 
+
+ DocPrompting: generating code by retrieving the docs .
+
+ In The Eleventh International Conference on Learning Representations ,
+
+ External Links: Link 
+
+ Cited by: Appendix C .
+
+ Zhu et al. (2025) 
+ X. Zhu, S. Peng, J. Guo, Y. Chen, Q. Guo, Y. Wen, H. Qin, R. Chen, Q. Zhou, K. Gao, et al. 
+
+ QiMeng-Kernel: macro-thinking micro-coding paradigm for llm-based high-performance GPU kernel generation .
+
+ arXiv preprint arXiv:2511.20100 .
+
+ Cited by: §5 .
+
+ Appendix A Knowledge Base Construction Details 
+
+ Our knowledge base separates reusable platform knowledge from operator-specific context. The shared knowledge base 𝒦 G \mathcal{K}_{G} contains information reusable across operators, while the per-operator knowledge base 𝒦 o \mathcal{K}_{o} specifies the target task and identifies the most relevant evidence in 𝒦 G \mathcal{K}_{G} . 
+
+ Shared knowledge base. 
+
+ 𝒦 G \mathcal{K}_{G} contains 236 versioned sources drawn from four main categories (Table  7 ). These sources provide complementary information about platform APIs, implementation mechanisms, target-specific constraints and operator semantics. Each source is associated with its toolkit version and hardware scope. Version-mismatched sources can still provide useful implementation patterns, but are treated as leads rather than authoritative platform facts. 
+
+ Table 7: Main sources of knowledge used by the search agent. 
+
+ Knowledge source | 
+
+ Role 
+ | 
+
+ Platform documentation and examples | 
+
+ API semantics, code patterns and build rules 
+ | 
+
+ Target environment | 
+
+ Installed APIs, compiler behavior and versions 
+ | 
+
+ Operator implementations | 
+
+ Tiling, vectorization, dtype and boundary handling 
+ | 
+
+ Task and algorithm specifications | 
+
+ Workloads, semantics and correctness requirements 
+ | 
+
+ Authority and version consistency. 
+
+ We separate semantic authority from platform authority. The executable reference determines what the operator must compute, while the installed toolkit and compiler determine which platform mechanisms are valid on the target system. Matching official sources are used next, while sources from other toolkit versions are treated as lower-priority implementation leads. This allows the agent to reuse useful implementation structure without inheriting incompatible APIs or task semantics. 
+
+ Per-operator knowledge. 
+
+ Before search, an automatic preparation step constructs an operator-specific context 𝒦 o \mathcal{K}_{o} . It contains a task contract , describing the operator semantics, input regimes, target environment and evaluation requirements, and a retrieval brief , which identifies relevant APIs, related implementations and known version or semantic conflicts in 𝒦 G \mathcal{K}_{G} . The preparation step requires no manual annotation and does not modify candidate kernels. This two-level organization keeps platform knowledge reusable while exposing only a small, task-relevant subset. 
+
+ Appendix B Retrieval Details 
+
+ Retrieval is question-driven rather than operator-wide. At each search step, the agent formulates a concrete implementation question, such as whether an API supports a particular dtype or how a related operator handles a boundary condition. Retrieval then proceeds in three stages. 
+
+ Route. 
+
+ The operator-specific retrieval brief maps the current question to a small set of relevant platform sources, related implementations and API entries. 
+
+ Filter. 
+
+ Retrieved evidence is checked against the target toolkit and hardware. Version-mismatched sources may be retained as leads, but cannot override facts observed on the target. 
+
+ Read. 
+
+ The agent reads the relevant source region directly, together with the local context required to interpret the implementation pattern. If needed, retrieval checks related sources. 
+
+ The resulting evidence pack therefore contains a small set of source-grounded facts and implementation patterns relevant to the current decision, rather than a generic collection of documents that mention the operator. 
+
+ Example. 
+
+ For apply_adam_w , retrieval identifies a closely related vendor implementation whose update rule differs from the executable reference in the placement of ε \varepsilon . The reference is treated as the authority for operator semantics, while the vendor implementation remains useful for its tiling and vectorization structure. The agent can therefore reuse the implementation mechanism without inheriting the semantic mismatch. This example illustrates why source identity and authority are preserved during retrieval: the agent borrows implementation structure from one source while adopting the arithmetic of another. 
+
+ Appendix C More Related Work 
+
+ Automated kernel optimization before LLMs. 
+
+ Generating fast kernels without a human expert is a long-standing goal.
+Scheduling languages separate what a kernel computes from how it is executed, and search over the resulting schedule space, guided by auto-scheduling and learned cost models, has produced strong tensor programs  ( Ragan-Kelley et al., 2013 ; Chen et al., 2018 ; Zheng et al., 2020 ; Zheng et al., 2021 ; Zhai et al., 2023 ) .
+Polyhedral compilers instead derive loop transformations analytically from a dependence model  ( Bondhugula et al., 2008 ; Verdoolaege et al., 2013 ; Baghdadi et al., 2019 ) , an approach that has also been carried to neural processing units  ( Zhao et al., 2021 ) .
+These systems search within a space of transformations that the compiler fixes in advance, and the platform constraints that make a transformation legal are encoded in the compiler itself—an encoding that takes considerable expert effort to build for each new backend.
+Our setting is the one where that encoding does not yet exist: the difficulty is less to tune a schedule that is already known to be valid than to find a valid implementation mechanism at all, and the space of candidate mechanisms is not enumerated in advance.
+ AscendEvolve therefore recovers mechanisms and constraints from primary platform sources at search time, rather than from a transformation space defined beforehand. 
+
+ Retrieval-augmented generation for code. 
+
+ Retrieval-augmented generation conditions a model on evidence fetched at inference time instead of relying on parametric memory alone  ( Lewis et al., 2021 ) , and the idea transfers naturally to code: retrieving related snippets from a code base improves both generation and completion  ( Parvez et al., 2021 ; Lu et al., 2022 ) .
+Two refinements are especially relevant here.
+Repository-level methods retrieve context scattered across files and iterate between retrieval and generation, using what has been written so far to drive the next query  ( Zhang et al., 2023 ) .
+Documentation-level methods retrieve API descriptions rather than code, which lets a model use libraries and functions it never saw during training  ( Zhou et al., 2023 ) .
+The second is the closer analogue to our setting: public code corpora are dominated by mainstream languages  ( Kocetkov et al., 2022 ) , so a model’s parametric knowledge of an emerging programming model is thin, while the corresponding documentation, headers and vendor implementations do exist and can be consulted.
+Recent agents for Ascend accordingly inject external knowledge into generation  ( Wen et al., 2026 ; Qiu et al., 2026 ) .
+Our use of retrieval departs from these formulations in three respects, each of which shapes the design in § 3.3 .
+Queries are frequently exact symbols, so lexical identity matters more than embedding similarity; a passage drawn from a mismatched toolkit version is actively harmful rather than merely unhelpful, so evidence has to be filtered against the target environment before it is used; and retrieval is driven not by the partial program, as in repository-level completion, but by an explicit search-time question informed by failed trials. 
+
+ Appendix D Mechanisms Across Diverse Implementations 
+
+ Figures  3 – 6 show
+the concrete execution mechanisms materialized by different archived
+implementations. “Correct” is the number of benchmark cases passed. “Suite
+ms” is the stage-local geometric mean over the candidate’s passing cases,
+using 5 warmups and 20 timed samples. 
+
+ Figure 3: Diverse implementation mechanisms for gcd . 
+
+ Figure 4: Diverse implementation mechanisms for gather . 
+
+ Figure 5: Diverse implementation mechanisms for cummin . 
+
+ Figure 6: Diverse implementation mechanisms for dynamic_quant . 
+
+ Appendix E AscendEvolve vs. Reflexion and OpenEvolve: Case Studies 
+
+ Figures  7 – 9 compare the generation
+trajectories and final scored outcomes of AscendEvolve, Reflexion, and OpenEvolve
+on three Level 2 operators for which both Stage 1 warmup and Stage 2 synthesis
+were actually materialized. Each case traces the mechanisms explored by
+AscendEvolve and reports whether the advantage comes from performance,
+correctness-first repair, or both. 
+
+ Figure 7: Case study for Level 2 cummin : Stage 2 combines a contiguous vector path with generic-prefix tuning. 
+
+ Figure 8: Case study for Level 2 dynamic_quant : Stage 2 accepts a correctness-first scoped reciprocal repair. 
+
+ Figure 9: Case study for Level 2 gather : Stage 2 preserves 20/20 correctness while improving copy scheduling. 
+
+ Appendix F Stage-wise Case Studies of Warmup and Synthesis 
+
+ Figures  10 – 16 
+trace how Stage 1 warmup constructs ten mechanism-specific implementation
+lineages and how Stage 2 synthesis selects a warmup parent, transfers a donor
+mechanism, and applies correctness-first arbitration. The cases cover
+performance refinement, semantic repair, safe scheduling transfer, rejection
+of a faster but less-correct candidate, and the absence of an eligible
+full-correct synthesis parent. 
+
+ Figure 10: Stage-wise case study for Level 1 exp : synthesis composes coefficient folding and depth-two queues on a full-correct warmup parent. 
+
+ Figure 11: Stage-wise case study for Level 1 gelu : synthesis first repairs exact-mode semantics and then tunes within the full-correct region. 
+
+ Figure 12: Stage-wise case study for Level 2 apply_rotary_pos_emb : a launch-path repair is combined with a faster row-wise donor and scheduling sweep. 
+
+ Figure 13: Stage-wise case study for Level 2 apply_adam_w : arbitration accepts a full-correct synthesis candidate despite higher raw latency. 
+
+ Figure 14: Stage-wise case study for Level 3 strided_slice : synthesis changes scheduling constants while preserving validated indexing and boundary logic. 
+
+ Figure 15: Stage-wise case study for Level 3 weight_quant_batch_matmul : a faster synthesis trial is rejected after losing correctness coverage. 
+
+ Figure 16: Stage-wise case study for Level 4 grouped_matmul_swiglu_quant : synthesis is skipped because warmup provides no compatible full-correct parent.

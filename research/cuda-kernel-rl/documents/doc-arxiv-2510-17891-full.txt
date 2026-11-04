@@ -1,0 +1,579 @@
+TritonRL : Training LLMs to Think and Code Triton Without Cheating
+
+ Jiin Woo
+ † † thanks: Work done during internship at AWS. ˜ Correspondence to: Jiin Woo <jiinw@andrew.cmu.edu> and Youngsuk Park <pyoungsu@amazon.com> 
+
+ Shaowei Zhu
+
+ Allen Nie
+
+ Zhen Jia
+
+ Yida Wang
+
+ Youngsuk Park
+ † † thanks: Work done during internship at AWS. ˜ Correspondence to: Jiin Woo <jiinw@andrew.cmu.edu> and Youngsuk Park <pyoungsu@amazon.com> 
+
+ Affiliation:  Carnegie Mellon University
+
+ Affiliation:  Amazon Web Services
+
+ Abstract 
+
+ With the rapid evolution of large language models (LLMs), the demand for automated, high-performance system kernels has emerged as a key enabler for accelerating development and deployment. We introduce TritonRL , a domain-specialized LLM for Triton kernel generation, trained with a novel training framework that enables robust and automated kernel synthesis.
+Unlike general-purpose programming languages, Triton kernel generation faces unique challenges due to data scarcity and incomplete evaluation criteria, vulnerable to reward hacking.
+Our approach addresses these challenges end-to-end by distilling Triton-specific knowledge through supervised fine-tuning on curated datasets, and further improving code quality via reinforcement learning (RL) with robust, verifiable rewards and hierarchical reward assignment.
+Our RL framework robustly detects reward hacking and guides both reasoning traces and code tokens through fine-grained verification and hierarchical reward decomposition, enabling the model to generate high-quality Triton kernels that can truly replace existing modules.
+With robust and fine-grained evaluation, our experiments on KernelBench demonstrate that TritonRL achieves state-of-the-art correctness and speedup, surpassing all other Triton-specific models and underscoring the effectiveness of our RL-based training paradigm. 
+
+ | 
+
+ 1 Introduction 
+
+ The exponential growth in demand for GPU computing resources has driven the need for highly optimized GPU kernels that improve computational efficiency, yet with the emergence of numerous GPU variants featuring diverse hardware specifications and the corresponding variety of optimization kernels required for each, developing optimized kernels has become an extremely time-consuming and challenging task. In response to this need, there is growing interest in leveraging large language models (LLMs) for automated kernel generation. While there have been attempts introducing inference frameworks that utilize general-purpose models, such as OpenAI models and DeepSeek, for generating kernels ( Ouyang et al., 2025 ; Lange et al., 2025 ; Li et al., 2025a ; NVIDIA Developer Blog, 2025 ; Muhamed et al., 2023 ) , they often struggle with even basic kernel implementations, thereby highlighting the critical need for domain-specific models specifically tailored for kernel synthesis. 
+
+ As the need for specialized models for kernel generation has emerged, several works have focused on fine-tuning LLMs for CUDA or Triton. In the CUDA domain, recent RL-based approaches include Kevin-32B Baronio et al. (2025) , which progressively improves kernels using execution feedback as reward signals, and CUDA-L1, which applies contrastive RL to DeepSeek-V3 Li et al. (2025c) . While these large models (32B-671B parameters) achieve strong CUDA performance, their training costs remain prohibitively expensive. To address these limitations, researchers have proposed specialized 8B Triton models, including KernelLLM Fisches et al. (2025) (supervised training on torch compiler-generated code) and AutoTriton Li et al. (2025b) , fine-tuned via LLM distillation and RL using execution feedback. Though these smaller models outperform their base models, significant room remains for improving efficiency and accuracy compared to larger counterparts. 
+
+ Furthermore, there is a common issue reported across kernel generation works, reward hacking ( Baronio et al., 2025 ; Li et al., 2025b ) . Due to the scarcity of high-quality kernel examples compared to other programming languages, most approaches rely on RL training using runtime measurements and correctness rewards from unit tests after kernel execution. However, models frequently learn to exploit unit test loopholes, such as direct use of high-level PyTorch modules, rather than generating proper code, and this phenomenon is particularly prevalent in smaller models (8B and below) ( Baronio et al., 2025 ) . This issue fundamentally undermines the core objective of developing more efficient custom kernels to replace existing pre-optimized libraries, while current approaches predominantly rely on simple rule-based syntax verification whose effectiveness remains uncertain. 
+
+ In this paper, we present TritonRL , an 8B-scale LLM specialized for Triton programming that achieves state-of-the-art performance in both correctness and runtime speedup, while effectively mitigating reward hacking. To enable high-quality Triton kernel generation with small models (up to 8B), we design a training pipeline with the following key contributions: 
+
+ • 
+
+ Simplified dataset curation with distillation : Instead of large-scale web crawling, we build on the curated KernelBook problems. Their solutions are refined and augmented through DeepSeek-R1 distillation  ( Guo et al., 2025 ) , providing high-quality supervision for SFT of our base model Qwen3-8B  ( Team, 2025 ) . 
+
+ • 
+
+ Fine-grained and robust verification : We incorporate enhanced rule-based checks (e.g., nn.Module ) together with LLM-based judges (e.g., Qwen3-235B-Instruct) to construct verifiable rewards. This enables reliable diagnosis across commercial and open-source models, while preventing reward hacking that arises from naive syntax-only verification. 
+
+ • 
+
+ Hierarchical reward decomposition with data mixing : Our RL stage decomposes rewards into multiple dimensions (e.g., correctness, efficiency, style) and applies token-level credit assignment. Combined with strategic data mixing across SFT and RL, this yields better kernel quality, generalization, and robustness. 
+
+ • 
+
+ Comprehensive evaluation and open-sourcing : Through rigorous validity analysis that filters out syntactically or functionally invalid code, we reveal true performance differences among models. Ablation studies further confirm the effectiveness of our hierarchical reward design and data mixing. At the 8B scale, TritonRL surpasses existing Triton-specific LLMs, including KernelLLM  ( Fisches et al., 2025 ) and AutoTriton  ( Li et al., 2025b ) .
+We release our datasets and codes, including training and evaluation frameworks, to ensure reproducibility and foster future research. 1 1 
+ 1 
+
+ Codes and datasets will be available soon. 
+
+ 2 TritonRL 
+
+ Figure 1: TritonRL components and workflow.
+
+ In this section, we present TritonRL , a specialized model designed for Triton programming. Our objective is to develop a model that can generate Triton code that is both correct and highly optimized for speed, outperforming the reference implementation. To achieve this, we adopt a two-stage training strategy: we first apply supervised fine-tuning (SFT) to instill fundamental Triton syntax and kernel optimization skills, followed by reinforcement learning (RL) with fine-grained verifiable rewards to further refine the model for correctness and efficiency. We will first detail the SFT procedure, and subsequently present the design of the reinforcement learning framework. 
+
+ 2.1 Triton Knowledge Distillation via Supervised Fine-Tuning 
+
+ Recent work ( Fisches et al., 2025 ; Li et al., 2025b ) has demonstrated that large language models (LLMs) exhibit weak Triton programming ability at the 8B scale, struggling both with syntax and with performance-oriented design patterns. Effective dataset curation is therefore essential, not only to expose Triton-specific primitives and coding structures but also to preserve the reasoning traces that guide kernel optimization. To address this, our pipeline follows three key steps: (i) data augmentation, (ii) synthesis of reasoning traces paired with corresponding code, and (iii) construction of high-quality training pairs for supervised fine-tuning. 
+
+ (i) 
+
+ Data augmentation: We start from the problem sets in KernelBook ( Paliskara & Saroufim, 2025 ) , which provides curated pairs of PyTorch programs and equivalent Triton kernels. To enrich this dataset, we augment the tasks with additional variations (e.g., diverse input shapes), thereby exposing the model to broader performance scenarios. 
+
+ (ii) 
+
+ Data synthesis: To obtain diverse reasoning traces that guide correct and efficient Triton generation, we employ DeepSeek-R1  ( Guo et al., 2025 ) to jointly synthesize reasoning steps and Triton implementations. For each task wrapped with instruction and Pytorch reference, multiple candidate kernels are collected, each paired with an explicit reasoning trace. This yields a dataset of
+ 𝒟 = { ( q , o i ) } = { ( task query, Triton code with CoT ) } \mathcal{D}=\big\{(q,o_{i})\big\}=\{(\texttt{task query, Triton code with CoT})\} .
+See concrete template in Appendix  F.5 ).
+Rather than directly using the Triton code from KernelBook as the target, we instead utilize Triton implementations generated by DeepSeek-R1. This choice ensures higher quality supervision, as KernelBook’s original Triton code frequently relies on high-level PyTorch modules (see Appendix  F.2 for examples). 
+
+ (iii) 
+
+ Supervised fine-tuning: In the SFT stage, the model is trained to produce valid Triton code as well as reproduce the associated reasoning traces from the instruction. This distillation process transfers essential Triton programming patterns while reinforcing reasoning ability. 
+
+ 2.2 Reinforcement Learning with Hierarchical Reward Decomposition 
+
+ While supervised fine-tuning (SFT) equips the base model with basic Triton syntax and kernel optimization abilities, the resulting code may still contain errors or lack efficiency.
+To further improve the quality of Triton code generation of TritonRL , we train the model via reinforcement learning (RL) with verifiable rewards, which incentivize model to generate more correct and efficient Triton code yielding higher rewards. In RL, designing effective reward feedback is essential since crude reward designs not perfectly aligned with original objectives of tasks often lead to reward hacking, guiding models to exploit loopholes. To address this, we first introduce robust and fine-grained verifiers that rigorously assess the quality of Triton code in diverse aspects, forming the basis for constructing reward functions. Building on these verifiers, we present a GRPO-based RL framework with hierarchical reward decomposition that provides targeted feedback for reasoning traces and Triton code, thereby improving the correctness and efficiency of generated Triton kernels. 
+
+ Figure 2: Illustration of the flow of our robust verifier incorporating syntax and functionality checkers and the examples of invalid Triton codes. (a) invalid syntax: the code lacks any Triton blocks and consists solely of PyTorch code.
+(b) invalid functionality: the code include dummy Triton code that just copies data without meaningful operation delegating core operation (matrix multiplication) to PyTorch modules (torch.matmul). 
+
+ Fine-Grained Verification for High-Quality Triton Code. 
+
+ We denote i i -th generated output sample o i o_{i} for a given prompt or task q q . Recall that q q and o i o_{i} include Pytorch reference q ref q^{\text{ref}} and Triton code o i code o_{i}^{\text{code}} that is executable on some proper input x x , i.e., q ref ​ ( x ) , o code ​ ( x ) q^{\text{ref}}(x),o^{\text{code}}(x) . We introduce fine-grained verifiers v v that comprehensively evaluate different aspects of code quality as follows. 
+
+ • 
+
+ Robust verifier: Sequential verifier to check output is a valid Triton code without non-nonsensical hacking. See Figure  2 for an illustration 
+
+ – 
+
+ syntax 
+: A binary verifier that assesses whether code o code o^{\text{code}} is valid Triton syntax. We use a rule-based linter to verify the presence of Triton kernels annotated with @triton.jit. 
+
+ – 
+
+ func :
+A binary functionality verifier to detect whether o code o^{\text{code}} constitutes a valid Triton kernel. Syntax checks alone are insufficient, since models may output code that superficially passes verification but defers computations to high-level PyTorch modules (e.g., torch.nn, @) or hardcodes constants, as in Figure  2 (b). To address this, we combine a rule-based linter—which ensures Triton kernels are invoked and flags reliance on PyTorch modules—with an LLM-based judge that evaluates semantic correctness against task specifications. 
+
+ • 
+
+ compiled : A binary verifier that checks whether the generated Triton code can be successfully compiled without errors. 
+
+ • 
+
+ correct : A binary verifier that evaluates whether the generated Triton code produces correct outputs by compiling and comparing its results against those of the reference PyTorch code using provided test input x x . 
+
+ | 
+ correct ( q , o ) = compile ( o code ) ⋅ [ o code ( x ) = = q ref ( x ) ] \texttt{correct}(q,o)\;=\;\texttt{compile}\!\left(o^{\text{code}}\right)\cdot\mathbbm{1}\!\left[\,o^{\text{code}}(x)==q^{\text{ref}}(x)\,\right] | 
+ | 
+
+ • 
+
+ speedup : A scalar score that quantifies the execution time improvement of the generated Triton code relative to the reference PyTorch implementation. For a prompt q q with reference Pytorch code q ref q^{\text{ref}} and corresponding triton code o code o^{\text{code}} generated, speed-up is defined as, given test input x x , 
+
+ | 
+ speedup ​ ( q , o ) = τ ⁡ ( o code , x ) τ ⁡ ( q ref , x ) ⋅ correct ​ ( q , o ) , \texttt{speedup}(q,o)=\frac{\tau(o^{\text{code}},x)}{\tau(q^{\text{ref}},x)}\cdot\texttt{correct}(q,o), | 
+ | 
+
+ where τ ⁡ ( ⋅ , x ) \tau(\cdot,x) measure the runtimes of given code and input x x . 
+
+ For notational simplicity, for a given prompt q q and output sample o i o_{i} , we define v ⁡ ( q , o i ) v(q,o_{i}) as v i v_{i} any verification function v v throughout the paper. 
+
+ While prior works ( Li et al., 2025b ; Baronio et al., 2025 ) addressed reward hacking with rule-based linters, such methods remain vulnerable to loopholes. Our verifier combines rule-based and LLM-based checks to capture both syntactic and semantic errors, offering stronger guidance during training (see Appendix  F.4 for examples and Section  3 for evaluation). Building on these fine-grained verifiers, we develop an RL framework that delivers targeted feedback to both reasoning traces and Triton code, improving kernel correctness and efficiency. 
+
+ Hierarchical Reward Decomposition. 
+
+ Training LLMs with long reasoning traces remains challenging because providing appropriate feedback across lengthy responses is difficult. When a single final reward is uniformly applied to all tokens, it fails to distinguish between those that meaningfully contribute to correctness or efficiency and those that do not. This issue is particularly pronounced in kernel code generation, where reasoning traces often outline complex optimization strategies for GPU operations while the subsequent code implements these plans. Even if the reasoning trace proposes a promising optimization, errors in the Triton implementation may result in the entire response being penalized. Thus, a single reward signal fails to provide appropriate feedback to both reasoning and solution ( Qu et al., 2025 ) , conflating high-quality reasoning with poor execution and preventing effective learning of good optimization strategies. 
+
+ To address this, we propose a GRPO with hierarchical reward decomposition for Triton code generation. Specifically, Triton code generation o i o_{i} can be viewed as two-level hierarchy action pairs, 
+
+ • 
+
+ o i plan o_{i}^{\text{plan}} : CoT reasoning traces correspond to high-level planning actions, providing abstract kernel optimization strategies, such as tiling or shared memory. 
+
+ • 
+
+ o i code o_{i}^{\text{code}} : final Triton code answers correspond to low-level coding actions that execute the plan given by the previous reasoning traces. 
+
+ The key idea is to assign different reward credit for different class of output tokens between plan and code as illustrated in Figure  3 . By jointly optimizing rewards for both levels, we can train the model to better align its reasoning with the desired code output as follows: 
+
+ | 
+
+ 𝒥 GRPO ​ ( θ ) = 𝔼 q ∼ P ( Q ) , { o i = ( o i plan , o i code ) } i = 1 G ∼ π θ o ​ l ​ d ( ⋅ | q ) [ 1 G ∑ i = 1 G α ℱ GRPO plan ( θ , i ) + ℱ GRPO code ( θ , i ) ] \displaystyle\begin{aligned} \mathcal{J}_{\text{GRPO}}(\theta)&=\mathbb{E}_{q\sim P(Q),~\{o_{i}=(o_{i}^{\text{plan}},o_{i}^{\text{code}})\}_{i=1}^{G}\sim\pi_{\theta_{old}}(\cdot|q)}\left[\frac{1}{G}\sum_{i=1}^{G}\alpha\mathcal{F}_{\text{GRPO}}^{\text{plan}}(\theta,i)+\mathcal{F}_{\text{GRPO}}^{\text{code}}(\theta,i)\right]\end{aligned} 
+ | 
+ | 
+ (1) | 
+
+ Figure 3: An example LLM output for Triton code generation, showing a reasoning trace (plan) and the generated Triton kernel code conditioned on the plan. 
+
+ where π θ \pi_{\theta} and π θ o ​ l ​ d \pi_{\theta_{old}} are the policy model and reference model, q q denotes a prompt given to the model, defining a task to implement in Triton, and o i = ( o i plan , o i code ) o_{i}=(o_{i}^{\text{plan}},o_{i}^{\text{code}}) represents i i -th response generated by the model for q q in the group G G .
+Here we denote o i , t plan o_{i,t}^{\text{plan}} and o i , t code o_{i,t}^{\text{code}} as t t -th token of output plan and code, and T i plan T_{i}^{\text{plan}} and T i code T_{i}^{\text{code}} as the sets of token positions in the plan and code, respectively. The GRPO losses ℱ plan ​ ( θ ) \mathcal{F}^{\text{plan}}(\theta) and ℱ code ​ ( θ ) \mathcal{F}^{\text{code}}(\theta) are computed over the tokens in generated plans and Triton codes, respectively, and α ∈ [ 0 , 1 ] \alpha\in[0,1] is a weighting factor that balances the training speed of planning and coding policy.
+Here, α \alpha is set to a small value (e.g., 0.1 0.1 ) so that the planning distribution is updated slowly, allowing the coding policy sufficient time to learn correct implementations conditioned on those high-level plans.
+The detailed formulation of each loss component is as follows. 
+
+ | 
+
+ ℱ GRPO plan = 1 | o i plan | ​ ∑ t ∈ T i plan A i plan ⋅ min ⁡ { π θ ​ ( o i , t plan | q , o i , < t plan ) π θ o ​ l ​ d ​ ( o i , t plan | q , o i , < t plan ) , clip ​ ( π θ ​ ( o i , t plan | q , o i , < t plan ) π θ o ​ l ​ d ​ ( o i , t plan | q , o i , < t plan ) , 1 − ϵ , 1 + ϵ ) } , ℱ GRPO code = 1 | o i code | ​ ∑ t ∈ T i code A i code ⋅ min ⁡ { π θ ​ ( o i , t code | q , o i plan , o i , < t code ) π θ o ​ l ​ d ​ ( o i , t code | q , o i plan , o i , < t code ) , clip ​ ( π θ ​ ( o i , t code | q , o i plan , o i , < t code ) π θ o ​ l ​ d ​ ( o i , t code | q , o i plan , o i , < t code ) , 1 − ϵ , 1 + ϵ ) } , \displaystyle\begin{aligned} \mathcal{F}_{\text{GRPO}}^{\text{plan}}&=\frac{1}{|o_{i}^{\text{plan}}|}\sum_{t\in T_{i}^{\text{plan}}}A_{i}^{\text{plan}}\cdot\min\left\{\frac{\pi_{\theta}(o_{i,t}^{\text{plan}}|q,o_{i,<t}^{\text{plan}})}{\pi_{\theta_{old}}(o_{i,t}^{\text{plan}}|q,o_{i,<t}^{\text{plan}})},\text{clip}\left(\frac{\pi_{\theta}(o_{i,t}^{\text{plan}}|q,o_{i,<t}^{\text{plan}})}{\pi_{\theta_{old}}(o_{i,t}^{\text{plan}}|q,o_{i,<t}^{\text{plan}})},1-\epsilon,1+\epsilon\right)\right\},\\
+\mathcal{F}_{\text{GRPO}}^{\text{code}}&=\frac{1}{|o_{i}^{\text{code}}|}\sum_{t\in T_{i}^{\text{code}}}A_{i}^{\text{code}}\cdot\min\left\{\frac{\pi_{\theta}(o_{i,t}^{\text{code}}|q,o_{i}^{\text{plan}},o_{i,<t}^{\text{code}})}{\pi_{\theta_{old}}(o_{i,t}^{\text{code}}|q,o_{i}^{\text{plan}},o_{i,<t}^{\text{code}})},\text{clip}\left(\frac{\pi_{\theta}(o_{i,t}^{\text{code}}|q,o_{i}^{\text{plan}},o_{i,<t}^{\text{code}})}{\pi_{\theta_{old}}(o_{i,t}^{\text{code}}|q,o_{i}^{\text{plan}},o_{i,<t}^{\text{code}})},1-\epsilon,1+\epsilon\right)\right\},\end{aligned} 
+ | 
+ | 
+ (2) | 
+
+ where A i plan A_{i}^{\text{plan}} and A i code A_{i}^{\text{code}} are the group-wise advantages for plan and code tokens, computed as A i = r i − 1 G ​ ∑ j = 1 G r j A_{i}=r_{i}-\frac{1}{G}\sum_{j=1}^{G}r_{j} , with rewards for plan and code tokens defined as: 
+
+ | 
+ r i plan = syntax i ⋅ func i ⋅ speedup i , r i code = syntax i ⋅ func i ⋅ correct i . \displaystyle r_{i}^{\text{plan}}=\texttt{syntax}_{i}\cdot\texttt{func}_{i}\cdot\texttt{speedup}_{i},\quad r_{i}^{\text{code}}=\texttt{syntax}_{i}\cdot\texttt{func}_{i}\cdot\texttt{correct}_{i}. | 
+ | 
+ (3) | 
+
+ Here, we note that the syntax and functionality checks serve as necessary conditions for correctness and speedup evaluations. If either the syntax or functionality check fails, the generated code is deemed invalid, and both correctness and speedup rewards are set to zero. 
+
+ To provide separate feedback for the hierarchical actions of planning and coding with their respective contributions, we design distinct reward functions for each action.
+As described in equation  3 , we decouple rewards for high-level plan tokens and low-level code tokens based on their main contributions to the final output, assigning speedup-based rewards to plan tokens and correctness-based rewards to code tokens. This approach ensures that reasoning traces are encouraged to propose optimization strategies that yield efficient kernels, while code generation is guided to produce valid implementations that faithfully realize these plans. In this way, our hierarchical reward decomposition provides a more targeted and effective learning signal compared to uniform reward designs used in prior work Li et al. (2025b) ; Baronio et al. (2025) , which apply a uniform reward to all tokens. 
+
+ Another key aspect of our reward decomposition is the use of the weighting factor α \alpha to balance the training speed of planning and coding policies.
+To effectively learn both planning and coding skills, it is important to ensure that the model has sufficient time to learn correct Triton implementation given the current planning distribution.
+If α \alpha is set to 1.0 1.0 , the planning and coding policies are updated at the same rate, which may lead to instability in learning, as the coding policy may struggle to keep up with rapidly changing plans. In contrast, if α \alpha is too small (e.g., 0.0 0.0 ), the planning policy remains static and only the coding policy is updated, which may limit the model’s ability to explore promising kernel optimization plans.
+By setting α \alpha to an appropriately small value (e.g., 0.1 0.1 ), we ensure that the planning distribution is updated slowly, allowing the coding policy sufficient time to learn correct implementations conditioned on those high-level plans. This helps avoid overly penalizing the reasoning trace due to code generation instability in early training, thus preserving promising optimization plans that may yield higher speedup once the code generation stabilizes. 
+
+ In our experiments, we compare our hierarchical reward decomposition with uniform reward designs explored by prior work  Li et al. (2025b) ; Baronio et al. (2025) , and evaluate different choices of α \alpha to highlight the advantages of the hierarchical reward decomposition. 
+
+ Difficulty-Aware Data Mixing. 
+
+ The selection of training data is crucial for effective RL post-training, and many works have shown that selective sampling by leveraging additional information, such as difficulty or interaction between data points, can significantly improve model performance ( Yu et al., 2025 ; Chen et al., 2025 ; Chen et al., 2024 ) .
+While KernelBook  Paliskara & Saroufim (2025) is a large-scale dataset containing diverse kernel generation tasks, uniformly sampling from the entire dataset may be inefficient and lead to suboptimal model performance. In this work, we augment each task in KernelBook with a difficulty label and explore different data mixtures to construct an optimal training set for RL post-training. 
+
+ We use an LLM labeler to create difficulty labels for each data point in KernelBook based on the difficulty levels defined in KernelBench  ( Ouyang et al., 2025 ) , which categorizes tasks into three levels based on the complexity of kernel implementation, and we denote the subset of training data with difficulty level d d as 𝒟 t ​ r ​ a ​ i ​ n ( d ) \mathcal{D}_{train}^{(d)} for d ∈ { 1 , 2 , 3 } d\in\{1,2,3\} . Forcusing on level 1 and 2 tasks, we form various data mixtures by sampling from these subsets with data mixing probabilities 𝒑 = ( p 1 , p 2 ) \bm{p}=(p_{1},p_{2}) , where p d p_{d} denotes the probability of sampling from 𝒟 t ​ r ​ a ​ i ​ n ( d ) \mathcal{D}_{train}^{(d)} . By varying the mixture probabilities 𝒑 \bm{p} , we can construct different training data mixtures. In our experiments, we explore multiple mixtures and evaluate the performance of the post-trained model on KernelBench to identify the optimal training data configuration. Additional details are provided in Appendix  F.1 . 
+
+ 3 Experiments 
+
+ This section provides the detailed recipe of training and evaluation of TritonRL , followed by the main results and ablation studies. 
+
+ 3.1 Training and Evaluation Setups 
+
+ Data Preparation. 
+
+ For both SFT and RL, we use 11k tasks from KernelBook ( Paliskara & Saroufim, 2025 ) . We expand each task with five reasoning traces and corresponding Triton implementations generated by DeepSeek-R1  ( Guo et al., 2025 ) , yielding 58k <task query, Triton code with CoT> pairs. Prompts adopt a one-shot format, where the reference PyTorch code is given and the model is asked to produce an optimized Triton alternative (examples in Appendix  F.5 ). To support curriculum in RL training, we further label tasks into three difficulty levels using Qwen3-235B-Instruct ( Team, 2025 ) , following the task definitions in Ouyang et al. (2025) , yielding 11k <task query, level> pairs. See detailed generation and classification in Appendix  H and   F.1 . 
+
+ Training Configuration. 
+
+ We begin by fine-tuning the base model Qwen3-8B on KernelBook tasks. After SFT, we move to RL training on the same KernelBook tasks, but without output labels—rewards are computed directly from code execution-so the RL dataset consists only of task instructions. An example of such instructions is shown in Appendix  F.5 . We implement training under the VeRL framework ( Sheng et al., 2025 ) . Unlike SFT, we use the subset of KernelBook tasks labeled as Level 1 and Level 2 for RL training. We explore different data mixtures from Level 1 and Level 2 tasks for RL training, where the default mixture is 𝒑 = [ 1.0 , 0.0 ] \bm{p}=[1.0,0.0] unless specified otherwise.
+Hyperparameters for both SFT and RL are provided in Appendix  H . By default, we use the reward function r r from equation  3 , setting α ∗ = 0.1 \alpha^{*}=0.1 unless specified otherwise. 
+
+ Evaluation Benchmarks. 
+
+ We evaluate TritonRL on KernelBench ( Li et al., 2025a ) 2 2 
+ 2 
+
+ We use the Triton backend version of KernelBench from https://github.com/ScalingIntelligence/KernelBench/pull/35 . . KernelBench offers an evaluation framework covering 250 tasks, divided into Level 1 (100 single-kernel tasks, such as convolution), Level 2 (100 simple fusion tasks, such as conv+bias+ReLU), and Level 3 (50 full architecture tasks, such as MobileNet), to assess LLM proficiency in generating efficient CUDA kernels. We conduct experiments mainly on the Level 1 and Level 2 tasks from KernelBench. The prompts used for these benchmarks are provided in Appendix  G.1 . 
+
+ Metrics. 
+
+ We evaluate the performance of LLMs for generating Triton code in terms of (1) Validity (syntax and functionality); (2) Correctness (compilation and correct output); (3) Speedup (relative execution time improvement).
+We report fast 1 and fast 2 to indicate the model’s ability to generate Triton code that is at least as fast as or twice as fast as the reference PyTorch implementation, respectively. The formal definition of metrics is provided in Appendix  D . We measure the pass@ k k metrics for each aspect, which indicates the ratio of generating at least one successful solution among k k sampled attempts. We use k = 10 k=10 as a default unless specified. We test both Triton codes and reference PyTorch codes on an NVIDIA L40S. 
+
+ Baselines. 
+
+ We compare TritonRL with several baselines, including KernelLLM ( Fisches et al., 2025 ) and AutoTriton ( Li et al., 2025b ) , which are fine-tuned LLMs specifically for Triton programming. We also include our base model Qwen3-8B ( Team, 2025 ) without any fine-tuning, fine-tuned Qwen3-8B only after SFT, and larger Qwen3 models (e.g., Qwen3-14B and Qwen3-32B). Additionally,
+we evaluate Claude-3.7 ( Anthropic, 2025 ) with unknown model size. For large model classes beyond 100B (e.g., GPT-OSS 120B ( OpenAI, 2025 ) , DeepSeek-R1-0528 ( NVIDIA Developer Blog, 2025 ) ), we report the numbers to the Appendix  I.1 as a reference. 
+
+ Model | 
+ #Params | 
+ Level1 (robust verifier) | 
+ Level1 (w/o robust verifier) | 
+
+ valid | 
+ compiled  /  correct | 
+ fast 1 \textbf{fast}_{1}  /  fast 2 \textbf{fast}_{2} | 
+ mean speedup | 
+ valid | 
+ compiled  /  correct | 
+
+ Qwen3 (base) | 
+ 8 8 B | 
+ 73.0 73.0 | 
+ 40.0 40.0  /  14.0 14.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 0.03 0.03 | 
+ 54.0 54.0 | 
+ 52.0 52.0  /  15.0 15.0 | 
+
+ Qwen3 | 
+ 14 14 B | 
+ 82.0 82.0 | 
+ 65.0 65.0  /  17.0 17.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 0.04 0.04 | 
+ 66.0 66.0 | 
+ 71.0 71.0  /  16.0 16.0 | 
+
+ Qwen3 | 
+ 32 32 B | 
+ 75.0 75.0 | 
+ 61.0 61.0  /  16.0 16.0 | 
+ 2.0 2.0  /  0.0 0.0 | 
+ 0.06 0.06 | 
+ 52.0 52.0 | 
+ 50.0 50.0  /  15.0 15.0 | 
+
+ KernelLLM | 
+ 8 8 B | 
+ 42.0 42.0 | 
+ 40.0 40.0  /  20.0 20.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 0.05 0.05 | 
+ 100.0 100.0 | 
+ 98.0 98.0  /  29.0 29.0 | 
+
+ AutoTriton | 
+ 8 8 B | 
+ 97.0 97.0 | 
+ 78.0 78.0  /  50.0 50.0 | 
+ 2.0 2.0  /  1.0 1.0 | 
+ 0.25 0.25 | 
+ 100.0 100.0 | 
+ 95.0 95.0  /  70.0 70.0 | 
+
+ TritonRL (ours) | 
+ 8 8 B | 
+ 99.0 99.0 | 
+ 82.0 82.0  /  56.0 \mathbf{56.0} | 
+ 5.0 \mathbf{5.0}  /  1.0 1.0 | 
+ 0.33 \mathbf{0.33} | 
+ 99.0 99.0 | 
+ 83.0 83.0  /  58.0 58.0 | 
+
+    w/o RL (SFT only) | 
+ 8 8 B | 
+ 97.0 97.0 | 
+ 88.0 \mathbf{88.0}  /  44.0 44.0 | 
+ 4.0 4.0  /  2.0 \mathbf{2.0} | 
+ 0.33 \mathbf{0.33} | 
+ 98.0 98.0 | 
+ 93.0 93.0  /  47.0 47.0 | 
+
+ Claude-3.7 | 
+ - | 
+ 99.0 99.0 | 
+ 99.0 \mathbf{99.0}  /  53.0 53.0 | 
+ 3.0 3.0  /  1.0 1.0 | 
+ 0.32 0.32 | 
+ 100.0 100.0 | 
+ 100.0 100.0  /  64.0 64.0 | 
+
+ Table 1: Main results on KernelBench Level 1.
+All metrics are reported as pass@10 (%). Our model achieves the best results among models with fewer than 32B parameters.
+The left block reports evaluation with the robust verifier (syntax + functionality).
+The right block (w/o robust verifier) lacks functionality checks, leading to misleading correctness estimates. 
+
+ Figure 4: Pass@ k k correctness and mean speedup for k = 1 , 5 , 10 k=1,5,10 on KernelBench Level 1 tasks.
+The figures show how performance (correctness on the left, mean speedup on the right) of TritonRL and baseline models scales as the number of attempts increases.
+
+ 3.2 Main Experiment Results 
+
+ Overall Performance on Level 1 Tasks. 
+
+ The left side of Table  1 presents the performance comparison results for pass@10 evaluated with robust verifiers (syntax and functionality) on KernelBench Level 1 tasks. TritonRL consistently outperforms most baseline models with < 32 <32 B parameter sizes in terms of validity, correctness, and speedup. In particular, TritonRL surpasses AutoTriton, which also leverages SFT and RL, by achieving higher correctness and speedup, underscoring the advantages of our hierarchical reward assignment. Notably, the correctness metric improves from 44% (SFT only) to 55% after RL, indicating that RL provides substantial gains in addition to supervised fine-tuning. Furthermore, TritonRL achieves on-par performance to much larger models, highlighting the efficiency of our approach in enabling smaller models to excel in specialized code generation tasks.
+We further evaluated inference scaling by varying the number of sampled attempts ( k = 1 , 5 , 10 k=1,5,10 ), as illustrated in Figure  4 . The correctness of TritonRL increases with more samples, whereas KernelLLM and Qwen3-8B show limited improvement, suggesting that TritonRL generates a more diverse set of codes and benefits from additional sampling during inference. Additional pass@1 and pass@5 results are provided in Appendix  I.2 . 
+
+ Figure 5: Side-by-side comparison of base models and their post-trained variants.
+Successful training should reduce invalid syntax errors (yellow) and functional invalidity (red), while increasing correctness (green) from individual base model. Only TritonRL shows this outcome. For each metric, the numbers represent the ratio of corresponding samples among 10 generated samples for each of the 100 tasks in KernelBench Level 1.
+
+ Effectiveness of Validity Reward. 
+
+ We analyze the validity of Triton codes generated by fine-tuned models to understand the types of errors each model is prone to. To examine the effects of fine-tuning on validity, we also include the base models of TritonRL and the baseline models. In Figure  5 , although both AutoTriton and TritonRL achieve relatively high rates of validity compared to KernelLLM, a more detailed breakdown reveals that AutoTriton exhibits a much higher proportion of functionally invalid codes. Interestingly, the base model of AutoTriton shows a low rate of functionally and syntactically invalid codes, indicating that the fine-tuning process of AutoTriton may have led to learn functionally invalid codes. In contrast, TritonRL generates significantly fewer invalid codes in terms of both syntax and functionality after fine-tuning, demonstrating the effectiveness of our robust verification in enhancing code quality. 
+
+ Moreover, Table  1 highlights how heavily prior models relied on cheating shortcuts. Without functionality verification (w/o robust), AutoTriton’s correctness jumps from 50% to 70%, revealing its tendency to exploit reward-driven shortcuts rather than produce true Triton code. In contrast, TritonRL shows only a slight increase (56% to 58%), suggesting it learned to generate genuine code. 
+
+ Effectiveness of Hierarchical Reward Decomposition. 
+
+ To validate the effectiveness of our hierarchical reward decomposition, we compare it with a uniform reward assignment approach, where a single reward is uniformly applied to all tokens without distinguishing between plan and code tokens, which is the reward design chosen by Li et al. (2025b) ; Baronio et al. (2025) .
+To generalize the reward function used in Li et al. (2025b) and Baronio et al. (2025) , we define a uniform reward as a weighted combination of correctness and speedup conditioned on validity,
+which can be expressed as 
+
+ | 
+ r i = syntax i ⋅ func i ⋅ ( β ⋅ correct i + ( 1 − β ) ⋅ speedup i ) , \displaystyle r_{i}=\texttt{syntax}_{i}\cdot\texttt{func}_{i}\cdot(\beta\cdot\texttt{correct}_{i}+(1-\beta)\cdot\texttt{speedup}_{i}), | 
+ | 
+ (4) | 
+
+ where β ∈ [ 0 , 1 ] \beta\in[0,1] is a hyperparameter that the ratio of correctness in the reward mixture.
+In Li et al. (2025b) , the reward is computed only based on correctness conditioned and validity, which corresponds to β = 1.0 \beta=1.0 , while in Baronio et al. (2025) , the reward is defined as the sum of correctness and speedup with some fixed weights.
+We defer the detailed GRPO formulation for uniform reward to Appendix  E .
+We compare TritonRL using hierarchical reward decomposition against models trained with uniform reward designs for various β \beta values, keeping all other RL training settings (GRPO algorithm, hyperparameters, and pre-RL fine-tuning) consistent. 
+
+ Table  2 demonstrates that hierarchical reward decomposition consistently yields higher correctness and speedup than any uniform reward configuration.
+While prior works ( Li et al., 2025b ; Baronio et al., 2025 ) explored single reward functions with various mixtures of correctness and speedup, our results demonstrate that such uniform designs have limitations in achieving the best model performance.
+This suggests that decoupling rewards by token class provides more targeted learning signals, better aligning with the distinct roles of planning and coding and leading to higher-quality Triton code generation. 
+
+ Reward Type | 
+ Correctness ratio ( β \beta ) | 
+ valid | 
+ compiled  /  correct | 
+ fast 1 \textbf{fast}_{\textbf{1}}  /  fast 2 \textbf{fast}_{\textbf{2}} | 
+
+ Hierarchical ( α ∗ \alpha^{*} ) | 
+ - | 
+ 99.0 99.0 | 
+ 82.0 82.0  /  56.0 \mathbf{56.0} | 
+ 5.0 \mathbf{5.0}  /  1.0 1.0 | 
+
+ Uniform | 
+ 0.0 0.0 | 
+ 94.0 94.0 | 
+ 87.0 87.0  /  47.0 47.0 | 
+ 3.0 3.0  /  1.0 1.0 | 
+
+ Uniform | 
+ 0.3 0.3 | 
+ 100.0 100.0 | 
+ 90.0 \mathbf{90.0}  /  38.0 38.0 | 
+ 2.0 2.0  /  1.0 1.0 | 
+
+ Uniform | 
+ 0.5 0.5 | 
+ 92.0 92.0 | 
+ 77.0 77.0  /  43.0 43.0 | 
+ 3.0 3.0  /  1.0 1.0 | 
+
+ Uniform | 
+ 0.7 0.7 | 
+ 98.0 98.0 | 
+ 78.0 78.0  /  40.0 40.0 | 
+ 1.0 1.0  /  1.0 1.0 | 
+
+ Uniform | 
+ 1.0 1.0 | 
+ 95.0 95.0 | 
+ 75.0 75.0  /  38.0 38.0 | 
+ 2.0 2.0  /  1.0 1.0 | 
+
+ Table 2: 
+Comparison of hierarchical versus uniform reward designs on KernelBench Level 1 tasks. All metrics are reported as pass@10 (%).
+Reward type specifies whether the single reward is assigned uniformly across all tokens (Uniform), or the reward signal is decomposed by token class (Hierarchical) as in equation  3 .
+The hyperparameter β \beta in the uniform reward design controls the proportion of correctness in the single reward function applied to all tokens. See equation  4 for details.
+
+ Effect of Plan-to-Code Update Ratio ( α \alpha ). 
+
+ We also analyze the effect of the hyperparameter α \alpha in our hierarchical reward decomposition, which controls the relative update rate of planning versus coding actions during RL training. Smaller α \alpha values slow down plan token updates, allowing coding actions to adapt to more stable planning distributions. As shown in Table  3 , α = 0.1 \alpha=0.1 achieves the best overall performance, while higher values (e.g., α = 1.0 \alpha=1.0 ) lead to instability and reduced correctness and speedup. Conversely, setting α = 0.0 \alpha=0.0 , disabling plan updates, also degrades results, and this indicates that some plan adaptation is necessary. These findings highlight the importance of balancing plan and code updates to avoid premature convergence and maximize Triton code quality. 
+
+ α \alpha | 
+ valid | 
+ compiled  /  correct | 
+ fast 1 \textbf{fast}_{\textbf{1}}  /  fast 2 \textbf{fast}_{\textbf{2}} | 
+
+ 0.0 0.0 | 
+ 98.0 98.0 | 
+ 78.0 78.0  /  37.0 37.0 | 
+ 3.0 3.0  /  1.0 1.0 | 
+
+ 0.1 0.1 ( α ∗ \alpha^{*} ) | 
+ 99.0 99.0 | 
+ 82.0 82.0  /  56.0 \mathbf{56.0} | 
+ 5.0 \mathbf{5.0}  /  1.0 1.0 | 
+
+ 0.3 0.3 | 
+ 100.0 100.0 | 
+ 96.0 \mathbf{96.0}  /  55.0 55.0 | 
+ 1.0 1.0  /  1.0 1.0 | 
+
+ 0.5 0.5 | 
+ 100.0 100.0 | 
+ 85.0 85.0  /  48.0 48.0 | 
+ 2.0 2.0  /  1.0 1.0 | 
+
+ 1.0 1.0 | 
+ 98.0 98.0 | 
+ 64.0 64.0  /  33.0 33.0 | 
+ 2.0 2.0  /  1.0 1.0 | 
+
+ Table 3: Ablation study of the hyperparameter α \alpha in TritonRL on KernelBench Level 1 tasks. All metrics are reported as pass@10 (%).
+ α \alpha is the weighting factor for plan rewards in equation  3 , determining how quickly plan tokens are updated relative to code tokens during training.
+The default configuration uses α ∗ = 0.1 \alpha^{*}=0.1 . 
+
+ Effect of Data Mixture for RL Training. 
+
+ We explore different data mixtures for RL training of TritonRL to understand how training data composition affects model performance. Our training dataset consists of two levels of tasks, with the ratio controlled by a data mixture probability vector 𝒑 = [ p 1 , p 2 ] \bm{p}=[p_{1},p_{2}] , where p 1 p_{1} and p 2 p_{2} represent the probabilities of sampling Level 1 and Level 2 tasks, respectively.
+We evaluate TritonRL on KernelBench Level 1 and 2 tasks using three data mixing strategies for RL training: training exclusively on Level 1 tasks ( 𝒑 = [ 1 , 0 ] \bm{p}=[1,0] ), exclusively on Level 2 tasks ( 𝒑 = [ 0 , 1 ] \bm{p}=[0,1] ), and a balanced mixture of both ( 𝒑 = [ 0.5 , 0.5 ] \bm{p}=[0.5,0.5] ), as summarized in Table  4 .
+Training only on Level 1 tasks ( 𝒑 = [ 1 , 0 ] \bm{p}=[1,0] ) yields the best correctness and fast 1 \text{fast}_{1} on Level 1 evaluation, while training only on Level 2 tasks does not improve Level 2 performance. This may be because Level 2 tasks are inherently more complex, and reward signals from those tasks are very sparse, making it difficult for the model to learn effectively (as confirmed in Table  5 ).
+This observation motivates future work to explore adaptive 𝒑 \bm{p} scheduling during post-training. 
+
+ Train Data | 
+ Mixing Prob. | 
+ Level1 | 
+ Level2 | 
+
+ Mixture | 
+ 𝒑 \bm{p} | 
+ valid | 
+ compiled  /  correct | 
+ fast 1 \textbf{fast}_{\textbf{1}}  /  fast 2 \textbf{fast}_{\textbf{2}} | 
+ valid | 
+ compiled  /  correct | 
+ fast 1 \textbf{fast}_{\textbf{1}}  /  fast 2 \textbf{fast}_{\textbf{2}} | 
+
+ Level 1 | 
+ [ 1 , 0 ] [1,0] | 
+ 99.0 99.0 | 
+ 82.0 82.0  /  56.0 56.0 | 
+ 5.0 5.0  /  1.0 1.0 | 
+ 66.0 66.0 | 
+ 29.0 29.0  /  7.0 7.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+
+ Level 1+2 | 
+ [ 0.5 , 0.5 ] [0.5,0.5] | 
+ 99.0 99.0 | 
+ 92.0 92.0  /  43.0 43.0 | 
+ 2.0 2.0  /  1.0 1.0 | 
+ 74.0 74.0 | 
+ 35.0 35.0  /  8.0 8.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+
+ Level 2 | 
+ [ 0 , 1 ] [0,1] | 
+ 100.0 100.0 | 
+ 97.0 97.0  /  49.0 49.0 | 
+ 3.0 3.0  /  1.0 1.0 | 
+ 57.0 57.0 | 
+ 37.0 37.0  /  6.0 6.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+
+ Table 4: Ablation study on data mixture for RL training of TritonRL , where the performance is evaluated on KernelBench level 1 and level 2 tasks.
+
+ Limited Performance on Fusion Tasks (Level 2). 
+
+ We evaluated TritonRL and baseline models on KernelBench Level 2 tasks, which involve fused implementations such as Conv+Relu. As shown in Table  5 , TritonRL outperforms other 8B-scale Triton-specific models in correctness and speedup. However, all models show a marked drop from Level 1 to Level 2, reflecting the increased difficulty of generating fully valid Triton code for fusion tasks. Fusion tasks require integrating multiple kernels, making it more challenging to produce correct implementations compared to single-operation replacements. Models often take shortcuts by implementing only part of the task in Triton and relying on high-level PyTorch APIs for the remainder, resulting in incomplete or invalid solutions (see Appendix  F.3 for examples).
+Additionally, these tasks yield much sparser reward signals, since successful fusion implementations are rare, making effective learning more difficult even when similar fusion tasks are frequently encountered during training, as shown in Table  4 .
+This pronounced performance gap highlights the need for improved optimization strategies and leaves substantial room for future progress. 
+
+ Model | 
+ #Params | 
+ Level2 | 
+ Level2 (w/o robust) | 
+
+ valid | 
+ compiled  /  correct | 
+ fast 1 \textbf{fast}_{1}  /  fast 2 \textbf{fast}_{2} | 
+ compiled  /  correct | 
+
+ Qwen3 (base) | 
+ 8 8 B | 
+ 56.0 56.0 | 
+ 1.0 1.0  /  0.0 0.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 52.0 52.0  /  11.0 11.0 | 
+
+ Qwen3 | 
+ 14 14 B | 
+ 35.0 35.0 | 
+ 24.0 24.0  /  1.0 1.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 94.0 94.0  /  65.0 65.0 | 
+
+ Qwen3 | 
+ 32 32 B | 
+ 31.0 31.0 | 
+ 16.0 16.0  /  0.0 0.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 73.0 73.0  /  22.0 22.0 | 
+
+ KernelLLM | 
+ 8 8 B | 
+ 0.0 0.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 96.0 96.0  /  3.0 3.0 | 
+
+ AutoTriton | 
+ 8 8 B | 
+ 70.0 70.0 | 
+ 3.0 3.0  /  0.0 0.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 97.0 97.0  /  76.0 76.0 | 
+
+ TritonRL (ours) | 
+ 8 8 B | 
+ 69.0 69.0 | 
+ 29.0 29.0  /  7.0 \mathbf{7.0} | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 88.0 88.0  /  42.0 42.0 | 
+
+    w/o RL (SFT only) | 
+ 8 8 B | 
+ 67.0 67.0 | 
+ 32.0 \mathbf{32.0}  /  6.0 6.0 | 
+ 0.0 0.0  /  0.0 0.0 | 
+ 98.0 98.0  /  41.0 41.0 | 
+
+ Claude-3.7 | 
+ - | 
+ 34.0 34.0 | 
+ 34.0 34.0  /  12.0 \mathbf{12.0} | 
+ 1.0 1.0  /  0.0 0.0 | 
+ 98.0 98.0  /  60.0 60.0 | 
+
+ Table 5: Main results on KernelBench Level 2.
+The left block reports evaluation with the robust verifier (syntax + functionality).
+The right block (w/o robust verifier) lacks functionality checks, leading to misleading correctness estimates, more severe than Level 1 evaluation. 
+
+ 4 Conclusion 
+
+ In this work, we introduce TritonRL , a specialized LLM for Triton code generation, trained with a novel RL framework featuring robust verifiable rewards and hierarchical reward assignment. Our experiments on KernelBench show that TritonRL surpasses existing fine-tuned Triton models in validity, correctness, and efficiency. Ablation studies demonstrate that both robust reward design and hierarchical reward assignment are essential for achieving correctness and efficiency. We believe TritonRL marks a significant advancement toward fully automated and efficient GPU kernel generation with LLMs. 
+
+ Reproducibility Statement 
+
+ Our code-base is built upon publicly available frameworks (Verl  ( Sheng et al., 2025 ) . Section  3.1 and the Appendix  H   G describe the experimental settings in detail.

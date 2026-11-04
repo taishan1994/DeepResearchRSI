@@ -1,0 +1,793 @@
+\paperurl \uselogo 
+
+ MaxKernel: Agentic Kernel Generation for TPUs 
+
+ Shangkun Wang
+
+ Affiliation: Equal contributions
+
+ Affiliation: Google
+
+ Nina Cai
+
+ Affiliation: Equal contributions
+
+ Affiliation: Google
+
+ Charles Hong
+
+ Affiliation: Google
+
+ Julian Walker
+
+ Affiliation: Google DeepMind
+
+ Gerson Kroiz
+
+ Affiliation: Google
+
+ George Vanica
+
+ Affiliation: Google
+
+ Deepak Patil
+
+ Affiliation: Google
+
+ Andi Gavrilescu
+
+ Affiliation: Google
+
+ Hassan Sipra
+
+ Affiliation: Google
+
+ Sethu Sankaran
+
+ Affiliation: Google
+
+ Abstract 
+
+ Code: https://github.com/AI-Hypercomputer/accelerator-agents/tree/main/MaxKernel 
+
+Designing and authoring high-performance custom kernels for accelerators is a complex task that requires deep hardware-level expertise. Large Language Models (LLM) can be leveraged together with real-time compiler feedback to build agentic systems for kernel generation. In this work, we present MaxKernel, a multi-agent system that implements three distinct paradigms for TPU kernel development: (1) a Human-in-the-Loop (HITL) agent for collaborative, step-by-step design; (2) an Autonomous (Auto) agent that executes a fully automated, metric/trace-driven optimization loop; and (3) a Graph-Based Autonomous Search that scales the Auto agent for global exploration of the design space. All three paradigms leverage a shared pool of specialized sub-agents to handle planning, implementation, self-debugging, testing, and hardware profiling. We evaluate MaxKernel on JaxBench, a comprehensive suite of 50 diverse kernel tasks for TPUs, alongside complex, real-world workloads from state-of-the-art open-source models. We demonstrate that MaxKernel consistently generates highly optimized implementations, matching expert hand-tuned baselines and delivering significant performance across the benchmark. Our agent is open-sourced and available here .. 
+
+ 1 Introduction 
+
+ The continuous scaling of deep learning architectures has driven a growing demand for specialized hardware accelerators. To fully utilize the compute and memory bandwidth of these devices, engineers frequently bypass standard compiler pipelines to develop custom, optimized kernels. However, writing these custom kernels, whether in CUDA [ 10 , 9 ] and Triton [ 15 ] for Graphics Processing Units (GPUs), JAX/Pallas [ 1 ] for Tensor Processing Units (TPUs), Neuron Kernel Interface (NKI) for AWS Tranium , Triton and Cude DSL for Meta Training and Inference Accelerator (MTIA) is a complex process. It requires extensive hardware expertise, specifically the ability to manually manage memory hierarchies (e.g., HBM versus SRAM/VMEM), orchestrate Direct Memory Access (DMA) pipelining, and derive multi-dimensional tiling strategies. 
+
+ Figure 1 : A schematic of the MaxKernel framework outlining the various modalities of operation and tools. 
+
+ Several works have shown that kernel generation benefits from test time scaling and agentic techniques across GPUs, TPUs [ 5 , 16 ] , Tranium, NKI [ 14 ] , MTIA [ 8 ] , and other accelerators [ 5 , 2 ] . Standard zero-shot or few-shot LLM approaches need to be augmented with real-time compiler feedback due to the rigidity of accelerator APIs, strict memory constraints, and opaque low-level compiler errors [ 16 ] . Furthermore, even when an LLM generates functionally correct code, achieving optimal hardware performance typically requires an iterative process of empirical profiling, often utilizing tools like XProf [ 6 ] , configuration tuning, frequently changing APIs and context [ 5 , 16 ] , and optimization techniques including evolutionary [ 11 ] ,greedy search [ 12 , 18 ] , and collaborative search [ 4 ] . 
+
+ Traditional compiler optimization techniques, such as Halide [ 13 ] , TVM [ 3 ] and Ansor [ 19 ] , address these complexities by decoupling algorithm definitions from scheduling, yet they still require significant domain knowledge or expensive evolutionary search phases. Recent works, such as AutoComp [ 5 ] , have demonstrated the potential of using LLMs to navigate these search spaces for tensor programs, which may critical performance gains by abandoning complex ideas before the code can compile. 
+
+ To address these challenges, we present MaxKernel , a multi-agent framework designed to automate and accelerate TPU kernel engineering. We benchmark our generated kernels on JAXBench [ 16 ] in addition to kernels for state-of-the-art OSS models, evaluating both functional correctness and execution time. While our primary evaluation focuses on TPU development via JAX/Pallas, the underlying agentic principles apply broadly to accelerator programming. MaxKernel supports three distinct orchestration paradigms: 
+
+ 1. 
+
+ Human-in-the-Loop (HITL): An interactive modality that keeps the human developer in control at critical decision points, ensuring safety and architectural alignment for complex kernels. 
+
+ 2. 
+
+ Autonomous Loop: An automated, closed-loop agent that continuously iterates through planning, generation, testing, and trace-based hardware profiling to systematically optimize performance. 
+
+ 3. 
+
+ Graph-Based Autonomous Search: An extension of the autonomous loop that models the kernel design space as a formal search graph. By leveraging different search algorithms (e.g., simple parallel search, beam search, etc), this paradigm conducts a broader exploration to navigate performance trade-offs and avoid local optima. 
+
+ In summary, our core contributions are as follows. 
+
+ 1. 
+
+ Modular Multi-Agent Architecture: We introduce MaxKernel, a flexible, multi-agent framework comprising specialized sub-agents capable of writing, debugging, and tuning hardware-specific kernels. This architecture seamlessly integrates with compiler pipelines and empirical profiling tools (e.g., XProf) to provide critical closed-loop hardware feedback to the LLMs. 
+
+ 2. 
+
+ Versatile Orchestration Paradigms: We detail three distinct execution workflows: Human-in-the-Loop, Autonomous Loop Pipeline, and Graph-Based Autonomous Search. This enables developers to dynamically trade off between manual architectural control, rapid automated iteration, and broad formal design-space exploration. 
+
+ 3. 
+
+ Rigorous Empirical Evaluation: We evaluate our framework on TPU optimization workloads using the JAXBench benchmark suite and SOTA OSS kernels. MaxKernel successfully bridges the gap between static LLM code generation and high-performance kernel engineering, achieving a 1.58× geometric mean speedup across the JAXBench workloads. Furthermore, on the eight production kernels where human-written kernels exist, MaxKernel achieves a 2.32× geometric mean speedup over the reference code, outperforming human-written ones (2.02×). 
+
+ 2 System Architecture & Agent Paradigms 
+
+ MaxKernel is a modular, agent-based system that tackles complex kernel optimization by breaking it into focused tasks. A schematic is provided in Figure 1 . At its core, the architecture relies on a suite of specialized sub-agents dedicated to planning, implementation, testing, autotuning, and profiling. To accommodate varying levels of user control and task complexity, MaxKernel operates under three distinct execution paradigms: an interactive Human-in-the-Loop (HITL) modality for developer-guided exploration, an Autonomous Loop (Auto) for closed-loop iterative optimization, and a highly scalable Graph-Based Autonomous Search for systematic, parallel exploration of the kernel design space. 
+
+ 2.1 Specialized Subagents 
+
+ The foundation of MaxKernel lies in its collection of task-specific sub-agents. By decomposing the complex process of kernel generation into manageable, specialized tasks, the system achieves higher reliability and allows for flexible orchestration. The key sub-agents include: 
+
+ • 
+
+ Kernel Generation and Fix Agents : Responsible for the core synthesis logic. This module is subdivided into a Planning Agent, which creates a high-level algorithmic optimization plan based on hardware specifications and the reference implementation, and an Implementation Agent, which translates the plan into valid Pallas code. To ensure syntactic and structural correctness, the validation and fix loop operates iteratively. The loop attempts to compile the generated code, interprets compiler feedback, and resolves errors before advancing to execution. 
+
+ • 
+
+ Testing and Verification Agents : Ensure the numerical correctness of the generated kernels. A Test Synthesis Agent constructs comprehensive test suites, while an Execution Agent runs these tests securely on the target hardware (e.g., TPU). This module validates the optimized kernel against the reference implementation, strictly enforcing dynamically specified numerical tolerances for a given TPU generation. 
+
+ • 
+
+ Autotuning Agent : Dedicated to hyperparameter optimization, this agent systematically explores the configuration space (e.g., block sizes, tile dimensions, etc) to discover the most performant hardware-specific parameters for a given kernel structure. 
+
+ • 
+
+ Profiling Agent : Focused on performance extraction and bottleneck identification, the Profiling Agent captures and analyzes low-level trace data. By extracting key empirical metrics—such as execution latency, memory bandwidth utilization, and compute density—it provides actionable feedback to inform subsequent algorithmic optimization iterations. We leverage XProf for this purpose. 
+
+ 2.2 Knowledge Store 
+
+ Incorporating hardware-specific information, low-level framework documentation and technical reports is critical for enabling agents to effectively generate, debug, profile, and iteratively refine code. However, loading the comprehensive specifications into the context window is computationally expensive. To address this limitation, we employ a Retrieval-Augmented Generation (RAG) [ 7 ] pipeline to dynamically surface relevant information from an external knowledge store during various execution phases. In this work, our RAG knowledge base is restricted to static sources, specifically comprising framework documentation, memory layout guides, and performance handbooks (e.g., Pallas, Mosaic, and XLA). Additionally, we explicitly exclude hand-tuned kernel code from the retrieval corpus; a primary objective of this study is to evaluate the extent to which agents can generalize and discover TPU-specific optimizations without relying on human-engineered baselines. 
+
+ 2.3 The Human-in-the-Loop (HITL) Agent 
+
+ The Human-in-the-Loop modality employs an orchestration agent acting as an interactive router. This orchestrator adheres to a "One Agent, Then Wait" paradigm [ 17 ] . The kernel generation process is structured into discrete phases as discussed in Section 2.1 (Figure 2 ) and users can seamlessly traverse the various stages. 
+
+ After a subagent completes its designated phase, automated execution halts, and control is immediately returned to the user. This approach allows human developers to review intermediate artifacts (such as the optimization plan markdown or the code draft), provide explicit feedback, or manually correct the trajectory before the system proceeds to the next phase. This modality is particularly effective for complex kernels where expert intuition is necessary to guide the Large Language Model (LLM) through challenging design spaces. 
+
+ Figure 2 : A schematic of the HITL Agent which demonstrates how the user has visibility into each of the sub-agents. The user has complete autonomy in choosing the sub-agents and the order of their calling. 
+
+ 2.4 The Autonomous Loop (Auto) Agent 
+
+ For well-defined optimization tasks and large-scale benchmarking, the Auto agent chains the sub-agents into a fully automated, closed-loop optimization pipeline (Figure 3 ). This orchestrator executes multiple iterations of the generation-evaluation cycle without human intervention, effectively performing a localized hill-climbing search.
+The autonomous workflow is characterized by the following mechanisms: 
+
+ • 
+
+ Iterative Refinement Cycle: The orchestrator continuously loops through a strict sequence of sub-tasks: Plan Generation → \rightarrow Implementation → \rightarrow Compilation Validation → \rightarrow Test Execution → \rightarrow Autotuning → \rightarrow Profiling. This procedure decomposes into four distinct stages. First, in the Preparation stage (prior to entering the loop), the system synthesizes a comprehensive test suite based on the reference code. This test suite is strictly frozen, ensuring that downstream implementation agents cannot "reward hack" or alter the validation criteria to artificially pass correctness checks. Upon entering the iterative loop, the Plan and Code Generation stage formulates an optimization strategy and translates it into a candidate Pallas kernel. Next, the Validation and Testing stage verifies compilability, numerical equivalence, and baseline performance against the frozen test suite; passing this stage guarantees the kernel is functionally sound. Finally, the Optimization and Profiling stage systematically autotunes the valid kernel across various tiling configurations and captures hardware traces to identify bottlenecks. Crucially, empirical profiling feedback from this final stage is fed directly into the planning phase of the subsequent iteration, driving continuous, data-driven improvement. 
+
+ • 
+
+ Robust Failure Handling: If a critical failure occurs—such as exceeding the maximum retry limit for compilation fixes, or failing numerical correctness checks—the pipeline immediately short-circuits. The error context is preserved, and the orchestrator loops back to the planning phase to devise an alternative strategy. 
+
+ • 
+
+ Best-of- N N State Rollback: To prevent performance regressions, the orchestrator maintains a snapshot history of every successful iteration, recording the kernel code, compilation status, test results, latency, and profiling summaries. At the conclusion of the pipeline, the system evaluates the history and automatically rolls back the workspace to the optimal (lowest latency) valid solution. 
+
+ • 
+
+ Orchestrator-Driven Path Management: To guarantee deterministic execution and prevent state corruption during autonomous loops, the root agent explicitly dictates absolute file paths for all artifacts at initialization. These rigid constraints are injected into the sub-agent prompts and file-system tools, ensuring precise file I/O tracking. 
+
+ Figure 3 : The closed-loop optimization workflow of the Auto Agent. 
+
+ 2.5 Graph-Based Autonomous Search 
+
+ While the Auto Agent performs linear, iterative improvements, it remains susceptible to local optima. To explore the optimization space more systematically, MaxKernel introduces a Graph-Based Autonomous Search (Figure 4 ), which encapsulates the Auto Agent within a broader search algorithm. The kernel generation process is modeled as a formal search problem where the orchestrator maintains a SearchGraph . Each node represents a specific state of the kernel produced by the auto agent worker, encompassing the source code, the optimization plan, and empirical evaluation metrics (e.g., correctness and speedup). This graph-based abstraction provides significant advantages: it enables seamless experimentation with various search heuristics, allows the system to recover gracefully from unexpected halts via the persistent graph state, and effectively mitigates LLM context window overflow by isolating each node expansion into a separate agent session. 
+
+ The general search process proceeds as follows: 
+
+ • 
+
+ Node Selection and Expansion : The search orchestrator selects promising candidate nodes from the frontier based on specific heuristic strategies. For example, in the beam search algorithm, we select the nodes with highest speedups in each depth. 
+
+ • 
+
+ Parallel Worker Execution : For each selected node, the orchestrator dispatches expansion tasks to distributed workers. Each worker instantiates the Auto Agent to independently apply a new optimization strategy, compile, test, and profile the resulting kernel variations in parallel. 
+
+ • 
+
+ State Update : The results from the workers are returned to the orchestrator as new nodes. The nodes’ information are incorporated in to the global graph, and the state of the search (such as the best node so far and the search frontiers) are updated. 
+
+ • 
+
+ Convergence : This parallel, branching exploration continues until termination criteria are met (e.g., maximum depth reached or a target latency is achieved), ultimately returning the optimal node from the graph. 
+
+ By orchestrating the Auto Agent across a search graph, MaxKernel scales beyond simple linear exploration, allowing it to autonomously and effectively navigate the complex trade-offs inherent in hardware-level kernel optimization. 
+
+ Currently, MaxKernel implements two primary search algorithms to navigate the optimization space. Parallel Search acts as an unconstrained exploration mechanism; it concurrently executes multiple independent optimization trajectories from a given baseline. Because these paths do not compete, each worker is allocated a larger iteration budget, granting the agent a deep, uninterrupted horizon to continuously debug and mature complex code changes. On the other hand, Beam Search acts as a highly competitive exploration mechanism, maintaining a restricted frontier of the top- k k most promising candidate kernels. To efficiently expand this frontier across multiple depths, Beam Search restricts each candidate to a smaller iteration budget before aggressively pruning under-performing trajectories and branching only the most immediately viable strategies. 
+
+ Figure 4 : Design of the Graph based autonomous search. The orchestrator determines the search algorithm, where each evaluation of the search opens up a new autonomous agent session, which then retrieves and returns artifacts to the main search. A database with the saved nodes and graph is also performed at the end of each search iteration. 
+
+ 3 Experiments and Results 
+
+ We systematically evaluate the MaxKernel system on JaxBench [ 16 ] , a curated suite of 50 diverse hardware-accelerated workloads. This benchmark comprises 17 widely used operators adapted from popular LLM architectures (e.g., complex attention mechanisms) and 33 fused operators adapted from the KernelBench dataset. Spanning attention variants, dense and sparse linear algebra, complex loss functions, and highly fused operations, JaxBench provides a rigorous testbed to evaluate MaxKernel’s capability for end-to-end kernel generation and hardware-specific optimization. Beyond this standard benchmark, we also demonstrate MaxKernel’s robust capability to accelerate state-of-the-art (SOTA) open-source (OSS) kernels from recent architectures. By automatically generating highly efficient Pallas implementations for complex real-world workloads—such as Multi-Head Latent Attention (MLA), Qwen3-Next Gated DeltaNet, and DeepSeek-V4 Sparse Attention—MaxKernel achieves significant improvements in latency and throughput over heavily optimized JAX and human-authored baselines. 
+
+ 3.1 Evaluation Metrics and Methods 
+
+ To assess both the robustness and the optimization quality of the generated kernels, we report four primary metrics: (1) The compilation rate measures the percentage of generated kernels that successfully compile without target-specific hardware errors (e.g., VMEM allocation failures, etc). (2) The correctness rate measures the percentage of compiled kernels that yield numerically equivalent outputs compared to the unoptimized JAX reference implementation over a suite of test inputs. To measure aggregate performance, we report the (3) geometric mean speedup across all tasks relative to the standard XLA compiler baseline (with performance regressions floored at 1.0x). Finally, we use the (4) fast- p p fraction ( fast p \text{fast}_{p} ), which quantifies the proportion of tasks that both achieve strict functional correctness and exceed a specific speedup threshold p p : 
+
+ | 
+ fast p = 1 N ​ ∑ i = 1 N 𝟙 ​ ( correct i ∧ speedup i > p ) \text{fast}_{p}=\frac{1}{N}\sum_{i=1}^{N}\mathbbm{1}(\text{correct}_{i}\wedge\text{speedup}_{i}>p) | 
+ | 
+
+ All empirical evaluations are conducted on TPU v6e hardware using MaxKernel’s dedicated evaluation harness. For each generated kernel, the framework dynamically synthesizes an isolated testing environment that validates functional correctness against the unoptimized reference implementation. Numerical equivalence is checked using jnp.allclose with both absolute and relative tolerances set to 10 − 2 10^{-2} ( atol = rtol = 10 − 2 \text{atol}=\text{rtol}=10^{-2} ) for most cases. To safely account for standard bf16 variance in custom hardware-accelerated math, certain tasks’ tolerance are relaxed to at most 10 − 1 10^{-1} . For a complete list of the tolerance we set for each problem, please refer to the appendix A . To measure true hardware performance, the harness integrates directly with XProf profiling tool. This allows the system to capture precise on-device execution times while explicitly filtering out host-side JAX dispatch and compilation overheads. By relying exclusively on these strict, XProf-backed measurements on TPU v6e, we guarantee that all reported speedups reflect authentic hardware-level acceleration rather than artifactual host or framework variances. 
+
+ We compare the following four generation methods: 
+
+ • 
+
+ Best-of- N N (Zero-Shot): Independent zero-shot completions conditioned on the JAX reference. The fastest correct sample out of N N is selected (in our experiments, we set N = 100 N=100 ). 
+
+ • 
+
+ MaxKernel Auto: A single-trajectory iterative refinement agent restricted to 5 iterations. To account for generation variance, we execute 5 independent runs per workload and report the median performance with its upper and lower bounds. 
+
+ • 
+
+ MaxKernel Parallel: Executed via 5 concurrent MaxKernel Auto trajectories (5 iterations each). Instead of the median, it selects the single fastest correct kernel across all runs, highlighting the upper bound of unguided parallel scaling. 
+
+ • 
+
+ MaxKernel Beam: A structured, top- k k guided graph search configured with a beam width of 3, a maximum depth of 3, and 2 expansion branches per node. To limit computational cost, the inner evaluation loop is strictly capped at 2 iterations per node. 
+
+ 3.2 End-to-End Kernel Performance 
+
+ The performance of the four methods on JaxBench are summarized in Table 1 . All large language model queries and agent interactions throughout our experiments were conducted using the Gemini 3.1 Pro model. We leave the ablations with other LLMs as future work. 
+
+ Table 1 : Performance Metrics Comparison. This table details the compilation rate, correctness rate, geometric mean speedup, and fast 1 \text{fast}_{1} scores across different generation strategies. MK stands for MaxKernel. For the MK Auto column, we report the median value across the five independent runs, with the lower and upper bounds shown in brackets [lower, upper]. 
+
+ | 
+ Best-of-N | 
+ MK Auto | 
+ MK Parallel | 
+ MK Beam | 
+
+ Compilation Rate | 
+ 10/50 | 
+ 49/50 [48/50, 50/50] | 
+ 50/50 | 
+ 50/50 | 
+
+ Correctness Rate | 
+ 10/50 | 
+ 48/50 [46/50, 49/50] | 
+ 50/50 | 
+ 50/50 | 
+
+ Geometric Mean Speedup | 
+ 1.08 | 
+ 1.39 [1.19, 1.42] | 
+ 1.58 | 
+ 1.49 | 
+
+ fast 1 \text{fast}_{1} | 
+ 6/50 | 
+ 22/50 [18/50, 28/50] | 
+ 34/50 | 
+ 31/50 | 
+
+ The baseline Best-of-N approach does not have all the relevant context from real time runs, achieving a compilation and correctness rate of only 10 / 50 10/50 and a geometric mean speedup near baseline ( 1.08 × 1.08\times ). By introducing the iterative validation and optimization loop, MaxKernel’s Auto agent significantly improves over the zero-shot baseline. Importantly, the Auto agent demonstrates high stability in producing compilable and numerically correct kernels. However, because a single run is susceptible to getting stuck in suboptimal local compiled states during optimization, the speedup results of Auto agent exhibit a relatively large variance, as demonstrated by its median and lower and upper bound speedup value. 
+
+ This high variance motivates the need for broader search space exploration. MaxKernel Parallel search selects the best outcome of independent agent instances run in parallel, eliminating compilation failures with 50 / 50 50/50 compiled and 50 / 50 50/50 correct, while boosting the geometric mean speedup to 1.58 × 1.58\times and achieving a fast 1 \text{fast}_{1} score of 34 / 50 34/50 . Alternatively, Maxkernel Beam search provides a guided, structured search strategy that prunes suboptimal paths sequentially. Beam search achieves a highly competitive correctness rate of 50 / 50 50/50 and a geometric mean speedup of 1.49 × 1.49\times with a fast 1 \text{fast}_{1} score of 31 / 50 31/50 . 
+
+ Figure 5 : Comparison of the fast p \text{fast}_{p} metric trajectories across different methods on JaxBench for varying speedup thresholds p p . Parallel nodes refer to the autonomous search trajectories of individual nodes. 
+
+ To show the speedup distribution of different methods, Figure 5 compares the fast p \text{fast}_{p} trajectories across varying speedup thresholds p. The Best-of-N baseline is omitted from this figure due to its negligible success rate. The five individual runs of the Auto agent (shown as faded lines representing Parallel Nodes 1–5) illustrate the high performance volatility of single-pass optimization. Because parallel search is defined as the best of the independent runs of the agent, its trajectory naturally resides on top of all the individual run curves, achieving the highest success rates (e.g., 68 % 68\% at p=1.0 and 24 % 24\% at p=2.0). Importantly, the beam search trajectory also consistently sits above the individual runs for most of the speedup thresholds p. This demonstrates that structured, guided exploration successfully prunes suboptimal compilation paths and avoids local optimization minima compared to single-pass runs. 
+
+ Table 2 compares the performance of our automated agentic strategies against expert-written, hand-tuned Pallas references. Remarkably, the automated agents achieve geometric mean speedups (2.32 for parallel search and 1.78 for beam search), on par with the geometric mean of the hand-tuned references (2.02). On a workload-by-workload basis, the agents achieve superior performance compared to the hand-tuned references on seven out of the eight workloads. For instance, on MLA Attention, human experts struggled to find performance-improving kernels, resulting in sub-baseline performance, whereas both agent methods successfully identified kernel implementations that surpassed the JAX/XLA baseline. Additionally, on Paged Attention, the beam search discovered a kernel that achieved a 6.74 speedup, more than double the hand-tuned reference of 2.41. The only exception is Ragged Paged Attention, where the human expert’s code achieved a strong 4.65 speedup compared to the agent’s 1.42. These results demonstrate that automated agentic compilation can consistently match or exceed human-expert optimization on complex TPU workloads, dramatically reducing developer effort. 
+
+ Table 2 : Speedups on the 8 kernels compared against JAX/XLA compile baselines and hand-tuned Pallas references. Best results for each workload is bolded. 
+
+ Workloads | 
+ XLA (ms) | 
+ Hand-tuned | 
+ MK Parallel | 
+ MK Beam | 
+
+ Flash Attention | 
+ 15.37 | 
+ 2.47 × \times | 
+ 2.37 × \times | 
+ 2.16 × \times | 
+
+ GQA Attention | 
+ 32.73 | 
+ 2.40 × \times | 
+ 2.51 × \times | 
+ 3.02 × \times | 
+
+ MLA Attention | 
+ 14.55 | 
+ 0.69 × \times | 
+ 1.21 × \times | 
+ 1.23 × \times | 
+
+ Sparse Attention | 
+ 16.56 | 
+ 2.45 × \times | 
+ 5.03 × \times | 
+ 2.35 × \times | 
+
+ Paged Attention | 
+ 7.52 | 
+ 2.41 × \times | 
+ 6.74 × \times | 
+ 2.01 × \times | 
+
+ Ragged Paged Attention | 
+ 15.36 | 
+ 4.65 × \times | 
+ 1.42 × \times | 
+ 1.27 × \times | 
+
+ GEMM | 
+ 5.41 | 
+ 1.03 × \times | 
+ 1.03 × \times | 
+ 1.02 × \times | 
+
+ Megablox GMM | 
+ 3.11 | 
+ 1.69 × \times | 
+ 2.39 × \times | 
+ 1.84 × \times | 
+
+ Geomean (floor 1 × \times ) | 
+ | 
+ 2.02 × \times | 
+ 2.32 × \times | 
+ 1.78 × \times | 
+
+ 3.3 Parallel search vs. Beam search 
+
+ To evaluate the search dynamics of both strategies, we track the geometric mean speedup of the generated kernels at each topological step. Specifically, we group the evaluated kernels chronologically by their search depth and iteration, and sort the active candidate nodes within each step by their performance. Plotting these aggregated metrics sequentially yields a progression curve, where each ascending segment illustrates the performance distribution of the agent at that exact stage of the search (Figure 6 ). 
+
+ Analyzing this progression highlights the distinct topological trade-offs between depth and breadth in automated code generation. Parallel Search, by allocating a deep refinement budget of five sequential iterations to independent trajectories, excels at stabilization. As the search advances, both the lower and upper bounds of the performance distribution rise consistently, culminating in peak geometric mean speedups exceeding 1.51 × \times . This demonstrates that long-horizon, independent refinement provides the agent sufficient opportunity to iteratively debug complex compilation errors and incrementally mature intricate memory layouts without the risk of premature pruning. 
+
+ Conversely, Beam Search prioritizes exploring a wider Pareto frontier. The progression curve shows the search successfully climbing during the initial two depths before experiencing a performance plateau upon expanding to depth 3. This plateau reflects the specific, brittle nature of low-level kernel optimization in hardware-specific frameworks like Pallas. Because Beam Search enforces a shallower budget (2 iterations versus the 5 iterations in parallel search) per depth before pruning and pivoting to other strategies, the selection mechanism can occasionally penalize bold, multi-step optimizations that require longer horizons to resolve rigid memory constraints or lowering failures. 
+
+ Despite this, the structural breadth of Beam Search remains advantageous depending on the nature of the optimization space. In scenarios characterized by diverse, easily compilable local minima where different algorithmic formulations, such as distinct loop orderings or mathematical reductions, yield immediate and reliable performance signals, Beam Search can be more effective. When optimizations do not require extensive, multi-step iterative debugging to compile, Beam Search’s ability to broadly explore the solution space and retain a diverse set of top candidates makes it a powerful and efficient strategy for discovering optimal algorithms. 
+
+ Figure 6 : Progression of geometric mean speedup. Evaluated candidate nodes for Beam Search (blue) and Parallel Search (orange) are aggregated across the 50 benchmark problems. Nodes are grouped sequentially by their chronological evaluation step—denoted by Depth (D) and Iteration (I)—and sorted internally from lowest to highest performance to form the ascending segments. 
+
+ 3.4 SOTA OSS Kernel Improvement 
+
+ To evaluate the efficacy of MaxKernel, we conducted extensive benchmarking against highly optimized JAX baselines and human-authored Pallas kernels across several recent models. Our evaluation assessed improvements in latency, throughput, and compute efficiency, while also demonstrating the framework’s ability to address execution robustness (Table 3 ). 
+
+ When evaluated against human-authored Pallas baselines on the Multi-Head Latent Attention v1 architecture, MaxKernel achieved an 8.68% reduction in latency and a 9.50% increase in throughput. 
+
+ MaxKernel also delivered significant speedups over standard JAX implementations across a variety of architectures. For Qwen3-Next Gated DeltaNet, replacing the JAX implementation with MaxKernel-generated kernels for both forward and backward passes reduced forward pass latency by 1.63 × \times and accelerated the overall training step by up to 4.70 × \times . On DeepSeek-V4 Sparse Attention, MaxKernel consistently outperformed the JAX baseline across all shape configurations, yielding speedups from 2.36 × \times for small decoding shapes up to 7.85 × \times for user-defined prefill operations. MaxKernel also effectively optimized memory-bound operations by keeping intermediate matrices fully within Vector Memory to avoid costly HBM flushes; this yielded a 1.10 × \times speedup for the Mamba v2 State Space Duality (SSD) algorithm and a 1.66 × \times speedup for the Compressed Sparse Attention (CSA) StreamIndex_topk operation. 
+
+ Beyond pure performance optimization, MaxKernel demonstrated utility in kernel debugging and robustness. We applied the framework to resolve critical crash and deadlock issues in the Ragged Page Attention v3 (RPAv3) prefill mode. MaxKernel automatically implemented protective ALU clamp instructions to handle left-padded inputs correctly, preventing negative slice sizes and ensuring DMA prefetches execute cleanly. These modifications restored crash-free execution with negligible performance overhead. 
+
+ Table 3 : Performance Improvements of MaxKernel on SOTA Architectures 
+
+ Architecture | 
+ Workload / Metric | 
+ Baseline | 
+ MaxKernel | 
+ Speedup/Gain | 
+
+ MLA v1 | 
+ Latency (ms) | 
+ 3.127 (Pallas) | 
+ 2.856 | 
+ +8.68% | 
+
+ Throughput (TFLOPS) | 
+ 116.735 (Pallas) | 
+ 127.825 | 
+ +9.50% | 
+
+ Qwen3-Next GDN | 
+ Forward Pass (ms) | 
+ 17.09 (JAX) | 
+ 10.47 | 
+ 1.63 × \times | 
+
+ Training Step (Fwd+Bwd) (ms) | 
+ 84.51 (JAX) | 
+ 17.99 | 
+ 4.70 × \times | 
+
+ DSv4 Sparse Attn | 
+ Prefill (ms) | 
+ 27.08 (JAX) | 
+ 3.449 | 
+ 7.85 × \times | 
+
+ Decode (ms) | 
+ 0.047 (JAX) | 
+ 0.02 | 
+ 2.36 × \times | 
+
+ Mamba v2 (SSD) | 
+ Forward Pass (ms) | 
+ 0.211 (JAX) | 
+ 0.192 | 
+ 1.10 × \times | 
+
+ StreamIndex_topk | 
+ Forward Pass (ms) | 
+ 0.415 (JAX) | 
+ 0.250 | 
+ 1.66 × \times | 
+
+ 4 Conclusion 
+
+ MaxKernel demonstrates that agentic systems can successfully handle the complexities of low-level accelerator programming. In particular, we showed how a harness comprising of context synthesis, automated diagnosis, bottleneck identification via XProf profiling, and structured optimization heuristics can accelerate hillclimbing on TPUs. We demonstrated state-of-the-art performance numbers on JaxBench, reaching a geometric mean speedup of 1.58x on top of XLA optimizations. 
+
+ In the future, we want to explore other optimization algorithms too, such as evolutionary search or greedy search via the Auto Research approach. In addition, dynamic and evolving knowledge bases from past experiments could offer additional improvements. Finally, we believe stateful hybrid optimizations could help address the exploration exploitation tradeoffs across the different optimization methods. 
+
+ References 
+
+ [1] 
+ J. Bradbury, R. Frostig, P. Hawkins, M. J. Johnson, C. Leary, D. Maclaurin, G. Necula, A. Paszke, J. VanderPlas, S. Wanderman-Milne, et al. (2018) 
+
+ JAX: composable transformations of python+ numpy programs .
+
+ Cited by: §1 .
+
+ [2] 
+ S. H. Bryngelson (2026) 
+
+ Apple neural engine: architecture, programming, and performance .
+
+ arXiv preprint arXiv:2606.22283 .
+
+ Cited by: §1 .
+
+ [3] 
+ T. Chen, T. Moreau, Z. Jiang, L. Zheng, E. Yan, H. Shen, M. Cowan, L. Wang, Y. Hu, L. Ceze, et al. (2018) 
+
+ { \{ tvm } \} : An automated { \{ end-to-end } \} optimizing compiler for deep learning .
+
+ In 13th USENIX symposium on operating systems design and implementation (OSDI 18) ,
+
+ pp. 578–594 .
+
+ Cited by: §1 .
+
+ [4] 
+ Y. Chen, L. Yan, Z. Yang, E. Zhang, J. Zhao, S. Wang, D. Yin, and J. Mao (2026) 
+
+ Beyond monolithic architectures: a multi-agent search and knowledge optimization framework for agentic search .
+
+ arXiv preprint arXiv:2601.04703 .
+
+ Cited by: §1 .
+
+ [5] 
+ C. Hong, S. Bhatia, A. Cheung, and S. Shao (2025) 
+
+ Autocomp: llm-driven code optimization for tensor accelerators .
+
+ In Machine Learning for Computer Architecture and Systems 2025 ,
+
+ Cited by: §1 ,
+ §1 .
+
+ [6] 
+ R. Hundt, N. Kumar, J. B. Paredes, S. Goodson, C. Verghese, P. Rengasamy, K. Le, J. Zhang, C. Alaras, Y. Zhang, et al. (2026) 
+
+ XProf: an open, scalable, and extensible profiling system for the modern ml stack .
+
+ Proceedings of Machine Learning and Systems 8 , pp. 214–232 .
+
+ Cited by: §1 .
+
+ [7] 
+ P. Lewis, E. Perez, A. Piktus, F. Petroni, V. Karpukhin, N. Goyal, H. Küttler, M. Lewis, W. Yih, T. Rocktäschel, et al. (2020) 
+
+ Retrieval-augmented generation for knowledge-intensive nlp tasks .
+
+ Advances in neural information processing systems 33 , pp. 9459–9474 .
+
+ Cited by: §2.2 .
+
+ [8] 
+ G. Liao, H. Qin, Y. Wang, A. Golden, M. Kuchnik, Y. Yetim, R. Xiao, J. J. Ang, C. Fu, Y. He, et al. (2026) 
+
+ Kernelevolve: scaling agentic kernel coding for heterogeneous ai accelerators at meta .
+
+ In 2026 ACM/IEEE 53rd Annual International Symposium on Computer Architecture (ISCA) ,
+
+ pp. 733–747 .
+
+ Cited by: §1 .
+
+ [9] 
+ E. Lindholm, J. Nickolls, S. Oberman, and J. Montrym (2008) 
+
+ NVIDIA tesla: a unified graphics and computing architecture .
+
+ IEEE micro 28 ( 2 ), pp. 39–55 .
+
+ Cited by: §1 .
+
+ [10] 
+ J. Nickolls, I. Buck, M. Garland, and K. Skadron (2008) 
+
+ Scalable parallel programming with cuda .
+
+ In Acm siggraph 2008 classes ,
+
+ pp. 1–14 .
+
+ Cited by: §1 .
+
+ [11] 
+ A. Novikov, N. Vũ, M. Eisenberger, E. Dupont, P. Huang, A. Z. Wagner, S. Shirobokov, B. Kozlovskii, F. J. Ruiz, A. Mehrabian, et al. (2025) 
+
+ Alphaevolve: a coding agent for scientific and algorithmic discovery .
+
+ arXiv preprint arXiv:2506.13131 .
+
+ Cited by: §1 .
+
+ [12] 
+ A. Pepe, C. Lin, D. Magka, B. Acun, Y. N. Wu, A. Protopopov, C. Wu, and Y. Bachrach (2026) 
+
+ Agentic discovery of neural architectures: aira-compose and aira-design .
+
+ arXiv preprint arXiv:2605.15871 .
+
+ Cited by: §1 .
+
+ [13] 
+ J. Ragan-Kelley, C. Barnes, A. Adams, S. Paris, F. Durand, and S. Amarasinghe (2013) 
+
+ Halide: a language and compiler for optimizing parallelism, locality, and recomputation in image processing pipelines .
+
+ Acm Sigplan Notices 48 ( 6 ), pp. 519–530 .
+
+ Cited by: §1 .
+
+ [14] 
+ J. Tang, J. Huan, H. Zhou, Y. Zhang, and L. Wang (2026) 
+
+ NKI-agent: domain-specific fine-tuning and agentic tool use for neuron kernel generation .
+
+ arXiv preprint arXiv:2607.04395 .
+
+ Cited by: §1 .
+
+ [15] 
+ P. Tillet, H. Kung, and D. Cox (2019) 
+
+ Triton: an intermediate language and compiler for tiled neural network computations .
+
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages ,
+
+ pp. 10–19 .
+
+ Cited by: §1 .
+
+ [16] 
+ A. Tschand, C. Hong, J. Walker, N. Cai, S. Wang, S. Subramanian, S. Dev, V. J. Reddi, A. Yazdanbakhsh, and S. Sankaran (2026) 
+
+ JAXBench: benchmarking autonomous tpu kernel optimization .
+
+ arXiv preprint arXiv:2607.20466 .
+
+ Cited by: §1 ,
+ §1 ,
+ §3 .
+
+ [17] 
+ Q. Wu, G. Bansal, J. Zhang, Y. Wu, B. Li, E. Zhu, L. Jiang, X. Zhang, S. Zhang, J. Liu, A. H. Awadallah, R. W. White, D. Burger, and C. Wang (2023) 
+
+ AutoGen: enabling next-gen llm applications. a framework for multi-agent conversation .
+
+ External Links: 2308.08155 
+
+ Cited by: §2.3 .
+
+ [18] 
+ S. Zhang, J. Li, Y. Zhang, P. Jia, Y. Wang, X. Qian, W. Zhang, M. Wang, Y. Liu, and X. Zhao (2026) 
+
+ MemSearch-o1: empowering large language models with reasoning-aligned memory growth in agentic search .
+
+ In Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,
+
+ pp. 925–943 .
+
+ Cited by: §1 .
+
+ [19] 
+ L. Zheng, C. Jia, M. Sun, Z. Wu, C. H. Yu, A. Haj-Ali, Y. Wang, J. Yang, D. Zhuo, K. Sen, et al. (2020) 
+
+ Ansor: generating { \{ high-performance } \} tensor programs for deep learning .
+
+ In 14th USENIX symposium on operating systems design and implementation (OSDI 20) ,
+
+ pp. 863–879 .
+
+ Cited by: §1 .
+
+ Appendix A Tolerance setting for JaxBench 
+
+ Table 4: Workload rtol and atol Values 
+
+ Workload | 
+ rtol | 
+ atol | 
+
+ 1p_Flash_Attention | 
+ 0.01 | 
+ 0.05 | 
+
+ 2p_GQA_Attention | 
+ 0.05 | 
+ 0.05 | 
+
+ 3p_MLA_Attention | 
+ 0.01 | 
+ 0.05 | 
+
+ 4p_Sparse_Attention | 
+ 0.01 | 
+ 0.01 | 
+
+ 5p_Flex_Attention | 
+ 0.01 | 
+ 0.01 | 
+
+ 6p_Paged_Attention | 
+ 0.01 | 
+ 0.01 | 
+
+ 7p_Ragged_Paged_Attention | 
+ 0.01 | 
+ 0.01 | 
+
+ 8p_GEMM | 
+ 0.01 | 
+ 0.01 | 
+
+ 9p_SwiGLU_MLP | 
+ 0.1 | 
+ 0.1 | 
+
+ 10p_Sparse_MoE | 
+ 0.1 | 
+ 0.1 | 
+
+ 11p_Megablox_GMM | 
+ 0.01 | 
+ 0.01 | 
+
+ 12p_RMSNorm | 
+ 0.01 | 
+ 0.01 | 
+
+ 13p_Cross_Entropy | 
+ 0.01 | 
+ 0.01 | 
+
+ 14p_Ragged_Dot | 
+ 0.01 | 
+ 0.01 | 
+
+ 15p_RetNet_Retention | 
+ 0.01 | 
+ 0.01 | 
+
+ 16p_Mamba2_SSD | 
+ 0.01 | 
+ 0.05 | 
+
+ 17p_Triangle_Multiplication | 
+ 0.01 | 
+ 0.01 | 
+
+ 18k_Conv2D_ReLU_BiasAdd | 
+ 0.01 | 
+ 0.01 | 
+
+ 19k_Matmul_Subtract_Multiply_ReLU | 
+ 0.01 | 
+ 0.01 | 
+
+ 20k_Gemm_Multiply_LeakyReLU | 
+ 0.01 | 
+ 0.01 | 
+
+ 21k_Gemm_Divide_Sum_Scaling | 
+ 0.1 | 
+ 0.1 | 
+
+ 22k_Conv2d_InstanceNorm_Divide | 
+ 0.01 | 
+ 0.01 | 
+
+ 23k_Matmul_Sum_Max_AvgPool_LogSumExp_LogSumExp | 
+ 0.01 | 
+ 0.01 | 
+
+ 24k_Matmul_Scale_ResidualAdd_Clamp_LogSumExp_Mish | 
+ 0.01 | 
+ 0.01 | 
+
+ 25k_Conv3d_GroupNorm_Mean | 
+ 0.01 | 
+ 0.01 | 
+
+ 26k_BMM_InstanceNorm_Sum_ResidualAdd_Multiply | 
+ 0.01 | 
+ 0.01 | 
+
+ 27k_Matmul_Mish_Mish | 
+ 0.01 | 
+ 0.01 | 
+
+ 28k_ConvTranspose3d_LayerNorm_GELU_Scaling | 
+ 0.01 | 
+ 0.05 | 
+
+ 29k_Matmul_Swish_Sum_GroupNorm | 
+ 0.01 | 
+ 0.01 | 
+
+ 30k_Matmul_Scaling_ResidualAdd | 
+ 0.01 | 
+ 0.01 | 
+
+ 31k_Gemm_BatchNorm_GELU_ReLU | 
+ 0.01 | 
+ 0.05 | 
+
+ 32k_Gemm_Sigmoid_LogSumExp | 
+ 0.01 | 
+ 0.01 | 
+
+ 33k_Conv3d_Mish_Tanh | 
+ 0.01 | 
+ 0.01 | 
+
+ 34k_Conv2d_Activation_BatchNorm | 
+ 0.01 | 
+ 0.1 | 
+
+ 35k_Gemm_Scaling_Hardtanh_GELU | 
+ 0.01 | 
+ 0.01 | 
+
+ 36k_Matmul_Sigmoid_Sum | 
+ 0.01 | 
+ 0.01 | 
+
+ 37k_Matmul_Swish_Scaling | 
+ 0.01 | 
+ 0.01 | 
+
+ 38k_Matmul_Dropout_Softmax | 
+ 0.01 | 
+ 0.01 | 
+
+ 39k_Conv2d_GELU_GlobalAvgPool | 
+ 0.01 | 
+ 0.01 | 
+
+ 40k_Gemm_GroupNorm_Min_BiasAdd | 
+ 0.01 | 
+ 0.01 | 
+
+ 41k_Gemm_Add_ReLU | 
+ 0.01 | 
+ 0.01 | 
+
+ 42k_Gemm_Max_Subtract_GELU | 
+ 0.01 | 
+ 0.01 | 
+
+ 43k_Gemm_BatchNorm_Scaling_Softmax | 
+ 0.01 | 
+ 0.01 | 
+
+ 44k_Matmul_Divide_GELU | 
+ 0.01 | 
+ 0.01 | 
+
+ 45k_Gemm_GroupNorm_Swish_Multiply_Swish | 
+ 0.01 | 
+ 0.05 | 
+
+ 46k_Conv2d_GroupNorm_Tanh_HardSwish_ResidualAdd_LogSumExp | 
+ 0.01 | 
+ 0.01 | 
+
+ 47k_Matmul_Add_Swish_Tanh_GELU_Hardtanh | 
+ 0.01 | 
+ 0.01 | 
+
+ 48k_Matmul_BatchNorm_BiasAdd_Divide_Swish | 
+ 0.01 | 
+ 0.01 | 
+
+ 49k_Matmul_AvgPool_GELU_Scale_Max | 
+ 0.01 | 
+ 0.01 | 
+
+ 50k_Matmul_GELU_Softmax | 
+ 0.01 | 
+ 0.01 |

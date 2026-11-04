@@ -1,0 +1,1292 @@
+MusaCoder : Native GPU Kernel Generation with Full-Stack Training on Moore Threads GPU 
+
+ Kun Chen
+ † † thanks: Equal contribution. 
+
+ Songshuo Lu 1 1 
+ 1 
+
+ Equal contribution. 
+
+ Sicong Liao 1 1 footnotemark: 
+ 1 
+
+ Tankun Li 1 1 footnotemark: 
+ 1 
+
+ Yafei Zhang 1 1 footnotemark: 
+ 1 
+
+ Affiliation:  Dong Yang 
+
+ Qiheng Lv
+
+ Hua Wang
+
+ Zhi Chen
+ † † thanks: Corresponding author. 
+
+ Yaohua Tang
+
+ Affiliation:  Moore Threads AI
+
+ Email:  tangyaohua28@gmail.com 
+
+ Abstract 
+
+ Native GPU kernel generation turns high-level tensor programs into executable, efficient low-level code. Existing Large Language Models (LLMs) struggle with this task, while execution-based reinforcement learning suffers from sparse rewards, reward hacking, and training instability. We present MusaCoder , a full-stack training framework for native GPU kernel generation on CUDA and MUSA backends. MusaCoder combines progressive kernel-oriented data synthesis, diversity-preserving rejection fine-tuning, and execution-feedback Reinforcement Learning (RL) through MooreEval , a distributed verifier and reward environment. To stabilize RL, MusaCoder introduces PrimeEcho for first-turn-anchored multi-turn rewards, Buffered Dynamic Retry for recovering signals from all-failed hard samples, and MirrorPop for off-policy sequence filtering. Experiments on KernelBench and a MUSA-ported variant show that MusaCoder outperforms strong open-source and proprietary baselines in both correctness and empirical speedup, with the 9B model matching or exceeding frontier closed-source models and the 27B model establishing a new state of the art. These results demonstrate not only the effectiveness of full-stack execution-feedback training for native kernel generation, but also the capability of Moore Threads GPUs to support the complete LLM post-training stack, providing a practical foundation for large-model training and optimization on emerging accelerators. 
+
+ MusaCoder: Native GPU Kernel Generation
+
+with Full-Stack Training on Moore Threads GPUs 
+ Kun Cheng 1 ,  Songshuo Lu 1 ,  Sicong Liao 1 ,  Tankun Li 1 ,  Yafei Zhang 1 
+
+Dong Yang,  Qiheng Lv,  Hua Wang,  Zhi Chen 2 ,  Yaohua Tang
+
+ Moore Threads AI 
+ tangyaohua28@gmail.com 2 2 footnotetext: Corresponding author. 
+
+ Figure 1: KernelBench performance comparison. 
+
+ 1 Introduction 
+
+ Modern neural networks increasingly rely on highly optimized GPU kernels to fully utilize accelerator hardware. While vendor-specific libraries (e.g., NVIDIA’s cuBLAS and cuDNN) and static templates (e.g., CUTLASS) deliver near-optimal performance for canonical operators, they struggle to keep pace with the rapid proliferation of novel and long-tail operator fusions in frontier AI models. Consequently, native GPU kernel generation—translating high-level tensor computations directly into optimized low-level device code—has become increasingly important. Recently, Large Language Models (LLMs) have shown promising potential for automating this process, offering a scalable alternative to labor-intensive manual kernel engineering. 
+
+ However, translating high-level PyTorch semantics into executable GPU kernels with LLMs remains fundamentally challenging. Unlike general-purpose code generation, synthesizing native kernels from scratch suffers from extremely low initial success rates.
+Without explicit domain grounding, off-the-shelf LLMs frequently struggle with GPU execution semantics, mathematical derivations, and multi-dimensional index mapping.
+Moreover, GPU kernels must satisfy strict correctness constraints, requiring the generated code to be compilable, numerically stable across edge cases, and compliant with hardware execution semantics. As a result, even minor logical or mathematical errors can lead to widespread compilation failures, illegal memory accesses, or incorrect numerical outputs. 
+
+ Recent years have witnessed the widespread adoption of reinforcement learning (RL) with execution-based feedback in code generation.
+However, extending these paradigms to GPU kernel generation
+introduces several major challenges.
+First, reward sparsity : the high failure rate of generated kernels often produces “all-failed” rollout groups, yielding limited useful learning signal. Second, reward hacking : models tend to exploit high-level API fallbacks (e.g., invoking torch.matmul or aten::* routines) instead of generating fully native kernels. Third, off-policy drift : the asynchronous and multi-turn nature of execution-based rollouts amplifies gradient instability during training. These challenges become even more pronounced in emerging non-CUDA accelerator ecosystems, where large-scale training corpora and reliable verification infrastructures remain limited. 
+
+ To address these challenges, we present MusaCoder , an end-to-end LLM-driven framework for native GPU kernel synthesis developed on Moore Threads GPU clusters (Fig.  2 ).
+To deal with the extremely low initial success rate of kernel generation and establish a strong policy initialization, we design a comprehensive three-stage data synthesis pipeline. Rather than relying on naive code translation, the pipeline first expands task diversity and injects foundational CUDA/MUSA knowledge to improve the model’s understanding of GPU programming semantics. It then introduces explicit tensor shape annotations and a structured six-step reasoning format to guide the mapping from high-level tensor operations to thread- and memory-level execution semantics. Finally, the pipeline incorporates profiling analysis and multi-turn interactive trajectories to reduce syntactic, logical, and execution-level errors that would otherwise
+undermine the stability and effectiveness of the overall synthesis pipeline. 
+
+ Leveraging this progressive data pipeline, we first perform Multi-task Supervised Fine-Tuning (SFT) to teach the model canonical kernel generation patterns and error diagnosis behaviors. To further align the model with execution correctness prior to RL, we subsequently apply Diversity-Preserving Rejection Sampling Fine-Tuning (RFT) . Conventional RFT typically retains only the single fastest implementation, which can lead to rapid entropy collapse and reduced exploration diversity. In contrast, our approach employs an execution sandbox to filter deterministic failures while deliberately preserving a heterogeneous set of verified correct implementations. This stage substantially improves absolute correctness while maintaining the behavioral diversity necessary for effective downstream reinforcement learning. 
+
+ Figure 2: Overview of the MusaCoder training pipeline. The pipeline first constructs a kernel-oriented corpus from diverse raw sources, including PyTorch-to-CUDA/MUSA generation data, GPU kernel knowledge QA, profiling analysis, optimization rewrite, and kernel review/repair data. The data are further augmented through shape/stride hints, unit tests, metadata extraction, weak-operator upsampling, LLM-based synthesis, and MooreEval-based verification. After post-processing, the verified corpus is used for multi-task SFT and diversity-preserving RFT. Finally, MusaCoder is optimized with a two-stage RL procedure, consisting of single-turn warmup and multi-turn enhancement, together with three stabilization techniques: PrimeEcho, MirrorPop, and Buffered Dynamic Retry.
+
+ Building upon this diverse initialization, we formulate kernel synthesis as a verifiable reinforcement learning problem. At the core of our RL stage is MooreEval , a scalable distributed execution sandbox for automated kernel evaluation. MooreEval enforces a strict correctness-first verification hierarchy and incorporates anti-hacking mechanisms to detect and penalize forbidden PyTorch fallbacks. Guided by execution feedback from MooreEval, we employ a two-stage RL training strategy consisting of a single-turn execution warmup followed by iterative multi-turn feedback rollouts. 
+
+ To improve the robustness and stability of execution-based RL,
+we introduce three complementary stabilization mechanisms: 
+
+ • 
+
+ PrimeEcho : A first-turn-anchored trajectory reward formulation that incorporates multi-turn corrective feedback to improve exploration while mitigating multi-turn reward hacking, without degrading zero-shot generation quality. 
+
+ • 
+
+ Buffered Dynamic Retry (BDR) : A dynamic resampling strategy that converts terminal all-failed groups into feedback-conditioned repair tasks, recovering useful learning signals from difficult long-tail samples and alleviating reward sparsity. 
+
+ • 
+
+ MirrorPop : A sequence-level off-policy masking strategy that more accurately estimates distributional drift magnitude, improving the detection of severe off-policy samples and enabling more stable RL training. 
+
+ Empirical evaluations on the KernelBench suite and its MUSA-ported variant show that MusaCoder significantly outperforms leading proprietary and open-source models, including Claude Opus 4.7 and DeepSeek-V4-Pro (Fig.  1 ). In particular, the 27B variant of MusaCoder achieves state-of-the-art kernel correctness and runtime speedups.
+These results demonstrate the effectiveness of our end-to-end alignment pipeline in enabling hardware-aware GPU kernel generation, paving the way toward fully automated kernel synthesis across platforms. 
+
+ 2 Related Work 
+
+ LLM-driven GPU kernel generation has become an important research direction in code synthesis.
+High-performance kernels are critical for maximizing accelerator utilization in modern deep learning systems. Unlike general-purpose program synthesis, GPU kernel generation imposes strict execution requirements: generated kernels must compile successfully, produce numerically correct outputs, avoid prohibited high-level framework fallbacks, and deliver measurable runtime improvements on real hardware. Consequently, recent research has increasingly focused not only on code generation itself, but also on execution-based evaluation, reward verification, and training models to perform iterative error correction and repair. 
+
+ 2.1 Vendor Libraries, Compilers, and DSLs 
+
+ Existing approaches to high-performance GPU computing largely fall into two paradigms.
+The first relies on highly optimized vendor libraries such as NVIDIA’s cuBLAS and cuDNN , as well as template-based frameworks like CUTLASS .
+While these libraries deliver excellent performance for canonical operations such as GEMM and convolution, extending them to support rapidly evolving model architectures, novel operators, and fused computation patterns often requires substantial manual engineering effort  ( Jaber and Jaber, 2026 ; Zhu et al., 2025 ) . Moreover, modern deep learning models introduce new computation patterns (e.g., SwiGLU and Grouped-Query Attention) at a pace that frequently exceeds the update cycles of vendor-maintained libraries and template frameworks. 
+
+ To address this inflexibility, the systems community has heavily invested in the second paradigm: bare-metal code generation (or native kernel synthesis) . Deep learning compilers and Domain-Specific Languages (DSLs) were proposed to generate low-level code directly from computational graphs  ( Chen et al., 2018 ; Zheng et al., 2020 ; Hsu et al., 2024 ; Liu et al., 2023 ; Li et al., 2025a ; Guo et al., 2026 ) . Methods like TVM  ( Chen et al., 2018 ) and Ansor  ( Zheng et al., 2020 ) map optimization spaces into Intermediate Representations (IRs), using search algorithms to find optimal implementations. Similarly, the Triton ecosystem  ( Tillet et al., 2019 ) provides a higher abstraction for GPU programming, with recent works exploring LLM integration within this DSL space  ( Hsu et al., 2024 ; Li et al., 2025a ) . These pioneering systems demonstrated that bypassing standard libraries is essential for fusing operations and maximizing hardware utilization. 
+
+ MusaCoder inherits this bare-metal synthesis philosophy. However, instead of generating code that calls cuDNN/CUTLASS or searching for schedules in explicit IRs, MusaCoder is trained to write native CUDA/MUSA kernels from scratch . By learning the mapping from PyTorch reference programs to underlying hardware instructions, MusaCoder helps developers support long-tail and novel operators without relying on standard libraries, directly mastering low-level kernel design and optimization. 
+
+ 2.2 LLM-Driven Kernel Generation and Iterative Refinement 
+
+ Recent post-training methods for code and kernel generation have expanded from supervised fine-tuning to verifier-guided reinforcement learning, multi-turn self-correction, and agent search  ( Madaan et al., 2023 ; Shinn et al., 2023 ; Baronio et al., 2025 ; Li et al., 2025b ; Dai et al., 2026 ; Bai et al., 2026 ; Zhang et al., 2025 ; Brabec et al., 2025 ; Dong et al., 2026 ; Yang et al., 2025 ) . Works like Kevin   ( Baronio et al., 2025 ) and CUDA-L1   ( Li et al., 2025b ) show that mastering kernel generation requires learning from compiler, runtime, and performance feedback via RL. Meanwhile, frozen-model agent systems (e.g., CUDA Agent   ( Dai et al., 2026 ) , CudaForge   ( Zhang et al., 2025 ) , QiMeng-Kernel   ( Zhu et al., 2025 ) , and AutoKernel   ( Jaber and Jaber, 2026 ) ) use LLMs at inference time to interact with profilers and tools. More broadly, software engineering frameworks like OpenHands and SWE-agent  ( Wang et al., 2024 ; Yang et al., 2024 ) , along with self-correction studies  ( Ding et al., 2024 ; Ye et al., 2025 ; Wang et al., 2025 ) , show the effectiveness of using test-time computation to improve code quality. 
+
+ While agent-based methods achieve strong performance by relying on massive inference-time computation, MusaCoder internalizes these capabilities directly into the model weights through an SFT → \rightarrow single-turn RL → \rightarrow multi-turn RL pipeline. By embedding compiler and runtime feedback into the training loop, MusaCoder empowers much smaller models (e.g., 9B parameters) to surpass the accuracy of state-of-the-art closed-source models. This approach fundamentally eliminates the reliance on extensive test-time search, drastically reducing deployment and inference costs while retaining the model’s ability to autonomously fix errors and optimize code. 
+
+ 2.3 Executable Evaluation and Reward Verification 
+
+ Benchmarking and verifier design are essential for execution-driven generation. Frameworks like KernelBench   ( Ouyang et al., 2025 ) and KernelBenchX   ( Wang et al., 2026 ) , along with other executable evaluations  ( Baronio et al., 2025 ; Li et al., 2025b ; Dai et al., 2026 ; Bai et al., 2026 ; Brabec et al., 2025 ) , require outputs to pass actual compilation, random testing, and synchronized profiling, rather than just measuring text similarity. 
+
+ Furthermore, GPU kernel generation is prone to reward hacking, such as calling forbidden PyTorch operators, using asynchronous execution to bypass timers, or modifying benchmark settings. Therefore, recent systems emphasize strict anti-cheating mechanisms  ( Wang et al., 2026 ; Li et al., 2025b ; Dai et al., 2026 ; Zhang et al., 2025 ; Zhu et al., 2025 ) . MusaCoder adopts this approach. Our verifier categorizes outputs into compilation failures, runtime exceptions, correctness failures, cheating/fallback behaviors, and valid performance metrics. This structured feedback prevents evaluation loopholes and provides precise debugging information for multi-turn RL. 
+
+ 2.4 Emerging Accelerator Ecosystems and MusaCoder’s Positioning 
+
+ While CUDA remains the dominant ecosystem, software stacks for emerging alternative accelerators—such as Huawei’s CANN  ( Huawei, 2026 ) , Cambricon’s BANG  ( Cambricon, 2026 ) , and Moore Threads’ MUSA SDK  ( Moore Threads, 2026 ) —are developing rapidly. A major systems challenge in these heterogeneous ecosystems is the high manual engineering cost of migrating and optimizing novel operators across different platforms. A model that can generate native kernels from scratch can significantly reduce this cross-platform development cost and mitigate vendor lock-in.
+MusaCoder addresses this problem by training CUDA and MUSA kernel generators within a unified full-stack pipeline on Moore Threads GPUs, showing that emerging accelerators can support closed-loop LLM post-training for executable code generation. 
+
+ Figure 3: Three-stage evolution of the SFT data construction pipeline. Stage 1 expands the PyTorch-to-CUDA/MUSA workload distribution and aligns baseline operator correctness through real PyTorch modules, GitHub projects, NNSmith-generated graphs, operator variants, cleaning, filtering, and prompt construction. Stage 2 injects tensor metadata and enforces a six-step structured reasoning template to strengthen shape inference, index mapping, boundary handling, and semantic correctness, followed by MooreEval-based automatic verification. Stage 3 introduces execution-feedback understanding through compilation errors, runtime failures, correctness mismatches, profiling signals, and multi-turn iterations, producing data for feedback-driven repair, reviewer training, and performance optimization. 
+
+ 3 Data Synthesis Pipeline 
+
+ Existing PyTorch-to-CUDA datasets are useful for KernelBench-style warmup, but they are not sufficient for full-stack post-training. They provide limited coverage of long-tail operators, often lack reusable verification assets, and may rely on vendor-library implementations rather than native kernels. MusaCoder therefore constructs SFT data as a staged capability-building process (Fig.  3 ). 
+
+ • 
+
+ Stage 1: Task Expansion and Fundamental Operator Correctness Enhancement. We enlarge PyTorch-to-CUDA/MUSA task coverage with open-source tasks, GitHub modules, NNSmith-generated graphs, targeted basic-operator variants, GPU-kernel Q&A data, and automatically generated unit tests. 
+
+ • 
+
+ Stage 2: Structured Reasoning and Spatial Logic Constraints. We add explicit tensor metadata and a six-step reasoning template to reduce common failures in shape inference, scalar formulas, indexing, boundary handling, and fallback avoidance. 
+
+ • 
+
+ Stage 3: Multi-turn RL Preparation and Environmental Feedback Parsing. We synthesize reviewer, profiling, optimization-rewrite, and multi-turn repair data so that the model can interpret compiler/runtime errors, correctness mismatches, and performance feedback before RL. 
+
+ Through the aforementioned three-stage pipeline, MusaCoder’s SFT data evolves from simple PyTorch-to-CUDA/MUSA translation pairs into a rich training corpus that integrates operator knowledge, structured reasoning, automated verification, and execution-feedback parsing. This pipeline not only improves the model’s execution correctness in generating native CUDA/MUSA kernels, but also strengthens its ability to interpret compiler errors, runtime feedback, and performance bottlenecks. As a result, it provides a strong and stable initialization for subsequent RFT and RL training while preserving sufficient behavioral diversity for effective exploration. 
+
+ 3.1 Task Expansion and Fundamental Operator Correctness Enhancement 
+
+ 3.1.1 PyTorch-to-CUDA/MUSA Workload Expansion 
+
+ This stage first expands the scale and distributional coverage of PyTorch-to-CUDA/MUSA generation tasks. Rather than relying on a narrow set of manually written operators, we construct reference workloads from three complementary sources: existing open-source PyTorch modules and kernel generation tasks  ( Dai et al., 2026 ; Gope et al., 2024 ) , real-world PyTorch modules and functional API calls from GitHub repositories, and valid PyTorch computation graphs automatically synthesized by NNSmith  ( Liu et al., 2023 ) . Open-source data provides representative kernel-generation scenarios, GitHub data introduces realistic module structures and operator compositions, and NNSmith systematically supplements workload regions that are insufficiently covered by manually collected or real-world code. 
+
+ For the GitHub data, we perform rigorous cleaning, deduplication, and filtering. We eliminate samples that depend on external states, contain unstable control flows, or are difficult to verify, retaining only reference programs that can be converted into executable PyTorch-to-CUDA/MUSA generation tasks. 
+
+ We employ NNSmith to synthesize executable computation graphs under strict operator, shape, and dtype constraints. The operator pool covers activation functions, basic mathematical operations, logical operations, shape manipulations, pooling, reductions, normalization layers, convolution variants, interpolation, padding, type casting, and matrix operations. We further extend this pool to include 1D/3D operators, transposed convolutions, PixelShuffle, Adaptive Pooling, Dropout, Bmm, Addmm, and normalization variants, ultimately covering approximately 162 empirically tested operators. During generation, we specify operator subsets via mgen.include , control graph size via mgen.max_nodes , and direct the generation of 1D, 2D, or 3D workloads via mgen.rank_choices . This facilitates the construction of diverse graph archetypes, such as CNN-like, 3D convolutional, 1D sequential, reduction-heavy, and shape-sensitive computation graphs. All generated computation graphs are validated via the TorchScript backend and filtered based on executability, input-output stability, graph scale, and task adaptability before being converted into kernel generation prompts. 
+
+ 3.1.2 Basic Operator Variant Augmentation 
+
+ Workload expansion alone does not resolve the model’s weaknesses on fundamental operator semantics. Early experiments show that the model’s accuracy is close to zero on several basic operator families, especially convolution variants. Under diverse parameter configurations, including varying strides, paddings, dilations, groups, kernel sizes, input ranks, 1D/2D/3D convolutions, and transposed convolutions, the model frequently fails in semantic interpretation, shape inference, boundary handling, and index mapping. Because these operators serve as essential building blocks for complex models and fused kernels, unstable correctness at this level would flood the subsequent RL stage with invalid samples and substantially weaken executable learning signals. 
+
+ To address this issue, we construct large-scale variant data for fundamental operators. The dataset spans diverse dtypes, shapes, broadcast patterns, reduction dimensions, contiguous and non-contiguous layouts, and extreme input scenarios. Guided by failure distributions observed in preliminary validation, we upsample vulnerable operator families, including nn.Conv2d , transposed convolutions, 3D convolutions, reductions, normalizations, softmax, broadcasting, and complex indexing. This targeted augmentation is designed not merely to increase data volume, but to expose the model to the parameter regimes and boundary cases where basic operator generation most often breaks down. 
+
+ The construction pipeline consists of “Data Pre-processing → \rightarrow Two-Stage LLM Generation → \rightarrow Compilation and Correctness Filtering.” In the pre-processing stage, we aggregate real-world PyTorch code snippets and low-level operator APIs. We employ Small Language Models (SLMs) for semantic cleansing to eliminate state-control APIs (e.g., torch.set_device() ), retaining exclusively pure computational operators as generation seeds. In the first stage of LLM generation, rather than directly outputting CUDA code, we prompt the LLM to design diverse implementation pathways for a given operator, including naive baselines, single-feature optimizations, algorithmic or input-specialized implementations, and composite optimized variants. Each pathway must explicitly define the thread mapping, memory hierarchy transitions, synchronization primitives, and resource bottleneck trade-offs, thereby forming a structured mechanism description. In the second stage, the LLM generates concrete CUDA kernels based on these mechanisms and target scenarios. Compared with generating code directly from operator descriptions, this “plan-then-implement” paradigm reduces monotonic template outputs and improves implementation diversity. Finally, we couple candidate implementations with automatically generated unit tests for compilation, execution, and correctness verification, filtering out samples that fail to compile, trigger runtime errors, exhibit numerical inconsistencies, or display suspicious speculative behaviors. 
+
+ Overall, this stage establishes the data foundation for PyTorch-to-CUDA/MUSA tasks through two complementary interventions. Workload expansion broadens the distribution of reference programs and operator compositions, while basic operator variant augmentation directly targets the model’s most severe fundamental correctness failures, especially convolution, reduction, normalization, broadcasting, and complex indexing. Together, they provide a more stable correctness baseline for the subsequent structured reasoning, multi-turn feedback, and RL phases. 
+
+ 3.1.3 GPU Kernel Knowledge Q&A Data 
+
+ Beyond direct PyTorch-to-CUDA/MUSA generation data, we construct a GPU Kernel Knowledge Question-and-Answer (Q&A) dataset to supplement the model’s foundational knowledge encompassing mathematical principles, CUDA programming models, GPU architectures, PyTorch tensor semantics, memory hierarchies, performance optimization strategies, numerical stability, and benchmarking methodologies. We observe that many errors in kernel generation do not merely stem from the code implementation itself, but rather originate from an inadequate comprehension of underlying concepts. Examples include erroneous thread indexing, neglected boundary checks, misjudged tensor layouts, mishandled reduction precision, or a lack of understanding regarding the impact of asynchronous CUDA execution on latency measurement. Therefore, this dataset aims to equip the model with more robust knowledge priors for kernel generation. 
+
+ The questions in this dataset are primarily sourced from two pipelines. The first pipeline extracts data from open-source CUDA tutorials, GPU programming documentation  ( NVIDIA, 2026a ) , kernel optimization examples, and common CUDA bug/FAQ repositories via rule matching, keyword extraction, and manual cleansing, predominantly covering general concepts and common optimization principles. The second pipeline synthesizes questions based on KernelBench task patterns and the model’s failure cases from the previous kernel generation stage, serving to precisely bridge the model’s exposed vulnerabilities. Specifically, we perform targeted augmentation for operator types that exhibit low accuracy or suboptimal performance during direct kernel generation, such as convolution, reduction, normalization, softmax, broadcasting, and complex shape indexing. 
+
+ Distinct from direct kernel generation data, the knowledge Q&A data does not require the model to output complete CUDA implementations. Instead, it trains the model to conduct deep causal reasoning: elucidating why a particular implementation is efficient, how underlying physical constraints restrict code topologies, and identifying the root causes of specific runtime errors. The questions encompass mathematical definitions, basic CUDA implementations and memory access optimizations, high-performance tuning, Tensor Core utilization and hardware adaptation, common bug debugging and bottleneck analysis, advanced applications, and future architectural evolutions. This data serves as a knowledge enhancement signal during SFT, forming a complement to the code generation data: the generation data teaches the model how to write kernels, whereas the knowledge Q&A data helps the model comprehend the underlying rationale for correctness and performance behind specific implementation choices. 
+
+ 3.1.4 Automated Unit Test Generation and Verification 
+
+ To guarantee the executability and correctness of the synthesized data, we construct an automated unit test generation and verification pipeline for PyTorch-to-CUDA/MUSA tasks. For a given PyTorch reference program, the code alone is insufficient to determine the correctness of the generated kernel; it necessitates test cases encompassing diverse input shapes, data types, value ranges, and edge cases. Therefore, we leverage Large Language Models (LLMs) to generate candidate test cases based on PyTorch code semantics and interface signatures, and execute them within a native PyTorch environment to obtain reference outputs (ground truth) for subsequent sample filtering and MooreEval evaluation. 
+
+ Specifically, test case generation primarily covers four dimensions of variation. First is shape coverage , including regular dimensions, unaligned dimensions, highly imbalanced dimensions, and shape combinations that trigger broadcasting. Second is dtype coverage , encompassing FP32 , FP16 , BF16 , and common integer inputs. Third is value range coverage , which includes standard random distributions, mixed positive and negative values, zero-inclusive inputs, and extreme maximum/minimum values that may trigger overflow, underflow, or numerically unstable paths. Finally, edge case coverage involves scenarios such as empty tensors, all-zero/all-one inputs, non-contiguous tensors, and special dimensional configurations. 
+
+ The generated candidate test cases are initially executed in the native PyTorch environment. We filter out test samples that exhibit syntax errors, invalid parameter combinations, runtime exceptions, out-of-memory (OOM) errors, or unstable outputs, retaining only those cases that execute stably and yield deterministic reference outputs. The retained test suite is subsequently utilized in two scenarios: first, during the SFT data construction phase for compiling and correctness-filtering candidate CUDA/MUSA implementations; second, within the subsequent MooreEval framework for random-input correctness checks and performance profiling of model-generated results. Through this pipeline, we mitigate the influx of erroneous implementations into the training data while providing a unified, reusable evaluation foundation for the ensuing RFT/RL phases. 
+
+ In summary, this stage establishes the foundational data substrate across three dimensions: tasks, knowledge, and verification. The PyTorch-to-CUDA/MUSA data broadens the task distributions exposed to the model; the knowledge Q&A data supplements the underlying CUDA and PyTorch semantic priors; and the automated unit tests provide a unified standard for data filtering and subsequent execution-based evaluations. The objective of this stage is not to directly pursue optimal performance, but rather to prioritize enhancing the executability, semantic correctness, and fundamental robustness of the generated results. 
+
+ 3.2 Structured Reasoning and Spatial Logic Constraints 
+
+ 3.2.1 Standardized Data Structure for Six-Step Reasoning 
+
+ During direct CUDA kernel generation, models frequently bypass intermediate reasoning steps, leaping straight from PyTorch code to low-level implementations. This often results in logical disjoints across operator semantic comprehension, shape inference, index mapping, boundary handling, and numerical stability. To mitigate these logical disjoints, we introduce a six-step reasoning format into the SFT data, decomposing the PyTorch-to-CUDA/MUSA translation process into an ordered sequence of intermediate reasoning steps. The objective of this format is not to induce redundant explanations, but to compel the model to execute a structured derivation—from high-level operator semantics to thread-level memory accesses—prior to code generation. 
+
+ The six-step reasoning structure is defined as follows: 
+
+ Step 1: Holistic Analysis and Operator Deconstruction 
+
+ Analyze the primary computational paradigm of the PyTorch code (e.g., element-wise operations, reductions, matrix multiplications, or spatial transformations), and explicitly list the involved inputs, outputs, and critical parameters such as weight , bias , stride , and padding . This phase establishes the mapping between PyTorch APIs and low-level kernel inputs, mitigating issues related to omitted parameters or misinterpreted operator semantics. 
+
+ Step 2: Scalar Mathematical Formula Derivation 
+
+ Deconstruct tensor-level operations in PyTorch into the scalar computations required for a single output element or a single thread. For example, for normalization operators, the calculation formulas for mean, variance, normalization, and affine transformations must be explicitly defined. This phase facilitates the paradigm shift from tensor-level expressions to thread-level computational logic. 
+
+ Step 3: Shape and Dimensionality Calculus 
+
+ Deduce the shape transitions across input, intermediate, and output tensors, clarifying the dimensional impact of operations such as broadcasting, reshape, transpose, slice, pooling, convolution, and reduction. For reduction operations, the reduction domain must also be explicitly determined. This phase provides the geometric basis for subsequent determinations of total thread counts, grid/block configurations, and output memory layouts. 
+
+ Step 4: Indexing Relations and Memory Mapping 
+
+ Establish the bi-directional mapping between 1D global thread indices and multi-dimensional logical coordinates, and compute the corresponding linear memory offsets based on the tensor layout. For non-contiguous tensors, explicit address calculations incorporating strides are mandated. This phase is primarily designed to minimize erroneous indexing, out-of-bounds memory accesses, and incorrect dimensional unrolling. 
+
+ Step 5: Boundary Handling and Type Safety 
+
+ Analyze edge cases requiring explicit handling within the kernel, such as out-of-bounds protection for trailing threads, padding regions, division-by-zero risks, low-precision accumulation errors, integer/floating-point type casting, and anomalous shapes. This phase guides the model to inject necessary defensive logic, thereby enhancing code robustness across diverse input conditions. 
+
+ Step 6: Error Pre-analysis and Negative Constraints 
+
+ Summarize potential pitfalls in the current task based on historical failure modes—such as hardcoding dimensions, ignoring strides, omitting biases, mishandling broadcasting, inappropriately assuming contiguous memory layouts, or invoking disallowed PyTorch fallbacks. Serving as a pre-generation self-diagnostic step, this phase prevents the model from reiterating high-frequency errors. 
+
+ Through this standardized format, we decompose end-to-end code generation into a six-dimensional intermediate reasoning process encompassing semantics, mathematics, shape, indexing, boundaries, and error pre-analysis. During the SFT phase, this format serves as high-quality reasoning traces incorporated into the training corpus, enabling the model to internalize a more stable and deterministic kernel generation workflow. In subsequent inference or multi-turn rectification scenarios, the model can leverage this structured intermediate representation for self-diagnosis and precise bug localization. 
+
+ 3.2.2 Explicit Tensor Shape Annotation 
+
+ We observe that models frequently stumble in PyTorch-to-CUDA/MUSA generation during shape-sensitive operations, such as view / reshape , transpose , broadcasting, slicing, pooling, convolution, and reduction. Once an error occurs in deducing the output shape or the layout of an intermediate tensor, the subsequent determinations of grid sizes, thread indices, memory offsets, and output write-back locations inherently cascade into failure. To mitigate such shape reasoning errors, we introduce an explicit shape annotation strategy during the construction of training samples: subsequent to the original PyTorch reference code but prior to the model’s generation of the CUDA/MUSA kernel, we append a structured [Tensor Shape Information] block. This block explicitly enumerates the shapes, strides, and contiguity flags of critical inputs, intermediate nodes, and output tensors. Consequently, the model is directly exposed to explicit tensor layout constraints prior to kernel generation, rather than relying exclusively on implicit reasoning derived from the PyTorch code. 
+
+ Specifically, we automatically extract tensor metadata from the PyTorch computation graph via predefined graph analysis scripts. PyTorch’s dynamic graph mechanism, torch.fx graph capture, and shape propagation provide the foundational utilities for this precise metadata extraction  ( Paszke et al., 2019 ; Reed et al., 2022 ) . For tasks with static input dimensions, we employ a static analysis pipeline based on torch.fx : we first trace the computation graph via torch.fx.symbolic_trace , and subsequently execute ShapeProp with dummy inputs to extract the concrete shape, stride, and is_contiguous attributes from the tensor_meta of each critical node. For tasks featuring dynamic input dimensions, we adopt a symbolic pipeline based on torch.export . We represent dynamic dimensions via torch.export.Dim and extract symbolic shape and stride expressions from the exported ExportedProgram . For instance, given a slice operation on an input of shape [ B , L ] [B,L] , the system can record the output shape as [ B , L − 1 ] [B,L-1] while preserving the stride semantics of that sliced view. 
+
+ In the final prompt, this annotation is inserted immediately following the PyTorch reference in a format akin to the following: 
+
+ Shape-enhanced prompt block 
+
+ This specific placement integrates the shape annotation intrinsically into the generation task itself, rather than treating it as a disjoint offline analysis log. For non-contiguous views, the prompt explicitly provides the strides and instructs the model to employ stride-based address calculations, averting the default assumption of contiguous memory layouts. For operations such as reshape, transpose, broadcast, and reduction, the annotation retains the input-output shape transitions of critical nodes, guiding the model in determining total thread counts, output coordinate unrolling schemes, and write-back indices.
+This strategy is primarily utilized during SFT data construction, though it can also serve as explicit prompt augmentation during inference. During training, it provides the model with explicit tensor layout supervision, training it to align shapes, strides, and output layouts prior to writing the kernel. During inference, it reduces the model’s misjudgments regarding complex shapes and non-contiguous memory layouts. Because we have thus far only conducted manual inspections on a limited subset of shape mismatch cases and their rectified outcomes, without yet formalizing systematic ablation studies, we do not present this as a standalone empirical claim in this paper. Instead, we provide a representative case study in the Appendix  C to demonstrate how explicit shape annotation facilitates the correction of indexing logic.
+
+ 3.3 Multi-turn RL Preparation and Environmental Feedback Parsing 
+
+ 3.3.1 Multi-turn Interactive Trajectory Synthesis and Context Pre-adaptation 
+
+ During single-turn CUDA kernel generation, models frequently struggle to simultaneously satisfy compilation, numerical correctness, and performance constraints. Compared to static PyTorch-to-CUDA/MUSA samples, the environmental feedback returned by the evaluation sandbox—such as textual compilation/runtime errors and quantitative performance metrics—provides explicit rectification signals. To lay the empirical foundation for subsequent multi-turn Reinforcement Learning (RL), we synthesize multi-turn iterative interaction trajectories during this stage. This not only trains the model to parse environmental feedback and localize functional or micro-architectural bugs, but crucially allows it to pre-adapt to the multi-turn conversational context and dependency structures, thereby executing targeted self-correction. 
+
+ Specifically, we adopt a “ 5 + 3 5+3 ” multi-turn interactive rollout mechanism. For each task, the model initially generates a candidate kernel, which is submitted to the MooreEval sandbox for verification. If the candidate implementation fails compilation or correctness checks, the subsequent prompt injects the error logs, numerical discrepancies, or failure rationales from the preceding turn, guiding the model to execute bug rectification. Conversely, if the candidate implementation is functionally correct, subsequent turns pivot towards performance optimization, prompting the model to refine memory access patterns, thread partitioning, synchronization strategies, or kernel fusion based on the current implementation. By default, a maximum of 5 iterative turns is permitted; to enhance the coverage of hard tasks, an additional allowance of up to 3 rectification attempts is granted. 
+
+ Regarding trajectory retention, we mandate that the final-turn output must pass correctness verification, and we prioritize retaining trajectories that exhibit significant performance gains relative to their historical correct versions. Specifically, if a trajectory contains multiple correct implementations, we designate the first correct version as the performance baseline and require the final version to achieve a speedup of at least 1.2 × 1.2\times . This criterion prevents the training set from being inundated with protracted rectification trajectories that lack optimization dividends. Concurrently, failure samples induced by environmental anomalies, timeouts, or non-model-related infrastructure issues are meticulously purged during the filtering phase to prevent the injection of noisy feedback. 
+
+ During training, the historical turns within the multi-turn trajectories function primarily as contextual inputs, supplying error diagnostics and evolutionary topologies; the specific loss masking strategies will be detailed comprehensively in the SFT training section. Fundamentally, this data compels the model to transcend the mere imitation of static code snapshots, enabling it to master dynamic parsing and refactoring driven by environmental feedback. This paradigm establishes an optimal policy initialization and context adaptation for the subsequent closed-loop, multi-turn RL training phase. 
+
+ 3.3.2 CUDA Kernel Reviewer 
+
+ To elevate the model’s diagnostic proficiency regarding the correctness and performance bottlenecks of CUDA kernels, we construct specialized CUDA Kernel Reviewer data. Taking a PyTorch reference code and a candidate CUDA kernel as inputs, this data tasks the model with verifying whether the candidate implementation aligns with the PyTorch semantics. If an error is detected, the model must provide a root-cause analysis alongside the rectified code; if the candidate kernel is functionally correct, the model must further profile its potential performance bottlenecks. In contrast to direct kernel generation data, the Reviewer data does not primarily train the model to author kernels de novo . Instead, it compels the model to comprehend the underlying causality—why a kernel succeeds or fails, and how it can be systematically rectified or optimized. 
+
+ Each Reviewer sample comprises two input components: the PyTorch reference code, which delineates the target computational semantics, and the candidate CUDA kernel, which serves as the implementation under scrutiny. The model’s output adheres to a standardized format. Initially, it conducts a correctness analysis, verifying whether the mathematical computations, shape inference, index mapping, boundary conditions, dtype handling, and synchronization logic are strictly congruent with the PyTorch reference. If the kernel exhibits flaws, the model must pinpoint the specific anomalies, elucidate the root causes and their downstream impacts, and generate the complete rectified code. Conversely, if the kernel is functionally correct, the model must analyze its performance characteristics and optimization headroom from micro-architectural perspectives, including memory access patterns, thread-level parallelism, warp divergence, occupancy, and arithmetic intensity. Finally, the model is mandated to output a standardized categorical conclusion: VERDICT: CORRECT or VERDICT: INCORRECT . 
+
+ This data systematically cultivates four core capabilities. First, functional equivalence verification , which assesses whether the CUDA kernel accurately manifests the mathematical semantics and tensor shape logic of the PyTorch reference. Second, common CUDA bug identification , encompassing erroneous thread indexing, out-of-bounds memory accesses, mismatched grid/block configurations, omitted synchronizations, invalid non-contiguous tensor addressing, and improper handling of dtypes or accumulation precision. Third, bug rectification capability , which entails synthesizing a corrected kernel aligned with the PyTorch reference upon successful bug localization. Fourth, performance profiling capability , which involves identifying latent bottlenecks within functionally correct kernels—such as uncoalesced memory accesses, excessive global memory transactions, sub-optimal shared memory utilization, low warp efficiency, or branch divergence. 
+
+ Within the training pipeline, the Reviewer data acts as auxiliary SFT data, forming a synergistic complement to the direct PyTorch-to-CUDA/MUSA generation data. While the generation data trains the model on how to author kernels , the Reviewer data trains it on how to audit kernels . This auditing proficiency is critically foundational for the subsequent multi-turn rectification and execution feedback training: when the model receives environmental signals such as compilation errors, correctness mismatches, or performance feedback, it must inherently comprehend the underlying root causes to synthesize a logically sound rectified version. Consequently, this data also serves as the infrastructural basis for cultivating subsequent critique/judge models or synthesizing multi-turn refinement trajectories. 
+
+ 3.3.3 Performance Feedback Comprehension and Targeted Optimization Refactoring 
+
+ In PyTorch-to-CUDA/MUSA tasks, once the generated outputs pass correctness verification, the subsequent objective shifts from “authoring correct kernels” to “authoring efficient kernels.” However, relying solely on scalar execution time feedback often leaves the model ill-equipped to diagnose the root causes of performance bottlenecks—such as uncoalesced memory accesses, excessive global memory transactions, sub-optimal shared memory utilization, low occupancy, excessive register pressure, warp divergence, or underutilized Tensor Cores. To elevate the model’s proficiency in comprehending performance feedback and executing optimization refactoring, we construct two categories of complementary data: one for learning to parse profiling feedback, and the other for learning targeted refactoring from naive kernels to optimized kernels. 
+
+ The first category comprises profiling-based performance analysis data. We utilize tools such as PyTorch Profiler, Nsight Systems, and Nsight Compute to collect kernel execution telemetry  ( Paszke et al., 2019 ; NVIDIA, 2026c ; NVIDIA, 2026b ) , subsequently extracting the metrics most pertinent to optimization decisions from the raw reports. Because complete NCU reports typically contain voluminous redundant fields that would inject contextual noise into training samples, we filter the data to retain exclusively the Top- K K critical metrics. For memory-bound kernels, emphasis is placed on metrics such as L2/DRAM accesses, memory throughput, and memory efficiency; for compute-bound kernels, the focus shifts to SM utilization, occupancy, instruction mix, Tensor Core activity, and primary stall reasons. Anchored on these structured metrics, we formulate two distinct tasks: (1) given a CUDA kernel, the model must predict its latent bottlenecks and performance characteristics; (2) given a CUDA kernel alongside its empirical profiling results, the model must analyze the bottlenecks and propose concrete optimization directives. Appendix  E provides the corresponding data template, report-extraction procedure, and a condensed example. 
+
+ The second category encompasses targeted optimization refactoring data. Taking functionally correct yet poorly performing CUDA kernels as inputs, these samples require the model to generate highly optimized implementations while strictly preserving the original PyTorch semantics. The candidate naive kernels typically exhibit prevalent anti-patterns, such as excessive atomicAdd operations, uncoalesced memory accesses, redundant global memory passes, excessive kernel launches, sub-optimal thread block configurations, superfluous cudaDeviceSynchronize() invocations, and the failure to exploit shared memory or warp-level primitives. The corresponding optimization objectives include memory coalescing, shared memory reductions, warp shuffles, kernel fusion, loop unrolling, mitigating branch divergence, and tuning block/grid configurations. 
+
+ During training, these two data categories serve distinct yet complementary functions. The profiling data trains the model to deduce performance bottlenecks from hardware metrics or runtime behaviors, whereas the optimization refactoring data further trains the model to operationalize these diagnostic insights into concrete code modifications. For instance, in operators such as reduction, softmax, normalization, or channel-wise scaling, a naive implementation might rely on multiple global memory passes or extensive atomic operations. Conversely, the optimized variants typically necessitate block-level reductions, shared memory reuse, warp-level reductions, or kernel fusion to minimize memory and synchronization overheads. Through this data, the model learns not only “where the bottlenecks lie” but also “how to architect the optimizations,” thereby furnishing a superior performance optimization initialization for the subsequent multi-turn feedback and RL phases. 
+
+ 4 Method 
+
+ 4.1 Overview 
+
+ The training pipeline of MusaCoder is orchestrated across three progressive stages: supervised warmup, task alignment, and execution feedback-driven reinforcement learning (RL). 
+
+ Initially, we leverage the multi-source data synthesized in the preceding section to conduct multi-task Supervised Fine-Tuning (SFT). This phase equips the model with proficiency in PyTorch-to-CUDA/MUSA task formats, prevalent native kernel implementation patterns, CUDA extension boilerplates, bug reviewing, feedback comprehension, and performance profiling. The primary objective of this stage is not to directly search for optimal kernels, but rather to establish robust code generation priors for the subsequent verifiable training phases. 
+
+ Following the supervised warmup, we conduct Rejection Sampling Fine-Tuning (RFT) to align the model closer to the final PyTorch-to-CUDA/MUSA generation tasks. Specifically, starting from the SFT checkpoint, we sample multiple candidate implementations for each PyTorch workload and utilize MooreEval to filter for positive samples that are parsable, compilable, numerically correct, and satisfy task constraints. Unlike standard RFT, which typically retains only the single best solution, we adopt a diversity-preserving filtering strategy: we cluster the correct implementations generated under the same prompt and randomly sample supervisory targets from this positive pool during training. This approach enhances the correctness of the RFT samples while preventing the model from prematurely collapsing into a narrow set of fixed implementation templates, thereby preserving the requisite exploration space for the subsequent RL phase. 
+
+ Unlike open-ended code generation, kernel generation tasks can derive programmatic feedback through actual compilation, execution, correctness verification, and performance measurement. MooreEval not only verifies whether candidate codes compile successfully, align their outputs with PyTorch references, and achieve empirical performance gains, but also enforces a rigorous anti-hacking protocol. Through static rules and runtime profiling, it detects forbidden PyTorch/ aten::* compute fallbacks, preventing the model from bypassing custom kernel authoring by merely invoking off-the-shelf PyTorch operators within ModelNew.forward() . Only candidate solutions that execute the core computations via genuine native kernels—while strictly satisfying both correctness and legitimacy constraints—are granted positive rewards. 
+
+ Building upon the structured verification telemetry returned by MooreEval, we formulate kernel generation as a verifiable reinforcement learning problem, executing single-turn RL and multi-turn feedback RL sequentially. Single-turn RL directly optimizes the model’s capacity to author native kernels on the first attempt without environmental feedback. Conversely, multi-turn feedback RL further trains the model to agentically leverage actual execution feedback for iterative bug rectification and performance optimization. To robustly orchestrate this closed-loop training paradigm, we propose three critical mechanisms: PrimeEcho maintains the optimization pressure on the first-turn generation quality while utilizing multi-turn rectification signals, thereby balancing the final success rate with inference efficiency; Buffered Dynamic Retry (BDR) transforms all-failed groups into learnable rectification tasks augmented with execution feedback, mitigating reward sparsity on hard samples;
+ MirrorPop introduces a novel sequence-level off-policy metric that more accurately estimates policy drift magnitude, enabling reliable masking of severely off-policy samples for stable RL optimization.
+Collectively, these three mechanisms guarantee effective exploration, objective consistency, and update stability during RL: PrimeEcho prevents the multi-turn objective from deviating from first-turn generation capabilities, BDR recovers training signals from long-tail failure samples, and MirrorPop curtails the instability induced by off-policy updates. 
+
+ 4.2 Supervised Warmup and Task Alignment 
+
+ 4.2.1 Multi-task Supervised Fine-Tuning 
+
+ After completing data synthesis, we first conduct Supervised Fine-Tuning (SFT) on the base LLMs to initialize the subsequent alignment tasks. Through SFT, the model learns code formats, reasoning processes, and response structures from high-quality samples. Without this phase, the model would generate a massive volume of unparsable, uncompilable, interface-mismatched, or semantically flawed candidate kernels during the early stages of RL, leading to extreme reward sparsity. 
+
+ Instead of training exclusively on standalone PyTorch-to-CUDA/MUSA translation tasks, we construct a multi-task SFT corpus spanning several complementary data categories. Kernel generation data provides direct code synthesis capabilities; Reviewer data improves semantic error detection and bug correction; Profiling/NCU data helps the model to interpret performance feedback and identify execution bottlenecks; Knowledge QA data strengthens understanding of GPU programming concepts and PyTorch tensor semantics; and optimization rewrite data teaches the transformation of inefficient implementations into optimized kernels. Through this multi-task supervision, the model learns not only how to generate kernels, but also how to analyze, debug, and optimize them. 
+
+ 4.2.2 Data Mixture and Prior Diagnostics 
+
+ To align the SFT data mixture more closely with the final PyTorch-to-CUDA/MUSA generation objective, we construct a small-scale prior diagnostic set before training to evaluate the base model’s initial proficiencies across different operator families. Specifically, we execute a single forward pass on a batch of PyTorch reference models using torch.profiler.profile   ( Paszke et al., 2019 ) , extract the aten::* operators invoked during actual execution, and perform statistical aggregation and resampling based on operator categories to construct a small evaluation set with a balanced operator distribution. Subsequently, we deploy the base model to generate CUDA/MUSA kernels on this diagnostic set and utilize MooreEval to measure the compilation rates, correctness rates, and performance metrics across different operator categories. 
+
+ These diagnostic results guide the data sampling strategy during the SFT phase. For operator families where the base model exhibits weakness—such as convolutions, reductions, normalizations, softmax, broadcasting, and complex indexing—we upsample the corresponding kernel generation, reviewer, optimization rewrite, and knowledge QA data. Conversely, for relatively stable tasks such as simple element-wise operations or activations, we appropriately downsample their proportions. This prevents uniform training across all tasks, allowing SFT to focus on bridging the model’s capability gaps for the final evaluation tasks. 
+
+ Furthermore, to prevent the model from overfitting to the specific output style of kernel code, we retain approximately 30 % 30\% general instruction-following and coding data within the SFT mixture. This portion of data primarily serves to maintain the base model’s generalized coding capabilities and instruction-following proficiency, mitigating issues such as format rigidness or degraded generalization after prolonged training. 
+
+ 4.2.3 Loss Masking for Multi-turn Samples 
+
+ For multi-turn execution feedback data, we align the training format as closely as possible with actual inference scenarios: historical turns serve exclusively as contextual inputs, and the supervisory signal is derived solely from the model’s final-turn output. Specifically, intermediate code attempts, environmental feedback, compilation errors, runtime exceptions, and rectification processes from preceding turns are retained in the context but are masked from the loss computation. Concurrently, the reasoning content from historical turns is removed, retaining only the essential code, error feedback, and interactive states. Only the final-turn model response retains the necessary reasoning content and the ultimately submittable code, which are then utilized to compute the cross-entropy loss. 
+
+ This loss masking strategy prevents the model from imitating failed implementations, incomplete code snippets, redundant debugging telemetry, or intermediate outputs that deviate from the final submission format. Meanwhile, the historical turns still provide crucial task evolution and error feedback information, training the model to directly generate high-quality final results given the task description and verifier feedback, rather than merely reproducing the entire trial-and-error trajectory. 
+
+ 4.2.4 Diversity-Preserving Rejection Fine-Tuning 
+
+ Following multi-task SFT, we conduct Rejection Sampling Fine-Tuning (RFT) to further align the model with the definitive PyTorch-to-CUDA/MUSA generation task. Distinct from the SFT phase, RFT exclusively utilizes direct PyTorch-to-CUDA/MUSA generation samples. For each PyTorch workload, we sample multiple candidate CUDA/MUSA implementations using the SFT model. These candidates are then submitted to our evaluation sandbox, MooreEval (detailed comprehensively in Section  4.3 ), for parsing, compilation, correctness verification, anti-hacking detection, and performance benchmarking. Candidate solutions exhibiting parsing failures, compilation errors, numerical inaccuracies, runtime instability, or suspicious hacking behaviors are systematically discarded. Conversely, CUDA/MUSA kernels that successfully pass verification are retained as novel supervisory targets to further fine-tune the model. 
+
+ In preliminary experiments, we attempted a greedy RFT approach, retaining only the single best verified response per prompt. While this strategy effectively enhanced the model’s alignment with the primary task format, it severely constricted the output distribution. We empirically observed that following this “one-positive” RFT, the model’s generation entropy plummeted rapidly, collapsing to approximately one-tenth of the SFT checkpoint’s entropy. Such entropy collapse is highly detrimental to the subsequent RL phase: the model becomes excessively prone to imitating a narrow subset of high-frequency implementation templates. This degradation in sampling diversity inherently stifles the model’s capacity to explore diverse kernel implementations, thread partitioning schemes, and optimization strategies during RL. 
+
+ To mitigate this pathology, we employ a diversity-preserving rejection filtering strategy. Specifically, we initially retain all positive samples that pass correctness verification for a given prompt, rather than exclusively selecting the fastest or singular optimal implementation. Subsequently, we cluster these correct implementations based on a rich set of micro-architectural and structural features, including code similarity, Abstract Syntax Tree (AST) topology, kernel count, grid/block configurations, and the utilization of shared memory, atomic operations, kernel fusion, or divergent reduction strategies. Finally, we select representative samples from each cluster, constraining the positive pool for each prompt to a bounded capacity of 4 to 8 trajectories. This methodology systematically filters out erroneous implementations while preserving a heterogeneous distribution of valid implementations for the same computational workload. 
+
+ During RFT training, instead of supervising each prompt with a single fixed target, we randomly sample solutions from its corresponding positive pool at each epoch. This reformulates the RFT objective from imitating a single canonical implementation to modeling a diverse distribution of valid solutions.
+By improving correctness while mitigating rapid entropy collapse, the approach preserves sufficient implementation diversity for downstream RL training. 
+
+ 4.3 MooreEval: Verifier and Reward Environment 
+
+ In the PyTorch-to-CUDA/MUSA kernel generation task, model outputs cannot be evaluated merely via textual similarity or static rules; they must undergo authentic compilation, execution, correctness verification, and performance benchmarking. More crucially, during RL training, the evaluation system ceases to be a mere offline benchmarking utility; it transfigures into the reward environment within the closed-loop training pipeline. A large number of candidate code snippets in each batch must be compiled and executed reliably and efficiently, with their telemetry subsequently fed back into the policy optimization process. Following executable-feedback benchmarks for kernel and code generation  ( Ouyang et al., 2025 ) , we designed MooreEval , serving as the unified executable evaluation environment for both RFT data filtering and RL training. 
+
+ The architectural objectives of MooreEval encompass four pillars: high throughput , robustness , reward interpretability , and anti-hacking resilience . Given a PyTorch reference and the model-generated ModelNew implementation, MooreEval parses and compiles the candidate code, subjects it to correctness testing with randomized inputs, executes anti-hacking detection, and performs synchronized speed profiling. It subsequently transcribes the outcomes into structured verification telemetry and scalar rewards. Distinct from single-node synchronous evaluation scripts, MooreEval employs a distributed heterogeneous pipeline that decouples CPU-side compilation from GPU-side execution. Compile Workers handle the pre-compilation of candidate codes, Exec Workers execute correctness, anti-cheat, and speed tests within isolated sandboxes, and the Reward Adapter bridges the final telemetry into the RL training framework. This decoupled architecture allows CPU compilation resources and GPU execution resources to scale independently, preventing GPUs from idling during compilation and thereby optimally sustaining large-batch reward computations during RL. 
+
+ Given that model-generated CUDA/MUSA codes are inherently untrusted, MooreEval incorporates rigorous failure isolation and fault tolerance mechanisms. Candidate codes may induce Python syntax errors, NVCC compilation failures, runtime illegal memory accesses, GPU kernel timeouts, or catastrophic Python process crashes. To prevent an anomalous sample from derailing the entire training loop, MooreEval orchestrates task execution via task queues, inflight states, visibility timeouts, bounded retries, and sandbox subprocess isolation. If a worker crashes or a task remains unacknowledged beyond the timeout threshold, the system automatically requeues the task. Conversely, if the error is deterministically caused by the candidate code itself—such as syntax errors, illegal memory accesses, or numerical mismatches—MooreEval immediately returns the corresponding error taxonomy. Additional system implementation details are provided in Appendix  I . 
+
+ 4.3.1 Structured Verification Protocol 
+
+ MooreEval employs a rigorous tiered verification protocol for each candidate implementation. First, the system extracts executable code from the model output and verifies whether it defines a ModelNew class satisfying the interface requirements. Samples that are unparsable, lack critical interfaces, or exhibit invalid code structures are immediately deemed invalid. Subsequently, the candidate implementation is compiled in an isolated environment. If a Python syntax error, NVCC compilation error, linking error, or compilation timeout occurs, MooreEval returns the corresponding compilation failure category, preempting the allocation of downstream GPU execution resources. 
+
+ Following successful compilation, MooreEval executes the candidate implementation on randomized inputs and aligns it against the PyTorch reference. The correctness check encompasses output shapes, dtypes, and numerical errors, with numerical verification anchored by torch.allclose and task-specific tolerance settings. MooreEval adopts a correctness-first verification sequence: only candidate solutions that pass correctness verification proceed to the anti-hacking detection and performance testing phases. This guarantees that performance rewards are strictly predicated on functional correctness, preventing erroneous implementations from acquiring illusory speedups by skipping computations or exploiting anomalous timings. 
+
+ Anti-hacking detection is a core verification mechanism within MooreEval. To ensure that the model generates fully native CUDA/MUSA kernels rather than relying on high-level PyTorch fallbacks, MooreEval combines static analysis with runtime profiling to detect aten::* operations invoked during ModelNew.forward() . The system maintains an allowlist (detailed in Appendix  J ) that permits only non-computational utilities such as shape queries, view/reshape operations, memory copies, and tensor creation. If prohibited high-level PyTorch/ aten::* operations are detected—including matrix multiplications, convolutions, reductions, or other high-level PyTorch operators—the candidate implementation is flagged as cheating:disallowed_aten and receives zero reward regardless of numerical correctness. In addition, MooreEval performs supplementary checks for anomalously large speedups to prevent spurious rewards caused by invalid implementations or timing manipulations. 
+
+ Finally, MooreEval conducts performance benchmarking on candidate solutions that pass both the correctness and legitimacy checks. Speed measurement utilizes CUDA events  ( NVIDIA, 2026a ) , executing repeatedly post-warmup while explicitly synchronizing the CUDA device to minimize variance introduced by asynchronous execution, initialization overheads, and stochastic fluctuations. Following this pipeline, each candidate implementation is reduced to a structured verification tuple: 
+
+ | 
+ V ⁡ ( c , x ) = ( compiled , correct , legal , speedup , category , detail ) , V(c,x)=(\mathrm{compiled},\mathrm{correct},\mathrm{legal},\mathrm{speedup},\mathrm{category},\mathrm{detail}), | 
+ | 
+ (1) | 
+
+ where c c represents the candidate code extracted from the model output, and x x represents the task prompt. “ compiled \mathrm{compiled} ” indicates whether the candidate code compiled successfully, “ correct \mathrm{correct} ” denotes whether the output aligns with the PyTorch reference, “ legal \mathrm{legal} ” indicates passage of the anti-hacking detection, “ speedup \mathrm{speedup} ” represents the speedup ratio relative to the PyTorch baseline, and “ category \mathrm{category} ” alongside “ detail \mathrm{detail} ” record failure telemetry such as compilation errors, runtime exceptions, numerical mismatches, prohibited operators, or infrastructural anomalies. 
+
+ In subsequent training phases, MooreEval generates two distinct categories of signals based on V ⁡ ( c , x ) V(c,x) . The first is a scalar score s ⁡ ( c ) s(c) , utilized for RFT filtering and RL reward computation; this score is deterministically governed by the candidate implementation’s compilation status, correctness, legitimacy, and speedup. The second is the textual feedback f ⁡ ( c ) f(c) , utilized for multi-turn feedback rollouts; this is synthesized from the error telemetry within “ category \mathrm{category} ” and “ detail \mathrm{detail} ”, yielding actionable information such as compilation failure summaries, shape/dtype mismatches, numerical error statistics, runtime exceptions, or forbidden aten::* invocation warnings. 
+
+ Consequently, MooreEval does not merely return a binary pass/fail verdict; rather, it simultaneously provisions structured verification states, scalar rewards, and interpretable textual feedback. This tiered architecture establishes an explicit hierarchy of training priorities: it primarily guarantees the executability of the candidate implementation, subsequently ensures numerical correctness and adherence to native kernel constraints, and ultimately awards supplementary rewards predicated on empirical performance gains. Concurrently, it supplies interpretable bug rectification signals essential for multi-turn RL. 
+
+ 4.3.2 Reward Design 
+
+ Based on the structured verification telemetry returned by MooreEval, we map each candidate implementation to a scalar reward for RL training. The reward employs a correctness-gated design: performance metrics contribute to the reward computation only if the candidate implementation compiles successfully, passes correctness verification, and does not trigger forbidden PyTorch/ aten::* fallbacks. This ensures that the training optimization strictly prioritizes executability, semantic correctness, and native kernel legitimacy, with speedup treated as a secondary objective. In other words, the model cannot acquire illusory positive rewards via erroneous outputs, skipped computations, PyTorch fallbacks, or anomalous timing manipulations. 
+
+ Let q ∈ [ 0 , 1 ] q\in[0,1] denote the correctness rate of the candidate implementation across randomized tests, and let ν \nu denote the runtime speedup relative to the PyTorch baseline. For a candidate code c c , the reward function s ⁡ ( c ) s(c) is defined as: 
+
+ | 
+ s ( c ) = { − 1 , if code extraction fails, compilation fails, or runtime fails , − 1 , if a disallowed PyTorch/ aten::*  fallback is detected , − 1 , if  ​ q = 0 , − 0.5 + 0.5 ​ q , if  ​ 0 < q < 1 , 1 + λ ⋅ min ⁡ ( max ⁡ ( ν − 1 , 0 ) , ν max ) , if  ​ q = 1 ​  and the implementation is legal . s(c)=\begin{cases}-1,&\text{if code extraction fails, compilation fails, or runtime fails},\\
+-1,&\text{if a disallowed PyTorch/{aten::*} fallback is detected},\\
+-1,&\text{if }q=0,\\
+-0.5+0.5q,&\text{if }0<q<1,\\
+1+\lambda\cdot\min(\max(\nu-1,0),\nu_{\max}),&\text{if }q=1\text{ and the implementation is legal}.\end{cases} | 
+ | 
+ (2) | 
+
+ Here, λ \lambda controls the weight of the performance reward, and ν max \nu_{\max} clips the impact of anomalously high speedups. This formulation provides a bounded shaping signal for partially correct implementations, enabling the model to transition smoothly from completely unusable to partially correct states. However, strictly positive rewards and speedup bonuses are exclusively reserved for fully correct and legal native kernels. Candidate implementations that trigger forbidden operations or exhibit anomalous speedups are treated as hard failures by MooreEval, ensuring the training objective remains strictly aligned with the constraints of native kernel generation. 
+
+ Unlike Reinforcement Learning from Human Feedback (RLHF)  ( Christiano et al., 2017 ; Stiennon et al., 2020 ; Ouyang et al., 2022 ; Bai et al., 2022 ) , which relies on human preferences, the reward here is derived entirely from programmatic verification encompassing compilation, execution, correctness, legitimacy, and performance metrics. Consequently, MooreEval provides consistent, reproducible, and interpretable environmental feedback for large-scale RL training. 
+
+ 4.3.3 Feedback Generation for Multi-turn Training 
+
+ Beyond outputting scalar rewards, MooreEval translates structured error taxonomies into natural language feedback for multi-turn feedback training. This feedback is not manually authored; rather, it is synthesized automatically from the evaluation telemetry, ensuring a consistent feedback format across diverse tasks and failure modes. 
+
+ For compilation failures, the feedback includes a condensed error summary, such as missing headers, type mismatches, invalid function signatures, or the specific locations of NVCC errors. For runtime failures, the feedback specifies issues like CUDA launch errors, illegal memory accesses, out-of-memory (OOM) exceptions, or execution timeouts. For correctness failures, the feedback details output shape mismatches, dtype mismatches, or numerical discrepancies, providing summaries of the maximum error, mean error, or failing inputs whenever possible. For samples triggering anti-hacking detection, the feedback explicitly identifies the forbidden aten::* operations and reminds the model that it must execute the core computation using custom native kernels. For functionally correct but underperforming samples, the feedback returns the runtime, speedup, and potential performance bottlenecks to guide optimization in subsequent turns. Detailed prompt templates are provided in Appendix  G . 
+
+ During multi-turn training, after the model generates candidate code c t c_{t} at turn t t , MooreEval returns the structured verification result V t V_{t} , the scalar score s t s_{t} , and the textual feedback f t f_{t} . If the candidate solution passes verification, the rollout can terminate early. Otherwise, the feedback f t f_{t} is appended to the context for the subsequent turn, guiding the model to generate a rectified version c t + 1 c_{t+1} . Therefore, MooreEval functions not merely as a reward function, but as a critical data engine for multi-turn bug rectification and performance optimization. Through this feedback mechanism, the model learns to localize issues based on actual execution outcomes and systematically refine its code implementation in subsequent turns. 
+
+ 4.4 Reinforcement Learning 
+
+ For each task prompt x x , the policy model π θ \pi_{\theta} generates a candidate implementation c c ; MooreEval then extracts the candidate code from the output, executes compilation and verification, and returns the structured telemetry V ⁡ ( c , x ) V(c,x) alongside a scalar reward s ⁡ ( c ) s(c) . Consequently, the RL phase does not rely on human preference annotations; instead, it directly leverages programmatic execution feedback to optimize the model. This paradigm elevates the probability of generating compilable, numerically correct, legal, and high-performance kernels while strictly satisfying the native kernel constraints. 
+
+ Our RL training pipeline is bifurcated into two stages. The first stage is a single-turn RL warmup , wherein candidate solutions are generated and evaluated in a single pass for each task. The policy is updated using the rewards returned by MooreEval, with the objective of elevating the model’s first-attempt generation capability under zero-feedback conditions. The second stage is multi-turn feedback RL . When a candidate solution fails, the structured error feedback synthesized by MooreEval is appended to the context, guiding the model to execute bug rectification or performance optimization in subsequent turns. Because the ultimate deployment and evaluation remain primarily focused on the quality of the first-turn generation, we architect PrimeEcho (first-turn-anchored multi-turn reward). This mechanism enables multi-turn feedback to provision supplementary exploration signals while preventing the model from becoming overly reliant on subsequent rectifications. 
+
+ 4.4.1 Single-turn RL Warmup 
+
+ During the single-turn RL phase, generation and evaluation are executed exclusively in a single turn per task. Given a prompt x x , the current policy π θ \pi_{\theta} samples candidate implementations c i c_{i} , and MooreEval computes the corresponding rewards r i = s ⁡ ( c i ) r_{i}=s(c_{i}) . For a given prompt, we sample a group of G G candidate solutions and construct the response-level advantage using intra-group normalized rewards: 
+
+ | 
+ A ^ i = r i − mean ⁡ ( { r j } j = 1 G ) std ⁡ ( { r j } j = 1 G ) + ϵ \hat{A}_{i}=\frac{r_{i}-\operatorname{mean}(\{r_{j}\}_{j=1}^{G})}{\operatorname{std}(\{r_{j}\}_{j=1}^{G})+\epsilon} | 
+ | 
+ (3) | 
+
+ Subsequently, we update the policy using Group Relative Policy Optimization (GRPO)  ( Shao et al., 2024 ; Guo et al., 2025 ) . Given the prompt x x , let o i = ( o i , 1 , … , o i , L i ) o_{i}=(o_{i,1},\ldots,o_{i,L_{i}}) denote the i i -th response, where o i , t o_{i,t} is its t t -th token and o i , < t o_{i,<t} is the previously generated prefix.
+During training, the importance ratio of the target policy relative to the rollout policy is defined as: 
+
+ | 
+ ρ i , t ​ ( θ ) = π θ ​ ( o i , t ∣ x , o i , < t ) π rollout ​ ( o i , t ∣ x , o i , < t ) \rho_{i,t}(\theta)=\frac{\pi_{\theta}(o_{i,t}\mid x,o_{i,<t})}{\pi_{\mathrm{rollout}}(o_{i,t}\mid x,o_{i,<t})} | 
+ | 
+ (4) | 
+
+ The corresponding optimization objective is defined as: 
+
+ | 
+ ℒ GRPO ( θ ) = − 1 ∑ i = 1 G L i ∑ i = 1 G ∑ t = 1 L i min ( ρ i , t ( θ ) A ^ i , clip ( ρ i , t ( θ ) , 1 − ϵ low , 1 + ϵ high ) A ^ i ) + β D KL ( π θ ∥ π ref ) . \mathcal{L}_{\mathrm{GRPO}}(\theta)=-\frac{1}{\sum_{i=1}^{G}L_{i}}\sum_{i=1}^{G}\sum_{t=1}^{L_{i}}\min\Big(\rho_{i,t}(\theta)\hat{A}_{i},\,\mathrm{clip}\big(\rho_{i,t}(\theta),1-\epsilon_{\mathrm{low}},1+\epsilon_{\mathrm{high}}\big)\hat{A}_{i}\Big)+\beta\,D_{\mathrm{KL}}(\pi_{\theta}\|\pi_{\mathrm{ref}}). | 
+ | 
+ (5) | 
+
+ Here, L i L_{i} denotes the length of the i i -th response, A ^ i \hat{A}_{i} is the response-level advantage, π ref \pi_{\mathrm{ref}} is the reference policy, and β \beta controls the strength of KL regularization.
+The parameters ϵ low \epsilon_{\mathrm{low}} and ϵ high \epsilon_{\mathrm{high}} define the lower and upper clipping margins of the importance ratio, yielding an asymmetric clipping range [ 1 − ϵ low , 1 + ϵ high ] [1-\epsilon_{\mathrm{low}},1+\epsilon_{\mathrm{high}}] . 
+
+ This stage directly optimizes the model’s first-turn generation capability, encouraging it to produce compilable, numerically correct, and fully native CUDA/MUSA kernels that satisfy the anti-hacking constraints.
+Unlike the subsequent multi-turn feedback stage, this warmup phase does not condition generation on iterative compiler or execution feedback, thereby forcing the model to improve its zero-shot kernel synthesis ability. 
+
+ 4.4.2 Multi-turn feedback RL 
+
+ While single-turn GRPO optimizes for the reward after the initial generation, many failures in CUDA/MUSA kernel synthesis are rectifiable. For instance, candidate code may fail due to missing header files, mismatched function signatures, shape inference errors, improper dtype handling, numerical overflows, or the inadvertent invocation of forbidden aten::* fallbacks. Since MooreEval provides not only scalar rewards but also granular error taxonomies and execution logs, we can reinject this feedback into the model’s context to guide iterative refinement. 
+
+ As illustrated in Figure  5 , given a task prompt x x , the i i -th rollout trajectory initiates at turn k = 1 k=1 with the model outputting y i , 1 y_{i,1} , from which we extract the candidate code: 
+
+ | 
+ c i , 1 = Extract ⁡ ( y i , 1 ) . c_{i,1}=\mathrm{Extract}(y_{i,1}). | 
+ | 
+ (6) | 
+
+ MooreEval subjects c i , 1 c_{i,1} to compilation, correctness verification, anti-hacking detection, and performance benchmarking, yielding the structured verification result: 
+
+ | 
+ V i , 1 = V ⁡ ( c i , 1 , x ) . V_{i,1}=V(c_{i,1},x). | 
+ | 
+ (7) | 
+
+ From this result, we derive the scalar score s i , 1 = s ⁡ ( c i , 1 ) s_{i,1}=s(c_{i,1}) and synthesize the feedback text f i , 1 = f ⁡ ( c i , 1 ) f_{i,1}=f(c_{i,1}) by aggregating error categories and log summaries. If c i , 1 c_{i,1} passes verification, the rollout terminates prematurely. Otherwise, the feedback f i , 1 f_{i,1} is appended to the context, prompting the model to generate a rectified output y i , 2 y_{i,2} . This process iterates until a candidate solution passes verification or the maximum iteration limit K K is reached. 
+
+ Figure 4: Multi-turn RL rollout process. 
+
+ Figure 5: Multi-turn reward design. 
+
+ The i i -th multi-turn trajectory is formally represented as: 
+
+ | 
+ τ i = ( x , y i , 1 , c i , 1 , V i , 1 , s i , 1 , f i , 1 , y i , 2 , c i , 2 , V i , 2 , s i , 2 , f i , 2 , … , y i , K , c i , K , V i , K , s i , K ) . \tau_{i}=(x,y_{i,1},c_{i,1},V_{i,1},s_{i,1},f_{i,1},y_{i,2},c_{i,2},V_{i,2},s_{i,2},f_{i,2},\ldots,y_{i,K},c_{i,K},V_{i,K},s_{i,K}). | 
+ | 
+ (8) | 
+
+ Here, y i , k y_{i,k} denotes the model output at turn k k , c i , k c_{i,k} the extracted candidate, V i , k V_{i,k} the MooreEval verification telemetry, s i , k s_{i,k} the scalar reward, and f i , k f_{i,k} the aggregated textual feedback. The rollout ceases upon successful verification or when the iteration limit is exhausted. 
+
+ The objective of multi-turn rollout is to cultivate the model’s capacity for agentic, iterative coding rather than merely optimizing for final-turn success. For complex kernel tasks, a model may struggle to simultaneously satisfy compilation, correctness, legitimacy, and performance constraints in the first pass. The execution feedback from MooreEval enables the model to systematically rectify compilation errors, shape/dtype mismatches, numerical deviations, and suboptimal implementations. 
+
+ However, the quality of the first-turn generation remains paramount. While multi-turn inference improves final success rates, each interaction turn incurs additional compilation, execution, and verification latency. If the model can generate a correct and efficient native kernel in the first attempt, it drastically reduces inference overhead. Therefore, our goal is to enhance the model’s rectification capabilities without fostering over-reliance on environmental feedback. Directly optimizing for the final-turn or best-turn reward would inherently bias the model toward multi-turn success, incentivizing weaker first-turn generation followed by heavy reliance on subsequent MooreEval feedback for rectification. 
+
+ To mitigate this objective drift, we introduce PrimeEcho , a first-turn-anchored multi-turn reward mechanism. It recontextualizes multi-turn feedback not as the sole target for final success, but as a supplementary exploration signal for first-turn generation. By leveraging the rectification traces revealed in subsequent turns while maintaining primary optimization pressure on first-turn generation, PrimeEcho achieves a balanced equilibrium between agentic multi-turn rectification proficiency and the low-latency efficiency of first-attempt kernel synthesis. 
+
+ 4.4.3 PrimeEcho: First-turn-anchored Multi-turn Reward 
+
+ The core philosophy of PrimeEcho is to explicitly decouple the initial generation quality from subsequent rectification gains within the trajectory-level reward. Given a group of G G multi-turn trajectories { τ i } i = 1 G \{\tau_{i}\}_{i=1}^{G} sampled for a single prompt, let c i , k c_{i,k} denote the candidate code at turn k k for the i i -th trajectory, and let s i , k = s ⁡ ( c i , k ) s_{i,k}=s(c_{i,k}) denote its corresponding MooreEval score. We define the trajectory-level reward as: 
+
+ | 
+ R τ i = α ​ s i , 1 + ( 1 − α ) ​ max 1 ≤ k ≤ K ​ s i , k + b early ​ ( τ i ) R_{\tau_{i}}=\alpha s_{i,1}+(1-\alpha)\max_{1\leq k\leq K}s_{i,k}+b_{\mathrm{early}}(\tau_{i}) | 
+ | 
+ (9) | 
+
+ where s i , 1 s_{i,1} represents the score of the first-turn generation, max 1 ≤ k ≤ K ⁡ s i , k \max_{1\leq k\leq K}s_{i,k} represents the peak score achieved across the entire multi-turn interaction, and α ∈ [ 0 , 1 ] \alpha\in[0,1] dictates the emphasis placed on the initial performance. A larger α \alpha skews the training closer to single-turn RL, whereas a smaller α \alpha permits the subsequent rectification outcomes to provide a stronger auxiliary signal. 
+
+ The early-success bonus b early ​ ( τ i ) b_{\mathrm{early}}(\tau_{i}) exclusively rewards initial successes achieved within the first two turns, thereby incentivizing the model to synthesize a correct solution as expeditiously as possible. Specifically, let success ⁡ ( c i , k ) \mathrm{success}(c_{i,k}) denote an indicator function representing whether the candidate code c i , k c_{i,k} passes MooreEval verification. The bonus is formulated as: 
+
+ | 
+ b early ​ ( τ i ) = β 1 ​ 𝟏 ​ [ success ⁡ ( c i , 1 ) ] + β 2 ​ 𝟏 ​ [ ¬ success ⁡ ( c i , 1 ) ∧ success ⁡ ( c i , 2 ) ] b_{\mathrm{early}}(\tau_{i})=\beta_{1}\mathbf{1}[\mathrm{success}(c_{i,1})]+\beta_{2}\mathbf{1}[\neg\mathrm{success}(c_{i,1})\land\mathrm{success}(c_{i,2})] | 
+ | 
+ (10) | 
+
+ where β 1 > β 2 ≥ 0 \beta_{1}>\beta_{2}\geq 0 . This term guarantees that among trajectories that ultimately succeed, those achieving success earlier accumulate higher rewards. 
+
+ Formally, PrimeEcho interpolates between a strict first-turn reward and a best-turn reward: 
+
+ | 
+ α = 1 ⇒ R τ i = s i , 1 + b early ​ ( τ i ) , α = 0 ⇒ R τ i = max 1 ≤ k ≤ K ⁡ s i , k + b early ​ ( τ i ) \alpha=1\Rightarrow R_{\tau_{i}}=s_{i,1}+b_{\mathrm{early}}(\tau_{i}),\qquad\alpha=0\Rightarrow R_{\tau_{i}}=\max_{1\leq k\leq K}s_{i,k}+b_{\mathrm{early}}(\tau_{i}) | 
+ | 
+ (11) | 
+
+ Thus, α \alpha explicitly governs the trade-off between first-turn generation quality and multi-turn rectification signals. By default, we adopt a relatively large α \alpha , ensuring that multi-turn feedback serves predominantly as a supplementary exploration signal during training, rather than eclipsing the primary objective of first-turn generation. 
+
+ Finally, for multiple trajectories generated under the same prompt, we utilize R τ i R_{\tau_{i}} to compute the intra-group normalized advantage: 
+
+ | 
+ A ^ i = R τ i − mean ⁡ ( { R τ j } j = 1 G ) std ⁡ ( { R τ j } j = 1 G ) + ϵ \hat{A}_{i}=\frac{R_{\tau_{i}}-\operatorname{mean}(\{R_{\tau_{j}}\}_{j=1}^{G})}{\operatorname{std}(\{R_{\tau_{j}}\}_{j=1}^{G})+\epsilon} | 
+ | 
+ (12) | 
+
+ This formulation is structurally identical to the response-level advantage in single-turn GRPO, substituting the single-turn reward with the PrimeEcho trajectory reward. As illustrated in Figure  5 , we predominantly apply this advantage to the tokens comprising the first-turn output, effectively subordinating the multi-turn feedback to serve the enhancement of first-turn generation. 
+
+ 4.5 RL Stabilization Techniques 
+
+ While MooreEval enables RL training to directly optimize compilation success, numerical correctness, and runtime performance, execution-based RL still faces two major stability challenges in practice.
+First, complex kernel-generation tasks frequently produce an all-failed group , where all candidate implementations sampled for the same prompt fail to obtain a positive reward.
+In group-relative optimization, such groups provide little discriminative learning signal, since the intra-group advantages cannot reliably distinguish useful directions for policy improvement.
+Second, off-policy drift can arise between the rollout policy used to generate samples and the policy being updated during training.
+If left uncontrolled, severely off-policy samples can increase gradient variance and induce unstable or biased policy updates. 
+
+ To address these challenges, we introduce two complementary stabilization components.
+ Buffered Dynamic Retry (BDR) strengthens learning signals on hard samples by converting all-failed groups into feedback-conditioned retry tasks, while MirrorPop improves training stability by identifying and masking high-risk off-policy samples at the sequence level. 
+
+ 4.5.1 Buffered Dynamic Retry 
+
+ During RL training with GRPO, G G candidate implementations are typically sampled for a given prompt x x , and the advantage is computed based on intra-group rewards. However, for challenging kernel generation tasks, an all-failed group frequently emerges, wherein all candidate solutions fail: 
+
+ | 
+ r i = − 1 for any  ​ 1 ≤ i ≤ G r_{i}=-1\quad\text{for any }1\leq i\leq G | 
+ | 
+ (13) | 
+
+ Within such an all-failed group , the absence of correct positive samples deprives the intra-group rewards of meaningful discriminability, failing to provide a valid optimization direction. Consequently, the model repeatedly samples failed implementations on long-tail, difficult tasks. Furthermore, our empirical observations indicate that the most prevalent failure modes during both the training phase and on the validation set are verification errors (i.e., kernel precision inaccuracies) and runtime exceptions (i.e., execution bugs). Therefore, a transitional training mechanism bridging single-turn and multi-turn RL is important—one designed to exclusively target these formidable challenges with minimal training overhead. To this end, we propose Buffered Dynamic Retry (BDR) , which dynamically transfigures these hard samples into feedback-conditioned rectification tasks, thereby recovering actionable training signals. 
+
+ An auxiliary motivation for this mechanism is to investigate whether empowering the model to rectify its own errors can simultaneously elevate its first-turn generation capability (i.e., zero-shot code generation). In practical implementation, the core of the multi-turn training described later serves primarily to provide exploration signals; during policy updates, only the first-turn tokens are subjected to optimization. This is done to prevent the degradation of first-turn generation quality, though it inherently sacrifices the direct enhancement of the model’s bug-rectification capabilities. Conversely, BDR considers all tokens during updates. It explicitly trains the model to reflect upon and rectify errors, internalizing the root causes of failures. This allows us to explore whether combining BDR with subsequent multi-turn training can augment the model’s intrinsic CUDA domain knowledge without compromising first-turn generation efficacy. 
+
+ Specifically, given a training dataset 𝒟 RL \mathcal{D}_{\mathrm{RL}} , upon the conclusion of each rollout epoch, we scan the MooreEval telemetry within the current batch to isolate all-failed prompts. For each hard prompt, the system selects a representative erroneous candidate c − c^{-} and extracts the structured error telemetry returned by MooreEval—such as correctness errors, runtime exceptions, compilation failures, or forbidden aten::* fallbacks. Subsequently, we concatenate the original task description, the failed code, and the error feedback into a feedback-conditioned prompt : 
+
+ | 
+ x ′ = Compose ⁡ ( x , c − , f − ) x^{\prime}=\mathrm{Compose}(x,c^{-},f^{-}) | 
+ | 
+ (14) | 
+
+ where f − f^{-} denotes the error summary or rectification hint automatically synthesized by MooreEval. In doing so, an originally intractable zero-shot generation task is structurally transformed into a feedback-driven code rectification task, significantly easing the model’s exploration toward a correct trajectory. 
+
+ To prevent these feedback-augmented samples from distorting the primary task distribution, we refrain from immediately replacing the original training data. Instead, we enqueue x ′ x^{\prime} into a dynamic buffer pool ℬ \mathcal{B} . The buffer utilizes a First-In-First-Out (FIFO) eviction policy to constrain its capacity: 
+
+ | 
+ ℬ ← FIFOUpdate ⁡ ( ℬ , x ′ ) \mathcal{B}\leftarrow\mathrm{FIFOUpdate}(\mathcal{B},x^{\prime}) | 
+ | 
+ (15) | 
+
+ We maintain the buffer at a fixed, predefined capacity. When a new sample is eligible for insertion and the pool is full, the oldest sample is evicted. This mechanism ensures the continuous retention of contemporary hard samples reflecting the model’s current failure boundaries, while purging outdated error trajectories. This is crucial because the policy model evolves continuously during training; an early failure sample may no longer pose a challenge in later stages. The FIFO design mitigates the interference of stale feedback on current policy updates, guaranteeing that the buffer consistently approximates the frontier of the model’s current capabilities. 
+
+ In subsequent training iterations, we sample feedback-conditioned prompts from the buffer pool with a small probability p buf p_{\mathrm{buf}} , mixing them with prompts from the original dataset 𝒟 RL \mathcal{D}_{\mathrm{RL}} : 
+
+ | 
+ x train ∼ { ℬ , with probability  ​ p buf 𝒟 RL , with probability  ​ 1 − p buf x_{\mathrm{train}}\sim\begin{cases}\mathcal{B},&\text{with probability }p_{\mathrm{buf}}\\
+\mathcal{D}_{\mathrm{RL}},&\text{with probability }1-p_{\mathrm{buf}}\end{cases} | 
+ | 
+ (16) | 
+
+ By default, the overwhelming majority of samples continue to originate from the original single-turn tasks, with only a marginal fraction drawn from the dynamic buffer. The rationale is that BDR intrinsically converts a subset of first-turn generation tasks into feedback-driven rectification tasks. If deployed extensively or during the early stages of training, it could introduce task interference, fostering an over-reliance on feedback and subsequently eroding the first-turn generation capabilities. Thus, we primarily activate this mechanism during the later stages of RL, deploying it as a stabilization protocol to conquer long-tail hard samples rather than as a substitute for the primary single-turn training objective. 
+
+ Crucially, we rely exclusively on the native execution feedback returned by MooreEval to guide retries, deliberately avoiding explicit rewriting prompts generated by external, more capable models. While external models can synthesize more articulate natural language explanations, such feedback frequently diverges from the data distribution established during the SFT phase. This divergence risks introducing out-of-distribution (OOD) contexts, precipitating entropy fluctuations and policy instability during training. By contrast, native sandbox feedback originates directly from the actual execution environment; it is structurally stable, reproducible, and seamlessly aligns with the authentic feedback the model will encounter in the subsequent multi-turn RL phase. 
+
+ 4.5.2 MirrorPop Off-policy Sequence Masking 
+
+ In addition to reward sparsity, off-policy mismatch is another major source of instability in RL training.
+During training, the rollout policy used to generate samples may diverge from the current policy being optimized.
+Such drift can arise from train–inference backend discrepancies, policy changes introduced by reusing the same rollout batch across multiple mini-batch updates, or discrete distributional shifts caused by routing perturbations in MoE models.
+When the mismatch becomes severe, the resulting importance ratios can produce high-variance gradient estimates and unstable policy updates.
+Therefore, it is important to identify and filter high-risk samples that deviate substantially from the rollout policy. 
+
+ A straightforward way to control off-policy updates is to apply token-level clipping or hard filtering to the importance ratio ρ i , t \rho_{i,t} , as in Truncated Importance Sampling (TIS)  ( Yao et al., 2025 ) and IcePop  ( Zhao et al., 2025 ) .
+However, similar to token-level PPO clipping  ( Schulman et al., 2017 ) , such methods operate on individual tokens and therefore do not directly capture whether an entire response has drifted substantially from the rollout distribution  ( Li et al., 2026 ) .
+This limitation is particularly relevant for long-form kernel generation, where moderate token-level deviations can accumulate into a severe sequence-level mismatch. 
+
+ To address this issue, sequence-level masking introduces a binary mask M i ∈ { 0 , 1 } M_{i}\in\{0,1\} for each response.
+When M i = 0 M_{i}=0 , the entire response is excluded from the policy-gradient update; when M i = 1 M_{i}=1 , the response is retained and contributes normally to optimization.
+The GRPO objective augmented with sequence-level masking is then formulated as: 
+
+ | 
+ ℒ GRPO ​ - ​ mask ( θ ) = − 1 ∑ i = 1 G M i ​ L i ∑ i = 1 G ∑ t = 1 L i min ( ρ i , t ( θ ) A ^ i , clip ( ρ i , t ( θ ) , 1 − ϵ low , 1 + ϵ high ) A ^ i ) M i + β D KL ( π θ ∥ π ref ) \mathcal{L}_{\mathrm{GRPO\text{-}mask}}(\theta)=-\frac{1}{\sum_{i=1}^{G}M_{i}L_{i}}\sum_{i=1}^{G}\sum_{t=1}^{L_{i}}\min\!\Bigl(\rho_{i,t}(\theta)\hat{A}_{i},\,\mathrm{clip}\bigl(\rho_{i,t}(\theta),1-\epsilon_{\mathrm{low}},1+\epsilon_{\mathrm{high}}\bigr)\hat{A}_{i}\Bigr)M_{i}+\beta D_{\mathrm{KL}}(\pi_{\theta}\|\pi_{\mathrm{ref}}) | 
+ | 
+ (17) | 
+
+ The key design question is how to determine the response-level mask M i M_{i} .
+A common sequence-level off-policy masking strategy defines a response-level importance ratio using the length-normalized geometric mean of token-level ratios  ( Liu et al., 2025b ; Liu et al., 2025a ) : 
+
+ | 
+ ρ ¯ i geo = ( ∏ t = 1 L i ρ i , t ) 1 / L i = exp ⁡ ( 1 L i ​ ∑ t = 1 L i log ⁡ ρ i , t ) \bar{\rho}^{\mathrm{geo}}_{i}=\left(\prod_{t=1}^{L_{i}}\rho_{i,t}\right)^{1/L_{i}}=\exp\left(\frac{1}{L_{i}}\sum_{t=1}^{L_{i}}\log\rho_{i,t}\right) | 
+ | 
+ (18) | 
+
+ The sequence is then retained or discarded according to whether
+ ρ ¯ i geo \bar{\rho}^{\mathrm{geo}}_{i} falls within a predefined trust interval.
+However, this geometric-mean statistic is equivalent to exponentiating the signed mean log-ratio, and therefore suffers from directional cancellation.
+For example, consider two tokens with importance ratios ρ 1 = 10 \rho_{1}=10 and ρ 2 = 0.1 \rho_{2}=0.1 .
+Both tokens exhibit large deviations from the rollout policy, but their signed log-ratio deviations cancel:
+ log ⁡ ρ 1 + log ⁡ ρ 2 = log ⁡ 10 + log ⁡ 0.1 = 0 . \log\rho_{1}+\log\rho_{2}=\log 10+\log 0.1=0. 
+As a result, the corresponding geometric mean becomes close to 1 1 , causing the conventional sequence-level mask to regard the response as nearly on-policy.
+This judgment is misleading: an over-weighted token and an under-weighted token offset each other algebraically in log space, but such cancellation does not imply that the sequence is safe for training. 
+
+ Figure  11 illustrates this effect with a real example.
+Red and green tokens denote positive and negative log-ratio deviations, respectively.
+When log ⁡ ρ t \log\rho_{t} is directly accumulated or averaged across the sequence, deviations with opposite signs can cancel, obscuring the true magnitude of sequence-level policy mismatch.
+In severe cases, a response containing strong local deviations may still appear nearly on-policy under the signed statistic.
+For off-policy filtering, however, the relevant quantity is the magnitude of deviation from the rollout policy rather than its signed direction.
+Thus, signed aggregation can underestimate the risk of high-mismatch trajectories. 
+
+ To address this cancellation problem, we propose MirrorPop .
+Instead of distinguishing whether a token is assigned a higher or lower probability by the current policy than by the rollout policy, MirrorPop measures the direction-invariant magnitude of the deviation.
+For each token, we define the mirror deviation as: 
+
+ | 
+ m i , t = max ⁡ ( ρ i , t , ρ i , t − 1 ) = exp ⁡ ( | log ⁡ ρ i , t | ) , m i , t ≥ 1 m_{i,t}=\max(\rho_{i,t},\rho_{i,t}^{-1})=\exp(|\log\rho_{i,t}|),\qquad m_{i,t}\geq 1 | 
+ | 
+ (19) | 
+
+ This formulation is symmetric with respect to reciprocal ratios: both ρ i , t = 10 \rho_{i,t}=10 and ρ i , t = 0.1 \rho_{i,t}=0.1 are mapped to the same deviation magnitude, since
+ max ⁡ ( 10 , 1 / 10 ) = max ⁡ ( 0.1 , 1 / 0.1 ) = 10 \max(10,1/10)=\max(0.1,1/0.1)=10 .
+Aggregating this direction-invariant deviation over the response, we define the length-normalized MirrorPop statistic as: 
+
+ | 
+ m ¯ i geo = ( ∏ t = 1 L i max ⁡ ( ρ i , t , ρ i , t − 1 ) ) 1 / L i = exp ⁡ ( 1 L i ​ ∑ t = 1 L i | log ⁡ ρ i , t | ) \bar{m}^{\mathrm{geo}}_{i}=\left(\prod_{t=1}^{L_{i}}\max(\rho_{i,t},\rho_{i,t}^{-1})\right)^{1/L_{i}}=\exp\!\left(\frac{1}{L_{i}}\sum_{t=1}^{L_{i}}|\log\rho_{i,t}|\right) | 
+ | 
+ (20) | 
+
+ The corresponding sequence-level mask is thus defined as: 
+
+ | 
+ M i mirrorpop = 𝟏 [ 1 L i ∑ t = 1 L i | log ρ i , t | ≤ δ ] M_{i}^{\mathrm{mirrorpop}}=\mathbf{1}\left[\frac{1}{L_{i}}\sum_{t=1}^{L_{i}}|\log\rho_{i,t}|\leq\delta\right] | 
+ | 
+ (21) | 
+
+ where δ \delta denotes the threshold in log-ratio space. 
+
+ The key distinction between MirrorPop and conventional sequence-level masking lies in how token-level ratios are aggregated.
+Conventional masking relies on the signed average
+ 1 L i ​ ∑ t log ⁡ ρ i , t \frac{1}{L_{i}}\sum_{t}\log\rho_{i,t} , whereas MirrorPop uses the absolute-deviation average
+ 1 L i ​ ∑ t | log ⁡ ρ i , t | \frac{1}{L_{i}}\sum_{t}|\log\rho_{i,t}| .
+As a result, positive and negative deviations no longer cancel; instead, both contribute to the sequence-level mismatch score.
+Revisiting the example ρ = [ 10 , 0.1 ] \rho=[10,0.1] , the conventional signed statistic gives
+ 1 2 ​ ( log ⁡ 10 + log ⁡ 0.1 ) = 0 \frac{1}{2}(\log 10+\log 0.1)=0 , corresponding to a geometric mean ratio of 1 1 .
+In contrast, MirrorPop gives
+ 1 2 ​ ( | log ⁡ 10 | + | log ⁡ 0.1 | ) = log ⁡ 10 \frac{1}{2}(|\log 10|+|\log 0.1|)=\log 10 , equivalently assigning a ratio-space mismatch magnitude of 10 10 .
+Thus, MirrorPop correctly identifies the response as a high-risk off-policy sample. 
+
+ In RL training with GRPO, we use M i = M i mirrorpop M_{i}=M_{i}^{\mathrm{mirrorpop}} as the response-level masking criterion.
+MirrorPop complements token-level ratio clipping by operating at a different granularity: token-level clipping limits the update contribution of individual tokens, whereas MirrorPop determines whether the entire response has drifted too far from the rollout policy to be safely used for optimization.
+In this sense, MirrorPop measures “how far” a response deviates from the rollout policy, rather than “in which direction” it deviates.
+This magnitude-based sequence filtering mitigates the underestimation caused by signed log-ratio cancellation, enabling more reliable removal of severely off-policy samples and improving the stability of RL updates. 
+
+ 5 Experiments 
+
+ 5.1 Training Details 
+
+ During the supervised training phase, we fine-tune two base checkpoints: MusaCoder-9B is initialized from Qwen3.5-9B 1 1 
+ 1 
+
+ https://qwen.ai/blog?id=qwen3.5 , and MusaCoder-27B is initialized from Qwen3.6-27B 2 2 
+ 2 
+
+ https://qwen.ai/blog?id=qwen3.6-27b . Unless otherwise specified, both model scales follow the same training pipeline. We use the AdamW ( Loshchilov and Hutter, 2017 ) optimizer with a learning rate of 1 × 10 − 5 1\times 10^{-5} , a warmup ratio of 3 % 3\% , weight decay of 0.01 0.01 , and bf16 precision. The maximum sequence length is set to 40 40 K, and the global batch size is 256 256 , training for 1 1 epoch. For multi-turn SFT samples, we apply the loss masking strategy detailed in Section  4.2.3 : historical turns serve exclusively as contextual input, and the loss is computed solely on the model’s final-turn response. The SFT implementation is built on DeepSpeed, incorporating ZeRO/offload techniques to support long-context supervised fine-tuning ( Rajbhandari et al., 2020 ) . 
+
+ The reinforcement learning phase employs a two-stage GRPO pipeline. The first stage, single-turn GRPO, aims to enhance the model’s capacity to directly generate correct, legal, and efficient kernels under zero-feedback conditions. The second stage proceeds from the single-turn checkpoint into multi-turn RL, introducing online feedback from MooreEval as a rectification signal for subsequent turns. A multi-turn rollout spans a maximum of 3 3 model response turns; the trajectory terminates early if a candidate implementation passes verification at any turn. 
+
+ Across both RL stages, the rollout group size is set to 8 8 , with a training batch size of 64 64 . Rollouts are executed using SGLang in async mode. The training sampling parameters are temperature 0.9 0.9 and top- p = 0.95 p=0.95 , while validation sampling uses temperature 0.7 0.7 and top- p = 0.7 p=0.7 . Multi-turn RL employs the PrimeEcho reward with α = 0.75 \alpha=0.75 by default. Notably, multi-turn RL calculates the policy gradient loss exclusively on the first-turn model response; subsequent turns participate only in trajectory evaluation and reward computation. 
+
+ The RL training infrastructure is built on Megatron + SGLang ( Shoeybi et al., 2019 ; Zheng et al., 2024 ) , where Megatron manages the distributed training of the actor and reference models, and SGLang handles high-throughput asynchronous rollouts. Tensor parallelism is introduced to distribute model parameters and mitigate activation memory overhead, especially for the 27B model. The RL learning rate is set to 1 × 10 − 6 1\times 10^{-6} , with a warmup ratio of 0.1 0.1 , weight decay of 0.1 0.1 , and gradient clipping at 0.5 0.5 . The maximum prompt length is 8 8 K, and the maximum response length is 32 32 K. 
+
+ All experiments are conducted on 64 Moore Threads MTT S5000 machines, each equipped with 8 × 80 8\times 80 GB accelerator cards 3 3 
+ 3 
+
+ https://www.mthreads.com/product/S5000 . This cluster robustly sustains the end-to-end training loop, encompassing long-context SFT, asynchronous rollouts, MooreEval online verification, and GRPO policy updates. Specifically, executing both supervised fine-tuning and execution-feedback reinforcement learning for 9B and 27B models on this domestic hardware environment demonstrates that the platform can support not only standard LLM fine-tuning but also complex RL training workloads involving large-scale code generation, compile-and-execute feedback, and online reward computation. 
+
+ 5.2 Evaluation Setup 
+
+ We evaluate MusaCoder’s PyTorch-to-CUDA/MUSA kernel generation capabilities on the KernelBench benchmark, employing the unified MooreEval protocol to validate all models. Unlike the original evaluation scripts, we strictly require candidate implementations to successfully parse and compile, pass shape, dtype, and numerical correctness checks against the PyTorch reference on randomized inputs, and refrain from invoking forbidden PyTorch/ aten::* computational fallbacks within ModelNew.forward() . Only candidate implementations that pass both correctness and legality checks proceed to performance testing. Performance measurements are conducted using repeated runs after warmup and timed via synchronized CUDA events to reduce variance from asynchronous execution and initialization overhead. 
+
+ For each task, we sample 8 8 candidate implementations at temperature 0.7 0.7 and report two categories of metrics. Pass Rate measures correctness. Pass@8 indicates whether at least one of the 8 8 sampled candidates passes MooreEval verification, while Avg.@8 reports the average fraction of verified candidates among the 8 8 samples. Faster Rate measures performance improvement among valid native kernel implementations. A candidate is counted as faster only if it first passes correctness and legality checks and then achieves a runtime speedup larger than 1.1 × 1.1\times over the corresponding baseline. We report Faster Rate against both PyTorch eager execution and torch.compile . The 1.1 × 1.1\times threshold filters out marginal runtime differences that may arise from measurement noise. 
+
+ We compare MusaCoder with both frontier code models and its underlying base models. The external baselines include Claude Opus 4.7, GLM-5.1, Kimi K2.6, and DeepSeek-V4-Pro/ProMax. We also report Qwen3.5-9B and Qwen3.6-27B to quantify the improvement brought by MusaCoder’s SFT/RFT and RL pipeline over the initial base checkpoints. All models are evaluated under identical prompt templates, sampling configurations, validation scripts, and hardware environments. Unless otherwise specified, all main results are reported across Overall, Level 1, Level 2, and Level 3 categories. 
+
+ Table 1: 
+KernelBench evaluation results under the strict MooreEval protocol. We report correctness-oriented Pass Rate metrics and performance-oriented Faster Rate metrics across Overall, Level 1, Level 2, and Level 3. Pass@8 denotes whether at least one of 8 sampled candidates passes verification, while Avg.@8 measures the average correctness rate among the 8 samples. Faster Rate is reported against PyTorch eager execution  ( Paszke et al., 2019 ) and torch.compile   ( Ansel et al., 2024 ) ; a candidate is counted as faster only if it passes correctness and legality checks and achieves speedup larger than 1.1 × 1.1\times over the corresponding baseline.
+
+ Model | 
+ Overall | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ Pass@8 | 
+ Avg.@8 | 
+ Pass@8 | 
+ Avg.@8 | 
+ Pass@8 | 
+ Avg.@8 | 
+ Pass@8 | 
+ Avg.@8 | 
+
+ Kimi K2.6 | 
+ 84.0 | 
+ 69.10 | 
+ 94 | 
+ 77.13 | 
+ 89 | 
+ 75.50 | 
+ 54 | 
+ 40.25 | 
+
+ GLM-5.1 | 
+ 85.6 | 
+ 76.25 | 
+ 98 | 
+ 89.38 | 
+ 89 | 
+ 82.00 | 
+ 54 | 
+ 38.50 | 
+
+ DeepSeek-V4-Pro | 
+ 83.2 | 
+ 54.90 | 
+ 97 | 
+ 68.88 | 
+ 86 | 
+ 56.38 | 
+ 50 | 
+ 24.00 | 
+
+ DeepSeek-V4-ProMax | 
+ 84.8 | 
+ 60.05 | 
+ 97 | 
+ 72.88 | 
+ 92 | 
+ 62.63 | 
+ 46 | 
+ 29.25 | 
+
+ Claude Opus 4.7 | 
+ 87.2 | 
+ 77.30 | 
+ 99 | 
+ 91.75 | 
+ 92 | 
+ 81.88 | 
+ 54 | 
+ 39.25 | 
+
+ Qwen3.5-9B | 
+ 23.6 | 
+ 7.05 | 
+ 35 | 
+ 11.63 | 
+ 22 | 
+ 5.75 | 
+ 4 | 
+ 0.50 | 
+
+ Qwen3.6-27B | 
+ 67.2 | 
+ 35.60 | 
+ 83 | 
+ 44.38 | 
+ 68 | 
+ 36.13 | 
+ 34 | 
+ 17.00 | 
+
+ MusaCoder-9B-SFT | 
+ 69.6 | 
+ 61.60 | 
+ 88 | 
+ 79.88 | 
+ 71 | 
+ 63.50 | 
+ 30 | 
+ 21.25 | 
+
+ MusaCoder-9B-RL | 
+ 83.6 | 
+ 77.20 | 
+ 94 | 
+ 89.25 | 
+ 89 | 
+ 84.50 | 
+ 52 | 
+ 38.50 | 
+
+ MusaCoder-27B-SFT | 
+ 84.8 | 
+ 79.40 | 
+ 95 | 
+ 89.00 | 
+ 92 | 
+ 87.75 | 
+ 50 | 
+ 43.50 | 
+
+ MusaCoder-27B-RL | 
+ 93.2 | 
+ 88.60 | 
+ 99 | 
+ 95.75 | 
+ 98 | 
+ 92.88 | 
+ 72 | 
+ 65.75 | 
+
+ Model | 
+ Overall | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ vs. 
+ Eager 
+ | 
+
+ vs. 
+ Compile 
+ | 
+
+ vs. 
+ Eager 
+ | 
+
+ vs. 
+ Compile 
+ | 
+
+ vs. 
+ Eager 
+ | 
+
+ vs. 
+ Compile 
+ | 
+
+ vs. 
+ Eager 
+ | 
+
+ vs. 
+ Compile 
+ | 
+
+ Kimi K2.6 | 
+ 3.3 | 
+ 1.4 | 
+ 7.5 | 
+ 3.0 | 
+ 0.6 | 
+ 0.5 | 
+ 0.2 | 
+ 0.0 | 
+
+ GLM-5.1 | 
+ 7.4 | 
+ 3.9 | 
+ 14.3 | 
+ 6.0 | 
+ 3.8 | 
+ 3.6 | 
+ 1.0 | 
+ 0.0 | 
+
+ DeepSeek-V4-Pro | 
+ 5.2 | 
+ 3.0 | 
+ 10.3 | 
+ 4.8 | 
+ 2.8 | 
+ 2.6 | 
+ 0.0 | 
+ 0.0 | 
+
+ DeepSeek-V4-ProMax | 
+ 5.7 | 
+ 3.0 | 
+ 11.6 | 
+ 5.0 | 
+ 2.3 | 
+ 2.3 | 
+ 0.5 | 
+ 0.3 | 
+
+ Claude Opus 4.7 | 
+ 11.8 | 
+ 7.5 | 
+ 21.0 | 
+ 10.5 | 
+ 6.9 | 
+ 6.8 | 
+ 3.3 | 
+ 2.8 | 
+
+ Qwen3.5-9B | 
+ 0.9 | 
+ 0.5 | 
+ 2.0 | 
+ 1.1 | 
+ 0.3 | 
+ 0.1 | 
+ 0.0 | 
+ 0.0 | 
+
+ Qwen3.6-27B | 
+ 3.4 | 
+ 1.6 | 
+ 8.3 | 
+ 3.6 | 
+ 0.3 | 
+ 0.3 | 
+ 0.0 | 
+ 0.0 | 
+
+ MusaCoder-9B-SFT | 
+ 1.6 | 
+ 1.2 | 
+ 3.0 | 
+ 2.1 | 
+ 1.0 | 
+ 0.8 | 
+ 0.0 | 
+ 0.0 | 
+
+ MusaCoder-9B-RL | 
+ 5.4 | 
+ 3.2 | 
+ 9.8 | 
+ 5.0 | 
+ 3.3 | 
+ 2.9 | 
+ 0.7 | 
+ 0.4 | 
+
+ MusaCoder-27B-SFT | 
+ 6.3 | 
+ 4.1 | 
+ 12.1 | 
+ 7.6 | 
+ 3.0 | 
+ 2.2 | 
+ 1.3 | 
+ 1.0 | 
+
+ MusaCoder-27B-RL | 
+ 15.0 | 
+ 9.2 | 
+ 25.7 | 
+ 12.8 | 
+ 10.2 | 
+ 8.7 | 
+ 3.2 | 
+ 3.0 | 
+
+ 5.3 Main Results on KernelBench 
+
+ Table  1 reports the main KernelBench results under the strict MooreEval protocol. In addition to frontier code models, we also include the two base checkpoints, Qwen3.5-9B and Qwen3.6-27B, to quantify the improvement brought by MusaCoder’s training pipeline. All models are evaluated with the same prompts, sampling configuration, verifier, and hardware environment. 
+
+ The base models show limited native kernel generation ability under strict executable verification. Qwen3.5-9B obtains only 23.6 % 23.6\% Overall Pass@8 and 7.05 % 7.05\% Avg.@8, while Qwen3.6-27B improves to 67.2 % 67.2\% Pass@8 and 35.60 % 35.60\% Avg.@8 but still falls behind strong general-purpose code models. After supervised alignment, MusaCoder-9B-SFT increases Overall Pass@8 to 69.6 % 69.6\% and Avg.@8 to 61.60 % 61.60\% , while MusaCoder-27B-SFT reaches 84.8 % 84.8\% and 79.40 % 79.40\% . These results indicate that the proposed SFT/RFT data pipeline substantially improves both task-format following and single-sample correctness stability. 
+
+ Execution-feedback RL further improves both model scales. MusaCoder-9B-RL raises Overall Pass@8 from 69.6 % 69.6\% to 83.6 % 83.6\% and Avg.@8 from 61.60 % 61.60\% to 77.20 % 77.20\% , approaching Claude Opus 4.7 in correctness under the same strict verifier. For the larger model, MusaCoder-27B-RL achieves the best overall correctness, reaching 93.2 % 93.2\% Pass@8 and 88.60 % 88.60\% Avg.@8. Compared with Claude Opus 4.7, this corresponds to absolute gains of 6.0 6.0 points in Pass@8 and 11.30 11.30 points in Avg.@8. The advantage is more pronounced on Level 3, where MusaCoder-27B-RL improves Pass@8 from Claude’s 54 % 54\% to 72 % 72\% and Avg.@8 from 39.25 % 39.25\% to 65.75 % 65.75\% , suggesting stronger robustness on complex shape reasoning, indexing, and multi-operator workloads. 
+
+ Faster Rate is more stringent than correctness because a candidate is counted only when it is correct, legal, and achieves more than 1.1 × 1.1\times speedup over the corresponding PyTorch baseline. Under this criterion, the base models rarely produce accelerated kernels: Qwen3.5-9B achieves only 0.9 % 0.9\% Faster Rate vs. Eager and 0.5 % 0.5\% vs. Compile, while Qwen3.6-27B reaches 3.4 % 3.4\% and 1.6 % 1.6\% . MusaCoder-9B-RL already slightly surpasses Claude Opus 4.7 on performance, achieving 12.6 % 12.6\% vs. Eager and 7.9 % 7.9\% vs. Compile, compared with Claude’s 11.8 % 11.8\% and 7.5 % 7.5\% . 
+
+ MusaCoder-27B-RL shows the strongest performance gains, achieving 15.0 % 15.0\% Faster Rate vs. Eager and 9.2 % 9.2\% vs. Compile. These are absolute improvements of 3.2 3.2 and 1.7 1.7 points over Claude Opus 4.7. Overall, these results show that MusaCoder’s execution-feedback training improves not only functional correctness but also the probability of generating native kernels with measurable runtime benefits. 
+
+ 5.4 Ablation and RL Training Analysis 
+
+ To systematically deconstruct the contributions of individual training components within MusaCoder, we conduct rigorous ablation studies and training dynamics analyses across the supervised phase, the reinforcement learning phase, and the RL stabilization mechanisms. Diverging from the main experiments—which merely report the terminal KernelBench benchmarks—this section explicitly decouples first-turn generation, multi-turn repair, reward dynamics, and training stability to illuminate the precise origins of the model’s performance gains. 
+
+ 5.4.1 Evaluation Metrics for Multi-turn RL 
+
+ To clearly delineate the model’s zero-shot generation capability from its multi-turn feedback-driven rectification proficiency, we report both first-turn metrics and best-turn metrics concurrently during multi-turn evaluation. For the i i -th validation sample, let c i , t c_{i,t} denote the candidate code generated at turn t t , and let its corresponding MooreEval score be s i , t s_{i,t} . We define the binary success indicator function as: 
+
+ | 
+ success ( c i , t ) = 𝟏 [ s i , t ≥ 1 ] \mathrm{success}(c_{i,t})=\mathbf{1}[s_{i,t}\geq 1] | 
+ | 
+ (22) | 
+
+ First-turn accuracy measures the model’s capability to correctly synthesize a kernel in a single attempt, strictly under zero-feedback conditions: 
+
+ | 
+ Acc first = 1 N ​ ∑ i = 1 N success ⁡ ( c i , 1 ) \mathrm{Acc}_{\mathrm{first}}=\frac{1}{N}\sum_{i=1}^{N}\mathrm{success}(c_{i,1}) | 
+ | 
+ (23) | 
+
+ This metric directly proxies the model’s performance in standard single-turn deployment scenarios, thus acting as one of the most critical constraint metrics during multi-turn RL optimization. 
+
+ Best-turn accuracy measures whether the model can ultimately rectify a failure within a maximum horizon of T T feedback turns: 
+
+ | 
+ Acc best = 1 N ​ ∑ i = 1 N max 1 ≤ t ≤ T ⁡ success ⁡ ( c i , t ) \mathrm{Acc}_{\mathrm{best}}=\frac{1}{N}\sum_{i=1}^{N}\max_{1\leq t\leq T}\mathrm{success}(c_{i,t}) | 
+ | 
+ (24) | 
+
+ If a specific sample fails on the first attempt but is successfully rectified in subsequent turns, it does not positively impact the first-turn accuracy but directly elevates the best-turn accuracy. Consequently, the best-turn accuracy primarily reflects the model’s agentic proficiency in leveraging MooreEval feedback for continuous rectification. 
+
+ Beyond binary correctness rates, we also report the first-turn score and best-turn score: 
+
+ | 
+ S first = 1 N ​ ∑ i = 1 N s i , 1 , S best = 1 N ​ ∑ i = 1 N max 1 ≤ t ≤ T ⁡ s i , t S_{\mathrm{first}}=\frac{1}{N}\sum_{i=1}^{N}s_{i,1},\qquad S_{\mathrm{best}}=\frac{1}{N}\sum_{i=1}^{N}\max_{1\leq t\leq T}s_{i,t} | 
+ | 
+ (25) | 
+
+ The scalar score preserves granular telemetry—such as partial correctness shaping, structural infraction penalties, and empirical speedup bonuses—rendering it a higher-resolution metric than binary accuracy. Finally, we aggregate the turn-to-success (i.e., the specific turn number at which a sample first passes verification) to empirically observe whether the policy exhibits a distributional bias toward immediate zero-shot success or an over-reliance on deferred feedback-driven rectifications. 
+
+ 5.4.2 Component Ablation 
+
+ Table  2 reports the ablation results for the main training components. Overall, each component contributes to the final performance, but their effects are reflected in different aspects: RFT improves supervised task alignment, single-turn warmup provides a stronger initialization for multi-turn RL, PrimeEcho controls the multi-turn reward objective, BDR recovers learning signals from hard samples, and MirrorPop stabilizes off-policy updates. 
+
+ Table 2: 
+Ablation study on the main training components. We report Overall Pass Rate and Faster Rate to measure the effect of each component on correctness and performance.
+
+ Setting | 
+ Overall Pass Rate | 
+ Overall Faster Rate | 
+
+ Pass@8 | 
+ Avg.@8 | 
+ vs. Eager | 
+ vs. Compile | 
+
+ MusaCoder-SFT | 
+ 84.8 | 
+ 79.40 | 
+ 6.3 | 
+ 4.1 | 
+
+    w/o RFT | 
+ 82.6 | 
+ 75.10 | 
+ 5.8 | 
+ 3.8 | 
+
+ MusaCoder-RL | 
+ 93.2 | 
+ 88.60 | 
+ 15.0 | 
+ 9.2 | 
+
+    w/o Single-turn Warmup | 
+ 90.8 | 
+ 84.25 | 
+ 14.2 | 
+ 8.6 | 
+
+    w/o PrimeEcho | 
+ 88.4 | 
+ 83.50 | 
+ 13.9 | 
+ 8.4 | 
+
+    w/o Buffered Dynamic Retry | 
+ 88.6 | 
+ 83.20 | 
+ 13.8 | 
+ 8.2 | 
+
+    w/o MirrorPop | 
+ 86.0 | 
+ 80.75 | 
+ 13.1 | 
+ 7.8 | 
+
+ First, RFT improves the supervised checkpoint before RL. Removing RFT reduces MusaCoder-SFT’s Overall Pass@8 from 84.8 % 84.8\% to 82.6 % 82.6\% and Avg.@8 from 79.40 % 79.40\% to 75.10 % 75.10\% , corresponding to drops of 2.2 2.2 and 4.30 4.30 percentage points. The performance metrics also decline: Faster Rate vs. Eager decreases from 6.3 % 6.3\% to 5.8 % 5.8\% , and vs. Compile decreases from 4.1 % 4.1\% to 3.8 % 3.8\% . This indicates that MooreEval-filtered RFT improves not only correctness but also the stability of single-sample generation. Since our RFT uses diversity-preserving filtering rather than selecting only the fastest candidate, it strengthens task alignment while maintaining implementation diversity for downstream RL exploration. 
+
+ Second, single-turn warmup is important for initializing the multi-turn RL stage. Without single-turn warmup, MusaCoder-RL drops from 93.2 % 93.2\% to 90.8 % 90.8\% in Overall Pass@8 and from 88.60 % 88.60\% to 84.25 % 84.25\% in Avg.@8. The Faster Rate also decreases substantially, from 15.0 % 15.0\% to 14.2 % 14.2\% against PyTorch eager execution and from 9.2 % 9.2\% to 8.6 % 8.6\% against torch.compile . These results suggest that directly entering multi-turn RL from the supervised checkpoint weakens the training signal, because early feedback turns are more likely to be spent on basic formatting, compilation, or interface errors. Single-turn warmup first aligns the policy with executable verification, giving the subsequent multi-turn stage a stronger starting point. 
+
+ PrimeEcho also brings clear gains. Removing PrimeEcho reduces Overall Pass@8 from 93.2 % 93.2\% to 88.4 % 88.4\% and Avg.@8 from 88.60 % 88.60\% to 83.50 % 83.50\% . Faster Rate decreases from 15.0 % / 9.2 % 15.0\%/9.2\% to 13.9 % / 8.4 % 13.9\%/8.4\% against PyTorch eager execution and torch.compile , respectively. This confirms the importance of first-turn-anchored multi-turn reward: if the trajectory reward over-emphasizes final-turn or best-turn success, the model may rely more heavily on later feedback instead of improving first-turn generation quality. PrimeEcho preserves the benefit of multi-turn exploration while maintaining pressure on the first response. 
+
+ Buffered Dynamic Retry also contributes noticeably to the final model. Removing BDR reduces Overall Pass@8 from 93.2 % 93.2\% to 88.6 % 88.6\% and Avg.@8 from 88.60 % 88.60\% to 83.20 % 83.20\% , corresponding to drops of 4.6 4.6 and 5.40 5.40 percentage points. The Faster Rate decreases from 15.0 % / 9.2 % 15.0\%/9.2\% to 13.9 % / 8.4 % 13.9\%/8.4\% . Although BDR is designed to target all-failed hard samples rather than every training example, its ablation still leads to a sizable degradation, suggesting that recovering learning signals from long-tail difficult prompts is important for both correctness and performance. 
+
+ Finally, MirrorPop has the largest impact among the stabilization components. Without MirrorPop, Overall Pass@8 drops from 93.2 % 93.2\% to 86.0 % 86.0\% , while Avg.@8 decreases from 88.60 % 88.60\% to 80.75 % 80.75\% , corresponding to drops of 7.2 7.2 and 7.85 7.85 percentage points. Faster Rate also falls from 15.0 % / 9.2 % 15.0\%/9.2\% to 13.1 % / 7.8 % 13.1\%/7.8\% . This demonstrates that off-policy sequence masking is not merely a background stability trick; it directly affects final correctness and speedup. By measuring the absolute magnitude of log-ratio deviations, MirrorPop avoids the cancellation problem of signed log-ratios and filters out high-mismatch sequences that would otherwise introduce unstable policy updates. 
+
+ 5.4.3 Effect of Single-turn RL Warmup 
+
+ Single-turn RL constitutes the critical transitional phase bridging supervised learning and execution-feedback optimization in MusaCoder. Both the main results and the ablation studies unequivocally demonstrate that this phase not only elevates terminal metrics but profoundly ameliorates the initialization quality for subsequent multi-turn training. Taking the 27B model as a primary example, the Overall Pass@8 and Avg.@8 during the SFT phase stand at 84.8 % 84.8\% and 79.40 % 79.40\% , respectively. Following RL, these metrics surge to 93.2 % 93.2\% and 88.60 % 88.60\% . In terms of performance, the Faster Rate vs. Eager escalates from 6.3 % 6.3\% to 15.0 % 15.0\% , and vs. Compile from 4.1 % 4.1\% to 9.2 % 9.2\% . This substantiates that execution-driven rewards do not merely amplify the probability of authoring functionally correct kernels; they dramatically inflate the proportion of kernels that achieve genuine hardware acceleration. 
+
+ Unlike SFT/RFT—which intrinsically relies on offline static samples—every candidate implementation synthesized during single-turn RL is subjected to live, iterative processing by MooreEval. Each response is compiled, executed, validated for mathematical correctness, and rigidly inspected for forbidden PyTorch/ aten::* fallbacks. Only after satisfying strict functional and architectural compliance checks is the candidate benchmarked for relative speedup against the PyTorch baseline. Consequently, the optimization gradient in this phase perfectly mirrors the terminal evaluation objective: high rewards are exclusively minted by native CUDA/MUSA kernels that are compilable, numerically sound, architecturally legal, and empirically performant. 
+
+ Analyzing the empirical training trajectory reveals three primary dimensions of improvement induced by single-turn RL. First, it systematically eradicates low-level formatting anomalies—such as code extraction failures, missing ModelNew structural declarations, and return type mismatches—enforcing an output distribution that stably adheres to the evaluation interface. Second, MooreEval’s draconian penalization of forbidden fallbacks actively suppresses the model’s inclination to invoke high-level PyTorch/ aten::* operators as a shortcut to bypassing the core task, aggressively steering the policy toward explicit custom kernel synthesis. Finally, among samples that are already functionally correct, the continuous performance reward further stratifies implementation quality. It computationally incentivizes the model to favor optimal thread mapping, contiguous memory access patterns, and efficient reduction heuristics, thereby directly elevating the acceleration ratio among verified kernels. 
+
+ The ablation results further codify the single-turn warmup as an indispensable foundational prerequisite for subsequent multi-turn RL. Ablating the single-turn warmup regresses MusaCoder-RL’s Overall Pass@8 from 93.2 % 93.2\% down to 90.8 % 90.8\% , and its Avg.@8 from 88.60 % 88.60\% down to 84.25 % 84.25\% ; the Faster Rate vs. Compile concurrently drops from 9.2 % 9.2\% to 8.6 % 8.6\% . This underscores a severe pathology: thrusting a supervised model directly into multi-turn training forces the system to squander valuable feedback epochs on rectifying primitive formatting violations and trivial compilation aborts. By contrast, interposing the single-turn RL phase ensures that the subsequent multi-turn regime can exclusively focalize on high-value rectification modes, such as numerical convergence debugging, boundary condition handling, complex tensor indexing, and algorithmic performance profiling. 
+
+ 5.4.4 Training Dynamics of Multi-turn RL 
+
+ Figure  6 illustrates the training dynamics throughout the multi-turn RL phase. As training progresses, the average number of interaction turns per sample steadily declines, while the aggregated multi-turn reward exhibits a continuous upward trajectory. This indicates that the policy model not only converges toward higher terminal scores across multi-turn interactions but concurrently curtails its over-reliance on deferred feedback epochs, exhibiting a pronounced inductive bias toward synthesizing viable candidate solutions in earlier turns. Given the inherently sparse nature of rewards in kernel generation tasks and the profound variance in task difficulty, the raw telemetry exhibits anticipated structural volatility; nonetheless, the smoothed trajectories delineate a definitive and stable optimization trend. 
+
+ (a) Number of turns 
+
+ (b) Reward 
+
+ Figure 6: Training dynamics of multi-turn reinforcement learning. Raw curves are shown in light color and smoothed curves are used for readability. 
+
+ Figure  7 further decomposes the multi-turn evaluation results across distinct difficulty tiers. The Score metric proxies the holistic quality of the model’s output, encapsulating partial correctness, architectural legality, and empirical performance parameters. The Accuracy metric is concurrently reported for both first-turn and best-turn outcomes, explicitly isolating zero-shot generation proficiency from multi-turn rectification capability. The Avg. Eval Turns metric quantifies the mean number of evaluation iterations required for the model to converge upon a functionally correct solution. 
+
+ Score 
+
+ Accuracy 
+
+ Turns 
+
+ Figure 7: Multi-turn evaluation metrics across KernelBench levels. 
+
+ Analyzing the disparate difficulty levels reveals that Level 1 tasks predominantly achieve high correctness rates within the very first turn, accompanied by a low average evaluation turn count. This suggests that the model has robustly internalized the heuristics for foundational operators and trivial composite patterns. Conversely, Level 2 and Level 3 tasks exhibit noticeably lower first-turn accuracies; however, their best-turn accuracies experience a marked surge following multi-turn feedback. This confirms that MooreEval feedback fundamentally empowers the model to debug and rectify complex shape, dtype, indexing, and numerical convergence errors. Concurrently, the elevated average evaluation turn count for Level 3 tasks underscores that intricate, model-level kernels inherently demand protracted feedback horizons to achieve full rectification. 
+
+ These empirical dynamics vindicate the architectural rationale underpinning PrimeEcho. While multi-turn feedback intrinsically elevates the terminal rectification success rate, optimizing the policy exclusively for best-turn success risks cultivating an over-reliance on subsequent feedback, inevitably eroding first-turn zero-shot generation quality. PrimeEcho mitigates this by rigidly anchoring the trajectory reward to the initial turn’s score, relegating multi-turn feedback to an auxiliary exploratory signal designed to augment—rather than eclipse—the primary objective of first-turn generation. The ablation studies unequivocally validate this: omitting PrimeEcho precipitates a regression in Overall Avg.@8 from 88.60 % 88.60\% to 83.50 % 83.50\% , and a drop in Faster Rate vs. Compile from 9.2 % 9.2\% to 8.4 % 8.4\% . This demonstrates that the first-turn-anchored reward is absolutely paramount for sustaining both strict generation quality and empirical performance dividends. 
+
+ 5.4.5 Effect of Buffered Dynamic Retry 
+
+ Buffered Dynamic Retry (BDR) is engineered primarily to alleviate the pathology of all-failed groups endemic to long-tail hard samples. In the main ablation study, removing BDR precipitates a regression in MusaCoder-RL’s Overall Pass@8 from 93.2 % 93.2\% to 88.6 % 88.6\% , and its Avg.@8 from 88.60 % 88.60\% to 83.20 % 83.20\% . Commensurately, Faster Rates vs. Eager and vs. Compile decline from 15.0 % 15.0\% and 9.2 % 9.2\% to 13.8 % 13.8\% and 8.2 % 8.2\% , respectively. Although this degradation is less severe than ablating the single-turn warmup or MirrorPop, BDR’s impact is highly concentrated on the long tail of complex tasks: it surgically transfigures terminal all-failed groups—which natively lack any positive baseline—into feedback-conditioned rectification tasks, thereby resurrecting critical gradient signals. 
+
+ Figure  8 juxtaposes the training trajectories across disparate BDR configurations against the baseline using Qwen3-8B. We empirically evaluated three paradigms: utilizing native MooreEval execution feedback directly, employing structured feedback synthesized by an external frontier model, and supplementing the external feedback with KL regularization. Empirical evidence indicates that while external frontier feedback accelerates convergence during early training phases, such prompts never manifested during the SFT phase. Consequently, they introduce severe out-of-distribution (OOD) contexts, inducing destabilizing fluctuations in the policy’s entropy. Imposing KL regularization fails to entirely suppress these anomalies and inadvertently retards convergence. Therefore, the optimal terminal configuration exclusively deploys the native sandbox feedback from MooreEval as the retry directive. 
+
+ Figure 8: Ablation of Buffered Dynamic Retry under different feedback settings. 
+
+ Table  3 details the outcomes of a short-horizon BDR training regimen initialized from the single-turn RL checkpoint. For Qwen3-8B, BDR elevates the Pass@8 from 59.6 % 59.6\% to 62.4 % 62.4\% , successfully resurrecting approximately 16 % 16\% of initially completely failed samples. For Qwen3-9B, BDR advances the Pass@8 from 73.2 % 73.2\% to 74.4 % 74.4\% , yielding a recovery rate of approximately 28 % 28\% . This underscores that BDR does not merely naively augment the dataset volume; it selectively resurrects actionable learning signals exclusively on instances where the current policy genuinely fails. A higher recovery rate directly proxies the policy’s enhanced capacity to autonomously assimilate execution feedback for self-correction. 
+
+ Table 3: Effect of Buffered Dynamic Retry. The results are obtained by continuing training from the best single-turn RL checkpoints. 
+
+ Model | 
+ Method | 
+ Pass@8 | 
+ Recovery Rate | 
+
+ Qwen3-8B | 
+ Baseline | 
+ 59.6% | 
+ – | 
+
+ BDR | 
+ 62.4% | 
+ ∼ \sim 16% | 
+
+ Qwen3.5-9B | 
+ Baseline | 
+ 73.2% | 
+ – | 
+
+ BDR | 
+ 74.4% | 
+ ∼ \sim 28% | 
+
+ It is crucial to note that BDR is fundamentally ill-suited as a high-frequency global training regimen throughout the entire RL pipeline. Because it structurally transfigures a subset of zero-shot generation tasks into feedback-conditioned repair tasks, excessive or premature integration risks task interference, potentially eroding the primary objective of first-turn synthesis. Consequently, we strategically deploy BDR strictly as a late-stage stabilization technique. Once the model has attained a robust baseline generation proficiency, feedback-augmented samples are introduced at a marginal sampling ratio, serving specifically to conquer the long-tail boundary of hard tasks. 
+
+ 5.4.6 Effect of MirrorPop 
+
+ The ablation results show that MirrorPop plays an important role in both final performance and RL training stability.
+As reported in Table 2 , removing MirrorPop reduces the Overall Pass@8 from 93.2 % 93.2\% to 86.0 % 86.0\% and the Avg.@8 from 88.60 % 88.60\% to 80.75 % 80.75\% , corresponding to absolute drops of 7.2 7.2 and 7.85 7.85 percentage points, respectively.
+The performance-oriented metrics also degrade: the Faster Rate vs. Eager decreases from 15.0 % 15.0\% to 13.1 % 13.1\% , while the Faster Rate vs. Compile drops from 9.2 % 9.2\% to 7.8 % 7.8\% .
+These results indicate that MirrorPop is not merely a training-curve smoothing heuristic; it directly contributes to final kernel correctness and empirical speedup. 
+
+ Figure  9 further compares three sequence-level off-policy masking configurations: Null , which disables sequence-level filtering and updates the policy using all rollouts; Vanilla , which performs masking based on conventional signed log-ratio aggregation; and MirrorPop , which masks sequences according to absolute log-ratio deviations.
+All three runs are continued from the same strong checkpoint, selected according to the best validation performance before this ablation. 
+
+ (a) Training reward 
+
+ (b) Entropy 
+
+ (c) Gradient norm 
+
+ (d) Response length clip ratio 
+
+ (e) Off-policy metric in Vanilla form 
+
+ (f) Off-policy metric in MirrorPop form 
+
+ Figure 9: 
+Training dynamics under different off-policy sequence masking strategies: Null, Vanilla, and MirrorPop.
+All runs are continued from the same checkpoint selected before this ablation.
+The last two panels report passive sequence-level off-policy diagnostics computed in the Vanilla signed-log-ratio form and the MirrorPop absolute-log-ratio form, respectively.
+
+ The training reward trajectories reveal a clear difference among the three settings.
+Both Null and Vanilla suffer from an initial reward drop after continued training begins, indicating that the policy can be destabilized when high-mismatch trajectories are not reliably filtered.
+Vanilla later recovers part of the lost reward, suggesting that signed log-ratio masking still removes some harmful off-policy samples.
+However, its recovered reward remains below MirrorPop, while Null shows little or only marginal recovery after the drop.
+Overall, Null and Vanilla both degrade to a substantially lower reward level than MirrorPop, with the main difference being that Vanilla partially rebounds whereas Null largely fails to recover.
+In contrast, MirrorPop maintains a consistently higher and more stable reward trajectory, indicating more reliable identification and suppression of high-risk off-policy samples. 
+
+ The entropy, gradient norm, and response length clipping curves (Figure  9 , b-d) provide consistent evidence.
+Under Null, the model shows pronounced fluctuations in gradient norm and entropy, together with a higher response length clipping ratio, indicating unstable optimization and a tendency toward pathological long responses.
+Vanilla partially alleviates these issues, but still exhibits noticeable oscillations.
+MirrorPop produces smoother gradient dynamics, more controlled entropy, and a lower response length clipping ratio, suggesting that its sequence-level filtering improves both optimization stability and output-structure control. 
+
+ To further analyze off-policy behavior, we report two passive sequence-level diagnostics corresponding to the Vanilla and MirrorPop formulations (Figure  9 , e-f).
+The Vanilla-form diagnostic computes the signed mean log-ratio:
+ 1 L i ​ ∑ t = 1 L i log ⁡ ρ i , t . \frac{1}{L_{i}}\sum_{t=1}^{L_{i}}\log\rho_{i,t}. 
+This statistic measures the signed average shift of a response, but positive and negative token-level deviations can cancel each other.
+The MirrorPop-form diagnostic instead computes the mean absolute log-ratio:
+ 1 L i ​ ∑ t = 1 L i | log ⁡ ρ i , t | , \frac{1}{L_{i}}\sum_{t=1}^{L_{i}}\left|\log\rho_{i,t}\right|, 
+which measures the magnitude of sequence-level policy mismatch regardless of direction. 
+
+ The two diagnostics reveal different behaviors.
+Under the Vanilla-form metric, both Null and Vanilla strategies first increase and then decrease, without showing a clear trend of off-policy control.
+However, under the MirrorPop-form metric, Null strategy continues to increase over training, while Vanilla strategy still shows a rise-and-fall pattern.
+This discrepancy suggests that signed log-ratio aggregation can underestimate the true severity of off-policy drift due to cancellation, and therefore may provide a misleading picture of whether high-mismatch trajectories are being effectively controlled.
+In contrast, MirrorPop strategy remains stable and gradually decreases under both diagnostics, indicating more consistent control over sequence-level policy drift. 
+
+ Overall, these results support the design rationale of MirrorPop.
+Rather than measuring only the directional bias of a response relative to the rollout policy, MirrorPop estimates the magnitude of sequence-level mismatch.
+This allows it to more reliably mask severely off-policy samples, thereby reducing unstable policy updates and improving the stability of RL training. 
+
+ 5.5 MUSA KernelBench 
+
+ To further evaluate MusaCoder’s cross-backend kernel generation capability, we conduct experiments on a MUSA-ported variant of KernelBench. This benchmark is adapted from the original CUDA version while preserving the same task structure and difficulty splits. We replace CUDA-specific task descriptions, backend constraints, and device-placement operations with their MUSA counterparts, e.g., mapping .cuda() to .musa() . For prompt exemplars that contain CUDA kernels, we use Musify to convert CUDA APIs, launch interfaces, and compilation commands into MUSA-compatible implementations. Converted exemplars are further checked through compilation and correctness validation, and only verified examples are retained to ensure consistency with the MUSA runtime. 
+
+ Since torch.compile has not yet been fully benchmarked on the current MUSA platform, we report Faster Rate only against PyTorch eager execution. A candidate is counted as faster only if it passes correctness and legality checks and achieves a speedup greater than 1.1 × 1.1\times , filtering out marginal timing noise. We compare MusaCoder with strong general code models, including DeepSeek-V4-Pro and GLM-5.1, to assess whether a model trained with CUDA/MUSA kernel data and execution feedback can generate native MUSA kernels directly from PyTorch references. 
+
+ Table 4: 
+MUSA KernelBench evaluation results. We report correctness-oriented Pass Rate metrics and performance-oriented Faster Rate metrics across Overall, Level 1, Level 2, and Level 3. Pass@8 denotes whether at least one of 8 sampled candidates passes verification, while Avg.@8 measures the average correctness rate among 8 samples. Faster denotes Faster Rate against PyTorch eager execution; torch.compile was not evaluated on the MUSA platform. A candidate is counted as faster only when its speedup is larger than 1.1 × 1.1\times .
+
+ Model | 
+ Overall | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ Pass@8 | 
+ Avg.@8 | 
+ Faster | 
+ Pass@8 | 
+ Avg.@8 | 
+ Faster | 
+ Pass@8 | 
+ Avg.@8 | 
+ Faster | 
+ Pass@8 | 
+ Avg.@8 | 
+ Faster | 
+
+ DeepSeek-V4-Pro | 
+ 92.0 | 
+ 56.9 | 
+ 5.7 | 
+ 96 | 
+ 63.9 | 
+ 6.6 | 
+ 96 | 
+ 61.5 | 
+ 7.5 | 
+ 76 | 
+ 33.8 | 
+ 0.0 | 
+
+ GLM-5.1 | 
+ 88.0 | 
+ 66.4 | 
+ 6.9 | 
+ 92 | 
+ 75.5 | 
+ 8.3 | 
+ 93 | 
+ 68.1 | 
+ 8.9 | 
+ 70 | 
+ 45.0 | 
+ 0.0 | 
+
+ MusaCoder-9B-SFT | 
+ 64.8 | 
+ 56.2 | 
+ 1.9 | 
+ 84 | 
+ 74.0 | 
+ 3.1 | 
+ 68 | 
+ 59.0 | 
+ 1.7 | 
+ 20 | 
+ 15.0 | 
+ 0.0 | 
+
+ MusaCoder-9B-RL | 
+ 84.4 | 
+ 72.3 | 
+ 6.4 | 
+ 94 | 
+ 82.5 | 
+ 9.0 | 
+ 90 | 
+ 77.0 | 
+ 5.7 | 
+ 54 | 
+ 42.5 | 
+ 2.6 | 
+
+ MusaCoder-27B-SFT | 
+ 79.6 | 
+ 63.5 | 
+ 5.2 | 
+ 92 | 
+ 80.1 | 
+ 7.6 | 
+ 84 | 
+ 64.5 | 
+ 4.9 | 
+ 46 | 
+ 27.9 | 
+ 1.0 | 
+
+ MusaCoder-27B-RL | 
+ 92.4 | 
+ 81.7 | 
+ 12.5 | 
+ 98 | 
+ 92.7 | 
+ 19.6 | 
+ 96 | 
+ 84.2 | 
+ 10.0 | 
+ 74 | 
+ 54.1 | 
+ 3.3 | 
+
+ Table  4 shows that execution-feedback training consistently improves MusaCoder on the MUSA backend. For the 9B model, RL increases Overall Pass@8 from 64.8 % 64.8\% to 84.4 % 84.4\% , Avg.@8 from 56.2 % 56.2\% to 72.3 % 72.3\% , and Faster Rate from 1.9 % 1.9\% to 6.4 % 6.4\% . For the 27B model, RL further improves Overall Pass@8 from 79.6 % 79.6\% to 92.4 % 92.4\% , Avg.@8 from 63.5 % 63.5\% to 81.7 % 81.7\% , and Faster Rate from 5.2 % 5.2\% to 12.5 % 12.5\% . These gains indicate that RL does not merely improve functional correctness; it also helps the model discover implementation patterns that are more likely to accelerate on the MUSA backend. 
+
+ Compared with general-purpose code models, MusaCoder-27B-RL achieves the strongest overall stability and performance. Although DeepSeek-V4-Pro already reaches a high Overall Pass@8 of 92.0 % 92.0\% , its Avg.@8 is only 56.9 % 56.9\% , suggesting that correct solutions appear less consistently across samples. MusaCoder-27B-RL achieves a similar Pass@8 of 92.4 % 92.4\% but substantially higher Avg.@8 of 81.7 % 81.7\% , improving single-sample correctness stability by 24.8 24.8 points. It also improves Faster Rate from DeepSeek’s 5.7 % 5.7\% and GLM’s 6.9 % 6.9\% to 12.5 % 12.5\% . On Level 3, MusaCoder-27B-RL reaches 54.1 % 54.1\% Avg.@8 and 3.3 % 3.3\% Faster Rate, while both baselines obtain 0.0 % 0.0\% Faster Rate, showing that MusaCoder is more effective at generating usable and accelerated kernels for difficult MUSA workloads. 
+
+ These results strengthen the central claim of this technical report: MusaCoder is not only a CUDA-oriented kernel generation model, but also a cross-backend native kernel synthesis system. The same data construction, verification, and execution-feedback training pipeline can transfer to the MUSA ecosystem and produce competitive native-kernel generation capability. This provides an important foundation for building an open MUSA kernel generation community, where LLMs can assist developers in writing, validating, repairing, and optimizing backend-specific GPU kernels.

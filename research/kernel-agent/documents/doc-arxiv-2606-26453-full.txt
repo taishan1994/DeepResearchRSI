@@ -1,0 +1,4439 @@
+Optimizing CUDA like a Human: Micro-Profiling Tools as Expert Surrogates for LLM-Based GPU Kernel Optimization 
+
+ Jiading Gai * jiadingg@amazon.comAmazon 
+
+ Shuai Zhang * shuaizs@amazon.comAmazon 
+
+ Kaj Bostrom bostromk@amazon.comAmazon 
+
+ Jin Huang jinhun@amazon.comAmazon 
+
+ Vihang Patil pvihang@amazon.comAmazon 
+
+ Haoyang Fang haoyfang@amazon.comAmazon 
+
+ Bernie Wang yuyawang@amazon.comAmazon 
+
+ Huzefa Rangwala rhuzefa@gmail.comSiemens 
+
+ George Karypis karypis@umn.eduUniversity of Minnesota 
+
+ Abstract 
+
+ We present KernelPro , a closed-loop multi-agent system that automatically generates, profiles, and iteratively optimizes GPU kernel code by integrating large language model (LLM) code generation with hardware profiler feedback and pluggable bottleneck detection tools. KernelPro introduces four contributions: (1) a semantic feedback operator that encodes expert heuristics as pluggable micro-profiling tools, transforming raw hardware metrics into actionable natural language guidance, (2) a two-stage tool invocation architecture where roofline-based bottleneck classification filters which specialized analysis tools execute, combining kernel-level ( ncu ), instruction-level (SASS), and system-level ( nsys ) profiling, (3) a domain-adapted MCTS with progressive widening, asymmetric branching, log-reward calibration, dead-end pruning, and search memory for cross-iteration learning, and (4) direct CuTe source-level code generation via autonomous code search over the CUTLASS/CuTe codebase, mimicking how expert engineers write high-performance GPU kernels in raw CUDA+CuTe. On KernelBench, KernelPro achieves geometric mean speedups of 2.42 × \times /4.69 × \times /5.30 × \times on Levels 1/2/3, establishing state-of-the-art (SOTA) performance across all difficulty levels. On VeOmni’s expert-optimized MoE training kernels, KernelPro achieves 1.23 × \times over hand-tuned Triton by generating a from-scratch raw-CUDA+CuTe Hopper WGMMA kernel. Ablation studies demonstrate that each design component independently and significantly improves optimization quality: micro-profiling tools ( p < 0.0001 p<0.0001 vs raw metrics), MCTS search (26% higher geometric mean vs greedy, p = 0.004 p=0.004 ), and proactive tool orchestration (23% improvement, p = 0.035 p=0.035 ). Finally, KernelPro is the first CUDA kernel coding agent to optimize energy efficiency beyond the speed-only focus of prior systems, demonstrating an 11.6% measured energy reduction at matched speed. 
+
+ 1 1 footnotetext: * Equal contribution. 
+
+ Code will be released upon publication. 
+
+ 1 Introduction 
+
+ Optimizing GPU kernels demands expertise that spans hardware architecture, memory hierarchies, instruction scheduling, and vendor-specific programming models. Experienced engineers follow a disciplined cycle: profile the kernel, recognize bottleneck patterns in the metrics, diagnose root causes, apply targeted transformations, and re-profile to verify. The bottleneck shifts after each successful optimization, and the process repeats until hardware limits are reached. What makes experts effective is not the ability to read numbers from a profiler, but the pattern recognition and diagnostic reasoning they apply to those numbers–heuristics refined over years and often codified into personal scripts and tools  ( NVIDIA Corporation, 2024 ; Yang et al., 2020 ) . 
+
+ Recent LLM-based CUDA optimization systems  ( Zhang et al., 2025 ; Dong et al., 2026 ; Li et al., 2026 ; Chen et al., 2025 ) have shown that language models can generate competitive kernel code when given profiling data. However, these systems present raw or lightly summarized metrics directly to the LLM and rely on the model to implicitly replicate expert reasoning. This conflates two distinct capabilities: interpreting hardware telemetry (a structured, rule-governed task) and generating optimized code (a creative, context-dependent task). By asking the LLM to do both at once, existing agents forgo the systematic intermediate analysis that makes human experts reliable–they miss optimizations, produce inconsistent diagnoses, and cannot easily incorporate new analysis patterns without retraining. 
+
+ We introduce KernelPro , a closed-loop multi-agent system that separates these concerns by encoding expert heuristics as pluggable micro-profiling tools –executable analysis functions that transform raw hardware metrics into actionable natural language guidance before the code-generation LLM sees them. Each tool implements a specific diagnostic pattern: a trigger condition (e.g., tensor core utilization below 10%), analysis logic (e.g., check whether the kernel performs reducible matrix operations), and a prescriptive recommendation (e.g., “rewrite using CUTLASS GEMM for a major expected speedup”). A two-stage invocation pipeline first classifies the kernel’s bottleneck type via roofline analysis, then dispatches only the relevant tools–reducing prompt noise and focusing the LLM on pertinent optimizations. 
+
+ KernelPro further contributes a domain-adapted Monte Carlo Tree Search (MCTS) strategy that balances exploitation of promising optimization paths with exploration of alternative approaches. Unlike the flat iterative refinement used by prior LLM-based CUDA optimization systems, MCTS with UCT selection avoids premature convergence to local optima on complex multi-step optimization problems. Combined with a search memory mechanism that distills findings across iterations, KernelPro achieves monotonically improving performance curves under fixed compute budgets. 
+
+ On the KernelBench benchmark  ( Ouyang et al., 2025 ) , KernelPro achieves geometric mean speedups of 2.42 × 2.42\times / 4.69 × 4.69\times / 5.30 × 5.30\times on Levels 1/2/3, surpassing KernelBlaster  ( Dong et al., 2026 ) , the prior SOTA at time of writing, on all levels. Following the principle that design choices should be empirically established rather than assumed, we validate each of KernelPro ’s components through controlled ablations—each assessed for significance with a paired Wilcoxon signed-rank test  ( Hollander et al., 2014 ) —on a fixed 42-task KernelBench subset (Levels 1–3), selected for transformer relevance and used throughout this paper (Section  5.3 ). For instance, micro-profiling tools provide 125% higher speedup than raw metrics ( p < 0.0001 p<0.0001 ), and MCTS significantly outperforms greedy search (Wilcoxon p = 0.004 p=0.004 , 26% higher geometric mean). 
+
+ Overall, KernelPro contributes and synthesizes five ideas to make LLM-based optimization more grounded, interpretable, and effective on modern GPU architectures: 
+
+ 1. 
+
+ A semantic feedback operator that formalizes expert heuristics as pluggable, LLM-invocable micro-profiling tools, transforming hardware metrics into natural language optimization guidance. 
+
+ 2. 
+
+ A two-stage tool invocation architecture where roofline-based bottleneck classification (Stage 1) filters which specialized analysis tools execute (Stage 2), combining kernel-level, instruction-level, and system-level profiling. 
+
+ 3. 
+
+ A domain-adapted MCTS for LLM-based CUDA optimization with progressive widening, asymmetric branching, log-reward calibration, and dead-end pruning. Search memory enables cross-iteration learning. 
+
+ 4. 
+
+ Direct CuTe source-level code generation via autonomous code search over the CUTLASS/CuTe codebase  ( NVIDIA, 2023 ) (CUTLASS is a CUDA template library of high-performance kernels; CuTe is its underlying tensor/layout-algebra layer for composing kernels from scratch), mimicking how expert engineers write high-performance GPU kernels in raw CUDA+CuTe (full generated source in Appendix  H ). 
+
+ 5. 
+
+ The first energy-aware CUDA kernel coding agent : whereas prior LLM-based kernel agents optimize for speed alone, KernelPro extends its reward and profiling tools to energy efficiency as a secondary objective via a lexicographic energy-aware reward. As a preliminary study, a matched-speed A/B finds a measured 11.6 % 11.6\% energy reduction at identical speed via lower-energy instruction selection (Section  5.5 ); a full evaluation is left to future work. 
+
+ 2 Related Work 
+
+ Several recent systems apply LLMs to CUDA kernel optimization, differing primarily in how hardware profiling data reaches the LLM. Some rely solely on end-to-end timing without hardware profiling  ( Andrews & Witteveen, 2025 ; Zhang et al., 2026 ; Wiedemann et al., 2026 ; Chen et al., 2026 ) . Others pass raw or statistically filtered ncu metrics directly into the LLM’s prompt and rely on the LLM itself to interpret them  ( Zhang et al., 2025 ; Dong et al., 2026 ; Li et al., 2026 ; Team & Meta, 2025 ; Han et al., 2026 ) . cuPilot  ( Chen et al., 2025 ) adds roofline-based bottleneck classification but stops at a label (memory-bound vs. compute-bound) without generating actionable directives from the underlying counters. In all cases, the LLM remains the sole interpreter of profiling data–no prior LLM-based system provides programmatic translation of hardware counters into optimization directives. The challenge predates LLMs: classical performance advisors such as GPA  ( Zhou et al., 2021 ) use instruction sampling and data-flow analysis to attribute stalls to their root causes and emit human-readable optimization suggestions, and independently observe that raw profiler output “provide[s] little insight into how to improve the code.” KernelPro adopts the same diagnose-then-prescribe philosophy but closes the loop : its micro-profiling tools translate counters into natural-language directives before any LLM involvement, and an LLM then applies the fix directly rather than leaving it to a human engineer. Our ablation (Appendix  C ) confirms that this tool-based interpretation significantly outperforms both no-feedback and raw-metrics-only feedback. 
+
+ CUTLASS and CuTe code generation. Several agents target NVIDIA’s CUTLASS library, but at different abstraction levels. AVO  ( Chen et al., 2026 ) and StitchCUDA  ( Li et al., 2026 ) generate high-level CUTLASS template instantiations–selecting tile sizes, pipeline stages, and epilogue fusions from a predefined configuration space. KernelPro operates at a lower level: it generates raw CUDA+CuTe source code by autonomously searching the CUTLASS/CuTe codebase for layout algebras, copy atoms, and MMA atoms, then composing them into novel kernels – the same workflow used by expert kernel engineers. 
+
+ Tree search and evolutionary methods for LLM code optimization. A growing body of work integrates Monte Carlo Tree Search with LLMs. MCTSr  ( Zhang et al., 2024 ) applies UCT to mathematical olympiad problems, where each node represents an answer version refined via self-evaluation. DeepSearch  ( Wu et al., 2025 ) embeds MCTS into the RL training loop with global frontier selection, targeting model weight updates rather than inference-time optimization. TreeRL  ( Hou et al., 2025 ) proposes entropy-guided token-level branching that forks from high-uncertainty tokens. Tree-GRPO  ( Ji et al., 2025 ) uses complete agent steps as tree nodes and derives process supervision signals from intra-tree relative advantages. These systems treat tree search as a mechanism for training LLMs or generating reasoning traces . AlphaEvolve  ( Novikov et al., 2025 ) takes an evolutionary approach, using population-based LLM sampling with scalar fitness to optimize algorithms including TPU kernels, but requires millions of samples over days of compute. 
+
+ KernelPro introduces a domain-adapted MCTS for LLM-based GPU kernel optimization, where each node represents a complete compiled-and-profiled CUDA kernel. This coarse granularity demands different design choices: progressive widening  ( Auger et al., 2013 ) gates expansion because each node requires compilation, execution, and profiling, ensuring exploration grows sublinearly with visit count; log-reward calibration eliminates the need for learned value functions; asymmetric branching factors reflect the empirical observation that valid optimizations outnumber valid repairs; dead-end pruning removes exhausted subtrees; and search memory enables cross-iteration learning. KernelPro adopts MCTSr’s ROOT re-expansion (fresh seed injection when existing subtrees plateau) but replaces self-reward with measured speedup, eliminating reward hacking risk. While writing this paper, we observed that OptiML  ( Bhattacharjee et al., 2026 ) has also independently applied MCTS with UCT for CUDA kernel optimization, which we view as convergent evidence that tree search is a natural fit for this domain. 
+
+ 3 The Architecture of KernelPro 
+
+ 3.1 High-Level Pipeline 
+
+ KernelPro operates as a multi-agent system with three primary agents coordinated by a search orchestrator. The Benchmarking Agent (Stage 1) analyzes the reference implementation to establish baseline performance metrics and classify the kernel’s bottleneck type (compute-bound, memory-bound, latency-bound, or mixed) via roofline analysis. The Programmer Agent generates optimized CUDA code in three modes: initial generation, debugging compilation/correctness errors, and iterative optimization based on profiling feedback. The Profiling Agent (Stage 2) executes micro-profiling tools filtered by the Stage 1 bottleneck classification, producing semantic feedback that guides the next optimization iteration. This two-stage architecture–bottleneck classification followed by filtered tool execution–reduces prompt noise and focuses the LLM on relevant optimizations. 
+
+ Stage 1 (one-time) Iterative Loop Stage 2 Micro-Profiling Tools CUDA/Triton/ PyTorch Kernel Benchmarking Agent (Roofline Classification) Bottleneck Type Search Orchestrator MCTS / Greedy Programmer Agent init ∣ \mid debug ∣ \mid optimize N N Candidates Best Validated CUDA Kernel Search Memory cross-iteration learning Compile & Execute validate correctness Profiling Agent (Semantic Feedback) ncu  (8 tools) nsys  (5 tools) SASS  (2 tools) input kernel perf analysis select node converged CUDA kernel code bottleneck type filtering inject memoize memoize semantic feedback ncu metrics + .cubin Control / Main Flow Semantic Feedback Memory Flow Tool Invocation Bottleneck Filtering 
+
+ Figure 1: 
+ KernelPro agentic optimization workflow. Stage 1 (Benchmarking Agent) performs one-time roofline-based bottleneck classification. The iterative loop comprises search, programming, compilation, correctness validation, profiling, and semantic feedback. The Search Orchestrator (MCTS or greedy) maintains an expansion tree over candidate solutions, while the Stage 2 Profiling Agent invokes bottleneck-filtered micro-profiling tools (8  ncu + 5  nsys + 2 SASS analyzers). Search Memory persists cross-iteration findings outside the loop. When the search converges, the workflow emits the best validated CUDA kernel.
+
+ All agents communicate with LLMs through a backend-agnostic interface built on the OpenAI Agents SDK  ( OpenAI, 2025 ) , so the same agent code runs unmodified on AWS Bedrock or vLLM  ( Kwon et al., 2023 ) . The Bedrock path requires the most adaptation: a custom adapter translates tool definitions, multi-turn tool-use/tool-result exchanges, and structured responses between the SDK’s tool-calling protocol and the Bedrock Claude Messages API, whereas vLLM’s OpenAI-compatible endpoint is consumed directly with no protocol translation. 
+
+ Proactive Tool Orchestration for the Profiling Agent. A deliberate design choice in KernelPro is the use of proactive tool orchestration for the Profiling Agent, rather than the reactive pattern typical of LLM agent frameworks  ( Yao et al., 2023 ) . In reactive systems, the LLM decides which tools to invoke–a stochastic process that may skip critical analyses. The Profiling Agent instead orchestrates its 15 micro-profiling tools deterministically : all relevant tools are executed based on the bottleneck classification, injecting their guidance into the prompt before LLM invocation. This mirrors how human CUDA experts systematically analyze all relevant metrics rather than selectively querying information. The proactive approach guarantees comprehensive analysis and consistent optimization quality, which is essential for reliable CUDA optimization outcomes. A concrete example: in Task 41 (Appendix  G.1 ), the tools turn a memory-bottleneck diagnosis into a ranked list of specific, actionable directives (epilogue fusion, BF16 tensor cores, register-pressure and coalescing fixes); the agent applies the top recommendations together for a 2.8 × 2.8\times single-step improvement. A reactive agent invoking only a few tools would surface a fraction of this guidance. 
+
+ 3.2 Agent Decomposition 
+
+ 3.2.1 Benchmarking Agent (Stage 1) 
+
+ The Benchmarking Agent runs once per problem at the start of optimization. It parses the reference code to identify the mathematical operations involved (GEMM, Softmax, convolution, etc.), computes a roofline estimate of theoretical peak performance from compute intensity and hardware specs, and classifies the problem as compute-bound, memory-bound, or mixed based on the CI/ridge ratio. It then profiles the reference implementation with ncu to validate this theoretical classification against measured utilization. The output is a ReferenceAnalysis object that guides downstream tool selection for the Programmer and Profiling Agents. 
+
+ 3.2.2 Programmer Agent 
+
+ The Programmer Agent generates candidate kernel implementations through KernelPro ’s backend-agnostic model interface, operating in three modes: 
+
+ • 
+
+ Initial : Generate first-attempt CUDA implementations from reference kernel 
+
+ • 
+
+ Debugging : Fix compilation errors or correctness failures in previous attempts 
+
+ • 
+
+ Optimize : Improve performance of working solutions based on profiler feedback 
+
+ Prompts are constructed via a modular PromptBuilder that composes task-specific instructions from reusable components: base optimization strategies, dataset-specific formats, mode-specific instructions, and curated examples. This modularity allows different baseline types (PyTorch, Triton  ( Tillet et al., 2019 ) , CUDA) to share common optimization knowledge while receiving tailored guidance. A notable feature is GPU-aware prompt injection : at agent creation time, KernelPro detects the target GPU architecture and injects architecture-specific guidance—most importantly the correct tensor-core instruction shapes (§ 3.2.4 )—so generated code targets the right instruction format without requiring the LLM to memorize hardware details. 
+
+ The agent outputs a structured MultipleCompletions object containing N N candidate solutions per iteration, each with its optimization strategy annotation. This structured output enables downstream validation and trajectory recording. A two-phase truncation-recovery mechanism handles cases where generated code exceeds the output token limit (detected via a max_tokens stop reason): Phase A retries with doubled max_tokens ; if still truncated, Phase B retries at that doubled budget with an appended directive to restart concisely. 
+
+ 3.2.3 Profiling Agent (Stage 2) 
+
+ The Profiling Agent transforms raw hardware metrics into semantic optimization guidance. Rather than simply forwarding ncu output to the LLM, it constructs a rich analysis prompt through a multi-stage process. 
+
+ First, the agent collects metrics from three profiling sources: ncu provides kernel-level metrics (throughput, occupancy, stalls), nsys provides system-level timeline data (launch overhead, synchronization), and SASS analysis provides instruction-level information by disassembling the compiled .so file. To obtain the binary path, KernelPro intercepts PyTorch’s load_inline compilation pipeline, capturing the ephemeral .so artifact for downstream ncu and SASS analysis. ncu profiling targets only the KernelPro -generated __global__ kernels identified via binary symbol analysis ( cuobjdump -symbols , filtering for STB_GLOBAL entry points), with fallback to duration-based kernel selection for library-call solutions (e.g., cuBLAS). This multi-level fusion is essential– ncu alone cannot distinguish whether a kernel uses Ampere-style async copies or Hopper TMA, but SASS reveals this directly. 
+
+ Second, the agent invokes the micro-profiling tool registry . The key function ToolRegistry.generate_prompt_guidance() iterates through registered tools (filtered by Stage 1 bottleneck type), executes each tool’s analyze() method on the collected metrics, and aggregates triggered findings into markdown-formatted guidance. This guidance is injected into the LLM prompt under an “Automated Bottleneck Analysis” section. 
+
+ The resulting prompt structure follows a consistent format: SASS analysis results (tensor core instruction counts, memory patterns), followed by an nsys timeline summary (launch overhead percentage, sync calls)—where gap detection uses an adaptive threshold of max ⁡ ( 1 % ​ of end-to-end time , 5 ​ μ ​ s ) \max(1\%\ \text{of end-to-end time},\ 5\mu\text{s}) so that only gaps meaningful relative to total runtime are flagged, avoiding false positives on long-running kernels—then tool-generated bottleneck analysis with severity ratings and recommendations, and finally ncu metrics organized by category (compute, memory, occupancy, stalls). 
+
+ The LLM then synthesizes this information into a structured ProfileAnalysis output containing bottleneck classification, severity assessment, and prioritized optimization recommendations. This structured output feeds back to the Programmer Agent for the next iteration. 
+
+ Tool invocation pattern. The Profiling Agent uses proactive tool orchestration. With 15 micro-profiling tools, reactive invocation would introduce stochastic selection–the LLM might call 3 tools and skip 10, missing critical analyses. Instead, KernelPro deterministically executes all relevant tools based on the Stage 1 bottleneck classification, injecting their combined guidance into the prompt before LLM invocation. This guarantees comprehensive coverage and consistent optimization quality across runs. Stage 1 classifies the bottleneck using two independent methods for robustness: a theoretical roofline bound (arithmetic intensity vs. the hardware ridge point) and the measured compute-vs-memory throughput from ncu . Agreement between the two gives high confidence; on disagreement, KernelPro defers to the theoretical bound, since it reflects the kernel’s inherent ceiling rather than the current (possibly unoptimized) implementation. Table  1 shows the resulting tool filtering. 
+
+ Table 1: Tool filtering by bottleneck type 
+
+ Bottleneck Type | 
+
+ Tool Selection 
+ | 
+ Rationale | 
+
+ COMPUTE_BOUND | 
+
+ Exclude memory tools (Coalescing, DRAM) 
+ | 
+ Memory not limiting | 
+
+ MEMORY_BOUND | 
+
+ Exclude compute tools (TensorCore, WGMMA) 
+ | 
+ Compute not limiting | 
+
+ LAUNCH_OVERHEAD | 
+
+ Nsys tools (LaunchOverhead, SmallKernel) 
+ | 
+ System-level issues | 
+
+ MIXED/LATENCY_BOUND | 
+
+ All tools 
+ | 
+ Multiple bottlenecks | 
+
+ 3.2.4 Open-Source Library Integration 
+
+ KernelPro treats open-source GPU libraries as first-class citizens through an extensible integration architecture. Prior CUDA AI agents either stitch pre-compiled library calls (cuBLAS, cuDNN) or generate raw CUDA/Triton–none support source-level code generation with libraries like CUTLASS. KernelPro ’s design enables LLM-based code generation with any GPU programming library through two mechanisms: (1) GPU-aware prompt injection –detecting target hardware and injecting library-specific configurations, and (2) a library-aware build and runtime environment –ensuring generated code compiles, executes, validates, and profiles seamlessly. 
+
+ We demonstrate this architecture with CUTLASS , an industry-grade library for custom tensor-core kernels (adopted in systems such as PyTorch and TensorRT); its
+ CuTe layer provides the tensor and layout abstractions (copy
+atoms, MMA atoms, layout algebra) used to compose such kernels from scratch. Generating
+this code is challenging for LLMs: it must match hardware-specific instruction shapes and
+satisfy architectural conventions that are easy to violate and sparsely documented,
+and it depends on a precise build configuration. 
+
+ For CUTLASS, KernelPro ’s prompt injection detects the target GPU at runtime and injects architecture-specific instruction shapes, include paths, and compiler flags. KernelPro ’s build and runtime environment handles compilation via PyTorch’s load_inline with CUTLASS-specific flags, tracks compilation events, validates correctness against reference implementations, and profiles compiled kernels with ncu / nsys . This closed-loop integration ensures that LLM-generated CUTLASS/CuTe code can compile, execute, profile, and evaluate seamlessly. Appendix  G presents two complete trajectories demonstrating this integration end-to-end: a custom BF16 epilogue functor achieving 12.1 × 12.1\times (Task 41) and a dual-GEMM pipeline with hand-written kernels achieving 2.79 × 2.79\times (Task 46). 
+
+ LLM-autonomous code search. 
+A key challenge in CUTLASS/CuTe code generation is that LLMs frequently produce code violating sparsely-documented architectural constraints (e.g., barrier lifecycle rules, warp specialization patterns, TMA pipeline depth). Rather than relying on static prompt injection of examples, KernelPro equips the Programmer Agent with LLM-autonomous code search tools that allow it to query the CUTLASS/CuTe codebase directly during generation: 
+
+ • 
+
+ search_cutlass : recursive grep over file contents with optional path/glob scoping (search calls are budgeted per iteration to encourage convergence toward generation; reads and listings are unbudgeted) 
+
+ • 
+
+ read_cutlass_file : Read specific files with line ranges 
+
+ • 
+
+ list_cutlass_directory : Directory listing for navigation 
+
+ • 
+
+ check_smem_layout : pre-flight validation that compiles a minimal tile_to_shape probe with nvcc against the CUTLASS headers, catching shape/stride divisibility errors—the dominant CuTe compile failure—before a full kernel build (unbudgeted) 
+
+ This design follows the principle that the LLM should discover relevant patterns autonomously rather than receiving pre-selected examples. The LLM decides what to search based on the optimization context—e.g., retrieving wgmma pipeline patterns and MMA/copy atoms from the live CuTe source when generating Hopper tensor-core code—and composes them into novel kernels. This is the source-level workflow that expert engineers use, and the mechanism behind KernelPro ’s from-scratch raw-CuTe kernels (Section  5.4 ). Contemporaneous work (GrepSeek;  Salemi et al., 2026 ) independently finds that agent-issued executable search over a raw corpus can outperform index-based retrieval. 
+
+ Additionally, a constraint mining tool pre-extracts hard architectural requirements from CUTLASS source (barrier lifecycle, warp specialization rules, vectorized epilogue patterns, tile swizzle) and injects them as non-negotiable code generation constraints. A companion tool validates generated code against these requirements before compilation, catching architectural errors early. 
+
+ 3.2.5 Multi-Language Input Support 
+
+ KernelPro supports PyTorch-to-CUDA , Triton-to-CUDA , and CUDA-to-CUDA translation. This flexibility serves diverse optimization workflows–from AI researchers prototyping in PyTorch to kernel engineers fine-tuning existing Triton or CUDA implementations. 
+
+ PyTorch Model + nn.Module Triton @triton.jit + run() CUDA existing kernel Source Languages Dataset Adapters (Normalization) kernelbench.py  triton2cuda.py  cuda2cuda.py  (future) Unified Problem Format class Model(nn.Module) + get_inputs() + get_init_inputs() Modular Prompt Builder (baseline_type routing) dataset_formats/{pytorch|triton}.txt + shared optimization strategies Output: CUDA C++ torch.utils.cpp_extension.load_inline 
+
+ Figure 2: Multi-language input pipeline: all source languages are normalized to a unified format before being routed through language-specific prompts to produce optimized CUDA kernel. 
+
+ While prior CUDA agents accept only PyTorch input (via KernelBench) or only existing CUDA code, KernelPro natively supports PyTorch, Triton, and CUDA inputs—enabling optimization of kernels at any stage of the development pipeline (Figure  2 ). All inputs are normalized to a unified class Model interface with language-specific prompt routing, producing CUDA C++ output via load_inline . 
+
+ This multi-language capability addresses a key production need: automating kernel optimization and hardware migration regardless of the source abstraction. Triton kernels hitting DSL-imposed performance ceilings (e.g., Ampere-era instructions on Hopper, Section  5.4 ), PyTorch prototypes requiring production CUDA implementations, and legacy CUDA kernels needing re-optimization for new GPU architectures can all be optimized through a single system—eliminating the need for scarce CUDA experts at each translation boundary. 
+
+ 3.3 Search Strategy 
+
+ KernelPro uses a solution-level Monte Carlo Tree Search (MCTS) strategy to navigate the CUDA optimization landscape. Each node is a complete compiled-and-profiled kernel rather than a single reasoning step. Unlike greedy search, MCTS systematically explores the multi-modal landscape (tiling vs vectorization vs algorithmic restructuring) while concentrating compute budget on the most promising subtrees. Algorithm  1 presents the full MCTS loop. 
+
+ Algorithm 1 MCTS Search with Progressive Widening and Search Memory. Green lines denote KernelPro -specific adaptations for CUDA kernel optimization. 
+
+ 1: 
+
+ Input: Problem P P , max iterations T T , candidates per expansion N N , UCT constant C uct C_{\text{uct}} 
+
+ 2: 
+
+ ROOT ← VirtualNode ​ ( ) \text{ROOT}\leftarrow\text{VirtualNode}() , ℳ ← ∅ \mathcal{M}\leftarrow\emptyset ⊳ \triangleright Virtual root, search memory
+
+ 3: 
+
+ ref_analysis ← BenchmarkingAgent.analyze ​ ( P ) \text{ref\_analysis}\leftarrow\text{BenchmarkingAgent.analyze}(P) ⊳ \triangleright Stage 1: roofline classification
+
+ 4: 
+
+ for t = 0 t=0 to T − 1 T-1 do 
+
+ 5: 
+
+    node ← UCT-Select ​ ( ROOT , C uct ) \text{node}\leftarrow\text{UCT-Select}(\text{ROOT},C_{\text{uct}}) ⊳ \triangleright Traverse tree via UCT + progressive widening
+
+ 6: 
+
+    if node = ROOT then mode ← initial \text{mode}\leftarrow\text{initial} ; parent ← None \text{parent}\leftarrow\text{None} ⊳ \triangleright Fresh seed injection
+
+ 7: 
+
+    else if node.status = FAILED then mode ← debug \text{mode}\leftarrow\text{debug} ; parent ← node \text{parent}\leftarrow\text{node} ⊳ \triangleright Repair attempt
+
+ 8: 
+
+    else mode ← optimize \text{mode}\leftarrow\text{optimize} ; parent ← node \text{parent}\leftarrow\text{node} ⊳ \triangleright Refine working solution
+
+ 9: 
+
+    candidates ← ProgrammerAgent.generate ​ ( P , parent , parent.feedback , ℳ , mode , N ) \text{candidates}\leftarrow\text{ProgrammerAgent.generate}(P,\text{parent},\text{parent.feedback},\mathcal{M},\text{mode},N) 
+
+ 10: 
+
+    for each c c in candidates do 
+
+ 11: 
+
+     result ← Execute ​ ( c ) \text{result}\leftarrow\text{Execute}(c) ⊳ \triangleright Compile, run, validate
+
+ 12: 
+
+     if result.valid then 
+
+ 13: 
+
+       metrics ← Profile ​ ( c ) \text{metrics}\leftarrow\text{Profile}(c) ⊳ \triangleright ncu + nsys hardware profiling
+
+ 14: 
+
+       sass_info ← SASSAnalyze ( c . cubin ) \text{sass\_info}\leftarrow\text{SASSAnalyze}(c.\text{cubin}) ⊳ \triangleright Disassemble compiled binary
+
+ 15: 
+
+       guidance ← RunTools ​ ( metrics , sass_info , bottleneck ) \text{guidance}\leftarrow\text{RunTools}(\text{metrics},\text{sass\_info},\text{bottleneck}) ⊳ \triangleright Expert surrogates
+
+ 16: 
+
+       analysis ← ProfilingAgent.analyze ​ ( c , metrics , guidance ) \text{analysis}\leftarrow\text{ProfilingAgent.analyze}(c,\text{metrics},\text{guidance}) 
+
+ 17: 
+
+       c . feedback ← analysis c.\text{feedback}\leftarrow\text{analysis} ⊳ \triangleright Tool-guided feedback replaces rollout
+
+ 18: 
+
+     end if 
+
+ 19: 
+
+     r ​ ( c ) ← Reward ​ ( c ) r(c)\leftarrow\text{Reward}(c) ⊳ \triangleright ln ⁡ ( speedup ) \ln(\text{speedup}) , − 2.0 -2.0 , or − 3.0 -3.0 
+
+ 20: 
+
+     Backpropagate ​ ( c , r ​ ( c ) ) \text{Backpropagate}(c,r(c)) ⊳ \triangleright Update visits and rewards to ROOT
+
+ 21: 
+
+     AttachChild ​ ( node , c ) \text{AttachChild}(\text{node},c) 
+
+ 22: 
+
+    end for 
+
+ 23: 
+
+    MarkTerminals ​ ( node ) \text{MarkTerminals}(\text{node}) ⊳ \triangleright Prune if ≥ \geq 3 all-failed repair children
+
+ 24: 
+
+    ℳ ← ExtractMemory ​ ( t , candidates , result , ℳ ) \mathcal{M}\leftarrow\text{ExtractMemory}(t,\text{candidates},\text{result},\mathcal{M}) ⊳ \triangleright Background summarizer
+
+ 25: 
+
+ end for 
+
+ 26: 
+
+ return GlobalBest ​ ( ROOT ) \text{GlobalBest}(\text{ROOT}) ⊳ \triangleright Best solution across entire tree
+
+ 3.3.1 UCT Selection 
+
+ KernelPro ’s MCTS maintains a search tree where each node represents a concrete CUDA solution (compiled, profiled, and evaluated). Selection follows the UCT algorithm  ( Kocsis & Szepesvári, 2006 ) : starting from a virtual ROOT node, the tree is traversed by repeatedly selecting the child that maximizes the upper confidence bound UCT ​ ( c ) = r ¯ c + C uct ​ ln ⁡ N parent / N c \text{UCT}(c)=\bar{r}_{c}+C_{\text{uct}}\sqrt{\ln N_{\text{parent}}/N_{c}} , where r ¯ c \bar{r}_{c} is the node’s mean reward, N c N_{c} its visit count, N parent N_{\text{parent}} the parent’s visit count, and C uct = 2 C_{\text{uct}}=\sqrt{2} . Unlike evolutionary approaches that maintain a candidate population, tree-structured selection gives proper credit to underexplored subtrees–a node buried three levels deep in a promising branch competes fairly against shallow alternatives because the exploration bonus is computed relative to its parent’s visits, not the global budget. 
+
+ 3.3.2 Progressive Widening with Domain-Adapted Branching 
+
+ Standard MCTS assumes a finite action set and expands a node until all its actions are tried. KernelPro ’s action–“generate another CUDA solution”–has an effectively unbounded branching factor, and each child is expensive to evaluate (compilation, execution, ncu profiling, and SASS analysis). KernelPro therefore uses progressive widening  ( Auger et al., 2013 ) to gate expansion: a node with N N visits may have at most C pw ⋅ N α C_{\text{pw}}\cdot N^{\alpha} children ( α = 0.5 \alpha=0.5 ), so a node earns additional candidates only as repeated visits confirm its promise. 
+
+ The key domain adaptation is asymmetric branching factors tied to node status. For ROOT (fresh seed generation) and FAILED nodes (repair attempts), the widening constant is C pw = 2 C_{\text{pw}}=2 –moderate diversity is appropriate because failed solutions typically need a specific fix rather than broad exploration. For SUCCESSFUL nodes (optimization refinements), C pw = 3 C_{\text{pw}}=3 –the search allocates more children because correct CUDA kernels have richer optimization surfaces with many orthogonal improvement axes (memory hierarchy tuning, instruction-level parallelism, tensor core utilization etc). This asymmetry encodes the empirical observation that the space of valid optimizations is broader than the space of valid repairs. 
+
+ At each internal node during traversal, KernelPro computes a virtual child UCT score : the hypothetical UCT of a new child that would inherit its parent’s mean reward as a prior and receive a fair share of visits. If this virtual score exceeds the UCT of the best existing child, the search expands the node (generates a new solution as its child) rather than descending further. This mechanism provides a principled expansion criterion–new children are only created when the uncertainty about unexplored alternatives outweighs the expected value of exploiting known children. 
+
+ 3.3.3 Reward Calibration 
+
+ Backpropagation requires a scalar reward signal that meaningfully ranks solutions across the tree. KernelPro uses a three-tier reward function calibrated on a diverse set of transformer-centric GPU kernels: 
+
+ | 
+ r ⁡ ( n ) = { ln ⁡ ( speedup ​ ( n ) ) correct − 2.0 incorrect output − 3.0 crash/compile error r(n)=\begin{cases}\ln(\text{speedup}(n))&\text{correct}\\
+-2.0&\text{incorrect output}\\
+-3.0&\text{crash/compile error}\end{cases} | 
+ | 
+ (1) | 
+
+ The logarithmic transform for correct solutions prevents high-speedup outliers (e.g., 100 × \times on trivially parallelizable kernels) from dominating the tree–a 2 × \times speedup on a well-optimized kernel is arguably harder than 50 × \times on an unoptimized one, and log-scaling reflects this. The gap between tiers (-2.0 for incorrect vs ln ⁡ ( 1 ) = 0 \ln(1)=0 at the correctness boundary) ensures that “almost correct” solutions never dominate the tree over genuinely correct ones, preventing the search from wasting budget refining broken code. Rewards propagate from leaf to ROOT via backpropagation, updating visit counts and cumulative rewards at every ancestor. 
+
+ 3.3.4 Dead-End Pruning and ROOT Re-expansion 
+
+ Two mechanisms prevent the search from stalling. First, terminal marking : when a failed node accumulates three or more repair children that all fail, it is marked terminal and excluded from future selection. This prunes dead-end subtrees where the underlying algorithmic approach is fundamentally broken, propagating upward through the tree as entire branches become exhausted. 
+
+ Second, ROOT re-expansion : when UCT selects the virtual ROOT node itself (rather than any of its children), the system generates entirely fresh solutions from scratch rather than refining existing ones. This mechanism–inspired by MCTSr  ( Zhang et al., 2024 ) –injects exploration diversity as the tree deepens, preventing the search from over-committing to early seeds that happen to look promising. The progressive widening gate on ROOT ensures this happens at a controlled rate: fresh seeds are generated only when the virtual child’s UCT score at ROOT exceeds that of all existing top-level solutions, indicating that unexplored regions of the solution space may outperform known optima. 
+
+ A controlled ablation comparing MCTS against greedy search under matched compute budgets (Appendix  E ) confirms that tree-structured exploration yields a 26% higher geometric mean speedup across 42 KernelBench tasks ( p = 0.004 p=0.004 ), with the largest gains on problems requiring multi-step optimization chains where greedy converges prematurely. The NetVLAD trajectory (Appendix  G , Task 46) provides concrete evidence: 43 consecutive failures precede the first working solution—a search depth that would exhaust any fixed-budget single-shot approach—yet once a correct kernel emerges, profiling-guided refinement converges rapidly ( 0.75 × → 2.79 × 0.75\times\to 2.79\times in two refinement steps). 
+
+ 3.4 Search Memory: Cross-Iteration Learning 
+
+ A fundamental challenge in iterative LLM-based optimization is that each iteration starts tabula rasa –the LLM has no memory of prior attempts beyond the immediate parent’s profiling feedback. This leads to three failure modes we observe in practice: (1) repeated errors , where the LLM re-attempts approaches that failed in earlier iterations; (2) lost discoveries , where useful search findings (file paths, API patterns) from tool calls are not carried forward; and (3) plateau behavior , where the LLM cycles between similar strategies without building toward a solution. 
+
+ KernelPro addresses this with a search memory system (Figure  1 )–a lightweight, append-only knowledge store scoped to a single optimization run. The system has three stages. First, a post-iteration extractor : after each iteration completes (success or failure), a separate background LLM call receives the iteration context–tool calls made, code approach attempted, and evaluation outcome–and produces structured entries for five memory sections. This separation ensures the code-generation LLM operates without meta-cognitive overhead. Second, a structured memory store organizes entries into semantically distinct sections: Search Findings (file paths, API patterns, and architectural details discovered via tool calls), Errors & Corrections (what was tried and why it failed–compilation errors, correctness failures, performance regressions), Successful Patterns (approaches that achieved measurable speedup, with the technique and result), Key Files (source files containing relevant implementations or examples), and Learnings (higher-level principles distilled from the iteration, e.g., “shared memory limits occupancy for this kernel size”). Third, prompt injection : the accumulated search memory is formatted as a structured block and injected into the Programmer Agent’s system prompt at the start of each iteration. The memory grows monotonically across iterations, providing an increasingly rich context for optimization decisions. 
+
+ A controlled ablation across 42 KernelBench tasks shows that search memory produces statistically equivalent final speedup while providing an early-convergence trend. Full ablation experiments are reported in Appendix  D . 
+
+ 4 Micro-Profiling Tools 
+
+ KernelPro ’s 15 micro-profiling tools encode GPU optimization expertise as composable analyzers that transform raw profiler metrics into actionable guidance. Each tool implements a trigger-analyze-recommend pattern: triggering on specific bottleneck signatures, analyzing severity and root cause, and generating targeted recommendations for the LLM. The tools are organized by profiler source (Table  2 )—kernel-level ( ncu ), instruction-level (SASS binary analysis), and system-level ( nsys )—because different bottlenecks manifest at different levels of abstraction and no single profiler provides complete visibility. 
+
+ Table 2: Micro-profiling tool categories by profiler source 
+
+ Category | 
+ Tools | 
+ Description | 
+
+ ncu (Nsight Compute) | 
+ 8 | 
+ Kernel-level metrics: throughput, stalls, occupancy | 
+
+ SASS (Binary Analysis) | 
+ 2 | 
+ Instruction-level: tensor cores, register spills | 
+
+ nsys (Nsight Systems) | 
+ 5 | 
+ System-level timeline: launch overhead, sync, transfers | 
+
+ Total | 
+ 15 | 
+ | 
+
+ 4.1 Tools as Expert Surrogates 
+
+ As motivated in Section  1 , KernelPro frames micro-profiling tools as executable surrogates for human expert workflow –encoding the profile-recognize-diagnose-prescribe cycle as callable tools. While demonstrated for CUDA, this pattern generalizes to any domain with measurable metrics, known bottleneck patterns, and actionable fixes (e.g., database query optimization, compiler tuning). 
+
+ 4.1.1 The 5-Tuple Formalization 
+
+ Each KernelPro micro-profiling tool encodes one expert heuristic as a formal 5-tuple: 
+
+ | 
+ τ = ( name , ℳ req , θ , trigger , analyze ) \tau=(\text{name},\mathcal{M}_{\text{req}},\theta,\text{trigger},\text{analyze}) | 
+ | 
+ (2) | 
+
+ where ℳ req ⊆ ℳ \mathcal{M}_{\text{req}}\subseteq\mathcal{M} is the required metric subset (from the ∼ 50 {\sim}50 ncu metrics KernelPro collects), θ \theta are threshold parameters, trigger : ℳ → { 0 , 1 } \text{trigger}:\mathcal{M}\to\{0,1\} is the activation predicate, and analyze : ℳ → 𝒪 \text{analyze}:\mathcal{M}\to\mathcal{O} produces structured output guidance. The output space 𝒪 \mathcal{O} is a fixed schema comprising: a severity level (critical/high/medium/low), a root cause explanation of why the bottleneck exists, ranked recommendations with expected improvement estimates, and optionally a code example demonstrating the fix. This schema is what distinguishes semantic feedback from raw metric forwarding–the LLM receives not “occupancy = 6%” but “occupancy is critically low (6%) because shared memory usage limits concurrent blocks to 2; switch to warp-level reduction for an expected 3–5 × \times improvement.” A full worked example is provided in Appendix  B . The following table illustrates how the 5-tuple maps to expert reasoning: 
+
+ Table 3: Mapping human expert workflow to tool components 
+
+ Expert Thought Process | 
+ Tool Component | 
+
+ Example 1: TensorCoreUnderutilizationTool | 
+
+ “Let me check tensor core usage” | 
+ ℳ req = { TC_util } \mathcal{M}_{\text{req}}=\{\texttt{TC\_util}\} | 
+
+ “If it’s below 10%, that’s critical” | 
+ θ = { low : 10 % } \theta=\{\text{low}:10\%\} | 
+
+ “This looks like matmul without TC” | 
+ trigger ( m ) = 𝟙 [ TC_util < 10 % ] \text{trigger}(m)=\mathds{1}[\texttt{TC\_util}<10\%] | 
+
+ “They should use cuBLAS” | 
+ analyze ​ ( ) → recommendations \text{analyze}()\to\text{recommendations} | 
+
+ Example 2: WarpStallTool | 
+
+ “Why are warps not issuing?” | 
+ ℳ req = { mem_stall , barrier_stall , … } \mathcal{M}_{\text{req}}=\{\texttt{mem\_stall},\texttt{barrier\_stall},...\} | 
+
+ “Over 40% stall on one reason is bad” | 
+ θ = { high : 40 % } \theta=\{\text{high}:40\%\} | 
+
+ “Memory dependency is the bottleneck” | 
+ trigger ( m ) = 𝟙 [ max ( stalls ) > 40 % ] \text{trigger}(m)=\mathds{1}[\max(\text{stalls})>40\%] | 
+
+ “Use shared memory to hide latency” | 
+ analyze ​ ( ) → stall-specific fixes \text{analyze}()\to\text{stall-specific fixes} | 
+
+ 4.1.2 Proactive vs. Reactive Tool Orchestration 
+
+ KernelPro uses proactive tool orchestration for the Profiling Agent: rather than letting the LLM decide which tools to call (the reactive pattern in standard agent frameworks), KernelPro deterministically executes all bottleneck-relevant tools and injects their combined guidance into the prompt before LLM invocation. Crucially, “bottleneck-relevant” is not “all tools”–the bottleneck classification from Stage 1 feeds a tool-affinity filter that excludes irrelevant analyses (e.g., memory-bound kernels skip tensor core utilization checks, compute-bound kernels skip coalescing analysis), preventing signal dilution while guaranteeing comprehensive coverage of the actual bottleneck. This transforms expert knowledge from an optional resource into a guaranteed input. The reactive pattern’s weakness–stochastic tool selection leading to missed analyses and inconsistent coverage–is particularly harmful for CUDA optimization, where the relevant bottleneck is often non-obvious and experts systematically check all metrics rather than guessing which to examine. Our controlled ablation (Appendix  F ) confirms this empirically: proactive orchestration achieves 23% higher geometric mean speedup than reactive function calling ( p = 0.035 p=0.035 ). 
+
+ 4.1.3 Pluggability and User Extensibility 
+
+ KernelPro ’s tools are pluggable –they can be dynamically added, removed, or modified without changing the core system via a decorator-based registration pattern ( @ToolRegistry.register ). Users subclass ProfilingTool , declare required metrics and thresholds, and implement an analyze() method; the tool is then automatically incorporated into the proactive orchestration pipeline. This makes KernelPro a platform rather than a fixed tool: teams can encode domain-specific heuristics (e.g., MoE expert load imbalance detection), add support for new GPU architectures before official updates, or register proprietary optimizations as private tools. The full registration API and a worked example are provided in Appendix  B (Listing  2 ). 
+
+ 4.2 Tool Specifications 
+
+ Each tool follows the 5-tuple formalization described above. The complete tool taxonomy (15 tools organized by category and bottleneck type) and detailed specifications are provided in Appendix  B , including full reference implementations (Listings  2 and  3 ) that make the trigger-analyze-recommend pattern concrete. We detail two representative tools below: one NCU-based analyzer and the SASS binary analysis tools. 
+
+ 4.2.1 Warp Stall Analyzers 
+
+ KernelPro includes two warp stall analyzers built on ncu metrics. The primary WarpStallTool analyzes why warps are not issuing instructions, identifying the dominant stall reason. It requires five warp-stall metrics ℳ req = { mem_dep , short_scoreboard , long_scoreboard , barrier , branch_resolving } \mathcal{M}_{\text{req}}=\{\texttt{mem\_dep},\;\texttt{short\_scoreboard},\;\texttt{long\_scoreboard},\;\texttt{barrier},\;\texttt{branch\_resolving}\} , where m . s m.s denotes the percentage of active cycles stalled on reason s s . The tool finds the dominant stall s ∗ = arg ⁡ max s ∈ ℳ req ⁡ m . s s^{*}=\arg\max_{s\in\mathcal{M}_{\text{req}}}m.s and triggers when m . s ∗ m.s^{*} exceeds θ high = 40 % \theta_{\text{high}}=40\% (severity escalates to critical at 60 % 60\% ). A companion BarrierStallTool triggers at a lower threshold ( 30 % 30\% ) specifically for barrier synchronization issues, which are both a performance and correctness concern. 
+
+ | 
+ ℳ req \displaystyle\mathcal{M}_{\text{req}} | 
+ = { mem_dep , short_scoreboard , long_scoreboard , \displaystyle=\bigl\{\,\texttt{mem\_dep},\;\texttt{short\_scoreboard},\;\texttt{long\_scoreboard}, | 
+ | 
+
+ | 
+ | 
+ barrier , branch_resolving } \displaystyle\qquad\;\;\texttt{barrier},\;\texttt{branch\_resolving}\,\bigr\} | 
+ | 
+
+ | 
+ s ∗ \displaystyle s^{*} | 
+ = arg ⁡ max s ∈ ℳ req ⁡ m . s \displaystyle=\arg\max_{s\in\mathcal{M}_{\text{req}}}m.s | 
+ | 
+
+ | 
+ θ \displaystyle\theta | 
+ = { high : 40 % , critical : 60 % } \displaystyle=\{\text{high}:40\%,\;\text{critical}:60\%\} | 
+ | 
+
+ | 
+ trigger ​ ( m ) \displaystyle\text{trigger}(m) | 
+ = 𝟙 [ m . s ∗ > θ high ] \displaystyle=\mathds{1}\bigl[m.s^{*}>\theta_{\text{high}}\bigr] | 
+ | 
+
+ | 
+ analyze ​ ( m ) \displaystyle\text{analyze}(m) | 
+ → ( severity by  m . s ∗ ; root cause and fix specific to  s ∗ ) \displaystyle\rightarrow\bigl(\text{severity by }m.s^{*};\ \text{root cause and fix specific to }s^{*}\bigr) | 
+ | 
+
+ When triggered, the tool translates the raw stall percentage into a structured diagnostic: a root cause explaining why the stall occurs (e.g., “warps are waiting for global memory operations to complete—400+ cycle latency with no prefetching”), followed by ranked actionable recommendations tailored to the dominant stall type. Memory dependency stalls produce guidance such as “use shared memory to cache frequently accessed data” and “implement vectorized loads ( float4 ) for better bandwidth”; barrier stalls recommend “use warp-level primitives ( __shfl_sync , __ballot_sync ) instead of __syncthreads() ” with a code example showing the correct pattern; scoreboard stalls suggest increasing instruction-level parallelism or using async copies ( cp.async ) on Ampere+; and branch resolving stalls recommend replacing conditionals with arithmetic predication (e.g., result = cond * val1 + (1-cond) * val2 ). This translation is what enables the LLM to act on profiler output without requiring GPU architecture expertise—the tool bridges the gap between “47% memory dependency stalls” (a number) and “add shared memory tiling with __syncthreads() between load and compute phases” (an action). The complete implementation, including the per-stall-type root causes and recommendations, is given in Listing  3 (Appendix  B ). 
+
+ 4.2.2 SASS Binary Analysis Tools 
+
+ While ncu tools analyze runtime counters , SASS tools analyze the compiled binary itself (what hardware instructions were actually emitted by nvcc ). ncu can report “tensor core utilization = 0%” but cannot explain whether the kernel lacks tensor core instructions entirely, uses an older generation (HMMA vs WGMMA), or delegates to cuBLAS (whose tensor-core kernels run as separate library launches, absent from the user kernel’s compiled .so ). KernelPro extracts SASS via cuobjdump --dump-sass on the compiled .so and counts instruction patterns across five tensor core generations (WGMMA, HMMA, IMMA, DMMA, BMMA), memory operations (LDGSTS, TMA), and register spilling (STL/LDL). Full 5-tuple specifications for both SASS tools are given in Appendix  B . 
+
+ WGMMAInstructionTool provides definitive hardware feature detection. When no tensor core instructions appear in SASS, it checks for cuBLAS dynamic symbols via nm -D —distinguishing “no TC instructions because the kernel is element-wise” from “no TC instructions because cuBLAS handles them at runtime.” On Hopper targets, if HMMA instructions are found but no WGMMA, it recommends switching to Hopper warpgroup MMA (expected 1.3–1.5 × \times improvement). In the VeOmni case study (Section  5.4 ) this mechanism flagged 37 candidates that compiled but emitted zero tensor-core instructions and an HMMA -with-register-spill regression, steering the search toward the winning WGMMA kernel. 
+
+ RegisterSpillDetector combines SASS evidence (STL/LDL counts prove spills exist) with ncu metrics to determine whether spills actually cause harm. Not all spills are pathological, so the tool triggers only under three multi-signal conditions—spill-induced latency bubbles, bandwidth contention from local-memory traffic, or register-bound occupancy that starves the scheduler—avoiding false alarms on harmless spills while catching cases where register pressure is the root bottleneck. (Exact thresholds in Appendix  B .) 
+
+ 5 Results and Evaluation 
+
+ We evaluate KernelPro along three axes—SOTA comparison on KernelBench, controlled ablations of each design component, and production validation on expert-optimized kernels—and close with a preliminary energy-aware extension. Throughout all experiments, a kernel is numerically correct if its output satisfies torch.allclose(out, ref, atol=1e-2, rtol=1e-3) . 
+
+ 5.1 Experimental Setup 
+
+ Benchmark. KernelBench  ( Ouyang et al., 2025 ) comprises 250 GPU kernel tasks at three difficulty levels: Level 1 (100 single operators), Level 2 (100 fused/composed operators), and Level 3 (50 full model architectures). Speedup is measured as wall-clock time of the PyTorch eager baseline divided by the optimized CUDA kernel. 
+
+ Configuration. Unless otherwise noted, experiments use Claude Sonnet 4.6 on NVIDIA A100 GPUs (AWS p4 instances), with 15 seeds per task (5 temperatures × \times 3 rounds), 30 iterations, 2 candidates per iteration, and MCTS search. A full comparison with concurrent systems (hardware, metric type, task subsets) is provided in Appendix  A . 
+
+ 5.2 State-of-the-Art Comparison on KernelBench 
+
+ Table 4: KernelPro vs. KernelBlaster on KernelBench (geometric mean speedup, A100). KernelBlaster was the prior SOTA at time of submission. 
+
+ System | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+ Solved | 
+
+ KernelPro | 
+ 2.42 × \times | 
+ 4.69 × \times | 
+ 5.30 × \times | 
+ 100/100/50 | 
+
+ KernelBlaster | 
+ 1.43 × \times | 
+ 2.50 × \times | 
+ 1.50 × \times | 
+ – | 
+
+ KernelPro improvement | 
+ +69% | 
+ +88% | 
+ +253% | 
+ | 
+
+ KernelPro outperforms KernelBlaster on all three levels, with the largest margin on Level 3 (+253%)—full model architectures where MCTS-guided multi-step optimization and micro-profiling tools provide the most actionable guidance. KernelPro achieves complete task coverage: 100/100 on Level 1, 100/100 on Level 2, and 50/50 on Level 3. Despite KernelBlaster’s use of RL-style exploration and a persistent knowledge base, KernelPro achieves higher speedups with a simpler approach grounded in micro-profiling tools as expert surrogates. A comprehensive comparison with five additional concurrent systems (CudaForge, StitchCUDA, KernelFoundry, AVO, and others) confirming KernelPro ’s advantage across hardware platforms and metric types is provided in Appendix  A . 
+
+ Robustness to outliers. Since some Level 2 and Level 3 kernels have trivially parallelizable reference implementations (yielding speedups > > 100 × \times ), we verify that KernelPro ’s advantage is not driven by a few extreme outliers. Table  5 reports geometric mean speedups under progressively aggressive capping thresholds. 
+
+ Table 5: Geometric mean speedup under capping thresholds. Each task’s speedup is clamped to min ⁡ ( speedup , cap ) \min(\text{speedup},\text{cap}) before computing the geometric mean. Results demonstrate broad-based gains across all levels. 
+
+ Level | 
+ Solved | 
+ No cap | 
+ Cap@100 | 
+ Cap@50 | 
+ Cap@20 | 
+ Cap@10 | 
+ Cap@5 | 
+
+ L1 | 
+ 100/100 | 
+ 2.42 × \times | 
+ 2.42 × \times | 
+ 2.42 × \times | 
+ 2.42 × \times | 
+ 2.34 × \times | 
+ 2.09 × \times | 
+
+ L2 | 
+ 100/100 | 
+ 4.69 × \times | 
+ 4.26 × \times | 
+ 3.99 × \times | 
+ 3.62 × \times | 
+ 3.25 × \times | 
+ 2.61 × \times | 
+
+ L3 | 
+ 50/50 | 
+ 5.30 × \times | 
+ 5.08 × \times | 
+ 4.95 × \times | 
+ 4.66 × \times | 
+ 4.31 × \times | 
+ 3.57 × \times | 
+
+ Level 1 speedups show minimal sensitivity to capping (maximum task speedup is 21.4 × \times ; geometric mean is unchanged through Cap@20), confirming uniformly distributed gains. Level 3 retains 4.31 × \times even at Cap@10, demonstrating that its strong performance is broad-based rather than driven by outliers. Level 2 shows the largest sensitivity to capping (4.69 × \times → \to 3.25 × \times at Cap@10) due to several reference implementations with extreme inefficiency; even under Cap@5, KernelPro still achieves 2.61 × \times —well above all competing systems. 
+
+ 5.3 Component Ablation 
+
+ We isolate the contribution of each KernelPro design component through controlled ablations on 42 KernelBench tasks (L1: 19, L2: 16, L3: 7) selected as a representative subset of transformer-relevant workloads, enabling controlled ablation at scale across multiple conditions, seeds, and iterations that would be prohibitive on the full 250-task benchmark. Each ablation varies a single component while holding all others fixed. All ablations use the same 42-task set; the effective sample size n n reported in Wilcoxon tests may be smaller because the test excludes tied pairs and tasks where a condition fails to produce a valid kernel. Table  6 summarizes the results; full experimental details are in the referenced appendices. 
+
+ Table 6: Consolidated ablation: independent contribution of each KernelPro component. Effect size is the ratio of geometric mean speedup (treatment/control). All use Wilcoxon signed-rank test (one-sided). 
+
+ Component | 
+ Treatment | 
+ Control | 
+ Geo Mean | 
+ p p -value | 
+ Details | 
+
+ Micro-profiling tools | 
+ Full pipeline | 
+ Raw ncu only | 
+ 4.00 × \times vs 1.77 × \times (+125%) | 
+ < < 0.0001*** | 
+ App.  C | 
+
+ MCTS search | 
+ Tree search | 
+ Greedy | 
+ 4.60 × \times vs 3.65 × \times (+26%) | 
+ 0.004** | 
+ App.  E | 
+
+ Proactive orchestration | 
+ Deterministic | 
+ Reactive | 
+ 1.37 × \times vs 1.12 × \times (+23%) | 
+ 0.035* | 
+ App.  F | 
+
+ Search memory | 
+ Memory ON | 
+ Memory OFF | 
+ 1.82 × \times vs 1.72 × \times (+6%) | 
+ 0.181 (n.s.) | 
+ App.  D | 
+
+ Three components independently and significantly improve optimization quality ( p < 0.05 p<0.05 ). We discuss the most informative findings from each ablation below; MCTS provides the second-largest effect (+26%) by enabling escape from local optima that trap greedy search. Proactive orchestration (+23%) ensures comprehensive tool coverage versus stochastic reactive invocation. Search memory shows a positive but non-significant trend on final speedup (+6%, p = 0.181 p=0.181 ), while improving early convergence. 
+
+ 5.3.1 Raw Metrics Are Harmful 
+
+ The tool ablation reveals a counterintuitive result: providing raw ncu metrics without interpretation performs significantly worse than providing no profiling feedback at all (geometric mean 1.77 × \times vs 3.35 × \times , Wilcoxon p = 0.0007 p=0.0007 ). This condition passes ∼ {\sim} 50 raw hardware counters as name-value pairs—comparable to the approach used by CudaForge  ( Zhang et al., 2025 ) . Unstructured metric dumps distract the LLM: it attempts to optimize counters that do not translate to wall-clock improvements, or misinterprets raw values without roofline context. KernelPro ’s full pipeline (4.00 × \times ) outperforms both controls, confirming that interpretation —not data access—drives optimization quality. The Task 41 trajectory (Appendix  G.1 ) illustrates this concretely: the tools translate the raw counters (15.88 sectors/request, 8.7 GB read traffic, 244 registers/thread) into concrete directives—fuse the epilogue, switch to BF16 tensor cores—that produce a 2.8 × 2.8\times single-step improvement; the same counters presented unstructured carry no such actionable directive. This finding generalizes beyond KernelBench: on 6 representative Triton inference kernels (Appendix  C.3 ), tools achieve 36% higher speedup in 31% fewer iterations. 
+
+ Table 7: Tool ablation: correctness and speedup across 42 KernelBench tasks. Unsolved tasks scored as 1.0 × \times . 
+
+ Configuration | 
+ Solved | 
+ Geo Mean | 
+ Win Rate | 
+
+ No Feedback | 
+ 32/42 (76%) | 
+ 3.35 × \times | 
+ 10/42 (24%) | 
+
+ Raw ncu Metrics | 
+ 36/42 (86%) | 
+ 1.77 × \times | 
+ 3/42 (7%) | 
+
+ KernelPro (full pipeline) | 
+ 42/42 (100%) | 
+ 4.00 × \times | 
+ 25/42 (60%) | 
+
+ Table  8 reports pairwise Wilcoxon signed-rank tests confirming the statistical ordering Ours > > No Feedback > > Raw ncu . Three insights emerge: (1) the interpretation gap (Raw → \to Ours) is larger than the data gap (None → \to Ours), confirming that how profiling data is presented matters more than whether it is present; (2) Raw ncu is significantly worse than No Feedback ( p = 0.0007 p=0.0007 ), meaning unstructured metrics actively degrade optimization quality—a direct challenge to the design of systems like CudaForge that pass raw counters; (3) n = 39 n=39 – 40 40 out of 42 tasks show non-zero differences, indicating the effect is broad-based rather than driven by a few outlier tasks. 
+
+ Table 8: Pairwise Wilcoxon signed-rank tests (one-sided, H 1 H_{1} : first > > second). 
+
+ Comparison | 
+ n n | 
+ W W | 
+ p p | 
+
+ Ours > > Raw ncu | 
+ 40 | 
+ 728 | 
+ < < 0.0001*** | 
+
+ Ours > > No Feedback | 
+ 40 | 
+ 590 | 
+ 0.0078** | 
+
+ No Fdbk > > Raw ncu | 
+ 39 | 
+ 618 | 
+ 0.0007*** | 
+
+ 5.3.2 Which Tools Drive the Largest Gains? 
+
+ Per-tool impact analysis across 42 tasks reveals which tools most reliably translate into optimization gains. Table  9 summarizes tool coverage and effectiveness; the hit rate —fraction of fires producing > > 1.5 × \times improvement—measures how reliably the LLM acts on each tool’s guidance. 
+
+ Table 9: Per-tool impact across 42 KernelBench tasks. “Fires” counts optimization turns where the tool’s recommendation appears; “Hit Rate” is the fraction producing > > 1.5 × \times improvement. 
+
+ Tool | 
+ Tasks | 
+ Fires | 
+ Hit Rate | 
+ Avg. | 
+
+ RegisterSpill | 
+ 16/42 | 
+ 44 | 
+ 18.2% | 
+ 1.44 × \times | 
+
+ OccupancyLimiter | 
+ 35/42 | 
+ 241 | 
+ 13.3% | 
+ 1.48 × \times | 
+
+ WarpStall | 
+ 35/42 | 
+ 318 | 
+ 11.0% | 
+ 1.41 × \times | 
+
+ SharedMemTiling | 
+ 28/42 | 
+ 172 | 
+ 9.3% | 
+ 1.42 × \times | 
+
+ LaunchOverhead | 
+ 24/42 | 
+ 141 | 
+ 8.5% | 
+ 1.32 × \times | 
+
+ TensorCore/cuBLAS | 
+ 42/42 | 
+ 835 | 
+ 8.1% | 
+ 1.31 × \times | 
+
+ MemoryCoalescing | 
+ 37/42 | 
+ 439 | 
+ 5.9% | 
+ 1.24 × \times | 
+
+ Vectorization | 
+ 41/42 | 
+ 595 | 
+ 4.0% | 
+ 1.16 × \times | 
+
+ The tensor core switch is the single highest-impact action: for compute-bound kernels where the LLM generates CUDA-core-only code, the TensorCoreUnderutilizationTool’s recommendation to use cuBLAS/CUTLASS produces an average 6.25 × \times gain across 9 tasks (max 9.6 × \times )—Task 41’s 4.11 × → 11.49 × 4.11\times\to 11.49\times single-iteration leap to a fused BF16 CUTLASS GEMM (Appendix  G.1 ) exemplifies this pattern. RegisterSpillDetector has the highest per-fire reliability (18.2%), because its diagnostic (“168 registers/thread, spilling to local memory”) is immediately actionable—the LLM can directly restructure loops to reduce live variables. Memory optimization tools (coalescing, vectorization) fire most broadly (37–41 of 42 tasks) but convert at lower rates (4–6%), reflecting the difficulty of non-trivial data layout changes. 
+
+ 5.3.3 MCTS Escapes Local Optima 
+
+ The 26% aggregate improvement from MCTS masks dramatic per-task effects. On tasks with multi-modal optimization landscapes, MCTS achieves up to 10.0 × \times the speedup of greedy search on the same task (L1 task 7: MCTS 25.0 × \times vs greedy 2.5 × \times ; L2 task 33: MCTS 8.0 × \times vs greedy 1.0 × \times ; L3 task 31: MCTS 25.0 × \times vs greedy 4.2 × \times ). In these cases, greedy converges to a correct but suboptimal solution and cannot escape its local basin, while MCTS explores alternative subtrees that discover fundamentally superior optimization paths (e.g., switching from shared-memory tiling to warp-shuffle reduction). Greedy wins on 8 tasks—typically unimodal landscapes where depth-first exploitation suffices and MCTS wastes budget on unnecessary exploration. 
+
+ 5.4 Production Validation: VeOmni MoE 
+
+ We further apply KernelPro to VeOmni , a production MoE training
+stack whose grouped-GEMM kernels are hand-optimized in Triton by expert engineers. We target the
+ dW1 weight-gradient kernel ( group_gemm_same_mn ) from
+GPT-OSS-120B’s gate_up_proj backward pass: per expert e e it computes
+ dW1 e = X e ⊤ ​ G e \mathrm{dW1}_{e}=X_{e}^{\top}G_{e} ( M = 2880 M{=}2880 , N = 5760 N{=}5760 , E = 128 E{=}128 ), with a
+ ragged contraction K e K_{e} that varies per expert under top-4 routing (total
+ R = ∑ e K e = 57,768 R=\sum_{e}K_{e}=57{,}768 rows; per-expert load from a measured-routing imbalance
+model, Appendix  H ). This is harder than a forward
+GEMM—the imbalance falls on the reduction axis, so each expert accumulates
+over a variable-length K e K_{e} while writing a fixed [ M , N ] [M,N] tile. 
+
+ On a single H100, KernelPro achieved a 1.23 × 1.23\times speedup over the expert-tuned
+Triton baseline; beyond this best kernel, it found 16 other distinct correct
+kernels that also beat the baseline. Table  10 traces the MCTS search
+climbing from a 0.07 × 0.07\times first attempt to 1.23 × 1.23\times over 18 iterations, each leap
+driven by the bottleneck KernelPro ’s profiling stage surfaced at the prior node. The gain
+comes not from tensor cores per se—the Triton baseline already issues Hopper warp-group
+MMA—but from shape-specific tuning of the memory path and occupancy for this
+transposed, ragged- K K layout. 
+
+ Table 10: KernelPro search progression on the VeOmni dW1 weight-gradient kernel
+(H100). Bottlenecks are those flagged by KernelPro ’s Stage-2 profiling at each milestone. 
+
+ Iter | 
+ Dominant bottleneck addressed | 
+ Speedup | 
+
+ – | 
+ Triton baseline ( group_gemm_same_mn ) | 
+ 1.00 × 1.00\times | 
+
+ 0 | 
+ Initial raw-CuTe WGMMA (SMEM bank conflicts) | 
+ 0.07 × 0.07\times | 
+
+ 8 | 
+ Uncoalesced global loads (cp.async staging) | 
+ 0.78 × 0.78\times | 
+
+ 14 | 
+ Uncoalesced loads (swizzled SMEM) | 
+ 0.97 × 0.97\times | 
+
+ 16 | 
+ Uncoalesced loads (vectorized epilogue) | 
+ 1.15 × 1.15\times | 
+
+ 18 | 
+ Occupancy / 168 regs/thread ( 128 × 128 128{\times}128 tile, 4-stage) | 
+ 1.23 × \mathbf{1.23\times} | 
+
+ Native CuTe + raw-CUDA generation. 
+
+ This kernel is the clearest production demonstration of KernelPro ’s headline claim
+(Contribution 4): autonomous source-level CuTe code generation, not high-level
+template instantiation or library stitching. The winning solution contains
+ zero library calls —no cuBLAS, no CUTLASS template—and
+is instead a from-scratch Hopper kernel that KernelPro composed by searching the
+CUTLASS/CuTe codebase during generation. At the source level it assembles: an
+ SM90_64x128x16 WGMMA warp-group MMA atom driven by
+ cute::gemm with explicit warpgroup_arrive / commit_batch / wait fences; a four-stage cp.async software pipeline 
+prefetching tiles into shared memory; 128-byte-swizzled shared memory 
+( GMMA::Layout_MN_SW128_Atom ) for bank-conflict-free WGMMA operand reads;
+and CuTe layout-algebra predication ( make_identity_tensor with
+ copy_if ) to mask the ragged per-expert K e K_{e} boundaries. Notably, KernelPro reasoned explicitly that a single TMA descriptor would mis-read neighboring experts’
+rows under ragged K K and chose cp.async over TMA—an architectural
+trade-off normally reserved for human kernel engineers. Listing  1 
+shows the resulting WGMMA mainloop. 
+
+ ⬇ 
+
+ 1 
+
+ // SM90 warp-group MMA atom (MN-major operands, FP32 accumulate); NS=4 stages 
+
+ 2 
+
+ using Atom = typename MmaSel < TA >:: type ; // SM90_64x128x16_F32F16F16_SS 
+
+ 3 
+
+ TiledMMA mma = make_tiled_mma ( Atom {}); 
+
+ 4 
+
+ ... 
+
+ 5 
+
+ for ( int kt = 0; kt < k_tiles ; ++ kt ) { // ragged-K mainloop 
+
+ 6 
+
+ cp_async_wait < NS - 2>(); __syncthreads (); 
+
+ 7 
+
+ int kload = kt + ( NS - 1); // prefetch NS-1 tiles ahead 
+
+ 8 
+
+ if ( kload < k_tiles ) { // predicated cp.async (4-stage) 
+
+ 9 
+
+ fillA ( kload ); copy_if ( copyA , tApA , tAgA ( _ , _ , _ , kload ), tAsA ( _ , _ , _ , smem_pipe_write )); 
+
+ 10 
+
+ fillB ( kload ); copy_if ( copyB , tBpB , tBgB ( _ , _ , _ , kload ), tBsB ( _ , _ , _ , smem_pipe_write )); 
+
+ 11 
+
+ } 
+
+ 12 
+
+ cp_async_fence (); smem_pipe_write = ( smem_pipe_write + 1) % NS ; 
+
+ 13 
+
+ warpgroup_arrive (); 
+
+ 14 
+
+ cute :: gemm ( mma , tCrA ( _ , _ , _ , smem_pipe_read ), tCrB ( _ , _ , _ , smem_pipe_read ), tCrC ); // WGMMA 
+
+ 15 
+
+ warpgroup_commit_batch (); warpgroup_wait <0>(); 
+
+ 16 
+
+ smem_pipe_read = ( smem_pipe_read + 1) % NS ; 
+
+ 17 
+
+ } 
+
+ Listing 1: KernelPro -generated WGMMA mainloop for the VeOmni dW1 weight-gradient kernel (excerpt). No library GEMM is invoked; the matrix multiply is a hand-written SM90 warp-group MMA. 
+
+ SASS analysis in the trajectory. 
+
+ This run also exercises KernelPro ’s instruction-level SASS tools
+(Section  4.2.2 ) in a way kernel-level ncu cannot. Because the
+LLM frequently emits code it believes uses warp-group tensor cores, the
+ WGMMAInstructionTool disassembles each compiled .so and reports the
+tensor-core instruction mix directly. Across the search it flagged 37
+candidates that compiled and ran but emitted zero tensor-core instructions
+( Found 0 TC ops (WGMMA:0 HMMA:0) )—scalar fallbacks that no utilization
+metric would distinguish from a slow-but-real tensor-core kernel—and surfaced
+generation regressions such as a candidate using the older Ampere HMMA 
+instructions with 250 register-spill instructions 
+( 16 TC ops (HMMA:16), STL:125 LDL:125 ). The decisive late iterations were
+in turn driven by an occupancy diagnosis— KernelPro ’s profiling reported the kernel
+ latency-bound at 18.8 % 18.8\% warp occupancy, limited by 168 168 registers/thread and
+shared-memory pressure —which steered the search toward the smaller-footprint,
+higher-occupancy 64 × 128 × 16 64{\times}128{\times}16 configuration that crossed the Triton
+baseline. The optimization is thus guided by instruction- and occupancy-level
+evidence, not runtime counters alone. The complete KernelPro -generated kernel—mainloop, prologue/epilogue, and host launch—is provided in Appendix  H ; Listing  1 shows only the WGMMA mainloop excerpt. 
+
+ 5.5 Energy-Aware Kernel Optimization: A Preliminary Study 
+
+ Power is increasingly the limiting factor in AI scaling  ( International Energy Agency, 2024 ) , and
+GPU energy is dominated by data movement rather than compute  ( Horowitz, 2014 ) .
+This makes energy a first-class measure of kernel efficiency—yet existing LLM-based kernel
+agents target latency alone. KernelPro is the
+first CUDA kernel coding agent to optimize energy efficiency; we explore
+whether its profiling-driven search can reduce kernel energy, and where that reduction is
+separable from speedup. 
+
+ KernelPro ’s design extends naturally beyond speedup. We treat energy efficiency as a
+ secondary objective under strict lexicographic priority: speedup always wins,
+and energy is optimized only to break ties among speed-equivalent solutions, via a single
+energy term added to the reward: 
+
+ | 
+ r ⁡ ( n ) = ln ⁡ ( speedup ​ ( n ) ) + ε ⋅ ln ⁡ ( energy_reduction ​ ( n ) ) , ε ≪ 1 , r(n)=\ln(\text{speedup}(n))+\varepsilon\cdot\ln(\text{energy\_reduction}(n)),\quad\varepsilon\ll 1, | 
+ | 
+ (3) | 
+
+ for correct solutions ( ε \varepsilon small enough that any speedup gain dominates any
+energy gain). The search, tools, and pipeline are otherwise unchanged. 
+
+ Kernel-level energy model. 
+
+ GPU energy is dominated by data movement, not
+compute: a DRAM access costs ∼ \sim 100–200 × \times a register access  ( Horowitz, 2014 ) ,
+and the register file is the single largest dynamic-power component on modern
+GPUs  ( Kandiah et al., 2021 ) . Device-level power sensors ( nvidia-smi )
+are too coarse and noisy for per-kernel attribution on A100/H100  ( Yang et al., 2024 ) ,
+so we instead estimate energy deterministically from ncu counters KernelPro already
+collects, as a weighted cost over four documented bottlenecks, with weights set by the
+per-operation energy hierarchy of Horowitz  ( Horowitz, 2014 ) and
+AccelWattch  ( Kandiah et al., 2021 ) : 
+
+ | 
+ E proxy = 20 ​ pJ/B ⋅ B DRAM ⏟ B1: DRAM bytes + 100 ​ pJ ⋅ S ld ⋅ max ⁡ ( 0 , r 4 − 1 ) ⏟ B2: uncoalesced + 80 ​ pJ ⋅ S local ⏟ B3: spill traffic + 3 ​ pJ ⋅ I ⏟ B4: instructions E_{\text{proxy}}=\underbrace{20\,\text{pJ/B}\cdot B_{\text{DRAM}}}_{\text{B1: DRAM bytes}}+\underbrace{100\,\text{pJ}\cdot S_{\text{ld}}\!\cdot\!\max(0,\tfrac{r}{4}\!-\!1)}_{\text{B2: uncoalesced}}+\underbrace{80\,\text{pJ}\cdot S_{\text{local}}}_{\text{B3: spill traffic}}+\underbrace{3\,\text{pJ}\cdot I}_{\text{B4: instructions}} | 
+ | 
+ (4) | 
+
+ where B DRAM B_{\text{DRAM}} is DRAM bytes read+written, S ld S_{\text{ld}} global-load sectors, r r 
+sectors-per-request, S local S_{\text{local}} local-memory (spill) sectors, and I I instructions
+executed. The resulting energy_reduction ratio (baseline/candidate cost) is
+intrinsic to the kernel and independent of wall-clock time, so it rewards reductions in
+hardware activity that timing alone cannot see. To confirm that proxy-driven choices
+translate to real device energy, we separately measure winning kernels in millijoules
+using a rigorous locked-clock, idle-subtracted NVML protocol. We also add four
+ energy-only micro-profiling tools that flag latency-hidden energy waste (bank
+conflicts, register spills, uncoalesced access, redundant barriers) the speed-only tools
+ignore. Appendix  I details the NVML protocol, the energy
+model, the four tools, and the literature mapping each to a documented bottleneck. 
+
+ To isolate the energy-aware reward from speedup, we run
+paired arms (i.e., speed-only versus energy-aware), and measure the winning kernels in millijoules under the rigorous protocol of Appendix  I.1 . Most energy savings coincide with speed savings—reducing data movement cuts both—so the speed-only search already captures them; the interesting case is where they decouple. On the Swish activation (KernelBench L1, pure
+elementwise, memory-bound), both arms reach an identical 2.52 × 2.52\times speedup with
+identical memory traffic (1 vectorized load + 1 store per thread), yet the energy-aware
+kernel draws 1802 mJ versus 2038 mJ—11.6% less dynamic energy 
+(Table  11 ). The mechanism is visible in SASS: the energy-aware
+kernel compiles to 56 instructions versus 216 for the same computation, having
+chosen the fast reciprocal intrinsic ( __fdividef , one MUFU ) over an
+IEEE-accurate division (32 FFMA + branch-heavy refinement) and a read-only cache
+load ( __ldg ). Because the kernel is bandwidth-bound, those ∼ \sim 160 extra
+instructions hide under memory stalls and cost no latency—but the SMs still
+execute and draw power for them. The speed-only objective is blind to this; the energy
+term is what selects the cheaper instruction stream. This is a concrete instance of energy
+reducible at fixed speed; a systematic characterization is left to future work. 
+
+ Table 11: Energy-aware matched-speed A/B on the Swish kernel (KernelBench L1).
+Both arms reach identical speedup and memory traffic; dynamic energy is measured under the
+locked-clock, idle-subtracted NVML protocol (Appendix  I.1 ). SASS instruction
+counts are for the vectorized kernel. 
+
+ Configuration | 
+ Speedup | 
+ Dynamic energy | 
+ SASS insns | 
+ Δ \Delta energy | 
+
+ | 
+ | 
+ (mJ, NVML) | 
+ | 
+ | 
+
+ KernelPro (speed-only) | 
+ 2.52 × \times | 
+ 2038 | 
+ 216 | 
+ — | 
+
+ KernelPro (energy-aware) | 
+ 2.52 × \times | 
+ 1802 | 
+ 56 | 
+ − 11.6 % -11.6\% | 
+
+ 6 Conclusion 
+
+ KernelPro demonstrates that the key bottleneck in LLM-based GPU kernel optimization is not code generation capability but how profiling data reaches the LLM . By encoding expert heuristics as pluggable micro-profiling tools—executable analysis functions that transform raw hardware counters into actionable natural language guidance— KernelPro replaces the implicit reasoning required by prior systems with explicit, systematic diagnostic workflows. Controlled ablations establish a clear contribution hierarchy: micro-profiling tools provide the largest gain (125% over raw metrics), with the counterintuitive finding that raw ncu metrics actively harm optimization quality relative to no feedback at all—directly challenging systems that pass unstructured counters to LLMs; domain-adapted MCTS and proactive tool orchestration each contribute significant further gains. Together these yield geometric mean speedups of 2.42 × 2.42\times / 4.69 × 4.69\times / 5.30 × 5.30\times on KernelBench Levels 1/2/3 with 100% task coverage, surpassing the prior SOTA on all levels. Beyond academic benchmarks, KernelPro achieves 1.23 × \times over an expert-optimized Triton baseline on a production MoE weight-gradient kernel (H100), generating a from-scratch raw-CUDA+CuTe Hopper WGMMA kernel, not a library call. KernelPro ’s CUTLASS/CuTe integration—with LLM-autonomous code search and architecture constraint mining—further enables direct source-level tensor core code generation, grounding the LLM in authoritative library source rather than memorized patterns (Appendix  G presents two complete trajectories). Finally, as the first CUDA kernel coding agent to optimize energy efficiency, KernelPro reduces measured energy by 11.6 % 11.6\% at matched speed via lower-energy instruction selection—a preliminary result whose systematic characterization we leave to future work. KernelPro has submitted 6 PRs to FlashInfer (1 merged, 5 under review), and scaling this into a sustained PR contribution pipeline is a key future direction. 
+
+ References 
+
+ Andrews & Witteveen (2025) 
+
+Martin Andrews and Sam Witteveen.
+
+ GPU kernel scientist: An LLM-driven framework for iterative
+kernel optimization.
+
+ In ES-FoMo III Workshop at ICML , 2025.
+
+ URL https://arxiv.org/abs/2506.20807 .
+
+ Auger et al. (2013) 
+
+David Auger, Adrien Couetoux, and Olivier Teytaud.
+
+ Continuous upper confidence trees with polynomial exploration –
+consistency.
+
+ In Proceedings of the European Conference on Machine Learning
+and Principles and Practice of Knowledge Discovery in Databases (ECML-PKDD) ,
+pp. 194–209, 2013.
+
+ doi: 10.1007/978-3-642-40988-2_13 .
+
+ Bai et al. (2024) 
+
+Yushi Bai, Shangqing Tu, Jiajie Zhang, Hao Peng, Xiaozhi Wang, Xin Lv, Shulin
+Cao, Jiazheng Xu, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li.
+
+ LongBench v2: Towards deeper understanding and reasoning on
+realistic long-context multitasks.
+
+ arXiv preprint arXiv:2412.15204 , 2024.
+
+ URL https://arxiv.org/abs/2412.15204 .
+
+ Bhattacharjee et al. (2026) 
+
+Arijit Bhattacharjee, Heng Ping, Son Vu Le, Paul Bogdan, Nesreen K. Ahmed, and
+Ali Jannesari.
+
+ OptiML: An end-to-end framework for program synthesis and CUDA
+kernel optimization.
+
+ arXiv preprint arXiv:2602.12305 , 2026.
+
+ URL https://arxiv.org/abs/2602.12305 .
+
+ Chatterjee et al. (2017) 
+
+Niladrish Chatterjee, Mike O’Connor, Donghyuk Lee, Daniel R Johnson, Stephen W
+Keckler, Minsoo Rhu, and William J Dally.
+
+ Architecting an energy-efficient DRAM system for GPUs.
+
+ In 2017 IEEE International Symposium on High Performance
+Computer Architecture (HPCA) , pp. 73–84. IEEE, 2017.
+
+ Chen et al. (2026) 
+
+Terry Chen, Zhifan Ye, Bing Xu, Zihao Ye, Timmy Liu, Ali Hassani, Tianqi Chen,
+Andrew Kerr, Haicheng Wu, Yang Xu, Yu-Jung Chen, Hanfeng Chen, Aditya Kane,
+Ronny Krashinsky, Ming-Yu Liu, Vinod Grover, Luis Ceze, Roger Bringmann, John
+Tran, Wei Liu, Fung Xie, Michael Lightstone, and Humphrey Shi.
+
+ AVO: Agentic variation operators for autonomous evolutionary
+search.
+
+ In arXiv preprint arXiv:2603.24517 , 2026.
+
+ URL https://arxiv.org/abs/2603.24517 .
+
+ Chen et al. (2025) 
+
+Yongchao Chen, Yueying Li, Yue Zhang, Shreyas Singh, Tian Lan, and Yongle
+Zhang.
+
+ cuPilot: A strategy-coordinated multi-agent framework for CUDA
+kernel evolution.
+
+ In arXiv preprint arXiv:2512.16465 , 2025.
+
+ URL https://arxiv.org/abs/2512.16465 .
+
+ Dong et al. (2026) 
+
+Kris Shengjun Dong, Sahil Modi, Dima Nikiforov, Sana Damani, Edward Lin, Siva
+Kumar Sastry Hari, and Christos Kozyrakis.
+
+ KernelBlaster: Continual cross-task CUDA optimization via
+memory-augmented in-context reinforcement learning.
+
+ In arXiv preprint arXiv:2602.14293 , 2026.
+
+ URL https://arxiv.org/abs/2602.14293 .
+
+ Han et al. (2026) 
+
+Yuxuan Han, Meng-Hao Guo, Zhengning Liu, Wenguang Chen, and Shi-Min Hu.
+
+ Making LLMs optimize multi-scenario CUDA kernels like experts.
+
+ In arXiv preprint arXiv:2603.07169 , 2026.
+
+ URL https://arxiv.org/abs/2603.07169 .
+
+ Hollander et al. (2014) 
+
+Myles Hollander, Douglas A. Wolfe, and Eric Chicken.
+
+ Nonparametric Statistical Methods .
+
+ John Wiley & Sons, 3rd edition, 2014.
+
+ Hong & Kim (2010) 
+
+Sunpyo Hong and Hyesoon Kim.
+
+ An integrated GPU power and performance model.
+
+ In Proceedings of the 37th Annual International Symposium on
+Computer Architecture (ISCA) , pp. 280–289, 2010.
+
+ Horowitz (2014) 
+
+Mark Horowitz.
+
+ 1.1 computing’s energy problem (and what we can do about it).
+
+ In 2014 IEEE International Solid-State Circuits Conference
+Digest of Technical Papers (ISSCC) , pp. 10–14. IEEE, 2014.
+
+ Hou et al. (2025) 
+
+Zhenyu Hou, Ziniu Hu, Yujiang Li, Rui Lu, Jie Tang, and Yuxiao Dong.
+
+ TreeRL: LLM reinforcement learning with on-policy tree search.
+
+ arXiv preprint arXiv:2506.11902 , 2025.
+
+ URL https://arxiv.org/abs/2506.11902 .
+
+ International Energy Agency (2024) 
+
+International Energy Agency.
+
+ Electricity 2024: Analysis and forecast to 2026.
+
+ Technical report, International Energy Agency (IEA), Paris, 2024.
+
+ URL https://www.iea.org/reports/electricity-2024 .
+
+ Ji et al. (2025) 
+
+Yuxiang Ji, Ziyu Ma, Yong Wang, Guanhua Chen, Xiangxiang Chu, and Liaoni Wu.
+
+ Tree search for LLM agent reinforcement learning.
+
+ In arXiv preprint arXiv:2509.21240 , 2025.
+
+ URL https://arxiv.org/abs/2509.21240 .
+
+ Kandiah et al. (2021) 
+
+Vijay Kandiah, Scott Peverelle, Mahmoud Khairy, Junrui Pan, Amogh Manjunath,
+Timothy G Rogers, Tor M Aamodt, and Nikos Hardavellas.
+
+ Accelwattch: A power modeling framework for modern gpus.
+
+ In MICRO-54: 54th Annual IEEE/ACM International Symposium on
+Microarchitecture , pp. 738–753, 2021.
+
+ Kocsis & Szepesvári (2006) 
+
+Levente Kocsis and Csaba Szepesvári.
+
+ Bandit based Monte-Carlo planning.
+
+ In Proceedings of the 17th European Conference on Machine
+Learning (ECML) , pp. 282–293, 2006.
+
+ doi: 10.1007/11871842_29 .
+
+ Kwon et al. (2023) 
+
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu,
+Joseph E. Gonzalez, Hao Zhang, and Ion Stoica.
+
+ Efficient memory management for large language model serving with
+PagedAttention.
+
+ In Proceedings of the 29th ACM Symposium on Operating Systems
+Principles (SOSP) , 2023.
+
+ URL https://arxiv.org/abs/2309.06180 .
+
+ Leng et al. (2013) 
+
+Jingwen Leng, Tayler Hetherington, Ahmed ElTantawy, Syed Gilani, Nam Sung Kim,
+Tor M Aamodt, and Vijay Janapa Reddi.
+
+ GPUWattch: Enabling energy optimizations in GPGPUs.
+
+ In Proceedings of the 40th Annual International Symposium on
+Computer Architecture (ISCA) , pp. 487–498, 2013.
+
+ Li et al. (2026) 
+
+Shiyang Li, Zijian Zhang, Winson Chen, Yuebo Luo, Mingyi Hong, and Caiwen Ding.
+
+ StitchCUDA: An automated multi-agents end-to-end GPU programing
+framework with rubric-based agentic reinforcement learning.
+
+ In Proceedings of the 43rd International Conference on Machine
+Learning (ICML) , Proceedings of Machine Learning Research. PMLR, 2026.
+
+ URL https://arxiv.org/abs/2603.02637 .
+
+ Nayak & Basu (2024) 
+
+Ajay Nayak and Arkaprava Basu.
+
+ Over-synchronization in GPU programs.
+
+ In 57th IEEE/ACM International Symposium on Microarchitecture
+(MICRO) . IEEE, 2024.
+
+ Novikov et al. (2025) 
+
+Alexander Novikov, Ngân V u, Marvin Eisenberger, Emilien Dupont, Po-Sen
+Huang, Adam Zsolt Wagner, Sergey Shirobokov, Borislav Kozlovskii, Francisco
+J. R. Ruiz, Abbas Mehrabian, M. Pawan Kumar, Abigail See, Swarat Chaudhuri,
+George Holland, Alex Davies, Sebastian Nowozin, Pushmeet Kohli, and Matej
+Balog.
+
+ AlphaEvolve: A coding agent for scientific and algorithmic
+discovery.
+
+ arXiv preprint arXiv:2506.13131 , 2025.
+
+ URL https://arxiv.org/abs/2506.13131 .
+
+ NVIDIA (2023) 
+
+NVIDIA.
+
+ CUTLASS: CUDA templates for linear algebra subroutines.
+
+ https://github.com/NVIDIA/cutlass , 2023.
+
+ NVIDIA Corporation (2024) 
+
+NVIDIA Corporation.
+
+ CUDA C++ Best Practices Guide, 2024.
+
+ URL https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/ .
+
+ OpenAI (2025) 
+
+OpenAI.
+
+ OpenAI Agents SDK.
+
+ https://github.com/openai/openai-agents-python , 2025.
+
+ Ouyang et al. (2025) 
+
+Anne Ouyang, Simon Guo, Simran Arora, Alex L. Zhang, William Hu, Christopher
+Ré, and Azalia Mirhoseini.
+
+ KernelBench: Can LLMs write efficient GPU kernels?
+
+ In arXiv preprint arXiv:2502.10517 , 2025.
+
+ URL https://arxiv.org/abs/2502.10517 .
+
+ Salemi et al. (2026) 
+
+Alireza Salemi, Chang Zeng, Atharva Nijasure, Jui-Hui Chung, Razieh Rahimi,
+Fernando Diaz, and Hamed Zamani.
+
+ GrepSeek: Training search agents for direct corpus interaction.
+
+ arXiv preprint arXiv:2605.29307 , 2026.
+
+ URL https://arxiv.org/abs/2605.29307 .
+
+ Spector et al. (2024) 
+
+Benjamin Spector, Aaryan Singhal, Simran Arora, and Chris Re.
+
+ GPUs Go Brrr, 2024.
+
+ URL https://hazyresearch.stanford.edu/blog/2024-05-12-tk .
+
+ Hazy Research Blog, introducing ThunderKittens.
+
+ Team & Meta (2025) 
+
+Ansor Team and Meta.
+
+ KernelEvolve: Scaling agentic kernel coding for heterogeneous AI
+accelerators at meta.
+
+ In arXiv preprint arXiv:2512.23236 , 2025.
+
+ URL https://arxiv.org/abs/2512.23236 .
+
+ Tillet et al. (2019) 
+
+Philippe Tillet, H. T. Kung, and David Cox.
+
+ Triton: An intermediate language and compiler for tiled neural
+network computations.
+
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on
+Machine Learning and Programming Languages (MAPL) , 2019.
+
+ Wiedemann et al. (2026) 
+
+Nina Wiedemann, Quentin Leboutet, Michael Paulitsch, Diana Wofk, and Benjamin
+Ummenhofer.
+
+ KernelFoundry: Hardware-aware evolutionary GPU kernel
+optimization.
+
+ In arXiv preprint arXiv:2603.12440 , 2026.
+
+ URL https://arxiv.org/abs/2603.12440 .
+
+ Wu et al. (2025) 
+
+Fang Wu, Weihao Xuan, Heli Qi, Ximing Lu, Aaron Tu, Li Erran Li, and Yejin
+Choi.
+
+ DeepSearch: Overcome the bottleneck of reinforcement learning with
+verifiable rewards via Monte Carlo tree search.
+
+ In arXiv preprint arXiv:2509.25454 , 2025.
+
+ URL https://arxiv.org/abs/2509.25454 .
+
+ Yang et al. (2020) 
+
+Charlene Yang, Thorsten Kurth, and Samuel Williams.
+
+ Hierarchical roofline analysis for GPUs: Accelerating performance
+optimization for the NERSC-9 Perlmutter system.
+
+ Concurrency and Computation: Practice and Experience ,
+32(20):e5547, 2020.
+
+ doi: 10.1002/cpe.5547 .
+
+ Yang et al. (2024) 
+
+Zeyu Yang, Karel Adámek, and Wesley Armour.
+
+ Part-time power measurements: nvidia-smi’s lack of attention.
+
+ arXiv preprint arXiv:2312.02741 , 2024.
+
+ Yao et al. (2023) 
+
+Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R.
+Narasimhan, and Yuan Cao.
+
+ ReAct: Synergizing reasoning and acting in language models.
+
+ In International Conference on Learning Representations
+(ICLR) , 2023.
+
+ URL https://arxiv.org/abs/2210.03629 .
+
+ Zhang et al. (2024) 
+
+Di Zhang, Jianbo Wu, Jingdi Lei, Tong Che, Jiatong Li, Tong Xie, Xiaoshui
+Huang, Shufei Zhang, Marco Pavone, Yuqiang Li, Wanli Ouyang, and Dongzhan
+Zhou.
+
+ Accessing GPT-4 level mathematical olympiad solutions via Monte
+Carlo Tree Self-refine with LLaMa-3 8B.
+
+ arXiv preprint arXiv:2406.07394 , 2024.
+
+ URL https://arxiv.org/abs/2406.07394 .
+
+ Zhang et al. (2025) 
+
+Zijian Zhang, Rong Wang, Shiyang Li, Yuebo Luo, Mingyi Hong, and Caiwen Ding.
+
+ CudaForge: An agent framework with hardware feedback for CUDA
+kernel optimization.
+
+ In arXiv preprint arXiv:2511.01884 , 2025.
+
+ URL https://arxiv.org/abs/2511.01884 .
+
+ Zhang et al. (2026) 
+
+Zijian Zhang, Shiyang Li, Rong Wang, Yuebo Luo, Mingyi Hong, and Caiwen Ding.
+
+ CUDA Agent: Large-scale agentic RL for high-performance CUDA
+kernel generation.
+
+ In arXiv preprint arXiv:2602.24286 , 2026.
+
+ URL https://arxiv.org/abs/2602.24286 .
+
+ Zhou et al. (2021) 
+
+Keren Zhou, Xiaozhu Meng, Ryuichi Sai, and John Mellor-Crummey.
+
+ GPA: A GPU performance advisor based on instruction sampling.
+
+ In Proceedings of the 2021 IEEE/ACM International Symposium on
+Code Generation and Optimization (CGO) , pp. 115–125, 2021.
+
+ URL https://arxiv.org/abs/2009.04061 .
+
+ Appendix A Comparison with Concurrent Work 
+
+ Table  12 provides an overview of concurrent LLM-based GPU kernel optimization systems: KernelBlaster  ( Dong et al., 2026 ) , CudaForge  ( Zhang et al., 2025 ) , StitchCUDA  ( Li et al., 2026 ) , KernelFoundry  ( Wiedemann et al., 2026 ) , and AVO  ( Chen et al., 2026 ) . Cross-system comparisons warrant several caveats. First, although speedups are all measured relative to a PyTorch baseline on the same GPU, different architectures offer different optimization ceilings (e.g., Hopper tensor cores vs. Ampere), so absolute ratios are not directly comparable across hardware. Second, the systems differ in which KernelBench tasks they evaluate on; for instance, StitchCUDA trains on 80% of KernelBench and evaluates on the remaining 20%, so its numbers reflect in-distribution performance rather than zero-shot evaluation on the full benchmark. Third, the reported metric differs: KernelPro and KernelBlaster report geometric mean speedup, whereas CudaForge reports arithmetic mean and StitchCUDA reports an end-to-end average. We plan to open-source KernelPro ’s generated solutions for all 250 KernelBench tasks, pending approval. 
+
+ Table 12: Landscape of LLM-based GPU kernel optimization systems on KernelBench. Speedup is over PyTorch eager baseline on the same GPU. “Tasks” denotes the number of test tasks evaluated per level. Metric type: GeoMean (G), ArithMean (A). 
+
+ System | 
+ LLM | 
+ GPU | 
+ Metric | 
+ L1 | 
+ L2 | 
+ L3 | 
+
+ Notes 
+ | 
+
+ KernelPro (ours) | 
+ Sonnet 4.6 | 
+ A100 | 
+ G | 
+ 2.42 × \times | 
+ 4.69 × \times | 
+ 5.30 × \times | 
+
+ Full KernelBench (100/100/50 tasks) 
+ | 
+
+ KernelBlaster | 
+ GPT-4.1/5.0 | 
+ H100 | 
+ G | 
+ 1.43 × \times | 
+ 2.50 × \times | 
+ 1.50 × \times | 
+
+ Full L1/L2; L3 subset (size unspecified) 
+ | 
+
+ CudaForge | 
+ o3 | 
+ RTX 6000 | 
+ A | 
+ 1.45 × \times | 
+ 2.10 × \times | 
+ 1.28 × \times | 
+
+ Full KernelBench (100/100/50 tasks) 
+ | 
+
+ StitchCUDA | 
+ Qwen3-32B ‡ | 
+ H200 | 
+ A | 
+ 3.54 × \times | 
+ 1.82 × \times | 
+ 1.50 × \times | 
+
+ 20/20/10 test tasks; trained on remaining 80% 
+ | 
+
+ KernelFoundry | 
+ GPT-4.1/o3 | 
+ RTX A6000 | 
+ – | 
+ – | 
+ 2.10 × \times | 
+ – | 
+
+ 40-task subset; MAP-Elites evolutionary search 
+ | 
+
+ AVO | 
+ Undisclosed | 
+ B200 | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Attention kernels only (not KernelBench) 
+ | 
+
+ ‡ StitchCUDA uses GRPO-trained Qwen3-32B as Coder (trained on 80% of KernelBench), GPT-5.2 as Planner/Verifier. 
+
+ Appendix B Micro-Profiling Tool Specifications 
+
+ Table 13: KernelPro micro-profiling tool taxonomy and trigger conditions 
+
+ Tool | 
+ Category | 
+ Bottleneck | 
+
+ Trigger Condition 
+ | 
+
+ TensorCoreUnderutilization | 
+ NCU | 
+ COMPUTE | 
+
+ TC util < < 10% 
+ | 
+
+ TensorCoreModerateUtil | 
+ NCU | 
+ COMPUTE | 
+
+ TC util 10–50% 
+ | 
+
+ WGMMAInstruction | 
+ SASS | 
+ COMPUTE | 
+
+ WGMMA/HMMA detected 
+ | 
+
+ RegisterSpillDetector | 
+ SASS | 
+ LATENCY | 
+
+ STL/LDL + bottleneck match 
+ | 
+
+ MemoryCoalescing | 
+ NCU | 
+ MEMORY | 
+
+ L1 hit < < 30%, stalls > > 40% 
+ | 
+
+ HighDRAMThroughput | 
+ NCU | 
+ MEMORY | 
+
+ DRAM throughput > > 80% 
+ | 
+
+ OccupancyLimiter | 
+ NCU | 
+ OCCUPANCY | 
+
+ Occupancy < < 50% 
+ | 
+
+ HighRegisterUsage | 
+ ncu | 
+ OCCUPANCY | 
+
+ Registers > > 96 
+ | 
+
+ WarpStall | 
+ NCU | 
+ LATENCY | 
+
+ Dominant stall > > 40% 
+ | 
+
+ BarrierStall | 
+ NCU | 
+ LATENCY | 
+
+ Barrier stall > > 30% 
+ | 
+
+ LaunchOverhead | 
+ nsys | 
+ LAUNCH | 
+
+ Launch overhead > > 20% 
+ | 
+
+ SyncOverhead | 
+ nsys | 
+ LAUNCH | 
+
+ Sync overhead > > 10% 
+ | 
+
+ SmallKernel | 
+ nsys | 
+ LAUNCH | 
+
+ Kernel < < 10 μ \mu s, launches > > 50 
+ | 
+
+ MemoryTransfer | 
+ nsys | 
+ MEMORY | 
+
+ Transfer > > 15% runtime 
+ | 
+
+ InterKernelGap | 
+ nsys | 
+ LAUNCH | 
+
+ Gap > > 1% runtime 
+ | 
+
+ B.1 Detailed Tool Formalizations 
+
+ WarpStallTool. 
+
+ Identifies why warps fail to issue by finding the dominant stall reason among five ncu warp-stall counters, then emitting a fix tailored to that reason—the clearest instance of diagnostic reasoning over raw numbers. The analyze step dispatches on the dominant stall: memory-dependency → \rightarrow shared-memory caching and vectorized ( float4 ) loads; barrier → \rightarrow warp-level primitives ( __shfl_sync / __ballot_sync ) in place of __syncthreads() ; long-scoreboard → \rightarrow async prefetch ( cp.async on Ampere+, TMA on Hopper); branch-resolving → \rightarrow arithmetic predication. 
+
+ | 
+ ℳ req \displaystyle\mathcal{M}_{\text{req}} | 
+ = { mem_dep , short_scoreboard , long_scoreboard , \displaystyle=\{\texttt{mem\_dep},\texttt{short\_scoreboard},\texttt{long\_scoreboard}, | 
+ | 
+
+ | 
+ | 
+ barrier , branch_resolving } ( stall % per active warp ) \displaystyle\qquad\texttt{barrier},\texttt{branch\_resolving}\}\quad(\text{stall \% per active warp}) | 
+ | 
+
+ | 
+ θ \displaystyle\theta | 
+ = { high :  40 % , critical :  60 % } \displaystyle=\{\text{high}{:}\,40\%,\ \text{critical}{:}\,60\%\} | 
+ | 
+
+ | 
+ s ∗ \displaystyle s^{*} | 
+ = arg ⁡ max s ∈ ℳ req ⁡ m . s \displaystyle=\arg\max_{s\in\mathcal{M}_{\text{req}}}m.s | 
+ | 
+
+ | 
+ trigger ​ ( m ) \displaystyle\text{trigger}(m) | 
+ = 𝟙 [ m . s ∗ > θ high ] \displaystyle=\mathds{1}[\,m.s^{*}>\theta_{\text{high}}\,] | 
+ | 
+
+ | 
+ analyze | 
+ → ( severity by  m . s ∗ ; rec : fix specific to  s ∗ ) \displaystyle\rightarrow(\text{severity by }m.s^{*};\ \text{rec}{:}\ \text{fix specific to }s^{*}) | 
+ | 
+
+ WGMMAInstructionTool (SASS). 
+
+ Tensor core utilization is the single most impactful optimization for matrix-heavy GPU workloads. Critically, on Hopper GPUs, only WGMMA instructions can achieve peak throughput–older HMMA instructions cap at ∼ \sim 63% of peak, leaving 37% performance on the table  ( Spector et al., 2024 ) . This tool provides definitive tensor core detection by analyzing compiled SASS binary via cuobjdump --dump-sass , identifying not just whether tensor cores are used but which generation of instructions, enabling architecture-specific optimization guidance. Supports all tensor core instruction variants: 
+
+ • 
+
+ WGMMA : Hopper warpgroup MMA (sm_90) – FP16/BF16/FP8/INT8/TF32 
+
+ • 
+
+ HMMA : Half-precision MMA (sm_70+) – FP16/BF16 
+
+ • 
+
+ IMMA/DMMA/BMMA : Specialized MMA – INT8/INT4, FP64, INT1 
+
+ Additionally detects cuBLAS usage via nm -D symbol lookup (cuBLAS auto-selects tensor core kernels on Volta+ GPUs). The two-stage approach: (1) fast nm -D check for library calls, (2) full SASS disassembly for user-written kernels. 
+
+ | 
+ ℳ req \displaystyle\mathcal{M}_{\text{req}} | 
+ = { sass_analysis } \displaystyle=\{\texttt{sass\_analysis}\} | 
+ | 
+
+ | 
+ tc_count | 
+ = wgmma + hmma + imma + dmma + bmma \displaystyle=\texttt{wgmma}+\texttt{hmma}+\texttt{imma}+\texttt{dmma}+\texttt{bmma} | 
+ | 
+
+ | 
+ trigger ​ ( m ) \displaystyle\text{trigger}(m) | 
+ = 𝟙 [ tc_count > 0 ∨ uses_cublas ] \displaystyle=\mathds{1}[\text{tc\_count}>0\lor\texttt{uses\_cublas}] | 
+ | 
+
+ | 
+ analyze | 
+ → ( which TC generation is emitted; recommend the CLOSE \displaystyle\rightarrow(\text{which TC generation is emitted; recommend the} | 
+ | 
+
+ | 
+ | 
+ OPEN architecture-appropriate path, e.g. WGMMA on Hopper ) \displaystyle\qquad\text{architecture-appropriate path, e.g.\ WGMMA on Hopper}) | 
+ | 
+
+ RegisterSpillDetector (SASS). 
+
+ Detection is multi-signal: from the SASS binary it counts STL (store local) and LDL (load local) instructions, then flags a spill ( stl_count + ldl_count > 0 \texttt{stl\_count}+\texttt{ldl\_count}>0 ) as harmful only when one of three conditions holds, with the exact cutoffs below: 
+
+ • 
+
+ Case A (Latency-bound) : long-scoreboard stall > 15 % >15\% and compute throughput < 50 % <50\% and memory throughput < 50 % <50\% (spills add latency while neither roofline is saturated). 
+
+ • 
+
+ Case B (Memory-bound by spills) : memory throughput > 60 % >60\% and local-memory traffic ratio > 30 % >30\% (spills consume bandwidth needed for useful data). 
+
+ • 
+
+ Case C (Occupancy-limited) : registers are the binding occupancy limit and the scheduler is starved (issue activity < 30 % <30\% or eligible warps/cycle < 0.6 <0.6 ). 
+
+ | 
+ ℳ req \displaystyle\mathcal{M}_{\text{req}} | 
+ = { stl_count , ldl_count , long_scoreboard , compute_tput , \displaystyle=\{\texttt{stl\_count},\texttt{ldl\_count},\texttt{long\_scoreboard},\texttt{compute\_tput}, | 
+ | 
+
+ | 
+ | 
+ memory_tput , local_traffic_ratio , occupancy_limit_regs , \displaystyle\qquad\texttt{memory\_tput},\texttt{local\_traffic\_ratio},\texttt{occupancy\_limit\_regs}, | 
+ | 
+
+ | 
+ | 
+ issue_active , eligible_warps } \displaystyle\qquad\texttt{issue\_active},\texttt{eligible\_warps}\} | 
+ | 
+
+ | 
+ trigger ​ ( m ) \displaystyle\text{trigger}(m) | 
+ = 𝟙 [ stl_count + ldl_count > 0 ] ∧ ( A ∨ B ∨ C ) \displaystyle=\mathds{1}[\texttt{stl\_count}+\texttt{ldl\_count}>0]\;\land\;(\text{A}\lor\text{B}\lor\text{C}) | 
+ | 
+
+ | 
+ analyze | 
+ → ( severity by case; rec : reduce register pressure CLOSE \displaystyle\rightarrow(\text{severity by case; rec}{:}\ \text{reduce register pressure} | 
+ | 
+
+ | 
+ | 
+ OPEN via  __launch_bounds__ ,  -maxrregcount , or kernel split ) \displaystyle\qquad\text{via {\_\_launch\_bounds\_\_}, {-maxrregcount}, or kernel split}) | 
+ | 
+
+ TensorCoreUnderutilizationTool. 
+
+ Flags compute-bound kernels that run on CUDA cores instead of tensor cores. As a 5-tuple: 
+
+ | 
+ ℳ req \displaystyle\mathcal{M}_{\text{req}} | 
+ = { tensor_core_util } \displaystyle=\{\texttt{tensor\_core\_util}\} | 
+ | 
+
+ | 
+ θ \displaystyle\theta | 
+ = { low :  10 % , moderate :  50 % } \displaystyle=\{\text{low}{:}\,10\%,\ \text{moderate}{:}\,50\%\} | 
+ | 
+
+ | 
+ trigger ​ ( m ) \displaystyle\text{trigger}(m) | 
+ = 𝟙 [ m . tensor_core_util < θ low ] \displaystyle=\mathds{1}[m.\texttt{tensor\_core\_util}<\theta_{\text{low}}] | 
+ | 
+
+ | 
+ analyze | 
+ → ( severity : critical CLOSE , \displaystyle\rightarrow(\text{severity}{:}\ \textsc{critical}, | 
+ | 
+
+ | 
+ | 
+ OPEN rec : “rewrite the matmul as a cuBLAS/CUTLASS GEMM” ) \displaystyle\qquad\text{rec}{:}\ \text{``rewrite the matmul as a cuBLAS/CUTLASS GEMM''}) | 
+ | 
+
+ LaunchOverheadDetector. 
+
+ Flags kernels whose end-to-end time is dominated by launch overhead rather than compute. As a 5-tuple: 
+
+ | 
+ ℳ req \displaystyle\mathcal{M}_{\text{req}} | 
+ = { launch_overhead_pct ​ ( p L ) , avg_launch_ns , kernel_launches } \displaystyle=\{\texttt{launch\_overhead\_pct}\ (p_{L}),\ \texttt{avg\_launch\_ns},\ \texttt{kernel\_launches}\} | 
+ | 
+
+ | 
+ θ \displaystyle\theta | 
+ = { high :  20 % , critical :  40 % } \displaystyle=\{\text{high}{:}\,20\%,\ \text{critical}{:}\,40\%\} | 
+ | 
+
+ | 
+ trigger ​ ( m ) \displaystyle\text{trigger}(m) | 
+ = 𝟙 [ p L > θ high ] \displaystyle=\mathds{1}[\,p_{L}>\theta_{\text{high}}\,] | 
+ | 
+
+ | 
+ analyze | 
+ → ( severity by  p L , rec : “CUDA Graph capture or kernel fusion” , \displaystyle\rightarrow(\text{severity by }p_{L},\ \text{rec}{:}\ \text{``CUDA Graph capture or kernel fusion''}, | 
+ | 
+
+ | 
+ | 
+ OPEN est. speedup = ( 1 − p L / 100 ) − 1 ) \displaystyle\qquad\text{est.\ speedup}=(1-p_{L}/100)^{-1}) | 
+ | 
+
+ The five tools above are representative; we refer readers to the open-source release for the complete set and their full definitions. 
+
+ B.2 Defining a New Tool 
+
+ KernelPro ’s tools are pluggable: a new heuristic is added by subclassing
+ ProfilingTool , declaring its required ncu metrics and thresholds,
+implementing analyze() , and registering it with the
+ @ToolRegistry.register decorator—after which the proactive orchestrator
+invokes it automatically (no changes to the core system). Listing  2 
+shows a complete tool (the register-pressure detector); analyze() returns a
+structured ToolOutput carrying the severity, root cause, and ranked
+recommendations that become the natural-language feedback injected into the prompt. 
+
+ ⬇ 
+
+ 1 
+
+ @ToolRegistry . register 
+
+ 2 
+
+ class HighRegisterUsageTool ( ProfilingTool ): 
+
+ 3 
+
+ name = "high_register_usage" 
+
+ 4 
+
+ priority = 70 # higher runs first 
+
+ 5 
+
+ REG_WARNING , REG_CRITICAL = 96, 128 
+
+ 6 
+
+ 7 
+
+ @property 
+
+ 8 
+
+ def required_metrics ( self ) -> List [ str ]: 
+
+ 9 
+
+ return [ "launch__registers_per_thread" ] 
+
+ 10 
+
+ 11 
+
+ def analyze ( self , kernel_name : str , 
+
+ 12 
+
+ metrics : Dict [ str , Any ]) -> ToolOutput : 
+
+ 13 
+
+ regs = self . get_metric ( metrics , 
+
+ 14 
+
+ "launch__registers_per_thread" , default =32) 
+
+ 15 
+
+ if regs < self . REG_WARNING : 
+
+ 16 
+
+ return ToolOutput ( triggered = False ) 
+
+ 17 
+
+ critical = regs >= self . REG_CRITICAL 
+
+ 18 
+
+ return ToolOutput ( 
+
+ 19 
+
+ triggered = True , 
+
+ 20 
+
+ severity = Severity . HIGH if critical else Severity . MEDIUM , 
+
+ 21 
+
+ title = "High Register Usage" , 
+
+ 22 
+
+ summary = f "{regs:.0f} registers/thread - may spill to local memory" , 
+
+ 23 
+
+ root_cause = "Register demand exceeds the physical file; spills to " 
+
+ 24 
+
+ "local memory are 10-100x slower than registers." , 
+
+ 25 
+
+ recommendations =[ 
+
+ 26 
+
+ "Use __launch_bounds__ to guide the compiler" , 
+
+ 27 
+
+ "Cap registers with -maxrregcount" , 
+
+ 28 
+
+ "Split the kernel or move data to shared memory" ], 
+
+ 29 
+
+ expected_improvement = "2-10x if eliminating spilling" ) 
+
+ Listing 2: Defining and registering a micro-profiling tool. The analyze method returns a structured ToolOutput (severity, root cause, ranked recommendations) that the orchestrator renders into prompt feedback. 
+
+ Tools span a wide complexity range under the same analyze → \rightarrow ToolOutput interface. Listing  2 is a minimal single-threshold detector; Listing  3 shows production-grade diagnostic logic— WarpStallTool reads five warp-stall counters, identifies the dominant stall reason via argmax , and dispatches a root cause and recommendations tailored to that reason (the same expert “which stall, and why” reasoning a human applies to ncu output). We reproduce its complete implementation. 
+
+ ⬇ 
+
+ 1 
+
+ @ToolRegistry . register 
+
+ 2 
+
+ class WarpStallTool ( ProfilingTool ): 
+
+ 3 
+
+ name = "warp_stall_analyzer" 
+
+ 4 
+
+ description = "Analyzes warp stall reasons to identify bottlenecks" 
+
+ 5 
+
+ version = "1.0.0" 
+
+ 6 
+
+ priority = 80 
+
+ 7 
+
+ 8 
+
+ # Thresholds 
+
+ 9 
+
+ STALL_HIGH = 40.0 # >40% stalls on one reason is significant 
+
+ 10 
+
+ STALL_CRITICAL = 60.0 # >60% is critical 
+
+ 11 
+
+ 12 
+
+ @property 
+
+ 13 
+
+ def required_metrics ( self ) -> List [ str ]: 
+
+ 14 
+
+ return [ 
+
+ 15 
+
+ "smsp__warp_issue_stalled_memory_dependency_per_warp_active.pct" , 
+
+ 16 
+
+ "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct" , 
+
+ 17 
+
+ "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct" , 
+
+ 18 
+
+ "smsp__warp_issue_stalled_barrier_per_warp_active.pct" , 
+
+ 19 
+
+ "smsp__warp_issue_stalled_branch_resolving_per_warp_active.pct" 
+
+ 20 
+
+ ] 
+
+ 21 
+
+ 22 
+
+ def analyze ( self , kernel_name : str , metrics : Dict [ str , Any ]) -> ToolOutput : 
+
+ 23 
+
+ # Get all stall metrics 
+
+ 24 
+
+ stalls = { 
+
+ 25 
+
+ "memory_dependency" : self . get_metric ( metrics , 
+
+ 26 
+
+ "smsp__warp_issue_stalled_memory_dependency_per_warp_active.pct" , default =0), 
+
+ 27 
+
+ "short_scoreboard" : self . get_metric ( metrics , 
+
+ 28 
+
+ "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct" , default =0), 
+
+ 29 
+
+ "long_scoreboard" : self . get_metric ( metrics , 
+
+ 30 
+
+ "smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct" , default =0), 
+
+ 31 
+
+ "barrier" : self . get_metric ( metrics , 
+
+ 32 
+
+ "smsp__warp_issue_stalled_barrier_per_warp_active.pct" , default =0), 
+
+ 33 
+
+ "branch_resolving" : self . get_metric ( metrics , 
+
+ 34 
+
+ "smsp__warp_issue_stalled_branch_resolving_per_warp_active.pct" , default =0) 
+
+ 35 
+
+ } 
+
+ 36 
+
+ 37 
+
+ # Find the dominant stall reason 
+
+ 38 
+
+ dominant_stall = max ( stalls , key = stalls . get ) 
+
+ 39 
+
+ dominant_value = stalls [ dominant_stall ] 
+
+ 40 
+
+ 41 
+
+ # Check if any stall is significant 
+
+ 42 
+
+ if dominant_value < self . STALL_HIGH : 
+
+ 43 
+
+ return ToolOutput ( triggered = False ) 
+
+ 44 
+
+ 45 
+
+ is_critical = dominant_value >= self . STALL_CRITICAL 
+
+ 46 
+
+ severity = Severity . HIGH if is_critical else Severity . MEDIUM 
+
+ 47 
+
+ 48 
+
+ # Get stall-specific analysis 
+
+ 49 
+
+ root_cause = self . _get_stall_root_cause ( dominant_stall ) 
+
+ 50 
+
+ recommendations = self . _get_stall_recommendations ( dominant_stall , stalls ) 
+
+ 51 
+
+ 52 
+
+ return ToolOutput ( 
+
+ 53 
+
+ triggered = True , 
+
+ 54 
+
+ severity = severity , 
+
+ 55 
+
+ title = f "High Warp Stalls ({dominant_stall.replace(’_’, ’ ’).title()})" , 
+
+ 56 
+
+ summary = f "{dominant_value:.1f}% of warps stalled on {dominant_stall}" , 
+
+ 57 
+
+ metrics_observed ={ 
+
+ 58 
+
+ "Memory dependency stalls" : f "{stalls[’memory_dependency’]:.1f}%" , 
+
+ 59 
+
+ "Short scoreboard stalls" : f "{stalls[’short_scoreboard’]:.1f}%" , 
+
+ 60 
+
+ "Long scoreboard stalls" : f "{stalls[’long_scoreboard’]:.1f}%" , 
+
+ 61 
+
+ "Barrier stalls" : f "{stalls[’barrier’]:.1f}%" , 
+
+ 62 
+
+ "Branch resolving stalls" : f "{stalls[’branch_resolving’]:.1f}%" , 
+
+ 63 
+
+ "Dominant stall" : dominant_stall 
+
+ 64 
+
+ }, 
+
+ 65 
+
+ metrics_thresholds ={ "Any stall type" : f "<{self.STALL_HIGH}% (target)" }, 
+
+ 66 
+
+ root_cause = root_cause , 
+
+ 67 
+
+ recommendations = recommendations , 
+
+ 68 
+
+ expected_improvement = "1.5-3x depending on stall type" 
+
+ 69 
+
+ ) 
+
+ 70 
+
+ 71 
+
+ def _get_stall_root_cause ( self , stall_type : str ) -> str : 
+
+ 72 
+
+ causes = { 
+
+ 73 
+
+ "memory_dependency" : "Warps wait for memory operations to complete " 
+
+ 74 
+
+ "(memory-bound): 400+ cycle global latency, uncoalesced accesses, " 
+
+ 75 
+
+ "or insufficient parallelism to hide latency." , 
+
+ 76 
+
+ "short_scoreboard" : "Warps wait for shared-memory/texture (MIO) ops: " 
+
+ 77 
+
+ "shared-memory bank conflicts, texture cache misses, sync overhead." , 
+
+ 78 
+
+ "long_scoreboard" : "Warps wait for long-latency ops tracked by the long " 
+
+ 79 
+
+ "scoreboard: outstanding global loads, texture fetches, atomics." , 
+
+ 80 
+
+ "barrier" : "Warps wait at __syncthreads() for the block to catch up: " 
+
+ 81 
+
+ "load imbalance, too many sync points, or divergent execution times." , 
+
+ 82 
+
+ "branch_resolving" : "Warps wait for branch conditions to resolve: " 
+
+ 83 
+
+ "data-dependent or thread-ID-dependent divergent paths." 
+
+ 84 
+
+ } 
+
+ 85 
+
+ return causes . get ( stall_type , "Unknown stall type" ) 
+
+ 86 
+
+ 87 
+
+ def _get_stall_recommendations ( self , stall_type : str , all_stalls : Dict ) -> List [ str ]: 
+
+ 88 
+
+ base_recs = { 
+
+ 89 
+
+ "memory_dependency" : [ 
+
+ 90 
+
+ "Use shared memory to cache frequently accessed data" , 
+
+ 91 
+
+ "Implement vectorized loads (float4) for better bandwidth" , 
+
+ 92 
+
+ "Ensure coalesced memory access patterns" , 
+
+ 93 
+
+ "Increase occupancy to hide memory latency (more warps)" , 
+
+ 94 
+
+ "Use __ldg() for read-only data (uses texture cache)" , 
+
+ 95 
+
+ "Consider software pipelining to overlap compute and memory" 
+
+ 96 
+
+ ], 
+
+ 97 
+
+ "short_scoreboard" : [ 
+
+ 98 
+
+ "Check for shared memory bank conflicts" , 
+
+ 99 
+
+ "Reduce shared memory accesses if possible" , 
+
+ 100 
+
+ "Use padding to avoid bank conflicts: ‘__shared__ float A[32][33]‘" , 
+
+ 101 
+
+ "Consider using registers instead of shared memory" , 
+
+ 102 
+
+ "Profile with ncu --set full to see bank conflict counts" 
+
+ 103 
+
+ ], 
+
+ 104 
+
+ "long_scoreboard" : [ 
+
+ 105 
+
+ "Similar to memory dependency - optimize memory access" , 
+
+ 106 
+
+ "Use async copy for prefetching if on Ampere+ (cp.async)" , 
+
+ 107 
+
+ "Consider TMA on Hopper for bulk transfers" , 
+
+ 108 
+
+ "Increase warp-level parallelism" 
+
+ 109 
+
+ ], 
+
+ 110 
+
+ "barrier" : [ 
+
+ 111 
+
+ "Reduce number of __syncthreads() calls" , 
+
+ 112 
+
+ "Use warp-level primitives (__shfl, __ballot) when possible" , 
+
+ 113 
+
+ "Balance workload across threads in a block" , 
+
+ 114 
+
+ "Consider warp-synchronous programming for small data" , 
+
+ 115 
+
+ "NEVER put __syncthreads() inside conditional blocks" 
+
+ 116 
+
+ ], 
+
+ 117 
+
+ "branch_resolving" : [ 
+
+ 118 
+
+ "Reorganize data to minimize branch divergence" , 
+
+ 119 
+
+ "Use arithmetic instead of branches: result = cond*v1 + (1-cond)*v2" , 
+
+ 120 
+
+ "Sort data to group similar computation paths" , 
+
+ 121 
+
+ "Use predication for short conditional blocks" , 
+
+ 122 
+
+ "Consider separate kernels for different code paths" 
+
+ 123 
+
+ ] 
+
+ 124 
+
+ } 
+
+ 125 
+
+ return base_recs . get ( stall_type , [ "Profile further to identify root cause" ]) 
+
+ Listing 3: WarpStallTool : complete implementation. It selects the dominant stall reason among five ncu counters via argmax and returns a reason-specific root cause and recommendations. 
+
+ Appendix C Micro-Profiling Tool Effectiveness: KernelBench and Production Kernels 
+
+ We isolate the contribution of KernelPro ’s micro-profiling tools with two controlled
+with-tools-versus-without-tools ablations: one on 42 KernelBench tasks
+(§ C.1 ) and one on six production Triton inference kernels
+(§ C.3 ), confirming the effect holds on both benchmark and
+real serving workloads. 
+
+ C.1 KernelBench Tasks 
+
+ We conduct a controlled ablation on the 42-task subset (Section  5.3 ) to isolate the contribution of micro-profiling tools. Three configurations compare progressive levels of profiling feedback: 
+
+ • 
+
+ No Feedback : The LLM receives only source code and compilation/correctness errors ( --skip-profiling ). Represents naive LLM retry. 
+
+ • 
+
+ Raw ncu Metrics : Full NCU counter dump ( ∼ \sim 50 raw metric values) appended to the prompt with no interpretation or bottleneck classification ( --raw-metrics-only ). 
+
+ • 
+
+ Ours : Raw ncu metrics plus all KernelPro micro-profiling tools (Stage 1 roofline classification + Stage 2 filtered tool analysis with structured optimization guidance). 
+
+ All conditions use Sonnet 4.6 on A100 GPUs with 15 seeds per task (5 temperatures × \times 3 independent rounds), 30 iterations, 2 candidates per iteration, and greedy search. We report the best speedup across all seeds for each task-configuration pair, with outlier speedups capped to limit disproportionate influence. 
+
+ Task IDs. 
+
+ The 42 KernelBench tasks used in this ablation are: 
+
+ • 
+
+ Level 1 (19): 1, 6, 7, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 23, 24, 26, 40, 88, 97 
+
+ • 
+
+ Level 2 (16): 3, 9, 12, 14, 18, 19, 22, 29, 30, 33, 34, 36, 37, 39, 40, 41 
+
+ • 
+
+ Level 3 (7): 28, 30, 31, 32, 43, 44, 50 
+
+ Table  14 shows the fraction of tasks where each configuration produces a correct kernel faster than the PyTorch eager baseline. 
+
+ Table 14: Correctness ablation: fraction of tasks solved (speedup > 1 × >1\times ). 
+
+ Configuration | 
+ Tasks Solved | 
+ Pass Rate (fast_1) | 
+
+ No Feedback | 
+ 32 / 42 | 
+ 76.2% | 
+
+ Raw ncu Metrics | 
+ 36 / 42 | 
+ 85.7% | 
+
+ Ours | 
+ 42 / 42 | 
+ 100.0% | 
+
+ Ours achieves a 100% solve rate across all 42 tasks, solving 31% more tasks than No Feedback and 17% more than Raw ncu Metrics. On several tasks, only Ours achieves substantial speedup (e.g., L2 task 40: 7.5 × \times vs 1.0 × \times /1.0 × \times ; L2 task 41: 5.8 × \times vs 1.0 × \times /1.0 × \times ), demonstrating that profiling-guided insight unlocks optimizations inaccessible to unguided approaches. The L2 task 41 trajectory (Appendix  G.1 ) provides a detailed walkthrough of how tool guidance produces its 12.1 × 12.1\times final speedup—the 2.8 × 2.8\times single-step improvement, where the agent acts on the tools’ top-ranked directives (epilogue fusion plus BF16 tensor cores), exemplifies the mechanism by which structured feedback unlocks optimization paths invisible to unguided search. 
+
+ Table  15 compares optimization quality across configurations. 
+
+ Table 15: Speedup ablation (outliers capped, unsolved tasks scored as 1.0 × \times ). 
+
+ Configuration | 
+ Mean | 
+ Geo Mean | 
+ Win Rate | 
+
+ No Feedback | 
+ 6.59 × \times | 
+ 3.35 × \times | 
+ 10/42 (24%) | 
+
+ Raw ncu Metrics | 
+ 3.45 × \times | 
+ 1.77 × \times | 
+ 3/42 (7%) | 
+
+ Ours | 
+ 6.91 × \times | 
+ 4.00 × \times | 
+ 25/42 (60%) | 
+
+ Table  16 shows the fraction of tasks exceeding progressively higher speedup thresholds. Ours dominates across all thresholds, with the gap widening at higher values. 
+
+ Table 16: fast_p: fraction of tasks with speedup > p >p . 
+
+ Threshold p p | 
+ No Feedback | 
+ Raw ncu | 
+ Ours | 
+
+ > 1 × >1\times | 
+ 0.762 | 
+ 0.857 | 
+ 1.000 | 
+
+ > 1.5 × >1.5\times | 
+ 0.548 | 
+ 0.286 | 
+ 0.667 | 
+
+ > 2 × >2\times | 
+ 0.524 | 
+ 0.238 | 
+ 0.619 | 
+
+ > 3 × >3\times | 
+ 0.524 | 
+ 0.238 | 
+ 0.595 | 
+
+ > 5 × >5\times | 
+ 0.405 | 
+ 0.167 | 
+ 0.524 | 
+
+ > 10 × >10\times | 
+ 0.167 | 
+ 0.095 | 
+ 0.214 | 
+
+ We use the Wilcoxon signed-rank test  ( Hollander et al., 2014 ) , a non-parametric paired test that makes no distributional assumptions, to evaluate whether configurations differ in optimization quality. For each task, we take the best speedup (with outliers capped) as that configuration’s score; unsolved tasks are scored as 1.0 × \times . The test is one-sided ( H 1 H_{1} : first configuration produces higher speedups); n n reports the number of non-zero differences (Wilcoxon excludes tied pairs). Results (Table  8 ) confirm the ordering Ours > > No Feedback > > Raw ncu . 
+
+ We highlight three key observations from the ablation results. 
+
+ Full pipeline is necessary for reliable optimization. 
+
+ Ours solves 100% of tasks–the structured profiling pipeline consistently identifies actionable bottlenecks that the model can address. 
+
+ Raw metrics without interpretation are harmful. 
+
+ Raw ncu Metrics performs significantly worse than No Feedback ( p = 0.0007 p=0.0007 ). This condition passes ∼ 50 {\sim}50 raw NCU counters without interpretation–comparable to CudaForge  ( Zhang et al., 2025 ) , which presents statistically pre-filtered metrics as verbatim name-value pairs. Unstructured metric dumps appear to distract the model: it attempts to optimize counters that do not translate to wall-clock improvements, or misinterprets raw values without roofline context. This validates KernelPro ’s core design principle that interpretation , not mere data access, drives optimization quality. 
+
+ The interpretation layer is the key differentiator. 
+
+ The gap from Raw ncu to Ours (raw → \to analyzed) is larger than from No Feedback to Ours (none → \to analyzed). The value lies not in collecting profiling data, but in presenting it as actionable, structured optimization guidance via the Stage 1/Stage 2 pipeline. This reveals that KernelPro ’s tool design is not simply “give the LLM more data”–it is specifically about structured interpretation of profiling data. Raw metrics actively degrade performance because the LLM lacks the domain context to translate hardware counters into optimization actions; only the micro-profiling tools’ detect-analyze-recommend pattern bridges this gap reliably. 
+
+ Profiling prevents correct-but-slow plateaus. 
+
+ Trajectory analysis reveals that KernelPro never produces a correct kernel that fails to exceed baseline (0/62 trajectories stuck at 1.0 × \times ), while No Feedback gets stuck in 10% of cases. When both configurations recover from an initial compilation error, No Feedback often produces a kernel that merely matches baseline performance and cannot improve further without knowing what to optimize. KernelPro immediately receives structured guidance (e.g., “reduce register usage from 168 to < < 64 per thread”) and follows a clear optimization path. This explains why KernelPro achieves higher fast_1 despite similar raw correctness rates: profiling does not fix bugs, but it prevents the model from settling on correct-but-slow solutions by always providing an actionable optimization target. 
+
+ C.2 Per-Tool Impact Analysis 
+
+ Per-tool coverage and hit rates are reported in Table  9 (main body). Below we provide additional per-bottleneck breakdowns. 
+
+ Table  17 shows the dominant optimization action triggered by each bottleneck type, measured as the single largest improvement per task. 
+
+ Table 17: Most impactful optimization action per bottleneck type across 42 tasks. 
+
+ Bottleneck | 
+ Primary Action | 
+ Tasks | 
+ Avg. | 
+ Max | 
+
+ Compute | 
+ Tensor Core switch | 
+ 9 | 
+ 6.25 × \times | 
+ 9.6 × \times | 
+
+ Latency | 
+ Register optimization | 
+ 4 | 
+ 6.14 × \times | 
+ 10.6 × \times | 
+
+ Memory | 
+ Coalescing/Vectorize | 
+ 6 | 
+ 3.48 × \times | 
+ 8.6 × \times | 
+
+ Three observations emerge: 
+
+ Tensor Core switch is the highest-impact single action. 
+
+ For compute-bound kernels, the tools identify that the LLM-generated CUDA kernel uses CUDA cores instead of Tensor Cores and recommend switching to cuBLAS/CUTLASS. This single recommendation produces an average 6.25 × \times gain across 9 tasks (max 9.6 × \times ). Without the tool’s quantitative signal (e.g., “TC utilization: 0.7%, threshold > > 10%”), the LLM has no way to know its manual kernel is orders of magnitude slower than the hardware’s peak capability. The Task 41 trajectory (Appendix  G.1 ) traces this pattern end-to-end: at iteration 13 the agent acts on the tools’ top directives—fusing the epilogue and moving to a BF16 tensor-core GEMM—for a 4.11 × → 11.49 × 4.11\times\to 11.49\times leap; the full generated solution is reproduced in the same appendix. 
+
+ Register spill detection has the highest per-fire reliability. 
+
+ RegisterSpill fires in only 16/42 tasks but converts to > > 1.5 × \times improvement 18.2% of the time—the highest among all tools. The diagnostic “register spill detected: 168 registers/thread, spilling to local memory” is highly actionable: the LLM can directly reduce register pressure by restructuring loops or reducing live variables. Example: L1_1 goes from 1.0 × \times to 10.6 × \times after the LLM eliminates register spills. 
+
+ Memory optimizations provide broad but incremental gains. 
+
+ MemoryCoalescing and Vectorization fire in 37–41 of 42 tasks but have low hit rates (4–6%). Memory access patterns are the most common bottleneck on A100 but are harder for the LLM to fix correctly—coalescing requires non-trivial data layout changes, while vectorization requires careful alignment handling. 
+
+ C.3 Production Inference Kernels 
+
+ To confirm the effect holds beyond KernelBench, we repeat the with-tools-versus-without-tools ablation on six representative Triton inference kernels covering common transformer serving patterns (NVIDIA A100). The kernels are: layer_norm (fused forward layer normalization with affine transform), vec_matmul (single-vector matrix multiplication for decoding), persistent_vec_matmul (persistent-loop variant that reuses thread blocks across output tiles), gemm_split_k (split-K GEMM with atomic accumulation for high-parallelism reduction), fused_moe (fused Mixture-of-Experts token routing and batched expert GEMM from vLLM), and kernel_paged_attention (paged multi-head attention with online softmax over non-contiguous KV-cache blocks from vLLM, supporting GQA). Both configurations receive identical ncu / nsys /SASS raw metrics; the only difference is whether the tool-generated guidance is included in the LLM prompt. 
+
+ Table 18: Triton inference kernel ablation: tools enable better speedup in fewer iterations. 
+
+ | 
+ With Tools | 
+ Without Tools | 
+
+ Kernel | 
+ Speedup | 
+ Iters | 
+ Speedup | 
+ Iters | 
+
+ layer_norm | 
+ 1.70 × \times | 
+ 6 | 
+ 1.24 × \times | 
+ 10 | 
+
+ vec_matmul | 
+ 2.03 × \times | 
+ 4 | 
+ 1.53 × \times | 
+ 10 | 
+
+ persistent_vec_matmul | 
+ 1.44 × \times | 
+ 6 | 
+ 1.49 × \times | 
+ 4 | 
+
+ gemm_split_k | 
+ 2.13 × \times | 
+ 5 | 
+ 1.39 × \times | 
+ 2 | 
+
+ fused_moe | 
+ 3.26 × \times | 
+ 2 | 
+ Failed | 
+ 10 | 
+
+ kernel_paged_attention | 
+ 1.98 × \times | 
+ 7 | 
+ 1.86 × \times | 
+ 10 | 
+
+ Geo Mean | 
+ 2.02 × \times | 
+ 5.0 | 
+ 1.49 × \times | 
+ 7.2 | 
+
+ Tools achieved 36% higher geometric mean speedup (2.02 × \times vs 1.49 × \times ) in 31% fewer iterations (5.0 vs 7.2). fused_moe failed entirely without tools after 10 iterations but achieved 3.26 × \times with tools in just 2 iterations. The vec_matmul case illustrates the “fast but wrong” trap: without tools, the LLM repeatedly generated incorrect solutions achieving 1.69–1.80 × \times speedups that failed correctness, unable to diagnose why faster attempts broke. With tool guidance identifying the bottleneck (“shared memory limiting occupancy to 2%”), it switched to warp-level reduction ( __shfl_down_sync ) and found a correct 2.03 × \times solution in 4 iterations. 
+
+ Appendix D Search Memory Ablation 
+
+ We conduct a controlled ablation to isolate the contribution of search memory– KernelPro ’s cross-iteration learning mechanism described in Section  3.4 . Two configurations compare the full KernelPro pipeline with and without memory: 
+
+ • 
+
+ Memory ON (Treatment) : Full KernelPro pipeline with session memory extraction. Accumulated findings ( errors_and_corrections , successful_patterns , search_findings ) are injected into subsequent iterations. 
+
+ • 
+
+ Memory OFF (Control) : Same pipeline with --disable-session-memory . Each iteration sees only the problem spec and profiling feedback from the parent node. Represents memoryless search. 
+
+ All conditions use Sonnet 4.6 on H100 GPUs with 25 iterations, 2 candidates per iteration, greedy search, and temperature 0.2. Both conditions run full ncu profiling and the profiling agent–the sole variable is whether cross-iteration findings are extracted and injected. Outlier speedups are capped at 25 × \times (consistent with Appendix  C ). This ablation uses the same 42-task subset as the other component ablations (Section  5.3 ). 
+
+ D.1 Search Memory Does Not Change Final Speedup 
+
+ Table  19 reports the best speedup achieved by each condition (capped at 25 × \times ). 
+
+ Table 19: Search memory ablation: optimization quality. 
+
+ Metric | 
+ Memory ON | 
+ Memory OFF | 
+
+ Geometric mean speedup | 
+ 1.818 × \times | 
+ 1.716 × \times | 
+
+ Arithmetic mean speedup | 
+ 2.436 × \times | 
+ 2.493 × \times | 
+
+ Win / Loss / Tie | 
+ 9 / 7 / 20 | 
+ — | 
+
+ Wilcoxon p p (one-sided) | 
+ 0.181 (n.s.) | 
+
+ Wilcoxon on log \log speedup | 
+ 0.181 (n.s.) | 
+
+ The Wilcoxon signed-rank test finds no significant difference in final optimization quality ( z = 0.911 z=0.911 , p = 0.181 p=0.181 , n = 36 n=36 ). The geometric mean ratio (ON/OFF) is 1.06 × 1.06\times –a small positive effect that does not reach significance due to high per-task variance. The 90% CI for the ratio ( [ 0.936 , 1.200 ] [0.936,1.200] ) bounds any quality difference to at most 20%, so the flat ceiling is a bounded result rather than merely underpowered. 
+
+ D.2 Search Memory Speeds Early Convergence 
+
+ Table 20: Convergence: geometric mean best@ N N (capped at 25 × \times ). Wilcoxon on log ⁡ ( best@ ​ N ) \log(\text{best@}N) . 
+
+ N N | 
+ ON | 
+ OFF | 
+ Ratio | 
+ z z | 
+ p p | 
+
+ 5 | 
+ 1.011 × \times | 
+ 0.982 × \times | 
+ 1.030 | 
+ 1.441 | 
+ 0.075 † | 
+
+ 10 | 
+ 1.418 × \times | 
+ 1.358 × \times | 
+ 1.044 | 
+ 1.461 | 
+ 0.072 † | 
+
+ 15 | 
+ 1.774 × \times | 
+ 1.604 × \times | 
+ 1.106 | 
+ 1.037 | 
+ 0.150 | 
+
+ 25 | 
+ 1.782 × \times | 
+ 1.656 × \times | 
+ 1.076 | 
+ 0.833 | 
+ 0.203 | 
+
+ 50 | 
+ 1.875 × \times | 
+ 1.723 × \times | 
+ 1.088 | 
+ 0.952 | 
+ 0.170 | 
+
+ † Marginal ( p < 0.10 p<0.10 ). best@ N N . 
+
+ While final speedup is equivalent, memory shows a marginal advantage in early convergence. Table  20 reports best-so-far speedup at progressive search depths. 
+
+ Memory shows its strongest effect in the first 10 iterations ( p = 0.072 p=0.072 ), with treatment winning on 15/36 tasks versus 10/36 for control at N = 10 N=10 (mean log ⁡ ( T / C ) = + 0.043 \log(T/C)=+0.043 ). This advantage diminishes at deeper search depths, consistent with memory’s role in avoiding redundant early exploration–memory prevents re-exploration of dead-end strategies during early iterations, but sufficiently long search compensates for the lack of cross-iteration learning. Its primary contribution is thus reaching good solutions faster rather than finding better ones given unlimited time. In practice this is the useful regime: under a fixed iteration budget–where users want the best kernel within a time constraint rather than the absolute best given unlimited search–the faster early convergence translates to reduced wall-clock time at no quality cost. 
+
+ Appendix E Search Strategy Ablation: MCTS vs Greedy 
+
+ We conduct a controlled ablation to isolate the contribution of MCTS tree search versus greedy search. KernelPro is the only LLM-based CUDA optimization agent to employ structured tree search; all related systems use flat iterative refinement or evolutionary population-based search. This ablation tests whether principled exploration via UCT selection produces better optimizations than pure greedy exploitation under a fixed compute budget of 60 candidates (30 iterations × \times 2 candidates per expansion). 
+
+ Both conditions use the full KernelPro profiling pipeline (Stage 1 roofline + Stage 2 filtered tools), session memory, Sonnet 4.6 on A100 GPUs, and identical hyperparameters: 15 seeds per task (5 temperatures × \times 3 rounds), 30 iterations, 2 candidates per iteration. The sole variable is the search strategy: 
+
+ • 
+
+ Greedy : Each iteration expands only the current best node, with fresh restart after consecutive failures. Repair targets are selected via a composite priority (execution stage, error magnitude, speedup) –kernels that execute but produce wrong output rank above compilation failures, with smaller numerical errors and higher partial speedups preferred as tiebreakers, concentrating repair budget on candidates closest to correctness. 
+
+ • 
+
+ MCTS : Tree search with progressive widening and UCT selection ( c = 2 c=\sqrt{2} ). Terminal marking prunes dead-end branches. 
+
+ Table  21 reports aggregate metrics on the 42 KernelBench tasks. MCTS achieves a 26% higher geometric mean speedup (4.60 × \times vs 3.65 × \times ) and wins on 29 tasks while greedy wins on only 8. The Wilcoxon signed-rank test rejects the null hypothesis at p = 0.004 p=0.004 , providing strong evidence that MCTS produces higher-quality optimizations under matched compute budgets. 
+
+ Table 21: Search strategy ablation: MCTS vs Greedy (42 KernelBench tasks). 
+
+ Metric | 
+ Greedy | 
+ MCTS | 
+
+ Geometric mean speedup | 
+ 3.65 × \times | 
+ 4.60 × \times | 
+
+ Median speedup | 
+ 4.17 × \times | 
+ 6.09 × \times | 
+
+ fast_p ( > 2 × >2\times ) | 
+ 59.5% | 
+ 70.3% | 
+
+ fast_p ( > 5 × >5\times ) | 
+ 48.6% | 
+ 59.5% | 
+
+ Head-to-head wins | 
+ 8 | 
+ 29 | 
+
+ Wilcoxon p p (one-sided) | 
+ 0.004** | 
+
+ Table  22 shows the fraction of tasks exceeding progressively higher speedup thresholds. MCTS dominates across all thresholds, with the gap largest at moderate speedups (1.5–5 × \times ) where MCTS solves 8–11% more tasks than greedy. This suggests MCTS is most valuable for tasks requiring multi-step optimization chains where greedy converges prematurely to a local optimum. 
+
+ Table 22: fast_p: fraction of tasks with best speedup > p >p . 
+
+ Threshold p p | 
+ Greedy | 
+ MCTS | 
+ Δ \Delta | 
+
+ > 1 × >1\times | 
+ 1.000 | 
+ 1.000 | 
+ – | 
+
+ > 1.5 × >1.5\times | 
+ 0.649 | 
+ 0.757 | 
+ +10.8% | 
+
+ > 2 × >2\times | 
+ 0.595 | 
+ 0.703 | 
+ +10.8% | 
+
+ > 3 × >3\times | 
+ 0.568 | 
+ 0.649 | 
+ +8.1% | 
+
+ > 5 × >5\times | 
+ 0.486 | 
+ 0.595 | 
+ +10.8% | 
+
+ > 10 × >10\times | 
+ 0.189 | 
+ 0.243 | 
+ +5.4% | 
+
+ The largest MCTS advantages occur on tasks requiring exploration to escape local optima: L1 task 7 (10.0 × \times ratio: MCTS 25.0 × \times vs greedy 2.5 × \times ), L2 task 33 (8.0 × \times ratio: MCTS 8.0 × \times vs greedy 1.0 × \times ), L3 task 31 (6.0 × \times ratio: MCTS 25.0 × \times vs greedy 4.2 × \times ). In these cases, greedy converges to a correct but suboptimal solution and cannot escape, while MCTS explores alternative subtrees that discover superior optimization paths. Task 46 (Appendix  G.2 ) demonstrates the extreme case: 43 consecutive failures before the first valid solution—a search depth that tree search’s persistence enables while budget-limited single-shot approaches would have long abandoned. Greedy wins on 8 tasks, with the largest margin on L2 task 22 (greedy 9.1 × \times vs MCTS 1.1 × \times ). These tend to be tasks where the optimization landscape is unimodal–depth-first exploitation suffices and MCTS wastes budget on unnecessary exploration. 
+
+ The results confirm that principled tree search is a significant contributor to KernelPro ’s performance. The 26% improvement in geometric mean speedup represents the gap between exploiting a single promising path (greedy) and systematically exploring the optimization landscape (MCTS). Combined with the micro-profiling tool ablation (Appendix  C ), this establishes that both components–tool-guided feedback and MCTS search–independently and significantly improve optimization quality. 
+
+ Appendix F Tool Invocation Mode Ablation 
+
+ We conduct a controlled ablation to isolate the contribution of proactive tool orchestration– KernelPro ’s deterministic execution of all relevant micro-profiling tools before LLM invocation (Section  3.2.3 ). This ablation tests whether guaranteed comprehensive analysis outperforms the standard reactive pattern where the LLM decides which tools to invoke via function calling. 
+
+ Both conditions use the full KernelPro micro-profiling tool suite (15 tools), greedy search (30 iterations × \times 2 candidates), session memory, and Sonnet 4.6 on A100 GPUs at five temperature settings (0.2, 0.33, 0.45, 0.57, 0.7) with 2 independent rounds per task (10 seeds total). The sole variable is the tool invocation pattern: 
+
+ • 
+
+ Proactive : All relevant micro-profiling tools are executed deterministically based on bottleneck classification. Results are injected into the prompt before LLM invocation. 
+
+ • 
+
+ Reactive : The LLM decides which tools to invoke via standard function calling. The same 15 tools are available but invocation is stochastic. 
+
+ Table  23 reports aggregate metrics across 42 tasks (best-of-seeds per task). Proactive mode achieves a 23% higher geometric mean speedup and wins on 10 of 14 decisive tasks ( p = 0.035 p=0.035 ). The effect is consistent across difficulty levels (L1, L2, L3). 
+
+ Table 23: Tool invocation mode ablation: Proactive vs Reactive (42 tasks, best-of-seeds). 
+
+ Metric | 
+ Reactive | 
+ Proactive | 
+
+ Geometric mean speedup | 
+ 1.12 × \times | 
+ 1.37 × \times | 
+
+ fast_p ( > 1.5 × >1.5\times ) | 
+ 7.1% | 
+ 19.0% | 
+
+ fast_p ( > 5 × >5\times ) | 
+ 2.4% | 
+ 11.9% | 
+
+ Task-level wins | 
+ 4 | 
+ 10 | 
+
+ Wilcoxon p p (one-sided) | 
+ 0.035* | 
+
+ Table  24 shows the fraction of tasks exceeding progressively higher speedup thresholds. Proactive mode dominates across all thresholds, with the largest gap at moderate speedups where proactive orchestration unlocks optimizations that reactive invocation misses. 
+
+ Table 24: fast_p by tool invocation mode: fraction of tasks with best speedup > p >p . 
+
+ Threshold p p | 
+ Reactive | 
+ Proactive | 
+ Δ \Delta | 
+
+ > 1 × >1\times | 
+ 0.262 | 
+ 0.262 | 
+ – | 
+
+ > 1.5 × >1.5\times | 
+ 0.071 | 
+ 0.190 | 
+ +11.9% | 
+
+ > 2 × >2\times | 
+ 0.071 | 
+ 0.167 | 
+ +9.5% | 
+
+ > 3 × >3\times | 
+ 0.048 | 
+ 0.119 | 
+ +7.1% | 
+
+ > 5 × >5\times | 
+ 0.024 | 
+ 0.119 | 
+ +9.5% | 
+
+ > 10 × >10\times | 
+ 0.000 | 
+ 0.071 | 
+ +7.1% | 
+
+ The results validate the proactive design choice described in Section  3.2.3 . Under reactive invocation, the LLM calls an average of 3–4 tools per iteration, missing critical analyses that would reveal optimization opportunities. Proactive orchestration guarantees that all relevant tools execute, providing the comprehensive profiling context that enables higher-quality optimizations. This is particularly important for CUDA optimization where the relevant bottleneck is often non-obvious–an expert systematically checks all metrics rather than guessing which to examine. The Task 41 trajectory (Appendix  G.1 ) provides a concrete illustration: the tools emit six ranked, actionable directives for the diagnosed bottleneck, and the agent compounds several of them in one step (epilogue fusion through the lower-ranked BF16 switch) for a 2.8 × 2.8\times improvement—reactive invocation calling 3–4 tools would surface only the top of this list, forgoing the rest. 
+
+ Combined with the micro-profiling tool ablation (Appendix  C ) and search strategy ablation (Appendix  E ), this establishes that three components–interpreted tool feedback, proactive orchestration, and MCTS search–each independently and significantly improve optimization quality ( p < 0.05 p<0.05 for all three). 
+
+ Appendix G Design Component Case Studies: CUTLASS Optimization Trajectories 
+
+ To illustrate how KernelPro ’s design components work together in practice, we present two complementary KernelBench trajectories that produce CUTLASS-based solutions. Level 2 Task 41 demonstrates deep refinement —a single decisive architectural choice followed by iterative profiling-driven polishing. Level 3 Task 46 demonstrates resilient exploration —sustained search through 43 failed attempts before achieving a working solution, then rapid profiling-guided convergence. Together they showcase how KernelPro ’s iterative search, micro-profiling tools, and CUTLASS integration enable optimization trajectories that single-shot generation cannot replicate. 
+
+ G.1 Level 2 / Task 41: GEMM + BatchNorm + GELU + ReLU 
+
+ Problem. 
+
+ The reference implements a linear layer ( 16384 × 4096 → 4096 16384\times 4096\to 4096 ) followed by batch normalization, GELU activation, and ReLU—four separate PyTorch operations producing four kernel launches with intermediate DRAM round-trips. The compute-bound GEMM dominates runtime, but the memory-bound elementwise tail contributes significant overhead at this batch size. 
+
+ Trajectory overview. 
+
+ KernelPro explores 41 iterations total, of which 7 produce valid solutions (34 fail compilation or correctness checks). The successful lineage progresses through iterations 9 → \to 12 → \to 13 → \to 26 → \to 28 → \to 37 → \to 40, achieving speedups of 3.91 × → 4.11 × → 11.49 × → 11.73 × → 12.00 × → 12.09 × → 12.10 × 3.91\times\to 4.11\times\to 11.49\times\to 11.73\times\to 12.00\times\to 12.09\times\to 12.10\times . Final speedup: 12.1 × \times . 
+
+ The breakthrough (iteration 13). 
+
+ The most significant optimization event occurs at the third successful iteration, where speedup jumps from 4.11 × 4.11\times to 11.49 × 11.49\times —a 2.8 × 2.8\times improvement in a single step. The micro-profiling tools diagnose a memory bottleneck (15.88 sectors/request indicating strided loads, 8.7 GB read traffic dominating runtime, 244 registers/thread limiting occupancy) and rank a set of remedies, the top two of which the agent applies together. It completes the fusion of the trailing batch-normalization and activation into the GEMM epilogue—a custom GeluReluAct functor plus BatchNorm affine folded into the GEMM weights ( α ⋅ W \alpha\cdot W , α ⋅ bias + β \alpha\cdot\text{bias}+\beta )—eliminating the last standalone elementwise kernel and its round trip through DRAM; and it switches the GEMM from a TF32 path ( float inputs, GemmShape<128,128,32> ) to BF16 tensor cores ( cutlass::bfloat16_t , GemmShape<128,128,16> ), which halves the dominant read traffic and roughly doubles tensor-core throughput. Both changes attack the same diagnosed bottleneck—off-chip data movement—and together account for the leap; the precision switch supplies most of the magnitude, while the fusion removes the residual inter-kernel traffic and is what makes the BF16 path a single end-to-end CUTLASS kernel rather than a library call. 
+
+ Profiling-driven polish (iterations 26–40). 
+
+ After the breakthrough, the profiling tools shift from identifying the primary bottleneck to precision tuning. At iteration 26, ncu identifies the bottleneck as compute-bound with 230 registers/thread; the agent explores a larger tile ( GemmShape<128,256,32> ) to increase arithmetic intensity. At iteration 28, profiling reveals this larger tile underperforms due to wave quantization effects at the problem’s dimensions, and the agent reverts to GemmShape<128,128,32> with different warp shapes. Subsequent iterations explore secondary optimizations—fusing the BF16 cast into the epilogue, adjusting pipeline stages, and tuning warp tile shapes ( 64 × \times 128 × \times 64 vs 32 × \times 64 × \times 64 )—each guided by specific ncu metrics. The final four iterations collectively contribute 0.61 × 0.61\times additional speedup through these incremental refinements. 
+
+ CUTLASS integration. 
+
+ The final solution showcases deep CUTLASS customization: a custom GeluReluAct epilogue functor template (handling both scalar float and vectorized cutlass::Array<float, N> ), batch normalization folded into GEMM weights at initialization, and BF16 precision with FP32 accumulation. The agent demonstrates understanding of CUTLASS’s type system—defining LinearCombinationGeneric<GeluReluAct, float, 4, float, float> with 4-wide vectorized epilogue access—which requires knowledge of CUTLASS’s template conventions that static few-shot examples alone would not generalize. 
+
+ KernelPro – Level 2 Task 41 — 12.10 × 12.10\times Speedup 
+
+ ⬇ 
+ import os 
+
+ os . environ [ ’TORCH_CUDA_ARCH_LIST’ ] = ’8.0’ 
+
+ import torch 
+
+ import torch . nn as nn 
+
+ from torch . utils . cpp_extension import load_inline 
+
+ cuda_src = r ’’ ’ 
+
+ #include <torch/extension.h> 
+
+ #include <ATen/cuda/CUDAContext.h> 
+
+ #include <cuda_runtime.h> 
+
+ #include <cuda_bf16.h> 
+
+ #include <cutlass/cutlass.h> 
+
+ #include <cutlass/array.h> 
+
+ #include <cutlass/numeric_types.h> 
+
+ #include <cutlass/gemm/device/gemm_universal.h> 
+
+ #include <cutlass/epilogue/thread/linear_combination_generic.h> 
+
+ #include <cutlass/gemm/threadblock/threadblock_swizzle.h> 
+
+ #include <cmath> 
+
+ // Fast vectorized FP32 -> BF16 cast: 16B loads, 8B stores, processes 4 elements/thread 
+
+ __global__ __launch_bounds__(256, 4) 
+
+ void cast_fp32_to_bf16_vec4(const float4* __restrict__ in, __nv_bfloat162* __restrict__ out, int n4) { 
+
+ int idx = blockIdx.x * blockDim.x + threadIdx.x; 
+
+ int stride = blockDim.x * gridDim.x; 
+
+ for (int i = idx; i < n4; i += stride) { 
+
+ float4 f = in[i]; 
+
+ __nv_bfloat162 a = __floats2bfloat162_rn(f.x, f.y); 
+
+ __nv_bfloat162 b = __floats2bfloat162_rn(f.z, f.w); 
+
+ ((__nv_bfloat162*)out)[i*2 + 0] = a; 
+
+ ((__nv_bfloat162*)out)[i*2 + 1] = b; 
+
+ } 
+
+ } 
+
+ torch::Tensor cast_to_bf16_fast(torch::Tensor x) { 
+
+ TORCH_CHECK(x.is_cuda() && x.dtype() == torch::kFloat32, "need fp32 cuda"); 
+
+ x = x.contiguous(); 
+
+ auto out = torch::empty(x.sizes(), x.options().dtype(torch::kBFloat16)); 
+
+ int64_t n = x.numel(); 
+
+ if (n % 4 != 0 || ((uintptr_t)x.data_ptr() % 16) != 0) { 
+
+ return x.to(torch::kBFloat16); 
+
+ } 
+
+ int n4 = n / 4; 
+
+ int block = 256; 
+
+ int grid = std::min(2048, (n4 + block - 1) / block); 
+
+ auto stream = at::cuda::getCurrentCUDAStream(); 
+
+ cast_fp32_to_bf16_vec4<<<grid, block, 0, stream>>>( 
+
+ reinterpret_cast<const float4*>(x.data_ptr<float>()), 
+
+ reinterpret_cast<__nv_bfloat162*>(out.data_ptr()), n4); 
+
+ return out; 
+
+ } 
+
+ template <typename T> struct GeluReluAct; 
+
+ template <> struct GeluReluAct<float> { 
+
+ static const bool kIsHeavy = true; 
+
+ CUTLASS_HOST_DEVICE float operator()(float x) const { 
+
+ if (x <= 0.f) return 0.f; 
+
+ float x3 = x * x * x; 
+
+ float inner = 0.7978845608f * (x + 0.044715f * x3); 
+
+ return 0.5f * x * (1.0f + ::tanhf(inner)); 
+
+ } 
+
+ }; 
+
+ template <int N> struct GeluReluAct<cutlass::Array<float, N>> { 
+
+ static const bool kIsHeavy = true; 
+
+ CUTLASS_HOST_DEVICE cutlass::Array<float, N> operator()( 
+
+ cutlass::Array<float, N> const& x) const { 
+
+ cutlass::Array<float, N> r; GeluReluAct<float> op; 
+
+ CUTLASS_PRAGMA_UNROLL for (int i = 0; i < N; ++i) r[i] = op(x[i]); 
+
+ return r; 
+
+ } 
+
+ }; 
+
+ using EpilogueOp = cutlass::epilogue::thread::LinearCombinationGeneric< 
+
+ GeluReluAct, float, 4, float, float>; 
+
+ using GemmDefault = cutlass::gemm::device::GemmUniversal< 
+
+ cutlass::bfloat16_t, cutlass::layout::RowMajor, 
+
+ cutlass::bfloat16_t, cutlass::layout::ColumnMajor, 
+
+ float, cutlass::layout::RowMajor, float, 
+
+ cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, 
+
+ cutlass::gemm::GemmShape<128,128,32>, 
+
+ cutlass::gemm::GemmShape<64,64,32>, 
+
+ cutlass::gemm::GemmShape<16,8,16>, 
+
+ EpilogueOp, 
+
+ cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>, 4, 8, 8>; 
+
+ using GemmSmall = cutlass::gemm::device::GemmUniversal< 
+
+ cutlass::bfloat16_t, cutlass::layout::RowMajor, 
+
+ cutlass::bfloat16_t, cutlass::layout::ColumnMajor, 
+
+ float, cutlass::layout::RowMajor, float, 
+
+ cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, 
+
+ cutlass::gemm::GemmShape<64,128,64>, 
+
+ cutlass::gemm::GemmShape<32,64,64>, 
+
+ cutlass::gemm::GemmShape<16,8,16>, 
+
+ EpilogueOp, 
+
+ cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>, 4, 8, 8>; 
+
+ using GemmBig = cutlass::gemm::device::GemmUniversal< 
+
+ cutlass::bfloat16_t, cutlass::layout::RowMajor, 
+
+ cutlass::bfloat16_t, cutlass::layout::ColumnMajor, 
+
+ float, cutlass::layout::RowMajor, float, 
+
+ cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, 
+
+ cutlass::gemm::GemmShape<128,256,32>, 
+
+ cutlass::gemm::GemmShape<64,64,32>, 
+
+ cutlass::gemm::GemmShape<16,8,16>, 
+
+ EpilogueOp, 
+
+ cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>, 3, 8, 8>; 
+
+ torch::Tensor fused_linear_bn_gelu_relu(torch::Tensor x, torch::Tensor W, torch::Tensor b) { 
+
+ TORCH_CHECK(x.is_cuda() && W.is_cuda() && b.is_cuda(), "inputs must be CUDA"); 
+
+ x = x.contiguous(); W = W.contiguous(); b = b.contiguous(); 
+
+ int M = x.size(0), K = x.size(1), N = W.size(0); 
+
+ auto out = torch::empty({M, N}, b.options()); 
+
+ auto launch = [&](auto gemm_op_tag) -> cutlass::Status { 
+
+ using GemmT = typename decltype(gemm_op_tag)::type; 
+
+ GemmT gemm_op; 
+
+ typename GemmT::Arguments args( 
+
+ cutlass::gemm::GemmUniversalMode::kGemm, {M, N, K}, 1, {1.0f, 1.0f}, 
+
+ reinterpret_cast<cutlass::bfloat16_t*>(x.data_ptr()), 
+
+ reinterpret_cast<cutlass::bfloat16_t*>(W.data_ptr()), 
+
+ b.data_ptr<float>(), out.data_ptr<float>(), 
+
+ (int64_t)M*K, (int64_t)N*K, 0, (int64_t)M*N, K, K, 0, N); 
+
+ return gemm_op(args); 
+
+ }; 
+
+ cutlass::Status status; 
+
+ bool small_m = (M <= 64), big = (M >= 512) && (N >= 512) && (K >= 512); 
+
+ if (small_m) { struct Tag { using type = GemmSmall; } tag; status = launch(tag); } 
+
+ else if (big) { struct Tag { using type = GemmBig; } tag; status = launch(tag); } 
+
+ else { struct Tag { using type = GemmDefault; } tag; status = launch(tag); } 
+
+ TORCH_CHECK(status == cutlass::Status::kSuccess, "CUTLASS GEMM failed"); 
+
+ return out; 
+
+ } 
+
+ ’ ’’ 
+
+ cpp_src = ( "torch::Tensor fused_linear_bn_gelu_relu(torch::Tensor x, torch::Tensor W, torch::Tensor b);\n" 
+
+ "torch::Tensor cast_to_bf16_fast(torch::Tensor x);\n" ) 
+
+ mod = load_inline ( 
+
+ name = ’fused_linbn_gelurelu_bf16_v5’ , cpp_sources = cpp_src , cuda_sources = cuda_src , 
+
+ functions =[ ’fused_linear_bn_gelu_relu’ , ’cast_to_bf16_fast’ ], 
+
+ extra_cuda_cflags =[ ’-I/path/to/cutlass/include’ , ’-I/path/to/cutlass/tools/util/include’ , 
+
+ ’--expt-relaxed-constexpr’ , ’-std=c++17’ , ’-gencode=arch=compute_80,code=sm_80’ , 
+
+ ’-O3’ , ’-DNDEBUG’ , ’--use_fast_math’ ], verbose = False ) 
+
+ class ModelNew ( nn . Module ): 
+
+ def __init__ ( self , in_features , out_features ): 
+
+ super (). __init__ () 
+
+ self . gemm = nn . Linear ( in_features , out_features ) 
+
+ self . batch_norm = nn . BatchNorm1d ( out_features ) 
+
+ self . _fused_W_bf16 = None 
+
+ self . _fused_b_fp32 = None 
+
+ def _build_fused ( self , device ): 
+
+ with torch . no_grad (): 
+
+ gamma = self . batch_norm . weight . to ( device ). float () 
+
+ beta_p = self . batch_norm . bias . to ( device ). float () 
+
+ mean = self . batch_norm . running_mean . to ( device ). float () 
+
+ var = self . batch_norm . running_var . to ( device ). float () 
+
+ scale = gamma / torch . sqrt ( var + self . batch_norm . eps ) 
+
+ W = self . gemm . weight . to ( device ). float () 
+
+ bias = self . gemm . bias . to ( device ). float () 
+
+ self . _fused_W_bf16 = ( W * scale . unsqueeze (1)). to ( torch . bfloat16 ). contiguous () 
+
+ self . _fused_b_fp32 = (( bias - mean ) * scale + beta_p ). contiguous () 
+
+ def forward ( self , x ): 
+
+ if self . _fused_W_bf16 is None or self . _fused_W_bf16 . device != x . device : 
+
+ self . _build_fused ( x . device ) 
+
+ x_bf16 = mod . cast_to_bf16_fast ( x . contiguous ()) if x . dtype == torch . float32 else x . to ( torch . bfloat16 ) 
+
+ return mod . fused_linear_bn_gelu_relu ( x_bf16 , self . _fused_W_bf16 , self . _fused_b_fp32 ) 
+
+ G.2 Level 3 / Task 46: NetVLAD with Ghost Clusters 
+
+ Problem. 
+
+ The reference implements NetVLAD with ghost clusters: a multi-step pipeline involving matrix multiplication ( 2048 × 512 → 37 2048\times 512\to 37 clusters), batch normalization, softmax, cluster slicing, weighted sum, batched matrix multiplication (residual computation), L2 normalization, and flatten. The operations span both compute-bound (two matrix multiplications) and memory-bound (softmax, normalization, transpose) regimes, making this a challenging heterogeneous optimization target. 
+
+ Trajectory overview. 
+
+ KernelPro explores 46 iterations, with only the final 3 producing valid solutions (43 fail compilation or correctness checks). The first valid solution at iteration 42 achieves only 0.75 × 0.75\times —a regression below baseline. Profiling-guided refinement then produces 2.38 × 2.38\times at iteration 44 and 2.79 × 2.79\times at iteration 45. Final speedup: 2.79 × \times . 
+
+ Resilience through 43 failures. 
+
+ This trajectory represents the most extreme exploration ratio in all 250 KernelBench tasks: 46 iterations attempted for 3 successes (15.3 × \times exploration ratio). The 43 failed iterations include incorrect CUTLASS configurations (wrong layouts for the batched GEMM), numerical errors in fused softmax normalization, and compilation failures from incompatible template instantiations. The search strategy’s persistence—continuing to generate candidates informed by prior failures—is critical here: a budget-limited single-shot approach would have abandoned this problem long before iteration 42. When iteration 42 finally compiles and runs correctly, it incorporates layout choices (RowMajor for the first GEMM, ColumnMajor for the batched GEMM) that reflect lessons accumulated across the prior failed attempts. 
+
+ Profiling-driven recovery from regression (iterations 42–45). 
+
+ The initial valid solution at 0.75 × 0.75\times demonstrates a common failure mode: correct CUTLASS compilation that performs worse than PyTorch’s optimized defaults due to poor memory access patterns. The micro-profiling tools quantify the problem precisely: 17.86 sectors/request (ideal: 4, indicating ∼ 4 × {\sim}4\times wasted bandwidth) and L1 hit rate of only 41.55%. The recommendations are specific and actionable: “fix memory access pattern to enable coalescing,” “use vectorized loads (float4) where layout permits,” and “use shared memory staging to batch and reorder accesses.” At iteration 44, the agent restructures memory access patterns based on this feedback, achieving 2.38 × 2.38\times —a 3.2 × 3.2\times improvement from profiling guidance alone. At iteration 45, ncu identifies shared memory as the new occupancy limiter and recommends reducing per-block shared memory usage. The agent responds with [32][33] bank-conflict-free padding on shared memory tiles and __launch_bounds__ annotations, reaching the final 2.79 × 2.79\times . 
+
+ CUTLASS integration. 
+
+ Unlike Task 41’s single-GEMM deep customization, Task 46 deploys CUTLASS broadly across a heterogeneous pipeline: two distinct GEMM configurations (128 × \times 128 × \times 16 for the assignment matrix multiplication and 64 × \times 64 × \times 16 for the batched residual computation), each with layout-aware configuration matched to the operation’s access patterns. These CUTLASS GEMMs serve as building blocks alongside hand-written kernels—a fused batch normalization + softmax + slice kernel using warp-shuffle reductions, a tiled 32 × \times 32 transpose with bank-conflict padding, and float4 vectorized loads for the normalization passes. This hybrid architecture (CUTLASS for compute-bound GEMMs, hand-tuned CUDA for memory-bound operations) demonstrates KernelPro ’s ability to match optimization strategy to each operation’s bottleneck characteristics. 
+
+ KernelPro – Level 3 Task 46 — 2.79 × 2.79\times Speedup 
+
+ ⬇ 
+ import os 
+
+ os . environ [ ’TORCH_CUDA_ARCH_LIST’ ] = ’8.0’ 
+
+ import math 
+
+ import torch 
+
+ import torch . nn as nn 
+
+ from torch . utils . cpp_extension import load_inline 
+
+ cuda_src = r ’’ ’ 
+
+ #include <torch/extension.h> 
+
+ #include <ATen/cuda/CUDAContext.h> 
+
+ #include <cuda_runtime.h> 
+
+ #include <cutlass/gemm/device/gemm.h> 
+
+ #include <cutlass/gemm/device/gemm_batched.h> 
+
+ using GemmTF32 = cutlass::gemm::device::Gemm< 
+
+ float, cutlass::layout::RowMajor, 
+
+ float, cutlass::layout::RowMajor, 
+
+ float, cutlass::layout::RowMajor, 
+
+ float, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, 
+
+ cutlass::gemm::GemmShape<128, 128, 16>, 
+
+ cutlass::gemm::GemmShape<64, 64, 16>, 
+
+ cutlass::gemm::GemmShape<16, 8, 8>>; 
+
+ using GemmBatchedTF32 = cutlass::gemm::device::GemmBatched< 
+
+ float, cutlass::layout::ColumnMajor, 
+
+ float, cutlass::layout::RowMajor, 
+
+ float, cutlass::layout::RowMajor, 
+
+ float, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80, 
+
+ cutlass::gemm::GemmShape<64, 64, 16>, 
+
+ cutlass::gemm::GemmShape<32, 32, 16>, 
+
+ cutlass::gemm::GemmShape<16, 8, 8>>; 
+
+ torch::Tensor gemm_rr(torch::Tensor A, torch::Tensor B) { 
+
+ int M = A.size(0), K = A.size(1), N = B.size(1); 
+
+ auto C = torch::empty({M, N}, A.options()); 
+
+ GemmTF32 gemm; 
+
+ cudaStream_t stream = at::cuda::getCurrentCUDAStream(); 
+
+ GemmTF32::Arguments args({M,N,K}, 
+
+ {A.data_ptr<float>(), K}, {B.data_ptr<float>(), N}, 
+
+ {C.data_ptr<float>(), N}, {C.data_ptr<float>(), N}, {1.0f, 0.0f}); 
+
+ gemm(args, nullptr, stream); 
+
+ return C; 
+
+ } 
+
+ torch::Tensor gemm_batched_cr(torch::Tensor A, torch::Tensor B, 
+
+ int Bsz, int M, int N_inner, int N_out) { 
+
+ auto C = torch::empty({Bsz, M, N_out}, B.options()); 
+
+ GemmBatchedTF32 gemm; 
+
+ cudaStream_t stream = at::cuda::getCurrentCUDAStream(); 
+
+ GemmBatchedTF32::Arguments args({M, N_out, N_inner}, 
+
+ {A.data_ptr<float>(), M}, (int64_t)N_inner * M, 
+
+ {B.data_ptr<float>(), N_out}, (int64_t)N_inner * N_out, 
+
+ {C.data_ptr<float>(), N_out}, (int64_t)M * N_out, 
+
+ {C.data_ptr<float>(), N_out}, (int64_t)M * N_out, 
+
+ {1.0f, 0.0f}, Bsz); 
+
+ gemm(args, nullptr, stream); 
+
+ return C; 
+
+ } 
+
+ __global__ void bn_softmax_slice_kernel( 
+
+ const float* __restrict__ logits, const float* __restrict__ scale, 
+
+ const float* __restrict__ bias, float* __restrict__ out, 
+
+ int rows, int K_total, int K) { 
+
+ int row = blockIdx.x; 
+
+ int tid = threadIdx.x; 
+
+ extern __shared__ float sdata[]; 
+
+ float local_max = -INFINITY; 
+
+ for (int i = tid; i < K_total; i += blockDim.x) { 
+
+ float v = logits[row * K_total + i] * scale[i] + bias[i]; 
+
+ sdata[i] = v; 
+
+ local_max = fmaxf(local_max, v); 
+
+ } 
+
+ __syncthreads(); 
+
+ int lane = tid & 31; int wid = tid >> 5; 
+
+ int nwarps = (blockDim.x + 31) >> 5; 
+
+ for (int off = 16; off > 0; off >>= 1) 
+
+ local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, off)); 
+
+ __shared__ float warp_max[32]; __shared__ float s_max; 
+
+ if (lane == 0) warp_max[wid] = local_max; 
+
+ __syncthreads(); 
+
+ if (wid == 0) { 
+
+ float v = (lane < nwarps) ? warp_max[lane] : -INFINITY; 
+
+ for (int off = 16; off > 0; off >>= 1) v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, off)); 
+
+ if (lane == 0) s_max = v; 
+
+ } 
+
+ __syncthreads(); 
+
+ float local_sum = 0.f; 
+
+ for (int i = tid; i < K_total; i += blockDim.x) { 
+
+ float e = __expf(sdata[i] - s_max); 
+
+ sdata[i] = e; local_sum += e; 
+
+ } 
+
+ __syncthreads(); 
+
+ for (int off = 16; off > 0; off >>= 1) 
+
+ local_sum += __shfl_xor_sync(0xffffffff, local_sum, off); 
+
+ __shared__ float warp_sum[32]; __shared__ float s_sum; 
+
+ if (lane == 0) warp_sum[wid] = local_sum; 
+
+ __syncthreads(); 
+
+ if (wid == 0) { 
+
+ float v = (lane < nwarps) ? warp_sum[lane] : 0.f; 
+
+ for (int off = 16; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffff, v, off); 
+
+ if (lane == 0) s_sum = v; 
+
+ } 
+
+ __syncthreads(); 
+
+ float inv = 1.f / s_sum; 
+
+ for (int i = tid; i < K; i += blockDim.x) out[row * K + i] = sdata[i] * inv; 
+
+ } 
+
+ torch::Tensor bn_softmax_slice(torch::Tensor logits, torch::Tensor scale, torch::Tensor bias, int K) { 
+
+ int rows = logits.size(0), K_total = logits.size(1); 
+
+ auto out = torch::empty({rows, K}, logits.options()); 
+
+ bn_softmax_slice_kernel<<<rows, 128, K_total * sizeof(float), 
+
+ at::cuda::getCurrentCUDAStream()>>>( 
+
+ logits.data_ptr<float>(), scale.data_ptr<float>(), bias.data_ptr<float>(), 
+
+ out.data_ptr<float>(), rows, K_total, K); 
+
+ return out; 
+
+ } 
+
+ __global__ void sum_assignment_kernel_v2( 
+
+ const float* __restrict__ assignment, float* __restrict__ a_sum, int N, int K) { 
+
+ int b = blockIdx.x; int tx = threadIdx.x; int ty = threadIdx.y; int by = blockDim.y; 
+
+ int base = b * N * K; 
+
+ float s = 0.f; 
+
+ for (int n = ty; n < N; n += by) s += assignment[base + n * K + tx]; 
+
+ extern __shared__ float ssum[]; 
+
+ ssum[ty * K + tx] = s; 
+
+ __syncthreads(); 
+
+ if (ty == 0) { 
+
+ float total = 0.f; 
+
+ for (int j = 0; j < by; j++) total += ssum[j * K + tx]; 
+
+ a_sum[b * K + tx] = total; 
+
+ } 
+
+ } 
+
+ torch::Tensor sum_assignment(torch::Tensor assignment, int Bsz, int N, int K) { 
+
+ auto a_sum = torch::empty({Bsz, K}, assignment.options()); 
+
+ int by = 256 / K; if (by < 1) by = 1; if (by > 32) by = 32; 
+
+ dim3 block(K, by); 
+
+ sum_assignment_kernel_v2<<<Bsz, block, (size_t)K*by*sizeof(float), 
+
+ at::cuda::getCurrentCUDAStream()>>>( 
+
+ assignment.data_ptr<float>(), a_sum.data_ptr<float>(), N, K); 
+
+ return a_sum; 
+
+ } 
+
+ __global__ __launch_bounds__(128, 8) void compute_inv_kernel( 
+
+ const float* __restrict__ vlad, const float* __restrict__ a_sum, 
+
+ const float* __restrict__ clusters2_t, float* __restrict__ inv_out, int K, int D) { 
+
+ int b = blockIdx.x; int tid = threadIdx.x; int bs = blockDim.x; 
+
+ extern __shared__ float s_asum[]; 
+
+ for (int i = tid; i < K; i += bs) s_asum[i] = a_sum[b * K + i]; 
+
+ __syncthreads(); 
+
+ int b_off = b * K * D; int D4 = D >> 2; 
+
+ const float4* vlad4 = reinterpret_cast<const float4*>(vlad + b_off); 
+
+ const float4* c4 = reinterpret_cast<const float4*>(clusters2_t); 
+
+ float sumsq = 0.f; 
+
+ for (int k = 0; k < K; k++) { 
+
+ float as = s_asum[k]; 
+
+ for (int d = tid; d < D4; d += bs) { 
+
+ float4 v4 = __ldg(&vlad4[k*D4 + d]); 
+
+ float4 cv = __ldg(&c4[k*D4 + d]); 
+
+ float a0=v4.x-as*cv.x, a1=v4.y-as*cv.y, a2=v4.z-as*cv.z, a3=v4.w-as*cv.w; 
+
+ sumsq += a0*a0 + a1*a1 + a2*a2 + a3*a3; 
+
+ } 
+
+ } 
+
+ int lane = tid & 31; int wid = tid >> 5; int nwarps = (bs+31)>>5; 
+
+ for (int off=16; off>0; off>>=1) sumsq += __shfl_xor_sync(0xffffffff, sumsq, off); 
+
+ __shared__ float warp_s[8]; 
+
+ if (lane == 0) warp_s[wid] = sumsq; 
+
+ __syncthreads(); 
+
+ if (wid == 0) { 
+
+ float v = (lane < nwarps) ? warp_s[lane] : 0.f; 
+
+ for (int off=16; off>0; off>>=1) v += __shfl_xor_sync(0xffffffff, v, off); 
+
+ if (lane == 0) inv_out[b] = rsqrtf(fmaxf(v, 1e-24f)); 
+
+ } 
+
+ } 
+
+ __global__ __launch_bounds__(256, 6) void transpose_normalize_kernel( 
+
+ const float* __restrict__ vlad, const float* __restrict__ a_sum, 
+
+ const float* __restrict__ clusters2_t, const float* __restrict__ inv_arr, 
+
+ float* __restrict__ out, int K, int D) { 
+
+ int b = blockIdx.z; int tile_k = blockIdx.x; int tile_d = blockIdx.y; 
+
+ int tx = threadIdx.x; int ty = threadIdx.y; 
+
+ int k0 = tile_k * 32; int d0 = tile_d * 32; 
+
+ __shared__ float tile[32][33]; 
+
+ __shared__ float s_asum[32]; 
+
+ if (ty == 0) { int k = k0+tx; s_asum[tx] = (k<K) ? a_sum[b*K+k] : 0.f; } 
+
+ __syncthreads(); 
+
+ float inv = inv_arr[b]; 
+
+ #pragma unroll 
+
+ for (int r = 0; r < 4; r++) { 
+
+ int k_local = ty*4+r, d_local = tx, k = k0+k_local, d = d0+d_local; 
+
+ float val = 0.f; 
+
+ if (k < K && d < D) { 
+
+ val = __ldg(&vlad[b*K*D + k*D + d]) - s_asum[k_local]*__ldg(&clusters2_t[k*D+d]); 
+
+ } 
+
+ tile[k_local][d_local] = val; 
+
+ } 
+
+ __syncthreads(); 
+
+ #pragma unroll 
+
+ for (int r = 0; r < 4; r++) { 
+
+ int d_local = ty*4+r, k_local = tx, d = d0+d_local, k = k0+k_local; 
+
+ if (d < D && k < K) out[b*D*K + d*K + k] = tile[k_local][d_local] * inv; 
+
+ } 
+
+ } 
+
+ torch::Tensor finalize(torch::Tensor vlad, torch::Tensor a_sum, 
+
+ torch::Tensor clusters2_t, int Bsz, int K, int D) { 
+
+ auto out = torch::empty({Bsz, D*K}, vlad.options()); 
+
+ auto inv = torch::empty({Bsz}, vlad.options()); 
+
+ cudaStream_t stream = at::cuda::getCurrentCUDAStream(); 
+
+ compute_inv_kernel<<<Bsz, 128, K*sizeof(float), stream>>>( 
+
+ vlad.data_ptr<float>(), a_sum.data_ptr<float>(), 
+
+ clusters2_t.data_ptr<float>(), inv.data_ptr<float>(), K, D); 
+
+ dim3 grid((K+31)/32, (D+31)/32, Bsz); dim3 block(32, 8); 
+
+ transpose_normalize_kernel<<<grid, block, 0, stream>>>( 
+
+ vlad.data_ptr<float>(), a_sum.data_ptr<float>(), 
+
+ clusters2_t.data_ptr<float>(), inv.data_ptr<float>(), 
+
+ out.data_ptr<float>(), K, D); 
+
+ return out; 
+
+ } 
+
+ ’ ’’ 
+
+ cpp_src = r ’’ ’ 
+
+ torch::Tensor gemm_rr(torch::Tensor A, torch::Tensor B); 
+
+ torch::Tensor gemm_batched_cr(torch::Tensor A, torch::Tensor B, int Bsz, int M, int N_inner, int N_out); 
+
+ torch::Tensor bn_softmax_slice(torch::Tensor logits, torch::Tensor scale, torch::Tensor bias, int K); 
+
+ torch::Tensor sum_assignment(torch::Tensor assignment, int Bsz, int N, int K); 
+
+ torch::Tensor finalize(torch::Tensor vlad, torch::Tensor a_sum, torch::Tensor clusters2_t, int Bsz, int K, int D); 
+
+ ’ ’’ 
+
+ mod = load_inline ( 
+
+ name = ’netvlad_opt3’ , cpp_sources = cpp_src , cuda_sources = cuda_src , 
+
+ functions =[ ’gemm_rr’ , ’gemm_batched_cr’ , ’bn_softmax_slice’ , ’sum_assignment’ , ’finalize’ ], 
+
+ extra_cuda_cflags =[ ’-I/path/to/cutlass/include’ , ’-I/path/to/cutlass/tools/util/include’ , 
+
+ ’--expt-relaxed-constexpr’ , ’-std=c++17’ , ’-gencode=arch=compute_80,code=sm_80’ , 
+
+ ’-O3’ , ’-DNDEBUG’ , ’--use_fast_math’ ], verbose = False ) 
+
+ class ModelNew ( nn . Module ): 
+
+ def __init__ ( self , cluster_size , feature_size , ghost_clusters ): 
+
+ super ( ModelNew , self ). __init__ () 
+
+ self . feature_size = feature_size 
+
+ self . cluster_size = cluster_size 
+
+ init_sc = (1 / math . sqrt ( feature_size )) 
+
+ clusters = cluster_size + ghost_clusters 
+
+ self . clusters = nn . Parameter ( init_sc * torch . randn ( feature_size , clusters )) 
+
+ self . batch_norm = nn . BatchNorm1d ( clusters ) 
+
+ self . clusters2 = nn . Parameter ( init_sc * torch . randn (1, feature_size , cluster_size )) 
+
+ self . out_dim = self . cluster_size * feature_size 
+
+ self . _cached = False 
+
+ def _build_cache ( self , device , dtype ): 
+
+ bn = self . batch_norm 
+
+ scale = ( bn . weight / torch . sqrt ( bn . running_var + bn . eps )). to ( device = device , dtype = dtype ). contiguous () 
+
+ bias = ( bn . bias - bn . running_mean * scale ). to ( device = device , dtype = dtype ). contiguous () 
+
+ self . register_buffer ( ’_bn_scale’ , scale , persistent = False ) 
+
+ self . register_buffer ( ’_bn_bias’ , bias , persistent = False ) 
+
+ self . register_buffer ( ’_clusters_c’ , self . clusters . detach (). contiguous (), persistent = False ) 
+
+ c2_2d = self . clusters2 . detach (). view ( self . feature_size , self . cluster_size ) 
+
+ self . register_buffer ( ’_clusters2_t’ , c2_2d . t (). contiguous (), persistent = False ) 
+
+ self . _cached = True 
+
+ def forward ( self , x , mask = None ): 
+
+ if not self . _cached or self . _bn_scale . device != x . device : 
+
+ self . _build_cache ( x . device , x . dtype ) 
+
+ B , N , D = x . size (0), x . size (1), self . feature_size 
+
+ K = self . cluster_size 
+
+ x_flat = x . contiguous (). view (-1, D ) 
+
+ logits = mod . gemm_rr ( x_flat , self . _clusters_c ) 
+
+ assignment = mod . bn_softmax_slice ( logits , self . _bn_scale , self . _bn_bias , K ) 
+
+ a_sum = mod . sum_assignment ( assignment , B , N , K ) 
+
+ vlad = mod . gemm_batched_cr ( assignment , x . contiguous (), B , K , N , D ) 
+
+ return mod . finalize ( vlad , a_sum , self . _clusters2_t , B , K , D ) 
+
+ Appendix H VeOmni dW1 Generated Kernel (Full Source) 
+
+ What the kernel computes. 
+
+ In MoE training, each token is routed to a few of E E experts and each expert applies
+its own FFN. VeOmni packs all routed tokens into a single contiguous buffer ordered by
+expert and runs a grouped GEMM, where the per-expert row counts are encoded as a
+cumulative-sum vector cumsum_K . The dW1 kernel is the backward-pass
+ weight gradient of the first FFN projection ( gate_up_proj ): for each
+expert e e it accumulates dW1 e = X e ⊤ ​ G e \mathrm{dW1}_{e}=X_{e}^{\top}G_{e} over that expert’s token
+rows, where X e X_{e} are the expert’s inputs and G e G_{e} the gradient of its pre-activation.
+The contraction length K e K_{e} (the number of tokens routed to expert e e ) therefore
+varies per expert and is the only ragged dimension; M = 2880 M{=}2880 and N = 5760 N{=}5760 are fixed
+by the GPT-OSS-120B hidden/intermediate sizes. 
+
+ Estimating the token-to-expert distribution. 
+
+ Because the speedup depends on the per-expert load (the K e K_{e} ), the benchmark must feed
+realistic routing imbalance rather than a uniform split. We measured GPT-OSS-120B
+routing on 30 30 LongBench-v2  ( Bai et al., 2024 ) samples × \times 36 36 MoE layers, recomputing each layer’s
+top- K K assignment from the router logits and counting tokens per expert. The
+per-expert counts are heavily skewed within a single (sample, layer)—coefficient of
+variation CV ≈ 2.13 \mathrm{CV}\approx 2.13 , versus CV ≈ ( E − 1 ) / R ≈ 0.011 \mathrm{CV}\approx\sqrt{(E-1)/R}\approx 0.011 
+for a uniform split—and balance out only when pooled across inputs and layers
+( CV ≈ 0.277 \mathrm{CV}\approx 0.277 ). Fitting generators to the empirical sorted-load curve by
+ L 1 L_{1} distance, a Dirichlet–Multinomial fits best ( L 1 = 0.129 L_{1}{=}0.129 , vs. 0.147 0.147 for a
+logistic-normal). We therefore sample each call’s routing as 
+
+ | 
+ p ∼ Dirichlet ⁡ ( α ​  1 E ) , α = 0.24 , E = 128 ; ( K 1 , … , K E ) ∼ Multinomial ⁡ ( R , p ) , p\sim\mathrm{Dirichlet}(\alpha\,\mathbf{1}_{E}),\quad\alpha{=}0.24,\ E{=}128;\qquad(K_{1},\dots,K_{E})\sim\mathrm{Multinomial}(R,\,p), | 
+ | 
+
+ with R = 57,768 R{=}57{,}768 total routed rows. The small α \alpha reproduces the measured heavy
+tail—a few hot experts, a long warm shoulder, and several empty experts
+( K e = 0 K_{e}{=}0 )—exercising the short-tail and empty-expert cases a uniform-shape GEMM never
+encounters. 
+
+ The generated kernel. 
+
+ The box below lists the complete KernelPro -generated CUDA source
+for the winning dW1 kernel (Section  5.4 ), which attains
+ 1.23 × 1.23\times over the expert-tuned Triton baseline on H100. KernelPro ’s Programmer Agent
+generated it at the CuTe source level—composing copy atoms, an MMA atom, and swizzled
+layouts into a novel kernel rather than instantiating a high-level CUTLASS GEMM template
+or calling a prebuilt library (no cuBLAS, no cutlass::gemm::device ). The
+only GEMM primitive is cute::gemm over a single
+ SM90_64x128x16_F32F16F16_SS warp-group MMA atom, fed by a four-stage
+ cp.async shared-memory pipeline with GMMA::Layout_MN_SW128_Atom 
+swizzling; the ragged per-expert contraction K e K_{e} is handled by CuTe layout-algebra
+predication ( make_identity_tensor + copy_if ), including the
+empty-expert ( K e = 0 K_{e}{=}0 ) early-out. The MMA atom is selected through a MmaSel 
+template specialized for both half_t and bfloat16_t (one reusable
+kernel, not a one-off), and a vectorized SMEM-staged epilogue restages
+accumulators into swizzled shared memory ( GMMA::Layout_K_SW128_Atom ) and
+stores them with predicated 128-bit UniversalCopy<uint128_t> writes to coalesce
+the output. This is direct evidence for KernelPro ’s native raw-CUDA + CuTe
+source-level generation (Contribution 4): the kernel is composed from CuTe primitives,
+not produced by template instantiation or library calls. The
+listing shows only the device kernel and
+its launcher; the (boilerplate) PyTorch binding is omitted. 
+
+ KernelPro – VeOmni dW1 Weight-Gradient Grouped GEMM — 1.23 × 1.23\times Speedup 
+
+ ⬇ 
+ #include < torch / extension . h > 
+
+ #include < ATen / cuda / CUDAContext . h > 
+
+ #include < cuda_runtime . h > 
+
+ #include < cute / tensor . hpp > 
+
+ #include < cute / atom / mma_atom . hpp > 
+
+ #include < cute / atom / copy_atom . hpp > 
+
+ #include < cute / algorithm / gemm . hpp > 
+
+ #include < cutlass / numeric_types . h > 
+
+ using namespace cute ; 
+
+ template < class T > struct MmaSel ; 
+
+ template <> struct MmaSel < cutlass :: half_t > { 
+
+ using type = SM90_64x128x16_F32F16F16_SS < GMMA :: Major :: MN , GMMA :: Major :: MN >; 
+
+ }; 
+
+ template <> struct MmaSel < cutlass :: bfloat16_t > { 
+
+ using type = SM90_64x128x16_F32BF16BF16_SS < GMMA :: Major :: MN , GMMA :: Major :: MN >; 
+
+ }; 
+
+ template < int BM , int BN , int BK , int NS , class TA , class TB , class TC > 
+
+ __global__ __launch_bounds__ (128, 3) 
+
+ void dw1_kernel ( int M , int N , 
+
+ const TA * __restrict__ a , 
+
+ const TB * __restrict__ b , 
+
+ TC * __restrict__ c , 
+
+ const long long * __restrict__ cumsum_K ) 
+
+ { 
+
+ int e = blockIdx . z ; 
+
+ long long k_end = cumsum_K [ e ]; 
+
+ long long k_start = ( e == 0) ? 0 LL : cumsum_K [ e -1]; 
+
+ int K = ( int )( k_end - k_start ); 
+
+ const TA * A = a + k_start * ( long long ) M ; 
+
+ const TB * B = b + k_start * ( long long ) N ; 
+
+ TC * C = c + ( long long ) e * ( long long ) M * ( long long ) N ; 
+
+ auto cta_tiler = make_shape ( Int < BM >{}, Int < BN >{}, Int < BK >{}); 
+
+ Tensor mA = make_tensor ( make_gmem_ptr ( A ), make_shape ( M , K ), make_stride ( Int <1>{}, M )); 
+
+ Tensor mB = make_tensor ( make_gmem_ptr ( B ), make_shape ( N , K ), make_stride ( Int <1>{}, N )); 
+
+ Tensor mC = make_tensor ( make_gmem_ptr ( C ), make_shape ( M , N ), make_stride ( N , Int <1>{})); 
+
+ auto cta_coord = make_coord ( blockIdx . x , blockIdx . y , _ ); 
+
+ Tensor gA = local_tile ( mA , cta_tiler , cta_coord , Step < _1 , X , _1 >{}); 
+
+ Tensor gB = local_tile ( mB , cta_tiler , cta_coord , Step < X , _1 , _1 >{}); 
+
+ Tensor gC = local_tile ( mC , cta_tiler , cta_coord , Step < _1 , _1 , X >{}); 
+
+ Tensor cAid = local_tile ( make_identity_tensor ( make_shape ( M , K )), cta_tiler , cta_coord , Step < _1 , X , _1 >{}); 
+
+ Tensor cBid = local_tile ( make_identity_tensor ( make_shape ( N , K )), cta_tiler , cta_coord , Step < X , _1 , _1 >{}); 
+
+ Tensor cCid = local_tile ( make_identity_tensor ( make_shape ( M , N )), cta_tiler , cta_coord , Step < _1 , _1 , X >{}); 
+
+ auto sA_layout = tile_to_shape ( GMMA :: Layout_MN_SW128_Atom < TA >{}, make_shape ( Int < BM >{}, Int < BK >{}, Int < NS >{})); 
+
+ auto sB_layout = tile_to_shape ( GMMA :: Layout_MN_SW128_Atom < TB >{}, make_shape ( Int < BN >{}, Int < BK >{}, Int < NS >{})); 
+
+ extern __shared__ char smem_raw []; 
+
+ constexpr size_t aBytes = ( size_t ) BM * BK * NS * sizeof ( TA ); 
+
+ constexpr size_t offB = (( aBytes + 127) / 128) * 128; 
+
+ TA * sAptr = reinterpret_cast < TA *>( smem_raw ); 
+
+ TB * sBptr = reinterpret_cast < TB *>( smem_raw + offB ); 
+
+ Tensor sA = make_tensor ( make_smem_ptr ( sAptr ), sA_layout ); 
+
+ Tensor sB = make_tensor ( make_smem_ptr ( sBptr ), sB_layout ); 
+
+ using CpA = Copy_Atom < SM80_CP_ASYNC_CACHEGLOBAL_ZFILL < uint128_t >, TA >; 
+
+ using CpB = Copy_Atom < SM80_CP_ASYNC_CACHEGLOBAL_ZFILL < uint128_t >, TB >; 
+
+ TiledCopy copyA = make_tiled_copy ( CpA {}, Layout < Shape < _16 , _8 >>{}, Layout < Shape < _8 , _1 >>{}); 
+
+ TiledCopy copyB = make_tiled_copy ( CpB {}, Layout < Shape < _16 , _8 >>{}, Layout < Shape < _8 , _1 >>{}); 
+
+ ThrCopy tca = copyA . get_slice ( threadIdx . x ); 
+
+ ThrCopy tcb = copyB . get_slice ( threadIdx . x ); 
+
+ Tensor tAgA = tca . partition_S ( gA ); 
+
+ Tensor tBgB = tcb . partition_S ( gB ); 
+
+ Tensor sA_w = as_position_independent_swizzle_tensor ( sA ); 
+
+ Tensor sB_w = as_position_independent_swizzle_tensor ( sB ); 
+
+ Tensor tAsA = tca . partition_D ( sA_w ); 
+
+ Tensor tBsB = tcb . partition_D ( sB_w ); 
+
+ Tensor tAcA = tca . partition_S ( cAid ); 
+
+ Tensor tBcB = tcb . partition_S ( cBid ); 
+
+ Tensor tApA = make_tensor < bool >( shape ( tAsA ( _ , _ , _ ,0))); 
+
+ Tensor tBpB = make_tensor < bool >( shape ( tBsB ( _ , _ , _ ,0))); 
+
+ using Atom = typename MmaSel < TA >:: type ; 
+
+ TiledMMA mma = make_tiled_mma ( Atom {}); 
+
+ ThrMMA thr_mma = mma . get_slice ( threadIdx . x ); 
+
+ Tensor tCsA = thr_mma . partition_A ( sA ); 
+
+ Tensor tCsB = thr_mma . partition_B ( sB ); 
+
+ Tensor tCgC = thr_mma . partition_C ( gC ); 
+
+ Tensor tCrA = thr_mma . make_fragment_A ( tCsA ); 
+
+ Tensor tCrB = thr_mma . make_fragment_B ( tCsB ); 
+
+ Tensor tCrC = thr_mma . make_fragment_C ( tCgC ); 
+
+ clear ( tCrC ); 
+
+ int k_tiles = ( K + BK - 1) / BK ; 
+
+ auto fillA = [&]( int kt ) { 
+
+ Tensor cc = tAcA ( _ , _ , _ , kt ); 
+
+ CUTE_UNROLL 
+
+ for ( int i = 0; i < size ( tApA ); ++ i ) tApA ( i ) = elem_less ( cc ( i ), make_coord ( M , K )); 
+
+ }; 
+
+ auto fillB = [&]( int kt ) { 
+
+ Tensor cc = tBcB ( _ , _ , _ , kt ); 
+
+ CUTE_UNROLL 
+
+ for ( int i = 0; i < size ( tBpB ); ++ i ) tBpB ( i ) = elem_less ( cc ( i ), make_coord ( N , K )); 
+
+ }; 
+
+ int smem_pipe_write = 0; 
+
+ int smem_pipe_read = 0; 
+
+ CUTE_UNROLL 
+
+ for ( int s = 0; s < NS - 1; ++ s ) { 
+
+ if ( s < k_tiles ) { 
+
+ fillA ( s ); copy_if ( copyA , tApA , tAgA ( _ , _ , _ , s ), tAsA ( _ , _ , _ , smem_pipe_write )); 
+
+ fillB ( s ); copy_if ( copyB , tBpB , tBgB ( _ , _ , _ , s ), tBsB ( _ , _ , _ , smem_pipe_write )); 
+
+ } 
+
+ cp_async_fence (); 
+
+ smem_pipe_write = ( smem_pipe_write + 1) % NS ; 
+
+ } 
+
+ CUTE_NO_UNROLL 
+
+ for ( int kt = 0; kt < k_tiles ; ++ kt ) { 
+
+ cp_async_wait < NS - 2>(); 
+
+ __syncthreads (); 
+
+ int kload = kt + ( NS - 1); 
+
+ if ( kload < k_tiles ) { 
+
+ fillA ( kload ); copy_if ( copyA , tApA , tAgA ( _ , _ , _ , kload ), tAsA ( _ , _ , _ , smem_pipe_write )); 
+
+ fillB ( kload ); copy_if ( copyB , tBpB , tBgB ( _ , _ , _ , kload ), tBsB ( _ , _ , _ , smem_pipe_write )); 
+
+ } 
+
+ cp_async_fence (); 
+
+ smem_pipe_write = ( smem_pipe_write + 1) % NS ; 
+
+ warpgroup_fence_operand ( tCrC ); 
+
+ warpgroup_arrive (); 
+
+ cute :: gemm ( mma , tCrA ( _ , _ , _ , smem_pipe_read ), tCrB ( _ , _ , _ , smem_pipe_read ), tCrC ); 
+
+ warpgroup_commit_batch (); 
+
+ warpgroup_wait <0>(); 
+
+ warpgroup_fence_operand ( tCrC ); 
+
+ smem_pipe_read = ( smem_pipe_read + 1) % NS ; 
+
+ } 
+
+ // ---------- Vectorized SMEM-staged epilogue (coalesced 128-bit stores) ---------- 
+
+ auto sC_layout = tile_to_shape ( GMMA :: Layout_K_SW128_Atom < TC >{}, make_shape ( Int < BM >{}, Int < BN >{})); 
+
+ Tensor sC = make_tensor ( make_smem_ptr ( reinterpret_cast < TC *>( smem_raw )), sC_layout ); 
+
+ Tensor tCrC_out = make_tensor < TC >( shape ( tCrC )); 
+
+ CUTE_UNROLL 
+
+ for ( int i = 0; i < size ( tCrC ); ++ i ) tCrC_out ( i ) = static_cast < TC >( float ( tCrC ( i ))); 
+
+ Tensor tCsC = thr_mma . partition_C ( sC ); 
+
+ __syncthreads (); 
+
+ copy ( tCrC_out , tCsC ); 
+
+ __syncthreads (); 
+
+ using CpC = Copy_Atom < UniversalCopy < uint128_t >, TC >; 
+
+ TiledCopy copyC = make_tiled_copy ( CpC {}, 
+
+ Layout < Shape < _8 , _16 >, Stride < _16 , _1 >>{}, 
+
+ Layout < Shape < _1 , _8 >>{}); 
+
+ ThrCopy tcc = copyC . get_slice ( threadIdx . x ); 
+
+ Tensor tCsC2 = tcc . partition_S ( sC ); 
+
+ Tensor tCgC2 = tcc . partition_D ( gC ); 
+
+ Tensor tCcC2 = tcc . partition_D ( cCid ); 
+
+ Tensor tCpC = make_tensor < bool >( shape ( tCsC2 ( _ , _ , _ ))); 
+
+ CUTE_UNROLL 
+
+ for ( int i = 0; i < size ( tCpC ); ++ i ) tCpC ( i ) = elem_less ( tCcC2 ( i ), make_coord ( M , N )); 
+
+ copy_if ( copyC , tCpC , tCsC2 , tCgC2 ); 
+
+ } 
+
+ template < class TA , class TB , class TC > 
+
+ void launch ( torch :: Tensor a , torch :: Tensor b , torch :: Tensor c , torch :: Tensor cumsum_K , 
+
+ int M , int N , int E ) { 
+
+ constexpr int BM = 128, BN = 128, BK = 32, NS = 4; 
+
+ size_t aBytes = ( size_t ) BM * BK * NS * sizeof ( TA ); 
+
+ size_t offB = (( aBytes + 127) / 128) * 128; 
+
+ size_t bBytes = ( size_t ) BN * BK * NS * sizeof ( TB ); 
+
+ size_t mainloop_smem = offB + bBytes ; 
+
+ size_t epi_smem = ( size_t ) BM * BN * sizeof ( TC ); 
+
+ int smem = ( int )( mainloop_smem > epi_smem ? mainloop_smem : epi_smem ); 
+
+ dim3 grid (( M + BM - 1) / BM , ( N + BN - 1) / BN , E ); 
+
+ dim3 block (128); 
+
+ auto kptr = & dw1_kernel < BM , BN , BK , NS , TA , TB , TC >; 
+
+ cudaFuncSetAttribute ( kptr , cudaFuncAttributeMaxDynamicSharedMemorySize , smem ); 
+
+ auto stream = at :: cuda :: getCurrentCUDAStream (); 
+
+ kptr <<< grid , block , smem , stream >>>( 
+
+ M , N , 
+
+ reinterpret_cast < const TA *>( a . data_ptr ()), 
+
+ reinterpret_cast < const TB *>( b . data_ptr ()), 
+
+ reinterpret_cast < TC *>( c . data_ptr ()), 
+
+ reinterpret_cast < const long long *>( cumsum_K . data_ptr < int64_t >())); 
+
+ } 
+
+ torch :: Tensor dw1_forward ( torch :: Tensor a , torch :: Tensor b , torch :: Tensor cumsum_K , 
+
+ int64_t num_experts , int64_t M , int64_t N ) { 
+
+ TORCH_CHECK ( a . is_cuda () && b . is_cuda (), "inputs must be CUDA" ); 
+
+ a = a . contiguous (); 
+
+ b = b . contiguous (); 
+
+ cumsum_K = cumsum_K . to ( torch :: kInt64 ). contiguous (); 
+
+ int E = ( int ) num_experts ; 
+
+ auto out = torch :: empty ({ E , M , N }, a . options ()); 
+
+ if ( a . scalar_type () == torch :: kHalf ) { 
+
+ launch < cutlass :: half_t , cutlass :: half_t , cutlass :: half_t >( a , b , out , cumsum_K , ( int ) M , ( int ) N , E ); 
+
+ } else if ( a . scalar_type () == torch :: kBFloat16 ) { 
+
+ launch < cutlass :: bfloat16_t , cutlass :: bfloat16_t , cutlass :: bfloat16_t >( a , b , out , cumsum_K , ( int ) M , ( int ) N , E ); 
+
+ } else { 
+
+ TORCH_CHECK ( false , "unsupported dtype" ); 
+
+ } 
+
+ return out ; 
+
+ } 
+
+ Appendix I Energy-Aware Optimization: Methodology 
+
+ This appendix expands the energy-aware extension of
+Section  5.5 : how KernelPro measures per-kernel energy
+(§ I.1 ), how energy enters the search as a secondary objective
+(§ I.2 ), the energy-only micro-profiling tools added
+(§ I.3 ), and the literature on dominant energy-heavy GPU
+bottlenecks with the KernelPro tool targeting each (§ I.4 ). 
+
+ I.1 NVML Millijoule Measurement Protocol 
+
+ KernelPro measures real GPU energy via NVIDIA’s on-board counter
+ nvmlDeviceGetTotalEnergyConsumption() , a monotonic millijoule accumulator and
+the only direct per-device energy counter NVIDIA exposes. Naive use is
+unreliable: on A100/H100 the on-board power sensor samples only ∼ \sim 25% of the runtime,
+leaving the rest unmonitored, so accounting for this duty-cycling can change measured
+energy by an average of 35 % 35\% (up to 65 % 65\% ) relative to an external power
+meter  ( Yang et al., 2024 ) . We therefore measure under a controlled protocol
+whenever we report millijoules. We lock GPU clocks (e.g. 1410 MHz on A100) to remove
+DVFS as a confound, warm up to thermal steady state, and use windows long enough
+( ∼ \sim 2 s) to take a stable median over 30 repetitions. To recover the kernel’s own
+consumption we subtract idle draw, reporting dynamic energy
+ E dyn = E raw − P idle ​ t E_{\text{dyn}}=E_{\text{raw}}-P_{\text{idle}}\,t ( P idle ≈ 76.7 P_{\text{idle}}\approx 76.7  W on our
+A100, t t the measured runtime), removing the device-wide constant draw NVML always
+includes. Crucially, because NVML’s per-process baseline drifts, we measure both arms’
+kernels back-to-back in a single session. 
+
+ NVML yields robust device-total dynamic energy but cannot attribute it to a single
+SM or to one kernel within a fused graph—so during search we rank candidates with the
+deterministic counter-based proxy (§ I.2 ), reserving this protocol for
+post-hoc validation of winning kernels. 
+
+ I.2 Energy as a Lexicographic Secondary Objective 
+
+ The reward extension (Eq.  3 ) places energy under strict
+lexicographic priority: ε \varepsilon is small enough that any speedup gain dominates any
+energy gain, so KernelPro never trades speed for energy—energy only differentiates
+speed-equivalent candidates. The extension is a single environment switch
+( IFCO_ENERGY_AWARE ) that activates the reward term, an energy-preferences
+prompt section, and the energy-only tools; a passive mode ( IFCO_ENERGY_MEASURE )
+records energy without acting on it, giving a control arm whose search remains
+byte-identical to standard KernelPro . Search strategy, tool filtering, profiling pipeline,
+and candidate generation are otherwise unchanged. 
+
+ Because NVML is device-wide and noisy, the energy_reduction term in the reward
+is the deterministic picojoule proxy E proxy E_{\text{proxy}} of Eq.  4 
+(Section  5.5 ), computed from ncu counters KernelPro already
+collects and weighted by the per-operation energy hierarchy of
+Horowitz  ( Horowitz, 2014 ) and AccelWattch  ( Kandiah et al., 2021 ) . The
+reduction ratio E proxy ​ ( baseline ) / E proxy ​ ( candidate ) E_{\text{proxy}}(\text{baseline})/E_{\text{proxy}}(\text{candidate}) is
+intrinsic to the kernel and independent of wall-clock time, so it rewards reductions in
+hardware activity that timing alone cannot see. 
+
+ I.3 Energy-Only Micro-Profiling Tools 
+
+ KernelPro ’s profiling runs a registry of micro-profiling tools filtered by the Stage-1 speed
+bottleneck. The energy extension adds a separate registry partition that bypasses this
+filter and always fires (energy waste is relevant regardless of the speed bottleneck),
+routing findings to a subordinate “Energy Efficiency Notes” prompt section. Each tool
+fires only when its pattern is present and latency-hidden (the corresponding stall
+metric is low)—i.e. it targets energy waste that timing does not already
+penalize, since any pattern that hurt speed is already handled by the speed tools.
+Severity is capped below that of speed-critical findings, enforcing the lexicographic
+priority. Table  25 lists the four tools. 
+
+ Table 25: Energy-only micro-profiling tools. Each fires only when latency-hidden, so it
+targets energy waste invisible to timing. 
+
+ Tool | 
+ ncu signal | 
+ Fires when | 
+ Energy mechanism | 
+
+ BankConflict | 
+ shared-memory bank conflicts | 
+ low short-scoreboard stall | 
+ N N -way conflict = N × =N\times SRAM replay | 
+
+ SpillTraffic | 
+ local-memory ld/st sectors | 
+ low long-scoreboard stall | 
+ spills ride L1 → \to L2 → \to DRAM | 
+
+ Uncoalesced | 
+ sectors-per-request > 1.2 × >1.2\times ideal | 
+ not memory-bound | 
+ extra DRAM sectors / row activations | 
+
+ RedundantBarrier | 
+ barriers present | 
+ ∼ \sim 0 barrier stall | 
+ zero-stall barriers idle the SM | 
+
+ The Swish win of Section  5.5 came from the reward’s
+instruction-count term (B4) rather than any of these four tools; surfacing that signal
+directly at the prompt level—e.g. a tool that reports SASS instruction count and flags
+IEEE operations replaceable by fast-math intrinsics under a bandwidth-bound roofline—is
+a natural extension we leave to future work. 
+
+ I.4 Energy-Heavy GPU Bottlenecks and Targeting Tools 
+
+ Table  26 summarizes the GPU energy-efficiency literature, ranking the
+dominant sources of dynamic kernel energy and mapping each to the KernelPro mechanism that
+targets it. The dominant kernel-level lever is reducing off-chip data movement
+(B1): a DRAM access costs ∼ \sim 100–200 × \times a register access, so data movement, not
+arithmetic, dominates energy  ( Horowitz, 2014 ; Leng et al., 2013 ; Hong & Kim, 2010 ) .
+This lever is largely speed-coupled (less data movement is also faster), so the speed-only
+search already captures most of it; the energy-aware objective targets the
+ residual —energy reducible at fixed speed (bank conflicts, redundant barriers,
+coalescing/precision that leave wall-clock unchanged). Frequency/DVFS and occupancy, the
+largest speed-independent levers reported in the literature, are runtime knobs
+outside KernelPro ’s kernel-generation scope. 
+
+ Table 26: Dominant sources of dynamic energy in GPU kernels (literature) and the KernelPro mechanism targeting each. B1–B4 are the proxy terms of § I.2 . 
+
+ Bottleneck 
+ | 
+
+ Impact 
+ | 
+
+ Reference 
+ | 
+
+ KernelPro mechanism 
+ | 
+
+ Off-chip DRAM data movement 
+ | 
+
+ DRAM ∼ \sim 100–200 × \times register/compute 
+ | 
+
+ Horowitz,2014 ; Leng et al.,2013 ; Hong & Kim,2010 
+ | 
+
+ B1; coalescing/vectorization tools 
+ | 
+
+ Register file / spills 
+ | 
+
+ register file largest dynamic-power component 
+ | 
+
+ Kandiah et al. (2021) 
+ | 
+
+ B3; SpillTraffic tool 
+ | 
+
+ Uncoalesced global access 
+ | 
+
+ extra 32 B sectors → \to extra DRAM row activations 
+ | 
+
+ Chatterjee et al. (2017) 
+ | 
+
+ B2; Uncoalesced tool 
+ | 
+
+ Redundant compute / precision 
+ | 
+
+ per-FLOP ∼ \sim 1–10 pJ; decoupled from speed 
+ | 
+
+ Horowitz (2014) 
+ | 
+
+ B4 
+ | 
+
+ Shared-memory bank conflicts 
+ | 
+
+ N N -way conflict = N × =N\times SRAM replay 
+ | 
+
+ Horowitz (2014) 
+ | 
+
+ BankConflict tool 
+ | 
+
+ Over-synchronization / barriers 
+ | 
+
+ idle-SM energy at zero-stall barriers 
+ | 
+
+ Nayak & Basu (2024) 
+ | 
+
+ RedundantBarrier tool 
+ | 
+
+ DVFS / occupancy (out of scope) 
+ | 
+
+ largest speed-independent lever (30–79%) 
+ | 
+
+ Hong & Kim (2010) 
+ | 
+
+ runtime knobs; not code-gen 
+ |

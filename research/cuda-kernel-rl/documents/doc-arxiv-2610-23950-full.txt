@@ -1,0 +1,542 @@
+Compaction-Aware Reinforcement Learning for Ascend Triton Kernel Generation 
+
+ Chuansai Zhou, Yanlin Liu 1 1 footnotemark: 
+ 1 
+
+ ,
+Bingning Huang, Shidi Xi, Chao Huang, Boxing Chen, Mingming Zhu,
+Guanghuan Fang, Ben Feng, Zongzuo Wang 
+ Huawei Technologies Ltd. 
+ {zhouchuansai,liuyanlin5,huangbingning,boxing.chen}@huawei.com,19149832005@bupt.edu.cn,
+ {zhumingming1,fangguanghuan1,fengben,wangzongzuo}@huawei.com,bruce.xi1@h-partners.com 
+
+ † † thanks: These authors contributed equally. 
+
+ Abstract 
+
+ Automatically generating high-performance kernels with LLM-based agents
+promises substantial gains in development efficiency, but two obstacles remain.
+First, while increasing multi-turn interaction with execution environments is crucial for refining generation quality, continuous context accumulation rapidly exceeds the model’s effective context window. Second, training long-horizon tasks via GRPO inherently incurs sparse rewards due to its reliance on terminal outcome evaluation, severely hindering step-level credit assignment; To address these obstacles, we propose ATRL (Ascend Triton Reinforcement Learning), a post-training method
+that refines GRPO into a compaction-aware, segment-level objective for
+long-horizon kernel generation. We also design a lightweight agent harness providing cascaded compilation, correctness, and profiling feedback, alongside an Ascend-specific knowledge base injected during agentic RL training and evaluation to compensate for the base model’s missing platform expertise. Evaluations on NPUKernelBench and KernelBench, both
+executed on Ascend hardware, show that ATRL consistently surpasses all
+baselines, including GRPO, in both correctness and speedup. 
+
+ | 
+
+ 1 Introduction 
+
+ High-performance kernels are critically important in LLMs infrastructure, as they directly accelerate both the training and inference pipelines of LLMs. Recent advances in large language models (LLMs) have opened a promising path toward automated kernel generation. A growing body of work trains models to translate high-level PyTorch reference implementations into optimized kernels in domain-specific languages (DSLs) such as Triton  Tillet et al. (2019) , whose tile-based programming model simplifies kernel development and substantially improves developer productivity  Guo et al. (2026) ; Liu et al. (2026) . To further improve generation quality, researchers have adopted an agentic paradigm: instead of producing a kernel through a single-round chat interaction, an LLM-based agent interacts with an execution environment across multiple turns–generating code, receiving compilation and correctness feedback, profiling performance, and iteratively refining its output  Dai et al. (2026) ; Du et al. (2026b) ; Lange et al. (2025) . This multi-turn, tool-augmented workflow has proven substantially more effective than single-round generation, as it enables the model to learn from execution feedback and explore a broader optimization landscape. 
+
+ Despite this progress, two fundamental challenges remain unresolved. First, the multi-turn agentic workflow inherently causes context to grow continuously: each turn appends tool results like view files, steadily inflating the input length. As recent workload characterizations have shown, this unbounded context growth not only degrades the quality of model inference, but also risks exceeding the effective context window, terminating the optimization loop prematurely  Yuan et al. (2026) ; Li et al. (2026) . Existing kernel-generation agents  Dai et al. (2026) ; Liu et al. (2026) either ignore this problem entirely or apply ad hoc truncation that discards potentially valuable debugging history, yielding no principled solution. Second, training long-horizon kernel generation with GRPO relies on a terminal outcome reward. Because credit is assigned only after the full trajectory finishes, intermediate edits receive little supervision, the learning signal remains sparse, and step-level credit assignment becomes unreliable. Standard GRPO therefore struggles to distinguish a useful repair from a later regression across many edit–verify turns. 
+
+ To address these challenges, we propose ATRL (Ascend Triton Reinforcement Learning), a post-training method that refines GRPO for long-horizon kernel generation. ATRL decomposes a long agent trajectory into segments at verifiable boundaries and optimizes the policy with segment-level rewards built on three ideas: (i) structured trajectory compaction , which condenses the accumulated history into a compact checkpoint once the context grows too long; (ii) mixed segment reward , which combines the terminal task success with the verifiable progress measured at each segment’s boundaries; and (iii) task-relative segment advantage , which normalizes segment advantages across rollouts of the same task and weights them segment-wise in the loss. The compaction checkpoint itself participates in training, so the model learns both to preserve state and to continue from it. Throughout, a lightweight agent harness supplies compilation, correctness, and profiling feedback, and an on-demand knowledge base provides Ascend-specific optimization guidance. 
+
+ 2 Related Work 
+
+ 2.1 LLM-Based Kernel Generation 
+
+ Training-free agentic generation. Several frameworks employ LLM agents that iteratively refine kernels through execution feedback without modifying model weights. AdaExplore  Du et al. (2026b) introduces failure-driven adaptation, synthesizing recurring errors into reusable validity rules, combined with diversity-preserving tree search to escape local optima. The robust-kbench framework  Lange et al. (2025) proposes an evolutionary meta-generation procedure with LLM-based verifiers for correctness filtering, while also exposing exploitable benchmark loopholes. MKEvolve  Yoo et al. (2026) adopts a modular decomposition strategy, iteratively co-evolving sub-kernel decompositions and their implementations to improve interpretability and reduce token consumption. While effective at test time, these approaches do not improve the model’s intrinsic generation ability and incur substantial inference cost per task. 
+
+ Training-based generation. DRTriton  Guo et al. (2026) proposes a synthetic data pipeline (CSP-DAG) with curriculum RL to train models for PyTorch-to-Triton conversion, achieving strong generalization despite training only on synthetic data. Dr. Kernel  Liu et al. (2026) introduces KernelGYM, a distributed GPU environment with reward-hacking detection, and identifies a biased policy-gradient issue in GRPO, proposing Turn-level Reinforce-Leave-One-Out (TRLOO) for unbiased multi-turn advantage estimation. MusaCoder  Cheng et al. (2026) presents an end-to-end alignment pipeline for Moore Threads MUSA kernels. It proceeds from SFT through diversity-preserving RFT to two-stage RL, and introduces PrimeEcho, MirrorPop, and Buffered Dynamic Retry to stabilize training. Kernel-Smith  Du et al. (2026a) combines an evolutionary agent with post-training RL, converting long-horizon trajectories into step-centric supervision, and validates cross-backend transfer between NVIDIA Triton and MetaX MACA. CUDA-Agent  Dai et al. (2026) scales agentic RL with a skill-augmented environment and automated verification/profiling, achieving state-of-the-art results on KernelBench. Compiler-R1  Pan et al. (2025) applies RL to compiler pass-sequence auto-tuning, demonstrating that RL-trained LLMs can optimize IR-level metrics. 
+
+ Despite this rapid progress, existing work is overwhelmingly centered on NVIDIA CUDA/Triton or, more recently, other GPU backends (MetaX MACA, Moore Threads MUSA). None of these methods address Ascend kernel generation , where the Da Vinci architecture introduces fundamentally different compute and memory semantics. Moreover, most approaches treat the multi-turn execution environment as a black box for reward computation, without exploiting the transparency of intermediate verification steps for fine-grained credit assignment. Our work fills both gaps by targeting the Ascend Triton ecosystem and adopting a white-box RL formulation. 
+
+ 2.2 Agentic RL 
+
+ Agentic Reinforcement Learning. 
+Agentic RL trains language models to improve through multi-turn interaction with tools and stateful environments, rather than optimizing isolated responses.
+ArCHer establishes a hierarchical actor-critic formulation that combines turn-level value learning with token-level policy optimization  ( Zhou et al., 2024 ) .
+WebRL further addresses task scarcity, sparse feedback, and policy drift in web environments using a self-evolving curriculum and outcome-supervised rewards  ( Qi et al., 2025 ) .
+For long-horizon digital agents, LOOP eliminates the learned critic through a leave-one-out baseline, enabling memory-efficient policy optimization directly in target environments  ( Chen et al., 2025 ) .
+RAGEN instead studies the dynamics of multi-turn RL and identifies the Echo Trap, in which declining reward variance and policy entropy destabilize learning, motivating its stabilized StarPO-S algorithm  ( Wang et al., 2025 ) . 
+
+ Recent studies address delayed credit assignment and unstable exploration through hierarchical or step-aware policy optimization.
+GiGPO combines episode-level advantages with step-level comparisons among actions from equivalent states  ( Feng et al., 2025 ) .
+Agent Lightning decomposes arbitrary agent executions into trainable transitions through hierarchical credit assignment  ( Luo et al., 2025 ) , while AgentGym-RL progressively increases interaction horizons to stabilize long-horizon training  ( Xi et al., 2025 ) .
+However, these methods are not readily applicable to Ascend kernel generation, where code states rarely recur and rewards are inherently sparse.
+In contrast, our framework leverages compiler, correctness, and performance feedback to optimize long-horizon kernel-generation trajectories. 
+
+ 3 Preliminary 
+
+ 3.1 Agentic Ascend Triton Kernel Generation 
+
+ An Ascend Triton kernel-generation task starts from a reference PyTorch
+implementation and a set of test inputs covering the required shapes and data
+types. The goal is to produce a Triton kernel that matches the reference
+outputs while running efficiently on the Ascend platform. Triton expresses the
+kernel as a collection of parallel tile programs  Tillet et al. (2019) ,
+which the Ascend backend compiles into an executable kernel. 
+
+ Producing a correct and efficient kernel usually requires several attempts.
+The agent writes or modifies the kernel, invokes a unified evaluation tool,
+and revises the implementation based on the structured report it
+returns—compiler diagnostics, correctness results, and performance
+measurements. This consolidated feedback makes the environment white-box,
+allowing training to distinguish compilation failures, numerical errors, and
+performance bottlenecks rather than relying only on final success; the full
+verification cascade is detailed in Section  4.1 and
+Appendix  B . 
+
+ Multi-turn optimization also creates an increasingly long interaction
+history. Source-code snapshots, compiler logs, correctness reports, and
+profiling results accumulate even after they are no longer useful. A long
+history increases inference cost, distracts the model with stale information,
+and may eventually exhaust its context window. Effective context management
+is therefore necessary to sustain long-horizon kernel optimization. 
+
+ 3.2 Group Relative Policy Optimization 
+
+ Group Relative Policy Optimization (GRPO)  Shao et al. (2024) is an online policy
+optimization algorithm that avoids training a separate value model. For
+each task x x , it samples a group of G G trajectories
+ { τ i } i = 1 G \{\tau_{i}\}_{i=1}^{G} from the old policy. Let
+ R i = R ⁡ ( x , τ i ) R_{i}=R(x,\tau_{i}) be the scalar reward of trajectory τ i \tau_{i} . Its
+group-relative advantage is 
+
+ | 
+ A ^ i = R i − μ R σ R , μ R = 1 G ​ ∑ j = 1 G R j , \widehat{A}_{i}=\frac{R_{i}-\mu_{R}}{\sigma_{R}},\qquad\mu_{R}=\frac{1}{G}\sum_{j=1}^{G}R_{j}, | 
+ | 
+ (1) | 
+
+ where σ R \sigma_{R} is the standard deviation of the group rewards. This group-relative
+baseline removes the critic required by conventional actor–critic methods
+and directly compares candidate trajectories generated for the same task. 
+
+ For each generated token, let ρ i , t \rho_{i,t} be its importance ratio and define
+the clipped ratio as
+ ρ ¯ i , t = clip ⁡ ( ρ i , t , 1 − ε , 1 + ε ) \bar{\rho}_{i,t}=\mathrm{clip}(\rho_{i,t},1-\varepsilon,1+\varepsilon) .
+The GRPO objective is 
+
+ | 
+ 𝒥 GRPO ​ ( θ ) = 𝔼 i , t ​ [ min ⁡ ( ρ i , t ​ A ^ i , ρ ¯ i , t ​ A ^ i ) − β ​ D i , t KL ] . \mathcal{J}_{\mathrm{GRPO}}(\theta)=\mathbb{E}_{i,t}\!\left[\min\!\left(\rho_{i,t}\widehat{A}_{i},\bar{\rho}_{i,t}\widehat{A}_{i}\right)-\beta D^{\mathrm{KL}}_{i,t}\right]. | 
+ | 
+ (2) | 
+
+ where D i , t KL D^{\mathrm{KL}}_{i,t} measures the divergence between the trainable
+policy π θ \pi_{\theta} and a frozen reference policy π ref \pi_{\mathrm{ref}} ,
+ ε \varepsilon is the clipping coefficient, and β \beta controls the KL
+regularization strength. Following Shao et al. (2024) , the divergence is estimated
+per token with the unbiased and nonnegative k ​ 3 k3 estimator 
+
+ | 
+ D i , t KL ≈ π ref ​ ( v i , t ) π θ ​ ( v i , t ) − log ⁡ π ref ​ ( v i , t ) π θ ​ ( v i , t ) − 1 , D^{\mathrm{KL}}_{i,t}\approx\frac{\pi_{\mathrm{ref}}(v_{i,t})}{\pi_{\theta}(v_{i,t})}-\log\!\frac{\pi_{\mathrm{ref}}(v_{i,t})}{\pi_{\theta}(v_{i,t})}-1, | 
+ | 
+ (3) | 
+
+ where v i , t v_{i,t} is the token generated at step t t of trajectory τ i \tau_{i} and
+the token probabilities are conditioned on the trajectory prefix. The
+expectation is taken over sampled tasks, trajectories, and policy-generated
+tokens. 
+
+ Recent variants relax the symmetric clipping interval of GRPO. In
+particular, DAPO  Yu et al. (2025) clips the importance ratio asymmetrically,
+ clip ⁡ ( ρ i , t , 1 − ε l , 1 + ε h ) \mathrm{clip}(\rho_{i,t},1-\varepsilon_{l},1+\varepsilon_{h}) with
+ ε h > ε l \varepsilon_{h}>\varepsilon_{l} . This clip-higher scheme enlarges the
+upper bound so that low-probability tokens can still raise their probability
+during optimization, counteracting the entropy collapse commonly observed in
+long reinforcement learning runs and thereby encouraging exploration. ATRL
+combines this asymmetric clipping with the KL-regularized GRPO objective;
+Section  4.3 develops the resulting segment-level
+formulation. 
+
+ Standard outcome-supervised GRPO broadcasts the same trajectory-level
+advantage A ^ i \widehat{A}_{i} to every generated token in τ i \tau_{i} . This is
+problematic for long-horizon kernel generation: unsuccessful early attempts,
+useful diagnostic actions, and the final successful repair all receive the
+same credit. Moreover, if most trajectories in a group fail compilation or
+correctness checks, their rewards become identical or nearly identical,
+producing little learning signal after group normalization. These
+limitations motivate the trajectory decomposition and fine-grained reward
+assignment introduced in Section  4 . 
+
+ 4 Method 
+
+ We formulate Ascend Triton kernel generation as a long-horizon interaction between a language-model policy and an executable Ascend environment. Starting from a PyTorch reference implementation, the policy generates a kernel implementation, invokes verification tools, and revises the implementation using compiler, correctness, and profiling feedback. Two properties of this setting shape the design of ATRL. First, trajectories are long and grow without bound: a single kernel can require many edit–verify cycles, and the accumulated tool history eventually exceeds the model’s context window. Second, the only naturally available scalar signal is the terminal outcome, which is too coarse to distinguish a useful repair from a later regression. ATRL addresses the first with a correctness-gated optimization workflow (Section  4.1 ) and structured trajectory compaction (Section  4.2 ), and the second with a compaction-aware RL objective that assigns credit to the resulting trajectory segments (Section  4.3 ). Throughout, an on-demand knowledge base supplies Ascend-specific programming and optimization guidance (Section  4.1 ). 
+
+ Figure 1: Method overview. The agent iteratively edits and verifies a Triton kernel in a sandbox. Long interactions are compacted into structured checkpoints, producing segments that receive both trajectory-level and incremental rewards. 
+
+ 4.1 Agentic Kernel Optimization 
+
+ Interaction loop. 
+
+ The agent operates in an isolated sandbox and alternates between language-model generation and tool execution. Its tools support file inspection and editing, knowledge retrieval, verification, and final submission; the full tool suite and sandbox setup are given in Appendix  A , and the corresponding prompt templates in Appendix  E . Tool outputs are returned as observations in the next model context, allowing the policy to repair compilation errors, correct numerical mismatches, and optimize measured latency without requiring a complete kernel in a single response. 
+
+ Correctness-gated optimization. 
+
+ We decouple correctness establishment from performance tuning by gating access to optimization guidance. During implementation , the agent identifies the kernel semantics from the PyTorch reference, retrieves relevant API documentation, and iterates until the candidate passes verification. During optimization , the agent uses profiling signals to select transformations such as tiling, multi-core partitioning, or improved memory access, while re-running correctness tests after every change. The gate prevents the policy from trading correctness for apparent speed. Near the turn limit, the harness may inject a brief reminder to create or verify an implementation; the reminder is also written to the rollout buffer so that inference and training observe the same sequence. 
+
+ On-demand knowledge retrieval. 
+
+ The sandbox exposes a structured knowledge base of Ascend-specific guidance covering hardware constraints, Triton APIs and their Ascend extensions, example kernels, and optimization strategies, retrieved through a judge–retrieve–apply chain that bounds token consumption. Before writing the kernel, the policy consults hardware constraints, examples, and API documentation to ground the initial implementation; during optimization, profiling signals guide the choice among transformations. Profiling reports diagnose symptoms—for example, low vector utilization or memory-bound execution—but do not prescribe an optimization, leaving the policy to connect each observation to an appropriate transformation. The retrieval interface and corpus maintenance are described in Appendix  A.3 . 
+
+ Cascaded verification. 
+
+ Each verification call executes a four-stage cascade—static analysis, compilation, numerical correctness, and hardware benchmarking—and stops at the first failed stage, so invalid candidates never reach the accelerator. The ordering is itself a safeguard: submissions that bypass the Triton kernel are rejected before any execution, and benchmarking runs only after every correctness case passes. Each stage emits a structured report that doubles as the environment observation. Stage definitions, precision criteria, and integrity safeguards are given in Appendix  B . 
+
+ Outcome reward. 
+
+ The verifier produces a scalar score that tracks progress from syntactic validity to execution efficiency: 
+
+ | 
+ R = w ast ​ 𝟏 ast + w cmp ​ 𝟏 cmp + w cor ​ p cor + w all ​ 𝟏 all + w spd ​ min ⁡ ( s s ⋆ , 1 ) , R=w_{\mathrm{ast}}\mathbf{1}_{\mathrm{ast}}+w_{\mathrm{cmp}}\mathbf{1}_{\mathrm{cmp}}+w_{\mathrm{cor}}p_{\mathrm{cor}}+w_{\mathrm{all}}\mathbf{1}_{\mathrm{all}}+w_{\mathrm{spd}}\min\!\left(\frac{s}{s^{\star}},1\right), | 
+ | 
+ (4) | 
+
+ where 𝟏 ast \mathbf{1}_{\mathrm{ast}} and 𝟏 cmp \mathbf{1}_{\mathrm{cmp}} indicate that the candidate passes static analysis and compiles, respectively, 𝟏 all \mathbf{1}_{\mathrm{all}} indicates that all correctness cases pass, p cor p_{\mathrm{cor}} is the fraction of correctness cases passed, s s is the measured speedup, and s ⋆ s^{\star} is the target speedup. The speed term is defined only when all correctness cases pass and is zero otherwise. We use
+ ( w ast , w cmp , w cor , w all , w spd ) = ( 0.02 , 0.15 , 0.60 , 0.13 , 0.40 ) (w_{\mathrm{ast}},w_{\mathrm{cmp}},w_{\mathrm{cor}},w_{\mathrm{all}},w_{\mathrm{spd}})=(0.02,0.15,0.60,0.13,0.40) and s ⋆ = 2.0 s^{\star}=2.0 . The maximum reward is 1.30 1.30 ; a fully correct implementation with no speedup receives 0.90 0.90 , and fully correct rollouts therefore occupy ( 0.90 , 1.30 ] (0.90,1.30] as speedup increases to the target. Thus, an incorrect but fast implementation cannot receive performance credit. 
+
+ 4.2 Structured Trajectory Compaction 
+
+ The iterative workflow above can produce trajectories that exceed the model’s context window, making an explicit mechanism for preserving execution state necessary. Truncating old messages discards precisely the failures and constraints needed for subsequent repair. Instead, after a verification call and once context usage crosses a threshold, we ask the rollout model to replace the accumulated history with a structured checkpoint. The checkpoint records seven types of state: attempted approaches, discovered constraints, design decisions, errors and fixes, the current implementation, the latest verification result, and one immediate next action. 
+
+ After compaction, the next context contains the unchanged system instruction and task, followed by the checkpoint and a short continuation instruction. The sandbox workspace and implementation files remain unchanged, so execution continues from the same environment state. Compaction is attempted only under conservative trigger conditions, and a checkpoint is accepted only if it is non-empty and shorter than the history it replaces. 
+
+ Compaction partitions rollout j j into I j + 1 I_{j}+1 segments,
+ τ j = { τ 1 j , … , τ I j + 1 j } \tau^{j}=\{\tau_{1}^{j},\ldots,\tau_{I_{j}+1}^{j}\} . At each boundary we store the code, verification status, and performance measurements. These snapshots allow us to measure what changed within a segment. We deliberately place the generated checkpoint in two positions: it is part of the preceding segment’s response, where RL can supervise its generation, and part of the following segment’s prompt, where it conditions continued execution. This dual role makes checkpoint quality itself optimizable while teaching the policy to preserve the state required for later kernel revisions. Trigger thresholds, prompt format, and failure-handling details appear in Appendix  C . 
+
+ Figure 2: Compaction-aware segmentation. A checkpoint closes one training segment and initializes the prompt of the next; the sandbox workspace persists across the boundary. 
+
+ 4.3 Compaction-Aware Reinforcement Learning 
+
+ Compaction changes the unit of training from one uninterrupted trajectory to several state-dependent segments. Standard trajectory-level GRPO assigns one terminal advantage to every generated token and cannot distinguish a useful repair from a later regression. We therefore combine global task success with the measured progress of each segment. 
+
+ Segment reward. 
+
+ Let R j R^{j} denote the score of the final verified implementation in rollout j j . For segment i i , let B i j B_{i}^{j} and E i j E_{i}^{j} denote its boundary states and define 
+
+ | 
+ r i j = R ⁡ ( E i j ) − R ⁡ ( B i j ) , R ~ i j = α ​ R j + ( 1 − α ) ​ r i j , r_{i}^{j}=R(E_{i}^{j})-R(B_{i}^{j}),\qquad\widetilde{R}_{i}^{j}=\alpha R^{j}+(1-\alpha)r_{i}^{j}, | 
+ | 
+ (5) | 
+
+ with α = 0.5 \alpha=0.5 and R ⁡ ( B 1 j ) = 0 R(B_{1}^{j})=0 . The first term preserves the end-to-end objective. The second attributes local progress: fixing compilation or correctness increases r i j r_{i}^{j} , whereas breaking a previously correct kernel or reducing its speed makes r i j r_{i}^{j} negative. Both terms use Equation  4 , so they have the same scale. Setting α = 1 \alpha=1 makes every segment receive the same terminal reward R j R^{j} , reducing the signal to the terminal outcome without per-segment progress; α = 0 \alpha=0 retains only the local progress term. 
+
+ Task-relative advantage. 
+
+ For one kernel task, we sample a group g g of rollouts and pool all of their segments. If
+ N g = ∑ j ∈ g ( I j + 1 ) N_{g}=\sum_{j\in g}(I_{j}+1) , we compute 
+
+ | 
+ μ g = 1 N g ​ ∑ j ∈ g ∑ i R ~ i j , σ g 2 = 1 N g ​ ∑ j ∈ g ∑ i ( R ~ i j − μ g ) 2 , A ^ i j = R ~ i j − μ g σ g . \mu_{g}=\frac{1}{N_{g}}\sum_{j\in g}\sum_{i}\widetilde{R}_{i}^{j},\quad\sigma_{g}^{2}=\frac{1}{N_{g}}\sum_{j\in g}\sum_{i}(\widetilde{R}_{i}^{j}-\mu_{g})^{2},\quad\widehat{A}_{i}^{j}=\frac{\widetilde{R}_{i}^{j}-\mu_{g}}{\sigma_{g}}. | 
+ | 
+ (6) | 
+
+ Normalizing within a task avoids comparing reward increments from kernels with different difficulty and optimization headroom. The segment advantage is broadcast only to response tokens in that segment. 
+
+ Policy objective. 
+
+ We optimize a clipped policy-gradient objective: 
+
+ | 
+ 𝒥 ⁡ ( θ ) = 𝔼 ⁡ [ 1 G ​ ∑ j = 1 G 1 I j + 1 ​ ∑ i = 1 I j + 1 1 | a i j | ​ ∑ t = 1 | a i j | [ min ⁡ ( ρ t ​ A ^ i j , clip ⁡ ( ρ t , 1 − ε l , 1 + ε h ) ​ A ^ i j ) − β ​ D t KL ] ] , \mathcal{J}(\theta)=\mathbb{E}\!\left[\frac{1}{G}\sum_{j=1}^{G}\frac{1}{I_{j}+1}\sum_{i=1}^{I_{j}+1}\frac{1}{|a_{i}^{j}|}\sum_{t=1}^{|a_{i}^{j}|}\left[\min\!\left(\rho_{t}\widehat{A}_{i}^{j},\,\mathrm{clip}(\rho_{t},1-\varepsilon_{l},1+\varepsilon_{h})\widehat{A}_{i}^{j}\right)-\beta D^{\mathrm{KL}}_{t}\right]\right], | 
+ | 
+ (7) | 
+
+ where ρ t = π θ ​ ( v t ∣ x t ) / π old ​ ( v t ∣ x t ) \rho_{t}=\pi_{\theta}(v_{t}\mid x_{t})/\pi_{\mathrm{old}}(v_{t}\mid x_{t}) ,
+ ε l \varepsilon_{l} and ε h \varepsilon_{h} are asymmetric clipping coefficients
+following the clip-higher schedule of DAPO  Yu et al. (2025) (values in
+Appendix  D ), and D t KL D^{\mathrm{KL}}_{t} denotes the
+per-token divergence from the frozen reference policy π ref \pi_{\mathrm{ref}} ,
+estimated with the k ​ 3 k3 estimator of Equation  3 and weighted by
+ β \beta as in GRPO  Shao et al. (2024) . Averaging first over tokens, then
+segments, and finally rollouts prevents long responses or frequently
+compacted trajectories from receiving disproportionate weight; we keep this
+nested normalization rather than the flat token-level aggregation of DAPO
+because it preserves segment-level credit assignment under trajectory
+compaction. 
+
+ 5 Experiments 
+
+ 5.1 Setup 
+
+ Model and Datasets. 
+We experiment with Qwen3.6-35B. Our training dataset is curated from the open-source cuda-llm 1 1 
+ 1 
+
+ https://github.com/ByteDance-Seed/cudaLLM dataset, from which we select a subset of samples for RL training. 
+
+ Baselines. 
+We compare: (1) untuned Qwen3.6-35B; (2) Qwen3.6-35B-SFT; (3) Dr.Kernel  Liu et al. (2026) , using the open-source 14B 2 2 
+ 2 
+
+ https://huggingface.co/hkust-nlp/drkernel-14b checkpoint (Drkernel-14B). We also train Qwen3-30B with this method, listed as Drkernel-30B; (4) GRPO, for which we train Qwen3.6-35B. The harness ablation additionally includes Qwen3.8-27B. Entries marked “–” are not evaluated. 
+
+ Benchmarks. 
+We evaluate correctness and speedup on KernelBench  ( Ouyang et al., 2024 ) 
+and NPUKernelBench 3 3 
+ 3 
+
+ https://github.com/Just-it/AscendOpGenAgent . . All performance measurements run on the Ascend platform. 
+
+ Evaluation Metrics. 
+We assess results using two key metrics: (1) Pass@1, the percentage of tasks
+where the agent generates a kernel that successfully compiles and passes functional correctness checks; We found that existing open-source evaluation standards are overly lenient, using atol=1e-2, rtol=1e-2, which permits some incorrect kernel implementations to pass precision validation. We instead adopt stricter thresholds: for fp32, atol= 10 − 3 10^{-3} and rtol= 2 − 13 2^{-13} ; for bf16, atol= 10 − 1 10^{-1} and rtol= 2 − 7 2^{-7} . (2)Fast@1 and Fast@1.2, the fraction of generated kernels
+whose measured speedup ratio over the reference reaches at least 1.0 1.0 or
+ 1.2 1.2 . 
+
+ 5.2 Main Results 
+
+ Tables  1 and 2 report the performance of ATRL and baselines on KernelBench and NPUKernelBench, respectively. 
+
+ On KernelBench, ATRL achieves the best Pass@1 among reported entries on all three levels, reaching 73 73 of 100 100 on Level 1, 35 35 of 100 100 on Level 2, and 10 10 of 50 50 on Level 3. Level 3 is compared only with GRPO ( 2 2 of 50 50 Pass@1); the other rows are not evaluated on this split. On Level 1, GRPO attains the highest Fast@1 and Fast@1.2, at 26 % 26\% and 23 % 23\% , with ATRL at 23 % 23\% and 22 % 22\% . On Level 2, ATRL attains the highest Fast@1 at 7 % 7\% , and ties Drkernel-30B for the highest Fast@1.2 at 3 % 3\% ; SFT and GRPO are both at 2 % 2\% and 2 % 2\% . On Level 3, Fast@1 and Fast@1.2 are 0 % 0\% for both GRPO and ATRL. The Pass@1 gain is consistent across levels. On Level 1 it does not raise Fast@1 or Fast@1.2 above GRPO. On Level 2 it coincides with higher Fast@1 ( 7 % 7\% versus GRPO’s 2 % 2\% ) and Fast@1.2 ( 3 % 3\% versus 2 % 2\% ). On Level 3 both speedup rates stay at 0 % 0\% . 
+
+ On NPUKernelBench, ATRL achieves the best Pass@1 and Fast@1 on all four levels. The Pass@1 margin over GRPO is largest on Level 1 ( 23 23 versus 9 9 of 33 33 ) and Level 2 ( 18 18 versus 6 6 of 31 31 ). On Level 3, the most challenging split, ATRL obtains 9 9 Pass@1, 4 4 Fast@1, and 2 2 Fast@1.2 out of 11 11 , compared with 3 3 , 1 1 , and 0 0 for GRPO. This shows that ATRL is particularly effective in long-horizon, hardware-specific settings where correct kernel generation requires accumulating and reusing domain knowledge across multiple optimization turns. 
+
+ Table 1: Main Results on KernelBench. We report Pass@1 and Fast@1/1.2. Metrics are reported relative to torch eager baseline.
+Each entry is the number of problems that meet the metric, out of 100, 100, and 50 problems on Levels 1–3. Bold 
+indicates the best result. 
+
+ Method | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ Pass@1 | 
+ Fast@1 | 
+ Fast@1.2 | 
+ Pass@1 | 
+ Fast@1 | 
+ Fast@1.2 | 
+ Pass@1 | 
+ Fast@1 | 
+ Fast@1.2 | 
+
+ Drkernel-14B | 
+ 15 | 
+ – | 
+ – | 
+ 1 | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Drkernel-30B | 
+ 37 | 
+ 23 | 
+ 19 | 
+ 12 | 
+ 4 | 
+ 3 | 
+ – | 
+ – | 
+ – | 
+
+ Qwen3.6-35B | 
+ 20 | 
+ 8 | 
+ 7 | 
+ 1 | 
+ 0 | 
+ 0 | 
+ – | 
+ – | 
+ – | 
+
+ Qwen3.6-35B-SFT | 
+ 33 | 
+ 12 | 
+ 11 | 
+ 4 | 
+ 2 | 
+ 2 | 
+ – | 
+ – | 
+ – | 
+
+ GRPO | 
+ 66 | 
+ 26 | 
+ 23 | 
+ 19 | 
+ 2 | 
+ 2 | 
+ 2 | 
+ 0 | 
+ 0 | 
+
+ ATRL(ours) | 
+ 73 | 
+ 23 | 
+ 22 | 
+ 35 | 
+ 7 | 
+ 3 | 
+ 10 | 
+ 0 | 
+ 0 | 
+
+ Table 2: Main Results on NPUKernelBench. We report Pass@1 and Fast@1/1.2. Metrics are reported relative to torch eager baseline.
+Each entry is the number of problems that meet the metric, out of 20, 33, 31, and 11 problems on Levels 0–3. Bold 
+indicates the best result. 
+
+ Method | 
+ L0 | 
+ L1 | 
+ L2 | 
+ L3 | 
+
+ Pass@1 | 
+ Fast@1 | 
+ Fast@1.2 | 
+ Pass@1 | 
+ Fast@1 | 
+ Fast@1.2 | 
+ Pass@1 | 
+ Fast@1 | 
+ Fast@1.2 | 
+ Pass@1 | 
+ Fast@1 | 
+ Fast@1.2 | 
+
+ Qwen3.6-35B | 
+ 12 | 
+ 7 | 
+ 5 | 
+ 7 | 
+ 2 | 
+ 1 | 
+ 3 | 
+ 3 | 
+ 3 | 
+ 3 | 
+ 3 | 
+ 2 | 
+
+ GRPO | 
+ 11 | 
+ 5 | 
+ 4 | 
+ 9 | 
+ 1 | 
+ 0 | 
+ 6 | 
+ 1 | 
+ 0 | 
+ 3 | 
+ 1 | 
+ 0 | 
+
+ ATRL(ours) | 
+ 18 | 
+ 12 | 
+ 8 | 
+ 23 | 
+ 4 | 
+ 3 | 
+ 18 | 
+ 8 | 
+ 8 | 
+ 9 | 
+ 4 | 
+ 2 | 
+
+ 5.3 Ablation Study 
+
+ We ablate the two components that address the obstacles stated in the introduction:
+(i) the lightweight agent harness of Section  4.1 , which turns the sandbox into a white-box environment, and
+(ii) the mixed segment reward of Section  4.3 , which replaces terminal GRPO credit assignment.
+Table  3 reports Pass@1 and Fast@1. 
+
+ Table 3: Ablation of the agent harness and the mixed segment reward.
+Each entry is the number of problems that meet the metric. KernelBench Levels 1–3 contain 100, 100, and 50 problems; NPUKernelBench Levels 0–3 contain 20, 33, 31, and 11. 
+
+ (a) KernelBench | 
+
+ Method | 
+ L1 | 
+ L2 | 
+ L3 | 
+
+ Pass@1 | 
+ Fast@1 | 
+ Pass@1 | 
+ Fast@1 | 
+ Pass@1 | 
+ Fast@1 | 
+
+ Qwen3.6-35B w/o our harness {}_{\text{w/o our harness}} | 
+ 49 | 
+ 19 | 
+ 7 | 
+ 0 | 
+ 4 | 
+ 1 | 
+
+ Qwen3.6-35B w our harness {}_{\text{w our harness}} | 
+ 71 | 
+ 32 | 
+ 34 | 
+ 6 | 
+ 2 | 
+ 0 | 
+
+ (b) NPUKernelBench | 
+
+ Method | 
+ L0 | 
+ L1 | 
+ L2 | 
+ L3 | 
+
+ Pass@1 | 
+ Fast@1 | 
+ Pass@1 | 
+ Fast@1 | 
+ Pass@1 | 
+ Fast@1 | 
+ Pass@1 | 
+ Fast@1 | 
+
+ Qwen3.6-35B w/o our harness {}_{\text{w/o our harness}} | 
+ 12 | 
+ 7 | 
+ 7 | 
+ 2 | 
+ 3 | 
+ 3 | 
+ 3 | 
+ 3 | 
+
+ Qwen3.6-35B w our harness {}_{\text{w our harness}} | 
+ 18 | 
+ 12 | 
+ 16 | 
+ 5 | 
+ 13 | 
+ 7 | 
+ 4 | 
+ 4 | 
+
+ Qwen3.8-27B w/o our harness {}_{\text{w/o our harness}} | 
+ 15 | 
+ 10 | 
+ 16 | 
+ 9 | 
+ 14 | 
+ 10 | 
+ 5 | 
+ 1 | 
+
+ Qwen3.8-27B w our harness {}_{\text{w our harness}} | 
+ 19 | 
+ 13 | 
+ 15 | 
+ 10 | 
+ 17 | 
+ 11 | 
+ 6 | 
+ 3 | 
+
+ Effect of the agent harness. 
+
+ We compare the same multi-turn loop with versus without the harness: cascaded static analysis, compilation, numerical correctness, and benchmarking; correctness-gated access to profiling; and on-demand retrieval from the Ascend knowledge base through the judge–retrieve–apply chain.
+On NPUKernelBench the largest relative gain is on Level 2 ( 2 2 to 13 13 of 31 31 Pass@1), where operators are both fused and hardware-specific; Qwen3.8-27B, a stronger starting point, still improves on Levels 0, 2, and 3, while Level 1 remains comparable.
+On KernelBench, enabling the harness raises frozen Qwen3.6-35B from 49 % 49\% to 71 % 71\% Pass@1 on Level 1 and from 7 % 7\% to 34 % 34\% on Level 2, and raises Fast@1 on Level 1 from 19 % 19\% to 32 % 32\% . On Level 3, Pass@1 falls from 4 4 to 2 2 of 50 50 and Fast@1 from 1 1 to 0 0 . This multi-turn comparison is separate from the Qwen3.6-35B row in Table  1 .
+This supports the claim that the harness, including retrieval from the Ascend knowledge base, supplies checks and Triton-Ascend APIs that the base model does not apply on its own. 
+
+ 6 Conclusion 
+
+ We introduced ATRL, a compaction-aware reinforcement learning method for long-horizon Ascend Triton kernel generation. ATRL preserves execution state through structured checkpoints and incorporates checkpoint generation into policy training. By combining terminal outcomes with verifiable progress at segment boundaries, it provides finer-grained credit assignment than outcome-supervised GRPO. A lightweight agent harness and an Ascend-specific knowledge base support iterative implementation, verification, and optimization. On KernelBench, ATRL improves Pass@1 over GRPO from 66 % 66\% to 73 % 73\% on Level 1 and from 19 % 19\% to 35 % 35\% on Level 2, with additional correctness gains on NPUKernelBench. Although performance gains vary across benchmark levels, these results support jointly designing context management and reward assignment for long-horizon kernel-generation agents. Future work will investigate stronger performance-oriented credit assignment and extend the approach to additional hardware backends.

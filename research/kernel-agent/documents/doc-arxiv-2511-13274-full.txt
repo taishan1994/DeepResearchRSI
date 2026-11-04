@@ -1,0 +1,3174 @@
+marginparsep has been altered.
+ topmargin has been altered.
+ marginparwidth has been altered.
+ marginparpush has been altered.
+
+ The page layout violates the ICML style. 
+
+ Please do not change the page layout, or include packages like geometry,
+savetrees, or fullpage, which change it for you. 
+
+ We’re not able to reliably undo arbitrary changes to the style. Please remove
+the offending package(s), or layout-changing commands and try again. 
+
+ KForge: Program Synthesis for Diverse AI Hardware Accelerators 
+
+ A Preprint 
+
+ Taras Sereda   1  
+ Tom St. John   1  
+ Burak Bartan   1  
+ Natalie Serrino   1  
+ Sachin Katti   1  2  
+ Zain Asgar   1  3  
+ † † footnotetext: 1 Gimlet Labs, San Francisco, California, USA
+ 2 Department of Electrical Engineering, Stanford University, Stanford, California, USA
+ 3 Department of Computer Science, Stanford University, Stanford, California, USA.
+Correspondence to: Taras Sereda <taras@gimletlabs.ai>.
+
+ Figure 1: Iterative program synthesis and optimization loop using LLMs. The workflow consists of two main phases: (1) a functional pass that iteratively refines synthesized programs until the code compiles, executes without errors, and produces correct output, and (2) an optimization pass that provides performance feedback to the LLM for iterative performance improvement. 
+
+ Abstract 
+
+ GPU kernels are critical for ML performance but difficult to optimize across diverse accelerators. We present KForge, a platform-agnostic framework built on two collaborative LLM-based agents: a generation agent that produces and iteratively refines programs through compilation and correctness feedback, and a performance analysis agent that interprets profiling data to guide optimization. This agent-based architecture requires only a single-shot example to target new platforms. 
+
+ We make three key contributions: (1) introducing an iterative refinement system where the generation agent and performance analysis agent collaborate through functional and optimization passes, interpreting diverse profiling data (from programmatic APIs to GUI-based tools) to generate actionable recommendations that guide program synthesis for arbitrary accelerators; (2) demonstrating that the generation agent effectively leverages cross-platform knowledge transfer, where a reference implementation from one architecture substantially improves generation quality for different hardware targets; and (3) validating the platform-agnostic nature of our approach by demonstrating effective program synthesis across fundamentally different parallel computing platforms: NVIDIA CUDA and Apple Metal. 
+
+ 1 Introduction 
+
+ Writing high-performance compute kernels requires mastering domain-specific languages such as CUDA  NVIDIA () , OpenCL  Khronos Group () , Metal  Apple Inc. (2014) , or Triton  Tillet et al. (2019) . Porting kernels across accelerators is extremely challenging and requires fundamental algorithmic restructuring. A kernel optimized for NVIDIA’s H100 cannot be easily adapted for AMD’s MI300X or Apple’s M-series chips, as each platform demands architecture-specific optimizations. 
+
+ Most models have optimized implementations for NVIDIA’s hardware because training is usually conducted on NVIDIA accelerators. However, a growing number of neural network workloads are running on various accelerators both in the cloud and on edge devices, such as smartphones or laptops, where users increasingly run inference tasks, such
+as on-device language models, computer vision, and speech
+synthesis or recognition systems. 
+
+ Compilers such as torch.compile   Ansel et al. (2024) and TensorRT-LLM  NVIDIA (2023) greatly speed up neural computation graphs by leveraging automatic kernel fusion, dynamic shape specialization, and graph optimizations. 
+
+ Nevertheless, building high-performance kernels, as demonstrated by FlashAttention  Dao et al. (2022) ; Dao (2023) , requires combining clever algorithmic techniques with careful hardware utilization. Specifically, integrating online softmax  Milakov & Gimelshein (2018) with tiled attention computation, while leveraging hardware-specific instructions, enables superior performance. Together, these optimizations reduce kernel scheduling overhead and optimize memory access patterns, maximizing arithmetic intensity while minimizing memory pipeline bubbles. 
+
+ This work explores whether large language models (LLMs) can generate kernel programs for multiple hardware accelerators, leveraging both algorithmic and hardware-specific optimizations. We target two distinct ecosystems: NVIDIA’s CUDA with its mature tooling and comprehensive PyTorch  Paszke et al. (2019) support, and Apple’s Metal for Silicon GPUs with limited programmatic profiling capabilities. 
+
+ We propose an agentic program synthesis framework, described in Figure  1 to mirror the real-world workflow of kernel engineers, who typically first make sure that kernel implementation is functionally correct. The kernel is then iteratively optimized using hardware utilization metrics such as memory bandwidth utilization, warp occupancy, or kernel arithmetic intensity. This setup allows the model to first arrive at a functionally correct program that is later incrementally improved based on previous attempts, simulating a practical development loop. 
+
+ 2 Related Work 
+
+ Recent work has explored using LLMs to automate GPU kernel generation and optimization, addressing the challenge of writing efficient kernels for machine learning workloads. 
+
+ KernelBench  Ouyang et al. (2025) introduced a benchmark framework with 250 PyTorch workloads to evaluate LLMs’ ability to generate efficient GPU kernels. The benchmark uses a f ​ a ​ s ​ t p fast_{p} metric measuring both correctness and speedup over baseline implementations. Results show that even frontier reasoning models match PyTorch baseline performance in fewer than 20% of cases, revealing a critical trade-off between optimization complexity and correctness. 
+
+ Sakana AI’s CUDA Engineer  Lange et al. (2025) presented an agentic framework for automatic CUDA kernel discovery using evolutionary optimization. Initially claiming 10-100x speedups over PyTorch operations, the system was later found to exploit evaluation framework vulnerabilities (“reward hacking”), leading to inflated performance claims. The project released a dataset of 30,000+ generated kernels, but highlighted the challenges of robust evaluation in automated optimization. 
+
+ Liger Kernel  Hsu et al. (2025) provides production-ready Triton kernels for LLM training, achieving 20% throughput increase and 60% memory reduction through kernel fusion and optimization. Unlike automated approaches, it offers curated, hand-optimized kernels for common operations like RMSNorm and SwiGLU. 
+
+ KernelLLM  Fisches et al. (2025) fine-tuned an 8B parameter model based on Llama 3.1 Instruct specifically for translating PyTorch modules into Triton kernels, achieving competitive performance on KernelBench-Triton despite its smaller size compared to general-purpose models. 
+
+ FlashInfer  Ye et al. (2025) demonstrates automated kernel generation through Just-In-Time (JIT) compilation that translates high-level attention specifications into optimized CUDA kernels, achieving 29-69% latency reductions in LLM serving benchmarks. Their system uses a unified block-sparse format and dynamic scheduling to handle diverse attention patterns, with successful integration into production frameworks such as SGLang  Zheng et al. (2024) and vLLM  Kwon et al. (2023) . The template-based approach separates algorithmic logic from hardware-specific optimizations, providing valuable insights for cross-platform kernel generation beyond NVIDIA hardware. 
+
+ CUDA-LLM  Chen et al. (2025) suggests a Feature Search and Reinforcement (FSR) framework that addresses the challenge of LLM-generated CUDA kernels often being syntactically correct but performance suboptimal. The FSR framework employs a multidimensional validation pipeline consisting of compilation verification, functional correctness testing through reference output comparison, and empirical performance profiling on target hardware. The system iteratively refines prompts by incorporating compilation error messages when kernels fail to compile, or by adding performance optimization hints when kernels are functionally correct but slow. 
+
+ 3 KForge: Autonomous Program Synthesis 
+
+ We propose KForge, a multi-stage autonomous program synthesis framework, described in Figure  1 . Our approach is versatile and supports iterative refinement, single-shot program synthesis, as well as repetitive sampling, where the mode of operation is directed by prompt construction. 
+
+ Repeated sampling has been extensively explored in multiple previous works  Chen et al. (2021) ; Ouyang et al. (2025) , specifically HumanEval   Chen et al. (2021) reports that generating 100 samples helps solve 70.2% of problems. Hence, we focus on comparing single-shot and iterative refinement experiments, bypassing repeated sampling. 
+
+ Within the scope of this work, we focus on the following three strategies that we employ for program synthesis. Each of these strategies is complementary to each other, allowing one to build dynamic configurations based on available sources of supervision and computational resource budgets. 
+
+ • 
+
+ Iterative refinement : It allows the model to make error corrections from the previous run or optimize the performance of the correctly generated kernel, taking into account the program synthesized in the previous iteration. Specifically, for each iteration i ∈ { 1 , … , N − 1 } i\in\{1,\ldots,N-1\} we add evaluation results from iteration i − 1 i-1 to the model’s prompt, with a corresponding instruction to fix the error or improve program performance. 
+
+ • 
+
+ Reference implementation : We provide the model with a functional reference implementation for other accelerator(s), enabling kernel translation. For example, when we generate Metal kernels, we provide CUDA kernels as reference implementations. 
+
+ • 
+
+ Profiling information : It is crucial for pinpointing bottlenecks and provides comprehensive information on hardware resource usage for a specific computational workload. The timeline view assists in identifying scheduling gaps, while the detailed statistics at the level of individual accelerator API calls enable focusing on parts of the computational graph that do not fully utilize hardware resources. 
+
+ 3.1 Program Synthesis Agent 
+
+ In this work, we follow a similar task definition as described in Ouyang et al. (2025) . Specifically, we treat the LLM as a function F : ( p ) ↦ k F:(p)\mapsto k that receives a text prompt p ∈ 𝒯 p\in\mathcal{T} as input and returns the generated code k ∈ 𝒯 k\in\mathcal{T} . The generated code is expected to contain: a kernel program, a kernel scheduling code, a JIT-library compilation code, and a PyTorch model class NewModel(nn.Module) with def forward(self, *inputs) method that implements the module’s forward pass. 
+
+ We use the Jinja2 template engine to parameterize the prompts. Listing  2 contains an example of the prompt template that we send to the program synthesis agent F F . The resulting prompt p p contains a high-level task description, a single-shot architecture in PyTorch and the corresponding implementation for the target accelerator, an input problem in PyTorch and a task description in natural language. 
+
+ ⬇ 
+
+ 1 
+
+ You write custom {{ accelerator }} kernels to replace the pytorch operators in the given architecture to get speedups ... 
+
+ 2 
+
+ 3 
+
+ Here ’ s an example to show you the syntax of inline embedding custom {{ accelerator }} operators ... 
+
+ 4 
+
+ 5 
+
+ {{ example_arch_src }} 
+
+ 6 
+
+ 7 
+
+ The example new arch with custom {{ accelerator }} kernels looks like this : 
+
+ 8 
+
+ 9 
+
+ {{ example_new_arch_src }} 
+
+ 10 
+
+ 11 
+
+ You are given the following architecture : 
+
+ 12 
+
+ 13 
+
+ {{ arc_src }} 
+
+ 14 
+
+ 15 
+
+ Optimize the architecture named Model with custom {{ accelerator }} operators ... 
+
+ 16 
+
+ 17 
+
+ Output the new code in codeblocks ... 
+
+ Figure 2: Program synthesis prompt template 
+
+ We use vector addition as the single-shot example for both the CUDA and MPS backends. The example consists of kernel definition, kernel scheduling logic, JIT-compilation via torch.utils.cpp_extension.load_inline , and binding with torch.nn.Module . Full code listings with custom kernel integration for CUDA and MPS are provided in Sections  A and  B . 
+
+ We also explored the interfaces for adding custom kernels in the MLX  Hannun et al. (2023) Deep Learning framework. MLX is developed at Apple for training and inference on Apple Silicon, so Metal kernels are its default. Although MLX recently added support for CUDA, we decided to use PyTorch as our framework of choice because it supports more backends, such as Intel’s XPU, and has wide adoption in the community. 
+
+ 3.2 Performance Analysis Agent 
+
+ We introduce a specialized agent for performance analysis rather than using a single program synthesis agent for two reasons.
+(1) Profiling data is extensive but optimization signals are sparse. Previous research  Modarressi et al. (2025) shows that LLM performance on relevant information retrieval drops to 50% for 32K token inputs versus < < 1K tokens.
+(2) Specialized agents enable a modular architecture with different models for each agent. Some LLMs like deepseek-r1 or deepseek-v3 are text-only, while analyzing profiling screenshots requires multimodal capabilities. 
+
+ The Performance Analysis Agent processes profiling inputs - raw metrics from NVIDIA Nsight Systems or visual data from Xcode Instruments—and generates optimization recommendations for subsequent program synthesis iterations. This platform-agnostic approach handles arbitrary textual or visual profiling data across different hardware accelerators. 
+
+ Formally, the agent is defined as G : ( o , k , { v 0 , … , v n } ) ↦ r G:(o,k,\{v^{0},...,v^{n}\})\mapsto r , where o ∈ 𝒯 o\in\mathcal{T} is the text performance optimization prompt; k ∈ 𝒯 k\in\mathcal{T} is the synthesized program; v i ∈ ℝ H × W × C ∪ 𝒯 , i ∈ { 0 , … , n } v^{i}\in\mathbb{R}^{H\times W\times C}\cup\mathcal{T},i\in\{0,...,n\} represents profiling information as screenshots when v i ∈ ℝ H × W × C v^{i}\in\mathbb{R}^{H\times W\times C} or text-based profiler output when v i ∈ 𝒯 v^{i}\in\mathcal{T} ; and r ∈ 𝒯 r\in\mathcal{T} is the performance recommendation. The agent is prompted to generate a single recommendation for maximum performance improvement. 
+
+ The recommendation r t r_{t} feeds into the next synthesis iteration, establishing a feedback loop: F : ( p , k t − 1 , r t − 1 ) ↦ k t F:(p,k_{t-1},r_{t-1})\mapsto k_{t} . 
+
+ 3.3 Program Verification 
+
+ The proposed execution flow defines a closed feedback loop, with valuable information that is either helpful in recovering from failures or allows the model to optimize a functionally correct implementation to achieve speedup. 
+
+ After every generation-evaluation iteration, we save detailed logs for each workload. We focus on five possible execution states: 
+
+ • 
+
+ generation failure — typical reasons: network error, model output does not contain workload’s code. 
+
+ • 
+
+ compilation failure — the generated result contains workload’s code, but fails to compile. 
+
+ • 
+
+ runtime error — the workload’s code compiles but fails at runtime, typically caused by segmentation faults or program abort. 
+
+ • 
+
+ numerical or shape mismatch — call to NewModel.forward returns tensors, but they mismatch in tensor shapes or expected values or both. 
+
+ • 
+
+ correct — call to NewModel.forward returns tensors that match expected outputs both in shapes and numerically. 
+
+ 4 Experimental Setup 
+
+ Our evaluation encompasses 8 LLMs from 3 model providers (Table  1 ), examining both their ability to synthesize programs for hardware accelerators and their relative performance on this task. 
+
+ Provider | 
+ Checkpoint | 
+ Chat | 
+ Reasoning | 
+
+ OpenAI | 
+ gpt-5-2025-08-07 | 
+ | 
+ ✓ | 
+
+ OpenAI | 
+ o3-2025-04-16 | 
+ | 
+ ✓ | 
+
+ OpenAI | 
+ gpt-4o-2024-11-20 | 
+ ✓ | 
+ | 
+
+ OpenAI | 
+ gpt-4.1-2025-04-14 | 
+ ✓ | 
+ | 
+
+ Anthropic | 
+ claude-opus-4-20250514 | 
+ | 
+ ✓ | 
+
+ Anthropic | 
+ claude-sonnet-4-20250514 | 
+ ✓ | 
+ | 
+
+ DeepSeek | 
+ deepseek-R1-0528 | 
+ | 
+ ✓ | 
+
+ DeepSeek | 
+ deepseek-V3-0324 | 
+ ✓ | 
+ | 
+
+ Table 1: Models used in experiments 
+
+ 4.1 Dataset 
+
+ We base our experiments on KernelBench  Ouyang et al. (2025) , containing 250 PyTorch modules across three difficulty levels: Level 1 (single primitives like convolutions), Level 2 (operation sequences with fusion potential), and Level 3 (complete architectures like AlexNet  Krizhevsky et al. (2012) or transformer components  Radford et al. (2019) ). 
+
+ Baseline Methodology. We measure execution time across 100 runs with 10 warmup steps, resetting compilation context between runs. This provides consistent reference points for evaluating generated kernels. 
+
+ CUDA Backend. CUDA provides comprehensive support for all 250 KernelBench problems. We evaluate against both eager mode and torch.compile (TorchInductor backend, default mode). While torch.compile occasionally degrades performance on simple operator sequences, this effect diminishes for larger Level 3 architectures. We reset the compilation context after each run, while computing baselines and evaluating generated kernels. 
+
+ MPS Backend. PyTorch 2.7 uses Metal Performance Shaders (MPS)  Apple Inc. () for GPU acceleration, but several operations lack native Metal implementations (Conv3D transpose, 3D average/max pooling). We exclude 30 problems containing unsupported operations (9 from Level 1 , 21 from Level 2 ), leaving 220 problems in total. Table  2 summarizes the problem distribution. We evaluate against eager mode, as torch.compile for MPS remains experimental with high failure rates (20%) and inconsistent performance. 
+
+ Benchmark | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ KernelBench-Metal | 
+ 91 | 
+ 79 | 
+ 50 | 
+
+ KernelBench | 
+ 100 | 
+ 100 | 
+ 50 | 
+
+ Table 2: Problem distribution for Metal experiments. KernelBench-Metal excludes MPS-unsupported operations. 
+
+ 4.2 Metrics 
+
+ As a metric, we use f ​ a ​ s ​ t p fast_{p} which is defined as the fraction of tasks that are both correct and have a speedup (computed as the ratio of baseline implementation to generated kernel execution time) greater than threshold p p : 
+
+ | 
+ f a s t p = 1 N ∑ i = 1 N 𝟙 ( correct i ∧ { speedup i > p } ) fast_{p}=\frac{1}{N}\sum_{i=1}^{N}\mathbbm{1}(\text{correct}_{i}\land\{\text{speedup}_{i}>p\}) | 
+ | 
+
+ where N N is the total number of problems in a given level. 
+
+ Key measurements include: 
+
+ • 
+
+ Correctness rate ( f ​ a ​ s ​ t 0 fast_{0} ): The fraction of tasks that produce correct results regardless of performance 
+
+ • 
+
+ On-par performance ( f ​ a ​ s ​ t 1 fast_{1} ): The fraction of tasks that are both correct and achieve at least the same speed as the reference implementation 
+
+ • 
+
+ Superior performance ( f ​ a ​ s ​ t p fast_{p} with p > 1.0 p>1.0 ): The fraction of tasks that are both correct and run faster than the reference implementation 
+
+ 4.3 Hardware Configuration 
+
+ For Metal experiments, we use 5 Mac Studios with Apple M4 Max
+chips (14-core CPU, 32-core GPU, 36GB unified memory). 
+
+ For CUDA experiments, we use a single server with 4× H100 SXM5
+GPUs (80GB HBM3 each), with 3.35 TB/s memory bandwidth. 
+
+ To reduce measurement noise and ensure dedicated resource allocation for benchmarking, we evaluate one kernel at a time per computational unit on each platform—one kernel per GPU for CUDA and one kernel per Mac Studio node for Metal. 
+
+ 4.4 Hyperparameters 
+
+ In our experiments, we use all models via API calls, although DeepSeek-R1  DeepSeek-AI et al. (2025a) and DeepSeek-V3  DeepSeek-AI et al. (2025b) are both open-source and can be self-hosted. 
+
+ For OpenAI reasoning models, we configure reasoning_effort="high" and leave max_output_tokens unspecified, enabling the model to generate as many tokens as needed to complete the task. 
+
+ Anthropic reasoning models are configured with a budget_tokens parameter to control the model’s reasoning effort. We follow Anthropic’s reasoning guidelines and set budget_tokens to half of the max_tokens value. After testing multiple max_tokens values on a subset of problems, we observed that generated outputs never exceeded 12,000 tokens. For all experiments, we set max_tokens=16384 , which provides sufficient headroom without constraining the model’s expressive power. 
+
+ | 
+ OpenAI | 
+ Anthropic | 
+ DeepSeek | 
+
+ temperature | 
+ 0.0 | 
+ 0.0 | 
+ 0.0 | 
+
+ reasoning_effort | 
+ “high” | 
+ – | 
+ – | 
+
+ max_output_tokens | 
+ None | 
+ – | 
+ – | 
+
+ max_tokens | 
+ – | 
+ 16384 | 
+ 20000 | 
+
+ budget_tokens | 
+ – | 
+ 8192 | 
+ – | 
+
+ Table 3: Hyper-parameter settings for our experiments 
+
+ For DeepSeek models, we set max_tokens=20000 and observed no truncated outputs in any of our experiments. Table  3 lists hyperparameters. 
+
+ For both CUDA and MPS backends, iterative refinement experiments are conducted with num_iterations=5 . 
+
+ 5 CUDA Backend Program Synthesis 
+
+ 5.1 Iterative Refinement 
+
+ This section outlines the iterative refinement experiment for CUDA program synthesis. We benchmark performance against the PyTorch eager mode baseline. Comparisons with torch.compile are addressed in the subsequent section, where profiling data is included. 
+
+ Reasoning models, in particular openai-gpt-5 and openai-o3 , consistently show the best performance across all levels of KernelBench. 
+
+ While chat models consistently perform worse, in particular, the gap increases with the complexity of the problems, reaching its maximum for Level 3 problems. This indicates that the model’s capability to perform intermediate reasoning is crucial for solving the problems of increased complexity. However, we conjecture that for easy problems in Level 1 it might be more cost-effective to perform initial synthesis with a chat model and run iterative refinements using SOTA reasoning LLMs. 
+
+ Performance at f ​ a ​ s ​ t 1 fast_{1} for all models decreases significantly, and only a fraction of models achieves speedups against the baseline. It is worth noting that many problems in the KernelBench dataset use input tensors with small batch_size . Benchmarking such problems may result in measuring kernel launch overhead T o T_{o} rather than time spent on memory access T m T_{m} or computation T c T_{c} (where T o T_{o} , T m T_{m} , and T c T_{c} represent overhead, memory, and computation time, respectively). This occurs when T o ≫ T m T_{o}\gg T_{m} or T o ≫ T c T_{o}\gg T_{c} . We perform a case study on several Level 3 problems across a grid of batch_size values. We describe it in detail in the Case Study section of this work. 
+
+ openai-gpt-5 achieves f ​ a ​ s ​ t 1.5 = 0.2 fast_{1.5}=0.2 on Level 3 problems. By manually inspecting generated programs, we observed optimizations like kernel fusion and application of torch.compile . Also, we found examples of CUDA Graphs incorporation that allow consolidating several kernel launches into one graph launch. 
+
+ Figure 3: CUDA Program Synthesis. Iterative refinement against PyTorch Eager Mode 
+
+ Comparison with alternative methods . To our knowledge,   Ouyang et al. (2025) is the only work that performs a comprehensive evaluation across all problems from KernelBench. One stark difference we observe is that the performance of frontier LLMs has significantly improved since the introduction of KernelBench. 
+
+ In our experiments, openai-gpt-5 is capable of achieving a correctness rate that is consistently higher than 90% for problems from all levels, while openai-o1 that was used in   Ouyang et al. (2025) 
+experiments achieves a correctness rate of 60% on average across all problem levels. deepseek-r1 and deepseek-v3 are the only two models that are used both in ours and their experiments. If we compare f ​ a ​ s ​ t 1 fast_{1} our results appear to be less performant, except for Level 1 problems for deepdeek-v3 where we show 18% versus 9% reported in   Ouyang et al. (2025) 
+
+ The f ​ a ​ s ​ t p fast_{p} metric for 8 LLMs is summarized in Figure  3 . In the subsequent sections, we will focus solely on openai-gpt-5 , openai-o3 and claude-opus-4 reasoning models since they yield the best overall performance. 
+
+ 5.2 Profiling Information Incorporation 
+
+ Figure 4: CUDA Program synthesis. Iterative refinement vs. Iterative refinement + Profiling Information against torch.compile 
+
+ NVIDIA offers a comprehensive profiling ecosystem with tools such as Nsight Compute and Nsight Systems that provide both command-line interfaces and programmatic access to detailed performance metrics. For the experiments in this section, we use NVIDIA Nsight Systems to capture detailed performance metrics. Profiling is performed using targeted capture with cudaProfilerApi range markers, tracing CUDA API calls, GPU kernels, NVTX ranges, OS runtime events, and cuDNN/cuBLAS operations. For each generated kernel, we extract quantitative performance data using nsys stats , which generates CSV reports containing CUDA API summaries, GPU kernel execution statistics, memory transfer metrics, and NVTX region timings. These structured CSV files, together with the kernel source code, are fed to the performance optimization module to generate actionable recommendations, analogous to the MPS backend workflow where visual profiling data guides optimization decisions. 
+
+ Figure  4 presents results for the three top-performing reasoning models. Notably, for Level 1 and Level 2 problems, torch.compile yields inferior performance compared to Eager Mode, while showing improved baseline performance on Level 3 problems. Incorporating profiling information does not seem to be consistently helpful except for openai-gpt-5 , where the additional information allows it to achieve the strongest performance overall, with 11% of Level 3 problems running at least 1.5 × \times faster than torch.compile . 
+
+ 6 MPS Backend Program Synthesis 
+
+ 6.1 One-shot and Iterative Refinement Kernel Synthesis 
+
+ The starting point of our experiments is a single-shot kernel synthesis, with the number of iterative refinement iterations constrained to 1, effectively giving the model only one chance for generation of a numerically correct kernel. Table 4 lists correctness rates for the Baseline and CUDA reference configurations. 
+
+ Reasoning models show the best performance and achieve remarkable correctness rates. Even in the baseline configuration, openai-o3 achieves 72% accuracy on Level 2 problems. Solid lines in Figure  5 correspond to f ​ a ​ s ​ t p fast_{p} values for iterative refinement experiments. 
+
+ | 
+ Baseline | 
+ CUDA Reference | 
+
+ Model | 
+ L1 | 
+ L2 | 
+ L3 | 
+ L1 | 
+ L2 | 
+ L3 | 
+
+ claude-opus-4 | 
+ 0.66 | 
+ 0.62 | 
+ 0.22 | 
+ 0.86 | 
+ 0.83 | 
+ 0.42 | 
+
+ openai-o3 | 
+ 0.59 | 
+ 0.72 | 
+ 0.44 | 
+ 0.53 | 
+ 0.44 | 
+ 0.28 | 
+
+ openai-gpt-5 | 
+ 0.78 | 
+ 0.65 | 
+ 0.44 | 
+ 0.69 | 
+ 0.72 | 
+ 0.48 | 
+
+ Table 4: Single-shot correctness rate. Baseline vs. CUDA reference configuration. These numbers demonstrate the model’s ability to solve the task with no additional information and without opportunities for error correction or kernel optimization. 
+
+ Figure 5: MPS program synthesis. Iterative refinement vs. Iterative refinement + CUDA reference implementation 
+
+ In general, reasoning models surpass chat models in performance, attaining high accuracy rates. Both openai-gpt-5 and openai-o3 exceed a 90% accuracy rate across all problem levels. Meanwhile, claude-opus-4 performs similarly on Level 1 and Level 2 but only solves 50% of Level 3 problems. 
+
+ The number of correctly generated kernels that run as fast as the baseline decreases significantly for all model providers over all levels. openai-gpt-5 with iterative refinement and CUDA reference configuration is the only model that generates 20% of the kernels for level 1 and level 2 that run at least 1.5 × \times faster than the baseline. 
+
+ | 
+ CUDA Reference | 
+ CUDA Reference + Prof Info | 
+
+ Model | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ f ​ a ​ s ​ t 1.0 fast_{1.0} | 
+
+ claude-opus-4 | 
+ 0.121 | 
+ 0.423 | 
+ 0.100 | 
+ 0.132 | 
+ 0.500 | 
+ 0.160 | 
+
+ openai-o3 | 
+ 0.462 | 
+ 0.321 | 
+ 0.220 | 
+ 0.418 | 
+ 0.474 | 
+ 0.280 | 
+
+ openai-gpt-5 | 
+ 0.571 | 
+ 0.718 | 
+ 0.340 | 
+ 0.538 | 
+ 0.756 | 
+ 0.440 | 
+
+ f ​ a ​ s ​ t 1.5 fast_{1.5} | 
+
+ claude-opus-4 | 
+ 0.044 | 
+ 0.115 | 
+ 0.020 | 
+ 0.066 | 
+ 0.154 | 
+ 0.020 | 
+
+ openai-o3 | 
+ 0.066 | 
+ 0.115 | 
+ 0.060 | 
+ 0.088 | 
+ 0.115 | 
+ 0.040 | 
+
+ openai-gpt-5 | 
+ 0.176 | 
+ 0.243 | 
+ 0.060 | 
+ 0.165 | 
+ 0.256 | 
+ 0.040 | 
+
+ Table 5: MPS Program Synthesis. Impact of profiling information 
+
+ 6.2 CUDA Reference Implementation 
+
+ Despite fundamental differences in memory architecture, CUDA and Metal exhibit significant structural similarities that facilitate cross-platform kernel adaptation. Both platforms employ analogous parallel execution hierarchies, with CUDA thread blocks corresponding to Metal threadgroups and similar 32-thread execution units; warp and SIMD-groups in CUDA and Metal terminology correspondingly. 
+
+ ⬇ 
+
+ 1 
+
+ __global__ void elementwise_add_kernel ( 
+
+ 2 
+
+ const float * a , const float * b , float * out , int size ) { 
+
+ 3 
+
+ int idx = blockIdx . x * blockDim . x + threadIdx . x ; 
+
+ 4 
+
+ if ( idx < size ) { 
+
+ 5 
+
+ out [ idx ] = a [ idx ] + b [ idx ]; 
+
+ 6 
+
+ } 
+
+ 7 
+
+ } 
+
+ Figure 6: CUDA kernel for element-wise vector additions 
+
+ The kernel program syntax demonstrates substantial overlap, enabling CUDA reference implementations to serve as effective reference implementations for Metal program synthesis through translation of thread indexing and synchronization constructs. The core parallel computational logic remains largely invariant, making CUDA kernels valuable reference implementations for Metal kernel generation. In Listing  6 and Listing  7 we include equivalent implementations for vector addition written in CUDA and Metal, respectively, to illustrate their similarities. 
+
+ ⬇ 
+
+ 1 
+
+ kernel void vector_add_kernel ( 
+
+ 2 
+
+ device float * input_a [[ buffer (0)]], 
+
+ 3 
+
+ device float * input_b [[ buffer (1)]], 
+
+ 4 
+
+ device float * output [[ buffer (2)]], 
+
+ 5 
+
+ uint index [[ thread_position_in_grid ]]) { 
+
+ 6 
+
+ output [ index ] = input_a [ index ] + input_b [ index ]; 
+
+ 7 
+
+ } 
+
+ Figure 7: Metal kernel for element-wise vector additions 
+
+ We use CUDA reference implementations from the KernelBench-samples dataset. We retain only correct programs, resulting in 12,600 programs spanning 245 tasks. For reproducibility purposes, we select the first correct implementation for each task and use it for all runs across all model providers. The generation process is now augmented with the CUDA reference implementation. 
+
+ Table 4 shows correctness rates for the CUDA reference configuration. All models except for openai-o3 achieve higher correctness rates compared to the baseline. 
+
+ Dashed lines in Figure  5 correspond to CUDA reference configuration and show the effectiveness of the proposed method in boosting model performance on a majority of the f ​ a ​ s ​ t p fast_{p} thresholds. 
+
+ These results suggest that some implementation patterns are language-agnostic and, to some extent, hardware-agnostic, enabling easier transfer across paradigms and smoother transitions between accelerators. 
+
+ 6.3 Profiling Information Incorporation 
+
+ Profiling Metal programs’ performance on macOS presents a challenge due to the absence of programmatic APIs for accessing GPU profiling data. Apple offers limited profiling capabilities, primarily through Xcode. 
+
+ At the program verification stage, we collect gputrace files for all problems that are correct and hereafter can be optimized. We use PyTorch MPS Profiler and capture trace files by setting MTL_CAPTURE_ENABLED=True . 
+
+ To address the issue of profiling information collection on MacOS, we automate gputrace analysis through an Apple Script that uses cliclick   Bluem () for interaction with Xcode’s GUI and captures screenshots of summary, memory, and timeline views for each collected gputrace. 
+
+ We focus on f ​ a ​ s ​ t 1.0 fast_{1.0} and f ​ a ​ s ​ t 1.5 fast_{1.5} threshold since intuitively, incorporation of profiling information is expected to increase program performance. Two configurations are considered: CUDA Reference and CUDA Reference + Performance Recommendation . The results are reported in Table  5 . 
+
+ Incorporation of optimization recommendations generated by the performance analysis agent G G shows to be helpful for all models in problems from Level 2 and Level 3 at f ​ a ​ s ​ t 1.0 fast_{1.0} . Specifically, openai-gpt-5 is capable of increasing f ​ a ​ s ​ t 1.0 fast_{1.0} for Level 3 problems by 30%, when openai-o3 improves its results for Level 2 problems by 47%. 
+
+ Interestingly, for f ​ a ​ s ​ t 1.5 fast_{1.5} , we do not observe consistent trends. Moreover, the previously mentioned small input tensor shapes used in KernelBench incur irreducible noise in measurement. The results also suggest that profiling information itself is still not sufficient for performance improvement, and sometimes can even lead to performance degradation. We plan to elucidate the observed behavior in greater detail in future work. 
+
+ 7 Case Studies 
+
+ 7.1 Evaluation Across Different Batch Sizes 
+
+ To evaluate whether synthesized programs generalize beyond their training shapes,
+we systematically test CUDA programs synthesized by openai-gpt-5 across batch
+sizes 8 , 16 , 32 , 64 , 128 8,16,32,64,128 on H100 PCIe Gen5 GPUs, comparing against PyTorch
+Eager Mode and torch.compile . All other module hyperparameters remain
+constant. 
+
+ A synthesized implementation of SqueezeNetFire consistently shows superior performance over tested batch_size shapes against both PyTorch Eager Mode and torch.compile , illustrating that our method can provide a speedup for end-to-end building blocks. The results are summarized in Table  6 . 
+
+ At large batch sizes (64, 128),
+ torch.compile ’s graph-level optimizations deliver superior throughput.
+Conversely, at small batch sizes (8, 16, 32), KForge  outperforms both
+baselines on end-to-end architectures (MobileNetV2 and MinGPT, corresponding to
+problems 20 and 43 from Level 3 ), suggesting kernel-level optimizations that
+reduce launch overhead and improve cache utilization in low-latency regimes. 
+
+ All synthesized programs maintain numerical correctness across the batch size
+range, confirming that iterative refinement produces programs robust to shape
+variation rather than overfitted to generation configurations. 
+
+ Notably, torch.compile could be applied atop synthesized programs
+to perform higher-level graph optimizations (operator fusion, memory planning,
+kernel scheduling) while preserving the low-level optimizations introduced
+during generation. This composition could yield the benefits of both
+kernel-level tuning and graph-level transformations, an avenue we leave for
+future exploration. 
+
+ Method | 
+ Workload | 
+ Batch Size | 
+
+ | 
+ | 
+ 8 | 
+ 16 | 
+ 32 | 
+ 64 | 
+ 128 | 
+
+ PyTorch 
+ Eager 
+ | 
+ SqueezeNetFire | 
+ 1.04 | 
+ 1.280 | 
+ 3.90 | 
+ 7.74 | 
+ 15.4 | 
+
+ MobileNetV2 | 
+ 2.79 | 
+ 2.92 | 
+ 5.2 | 
+ 9.86 | 
+ 19.2 | 
+
+ MinGPT | 
+ 1.38 | 
+ 2.59 | 
+ 4.94 | 
+ 9.68 | 
+ 19.4 | 
+
+ Torch 
+ Compile 
+ | 
+ SqueezeNetFire | 
+ 0.565 | 
+ 0.686 | 
+ 2.41 | 
+ 3.59 | 
+ 7.11 | 
+
+ MobileNetV2 | 
+ 2.78 | 
+ 2.65 | 
+ 4.2 | 
+ 7.37 | 
+ 13.8 | 
+
+ MinGPT | 
+ 1.12 | 
+ 2.1 | 
+ 3.97 | 
+ 7.65 | 
+ 15.7 | 
+
+ KForge 
+ (ours) 
+ | 
+ SqueezeNetFire | 
+ 0.474 | 
+ 0.539 | 
+ 1.58 | 
+ 3.09 | 
+ 6.10 | 
+
+ MobileNetV2 | 
+ 1.8 | 
+ 5.41 | 
+ 10.2 | 
+ 19.9 | 
+ 41.6 | 
+
+ MinGPT | 
+ 0.87 | 
+ 1.81 | 
+ 5.35 | 
+ 10.3 | 
+ 22.8 | 
+
+ Table 6: Execution time in milliseconds across batch sizes for three end-to-end architectures from Level 3 
+
+ 7.2 High Performance Programs 
+
+ In Section C.1 , the program synthesized by claude-sonnet applies loop-based vectorization to optimize the Swish  Ramachandran et al. (2017) activation function defined as 
+
+ | 
+ Swish ​ ( x ) = x ⋅ σ ⁡ ( x ) = x 1 + e − x \text{Swish}(x)=x\cdot\sigma(x)=\frac{x}{1+e^{-x}} | 
+ | 
+
+ on Metal-enabled hardware. Each thread sequentially processes 8 elements, reducing launch overhead while increasing arithmetic intensity and register utilization. The exponential computation within the sigmoid function employs Metal’s fast::exp intrinsic to achieve further speedup with a reasonable trade-off in numerical precision. 
+
+ The implementation employs thread-local caching of Metal objects, including the device handle, pipeline state, and command queue, to eliminate redundant initialization across kernel invocations. The threadgroup configuration is dynamically tuned based on maxTotalThreadsPerThreadgroup to maintain high occupancy across a range of input sizes. Additionally, the kernel performs a single bounds check per thread, minimizing control flow divergence and improving execution efficiency. These optimizations lead to improved throughput and memory access coherence, while maintaining correctness for tensors with dimensions not divisible by eight. Overall, the synthesized program achieves a 5 × 5\times speedup over the PyTorch eager baseline. 
+
+ 7.3 Invariance Exploitation 
+
+ We observe patterns where models leverage the fact that certain programs produce constant output values, specifically synthesized programs in Appendix  C.2 and Appendix  C.3 which amount to 1% of problems from Level 1 and Level 2 KernelBench dataset. Speedups are achieved by recognizing that the computation result will be a constant value. This recognition allows reducing the computation graph from multiple layers to a single operation that outputs a tensor of all zeros with the required shape. In this work, we do not attempt to address this issue and attribute it as a data-specific problem. The so-called “cheating” problem can effectively be treated as a smart fusion optimization, where the computation graph is reduced to a single node. Future work could build more comprehensive benchmarks with diverse input shapes and randomized values. 
+
+ 7.4 Computational Graph Reduction 
+
+ We observed a clever optimization discovered by one of OpenAI’s models that enabled the discovery of a shorter but functionally equivalent computational graph. Interestingly, LLMs described the suggested optimization in the doc string and added the implementation that corresponds to the suggested idea. Principally, that suggestion allowed the simplification of the problem from Matrix-Matrix multiplication to Matrix-Vector multiplication. The reader is welcome to inspect both the original problem and generated optimization provided in Appendix  C.4 and Appendix  C.5 . 
+
+ While it is not clear if this problem formulation is intentional in the KernelBench dataset, but we believe that capabilities such as this one serve the illustrative purpose of how LLMs can facilitate invariance in optimizing computational graphs that can translate to a plethora of practical applications such as chip design, route planning, and generic optimization on graphs. 
+
+ 8 Discussion 
+
+ Experimental results confirm that frontier reasoning LLMs, when augmented with iterative feedback loops, are well-positioned for program synthesis tasks and can accelerate program development for diverse hardware accelerators. Furthermore, by providing reference implementations, we are able to improve both the correctness rate and performance of the programs. 
+
+ Although we observe a remarkable success rate for single-shot generation, it is followed by incremental changes in subsequent iterations. We hypothesize that this occurs because conditioning on previous generations does not necessarily lead to globally optimal solutions. Instead, the model may become trapped in local optima, where each iterative refinement produces marginal improvements while missing opportunities for more fundamental algorithmic restructuring that could yield superior performance. 
+
+ Regardless of the accelerator in question, it remains challenging to determine which profiling information is useful for making optimization decisions. Raw profiling data often contain hundreds of metrics, ranging from memory bandwidth utilization and cache hit rates to warp occupancy and instruction throughput, creating an overwhelming amount of information that requires expert knowledge to interpret effectively. 
+
+ The f ​ a ​ s ​ t p fast_{p} metric may obscure modest speedups below the threshold, despite small per-kernel gains (e.g., 2-5%) compounding to significant improvements at scale. A continuous speedup distribution would provide a finer-grained analysis, revealing exact performance gains. 
+
+ 9 Future Work 
+
+ Future work will explore program synthesis for both forward and backward passes of neural network models, enabling acceleration of not only inference but also training across diverse hardware accelerators. 
+
+ We plan to investigate conditioning on intermediate representations (IRs) used by compilers. This could enable the model to learn from existing compiler optimizations for the synthesis of more performant programs. 
+
+ Building on our profiling-based approach, we aim to develop a more granular feedback architecture that incorporates memory bandwidth utilization and roofline model analysis to guide optimization decisions. Such detailed profiling could help the model identify performance bottlenecks more precisely and generate more targeted optimizations. 
+
+ Finally, we believe that integrating formal verification methods could make program synthesis more robust, ensuring correctness across various data types and tensor shapes while maintaining the performance benefits of synthesized kernels. 
+
+ Acknowledgments 
+
+ The authors would like to thank Omid Azizi, Vihang Mehta, and Jeff Liu for insightful discussions, feedback on early versions of this text, and assistance with the hardware setup for the experiments. 
+
+ References 
+
+ Ansel et al. (2024) 
+
+Ansel, J., Yang, E., He, H., Gimelshein, N., Jain, A., Voznesensky, M., Bao, B., Bell, P., Berard, D., Burovski, E., Chauhan, G., Chourdia, A., Constable, W., Desmaison, A., DeVito, Z., Ellison, E., Feng, W., Gong, J., Gschwind, M., Hirsh, B., Huang, S., Kalambarkar, K., Kirsch, L., Lazos, M., Lezcano, M., Liang, Y., Liang, J., Lu, Y., Luk, C. K., Maher, B., Pan, Y., Puhrsch, C., Reso, M., Saroufim, M., Siraichi, M. Y., Suk, H., Zhang, S., Suo, M., Tillet, P., Zhao, X., Wang, E., Zhou, K., Zou, R., Wang, X., Mathews, A., Wen, W., Chanan, G., Wu, P., and Chintala, S.
+
+ Pytorch 2: Faster machine learning through dynamic python bytecode transformation and graph compilation.
+
+ In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , ASPLOS ’24, pp. 929–947, New York, NY, USA, 2024. Association for Computing Machinery.
+
+ ISBN 9798400703850.
+
+ doi: 10.1145/3620665.3640366 .
+
+ URL https://doi.org/10.1145/3620665.3640366 .
+
+ (2) 
+
+Apple Inc.
+
+ Metal Performance Shaders (MPS) backend for PyTorch.
+
+ https://developer.apple.com/metal/pytorch/ .
+
+ Accessed: 2025-01-01.
+
+ Apple Inc. (2014) 
+
+Apple Inc.
+
+ Metal, 2014.
+
+ URL https://developer.apple.com/metal/ .
+
+ Graphics and compute API.
+
+ (4) 
+
+Bluem, C.
+
+ cliclick: A command-line tool for executing mouse- and keyboard-related actions.
+
+ https://github.com/BlueM/cliclick .
+
+ Chen et al. (2021) 
+
+Chen, M., Tworek, J., Jun, H., Yuan, Q., de Oliveira Pinto, H. P., Kaplan, J., Edwards, H., Burda, Y., Joseph, N., Brockman, G., Ray, A., Puri, R., Krueger, G., Petrov, M., Khlaaf, H., Sastry, G., Mishkin, P., Chan, B., Gray, S., Ryder, N., Pavlov, M., Power, A., Kaiser, L., Bavarian, M., Winter, C., Tillet, P., Such, F. P., Cummings, D., Plappert, M., Chantzis, F., Barnes, E., Herbert-Voss, A., Guss, W. H., Nichol, A., Paino, A., Tezak, N., Tang, J., Babuschkin, I., Balaji, S., Jain, S., Saunders, W., Hesse, C., Carr, A. N., Leike, J., Achiam, J., Misra, V., Morikawa, E., Radford, A., Knight, M., Brundage, M., Murati, M., Mayer, K., Welinder, P., McGrew, B., Amodei, D., McCandlish, S., Sutskever, I., and Zaremba, W.
+
+ Evaluating large language models trained on code, 2021.
+
+ URL https://arxiv.org/abs/2107.03374 .
+
+ Chen et al. (2025) 
+
+Chen, W., Zhu, J., Fan, Q., Ma, Y., and Zou, A.
+
+ Cuda-llm: Llms can write efficient cuda kernels, 2025.
+
+ URL https://arxiv.org/abs/2506.09092 .
+
+ Dao (2023) 
+
+Dao, T.
+
+ Flashattention-2: Faster attention with better parallelism and work partitioning.
+
+ arXiv preprint arXiv:2307.08691 , 2023.
+
+ Dao et al. (2022) 
+
+Dao, T., Fu, D. Y., Ermon, S., Rudra, A., and Ré, C.
+
+ Flashattention: Fast and memory-efficient exact attention with io-awareness.
+
+ arXiv preprint arXiv:2205.14135 , 2022.
+
+ DeepSeek-AI et al. (2025a) 
+
+DeepSeek-AI, Guo, D., Yang, D., Zhang, H., Song, J., Zhang, R., Xu, R., Zhu, Q., Ma, S., Wang, P., Bi, X., Zhang, X., Yu, X., Wu, Y., Wu, Z. F., Gou, Z., Shao, Z., Li, Z., Gao, Z., Liu, A., Xue, B., Wang, B., Wu, B., Feng, B., Lu, C., Zhao, C., Deng, C., Zhang, C., Ruan, C., Dai, D., Chen, D., Ji, D., Li, E., Lin, F., Dai, F., Luo, F., Hao, G., Chen, G., Li, G., Zhang, H., Bao, H., Xu, H., Wang, H., Ding, H., Xin, H., Gao, H., Qu, H., Li, H., Guo, J., Li, J., Wang, J., Chen, J., Yuan, J., Qiu, J., Li, J., Cai, J. L., Ni, J., Liang, J., Chen, J., Dong, K., Hu, K., Gao, K., Guan, K., Huang, K., Yu, K., Wang, L., Zhang, L., Zhao, L., Wang, L., Zhang, L., Xu, L., Xia, L., Zhang, M., Zhang, M., Tang, M., Li, M., Wang, M., Li, M., Tian, N., Huang, P., Zhang, P., Wang, Q., Chen, Q., Du, Q., Ge, R., Zhang, R., Pan, R., Wang, R., Chen, R. J., Jin, R. L., Chen, R., Lu, S., Zhou, S., Chen, S., Ye, S., Wang, S., Yu, S., Zhou, S., Pan, S., Li, S. S., Zhou, S., Wu, S., Ye, S., Yun, T., Pei, T., Sun, T., Wang, T., Zeng, W.,
+Zhao, W., Liu, W., Liang, W., Gao, W., Yu, W., Zhang, W., Xiao, W. L., An, W., Liu, X., Wang, X., Chen, X., Nie, X., Cheng, X., Liu, X., Xie, X., Liu, X., Yang, X., Li, X., Su, X., Lin, X., Li, X. Q., Jin, X., Shen, X., Chen, X., Sun, X., Wang, X., Song, X., Zhou, X., Wang, X., Shan, X., Li, Y. K., Wang, Y. Q., Wei, Y. X., Zhang, Y., Xu, Y., Li, Y., Zhao, Y., Sun, Y., Wang, Y., Yu, Y., Zhang, Y., Shi, Y., Xiong, Y., He, Y., Piao, Y., Wang, Y., Tan, Y., Ma, Y., Liu, Y., Guo, Y., Ou, Y., Wang, Y., Gong, Y., Zou, Y., He, Y., Xiong, Y., Luo, Y., You, Y., Liu, Y., Zhou, Y., Zhu, Y. X., Xu, Y., Huang, Y., Li, Y., Zheng, Y., Zhu, Y., Ma, Y., Tang, Y., Zha, Y., Yan, Y., Ren, Z. Z., Ren, Z., Sha, Z., Fu, Z., Xu, Z., Xie, Z., Zhang, Z., Hao, Z., Ma, Z., Yan, Z., Wu, Z., Gu, Z., Zhu, Z., Liu, Z., Li, Z., Xie, Z., Song, Z., Pan, Z., Huang, Z., Xu, Z., Zhang, Z., and Zhang, Z.
+
+ Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning, 2025a.
+
+ URL https://arxiv.org/abs/2501.12948 .
+
+ DeepSeek-AI et al. (2025b) 
+
+DeepSeek-AI, Liu, A., Feng, B., Xue, B., Wang, B., Wu, B., Lu, C., Zhao, C., Deng, C., Zhang, C., Ruan, C., Dai, D., Guo, D., Yang, D., Chen, D., Ji, D., Li, E., Lin, F., Dai, F., Luo, F., Hao, G., Chen, G., Li, G., Zhang, H., Bao, H., Xu, H., Wang, H., Zhang, H., Ding, H., Xin, H., Gao, H., Li, H., Qu, H., Cai, J. L., Liang, J., Guo, J., Ni, J., Li, J., Wang, J., Chen, J., Chen, J., Yuan, J., Qiu, J., Li, J., Song, J., Dong, K., Hu, K., Gao, K., Guan, K., Huang, K., Yu, K., Wang, L., Zhang, L., Xu, L., Xia, L., Zhao, L., Wang, L., Zhang, L., Li, M., Wang, M., Zhang, M., Zhang, M., Tang, M., Li, M., Tian, N., Huang, P., Wang, P., Zhang, P., Wang, Q., Zhu, Q., Chen, Q., Du, Q., Chen, R. J., Jin, R. L., Ge, R., Zhang, R., Pan, R., Wang, R., Xu, R., Zhang, R., Chen, R., Li, S. S., Lu, S., Zhou, S., Chen, S., Wu, S., Ye, S., Ye, S., Ma, S., Wang, S., Zhou, S., Yu, S., Zhou, S., Pan, S., Wang, T., Yun, T., Pei, T., Sun, T., Xiao, W. L., Zeng, W., Zhao, W., An, W., Liu, W., Liang, W., Gao, W., Yu, W., Zhang, W.,
+Li, X. Q., Jin, X., Wang, X., Bi, X., Liu, X., Wang, X., Shen, X., Chen, X., Zhang, X., Chen, X., Nie, X., Sun, X., Wang, X., Cheng, X., Liu, X., Xie, X., Liu, X., Yu, X., Song, X., Shan, X., Zhou, X., Yang, X., Li, X., Su, X., Lin, X., Li, Y. K., Wang, Y. Q., Wei, Y. X., Zhu, Y. X., Zhang, Y., Xu, Y., Xu, Y., Huang, Y., Li, Y., Zhao, Y., Sun, Y., Li, Y., Wang, Y., Yu, Y., Zheng, Y., Zhang, Y., Shi, Y., Xiong, Y., He, Y., Tang, Y., Piao, Y., Wang, Y., Tan, Y., Ma, Y., Liu, Y., Guo, Y., Wu, Y., Ou, Y., Zhu, Y., Wang, Y., Gong, Y., Zou, Y., He, Y., Zha, Y., Xiong, Y., Ma, Y., Yan, Y., Luo, Y., You, Y., Liu, Y., Zhou, Y., Wu, Z. F., Ren, Z. Z., Ren, Z., Sha, Z., Fu, Z., Xu, Z., Huang, Z., Zhang, Z., Xie, Z., Zhang, Z., Hao, Z., Gou, Z., Ma, Z., Yan, Z., Shao, Z., Xu, Z., Wu, Z., Zhang, Z., Li, Z., Gu, Z., Zhu, Z., Liu, Z., Li, Z., Xie, Z., Song, Z., Gao, Z., and Pan, Z.
+
+ Deepseek-v3 technical report, 2025b.
+
+ URL https://arxiv.org/abs/2412.19437 .
+
+ Fisches et al. (2025) 
+
+Fisches, Z. V., Paliskara, S., Guo, S., Zhang, A., Spisak, J., Cummins, C., Leather, H., Synnaeve, G., Isaacson, J., Markosyan, A., and Saroufim, M.
+
+ Kernelllm: Making kernel development more accessible, 6 2025.
+
+ URL https://huggingface.co/facebook/KernelLLM .
+
+ Corresponding authors: Aram Markosyan, Mark Saroufim.
+
+ Hannun et al. (2023) 
+
+Hannun, A., Digani, J., Katharopoulos, A., and Collobert, R.
+
+ MLX: Efficient and flexible machine learning on apple silicon, 2023.
+
+ URL https://github.com/ml-explore .
+
+ Hsu et al. (2025) 
+
+Hsu, P.-L., Dai, Y., Kothapalli, V., Song, Q., Tang, S., Zhu, S., Shimizu, S., Sahni, S., Ning, H., and Chen, Y.
+
+ Liger kernel: Efficient triton kernels for llm training, 2025.
+
+ URL https://arxiv.org/abs/2410.10989 .
+
+ (14) 
+
+Khronos Group.
+
+ Opencl - the open standard for parallel programming of heterogeneous systems.
+
+ https://www.khronos.org/opencl/ .
+
+ Krizhevsky et al. (2012) 
+
+Krizhevsky, A., Sutskever, I., and Hinton, G. E.
+
+ Imagenet classification with deep convolutional neural networks.
+
+ In Pereira, F., Burges, C., Bottou, L., and Weinberger, K. (eds.), Advances in Neural Information Processing Systems , volume 25. Curran Associates, Inc., 2012.
+
+ URL https://proceedings.neurips.cc/paper_files/paper/2012/file/c399862d3b9d6b76c8436e924a68c45b-Paper.pdf .
+
+ Kwon et al. (2023) 
+
+Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica, I.
+
+ Efficient memory management for large language model serving with pagedattention.
+
+ In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles , 2023.
+
+ Lange et al. (2025) 
+
+Lange, R. T., Prasad, A., Sun, Q., Faldor, M., Tang, Y., and Ha, D.
+
+ The ai cuda engineer: Agentic cuda kernel discovery, optimization and composition.
+
+ arXiv preprint , 2025.
+
+ Milakov & Gimelshein (2018) 
+
+Milakov, M. and Gimelshein, N.
+
+ Online normalizer calculation for softmax, 2018.
+
+ URL https://arxiv.org/abs/1805.02867 .
+
+ Modarressi et al. (2025) 
+
+Modarressi, A., Deilamsalehy, H., Dernoncourt, F., Bui, T., Rossi, R. A., Yoon, S., and Schütze, H.
+
+ Nolima: Long-context evaluation beyond literal matching, 2025.
+
+ URL https://arxiv.org/abs/2502.05167 .
+
+ (20) 
+
+NVIDIA.
+
+ Cuda toolkit documentation.
+
+ https://docs.nvidia.com/cuda/ .
+
+ NVIDIA (2023) 
+
+NVIDIA.
+
+ Tensorrt-llm, 2023.
+
+ URL https://github.com/NVIDIA/TensorRT-LLM .
+
+ Large Language Model inference optimization library for NVIDIA GPUs.
+
+ Ouyang et al. (2025) 
+
+Ouyang, A., Guo, S., Arora, S., Zhang, A. L., Hu, W., Ré, C., and Mirhoseini, A.
+
+ Kernelbench: Can llms write efficient gpu kernels?, 2025.
+
+ URL https://arxiv.org/abs/2502.10517 .
+
+ Paszke et al. (2019) 
+
+Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J., Chanan, G., Killeen, T., Lin, Z., Gimelshein, N., Antiga, L., Desmaison, A., Köpf, A., Yang, E., DeVito, Z., Raison, M., Tejani, A., Chilamkurthy, S., Steiner, B., Fang, L., Bai, J., and Chintala, S.
+
+ Pytorch: An imperative style, high-performance deep learning library, 2019.
+
+ URL https://arxiv.org/abs/1912.01703 .
+
+ Radford et al. (2019) 
+
+Radford, A., Wu, J., Child, R., Luan, D., Amodei, D., and Sutskever, I.
+
+ Language models are unsupervised multitask learners.
+
+ 2019.
+
+ Ramachandran et al. (2017) 
+
+Ramachandran, P., Zoph, B., and Le, Q. V.
+
+ Searching for activation functions, 2017.
+
+ URL https://arxiv.org/abs/1710.05941 .
+
+ Tillet et al. (2019) 
+
+Tillet, P., Kung, H. T., and Cox, D.
+
+ Triton: an intermediate language and compiler for tiled neural network computations.
+
+ MAPL 2019, pp. 10–19, New York, NY, USA, 2019. Association for Computing Machinery.
+
+ ISBN 9781450367196.
+
+ doi: 10.1145/3315508.3329973 .
+
+ URL https://doi.org/10.1145/3315508.3329973 .
+
+ Ye et al. (2025) 
+
+Ye, Z., Chen, L., Lai, R., Lin, W., Zhang, Y., Wang, S., Chen, T., Kasikci, B., Grover, V., Krishnamurthy, A., and Ceze, L.
+
+ Flashinfer: Efficient and customizable attention engine for llm inference serving, 2025.
+
+ URL https://arxiv.org/abs/2501.01005 .
+
+ Zheng et al. (2024) 
+
+Zheng, L., Yin, L., Xie, Z., Sun, C., Huang, J., Yu, C. H., Cao, S., Kozyrakis, C., Stoica, I., Gonzalez, J. E., Barrett, C., and Sheng, Y.
+
+ Sglang: Efficient execution of structured language model programs, 2024.
+
+ URL https://arxiv.org/abs/2312.07104 .
+
+ Appendix A vector-add PyTorch CUDA implementation 
+
+ ⬇ 
+
+ 1 
+
+ import torch . nn as nn 
+
+ 2 
+
+ from torch . utils . cpp_extension import load_inline 
+
+ 3 
+
+ 4 
+
+ # Define the custom CUDA kernel for element - wise addition 
+
+ 5 
+
+ source = """ 
+
+ 6 
+
+ # include < torch / extension . h > 
+
+ 7 
+
+ # include < cuda_runtime . h > 
+
+ 8 
+
+ 9 
+
+ __global__ void elementwise_add_kernel ( const float * a , const float * b , float * out , int size ) { 
+
+ 10 
+
+ int idx = blockIdx . x * blockDim . x + threadIdx . x ; 
+
+ 11 
+
+ if ( idx < size ) { 
+
+ 12 
+
+ out [ idx ] = a [ idx ] + b [ idx ]; 
+
+ 13 
+
+ } 
+
+ 14 
+
+ } 
+
+ 15 
+
+ 16 
+
+ torch :: Tensor elementwise_add_cuda ( torch :: Tensor a , torch :: Tensor b ) { 
+
+ 17 
+
+ auto size = a . numel (); 
+
+ 18 
+
+ auto out = torch :: zeros_like ( a ); 
+
+ 19 
+
+ 20 
+
+ const int block_size = 256; 
+
+ 21 
+
+ const int num_blocks = ( size + block_size - 1) / block_size ; 
+
+ 22 
+
+ 23 
+
+ elementwise_add_kernel <<< num_blocks , block_size >>>( a . data_ptr < float >(), b . data_ptr < float >(), out . data_ptr < float >(), size ); 
+
+ 24 
+
+ 25 
+
+ return out ; 
+
+ 26 
+
+ } 
+
+ 27 
+
+ """ 
+
+ 28 
+
+ 29 
+
+ cpp_src = " torch :: Tensor elementwise_add_cuda ( torch :: Tensor a , torch :: Tensor b );" 
+
+ 30 
+
+ 31 
+
+ # Compile the inline CUDA code for element - wise addition 
+
+ 32 
+
+ elementwise_add = load_inline ( 
+
+ 33 
+
+ name =" elementwise_add ", 
+
+ 34 
+
+ cpp_sources = cpp_src , 
+
+ 35 
+
+ cuda_sources = source , 
+
+ 36 
+
+ functions =[" elementwise_add_cuda "], 
+
+ 37 
+
+ verbose = True , 
+
+ 38 
+
+ extra_cflags =[""], 
+
+ 39 
+
+ extra_ldflags =[""], 
+
+ 40 
+
+ ) 
+
+ 41 
+
+ 42 
+
+ 43 
+
+ class ModelNew ( nn . Module ): 
+
+ 44 
+
+ def __init__ ( self ) -> None : 
+
+ 45 
+
+ super (). __init__ () 
+
+ 46 
+
+ self . elementwise_add = elementwise_add 
+
+ 47 
+
+ 48 
+
+ def forward ( self , a , b ): 
+
+ 49 
+
+ return self . elementwise_add . elementwise_add_cuda ( a , b ) 
+
+ Appendix B vector-add PyTorch Metal implementation 
+
+ ⬇ 
+
+ 1 
+
+ import torch 
+
+ 2 
+
+ import torch . nn as nn 
+
+ 3 
+
+ from torch . utils . cpp_extension import load_inline 
+
+ 4 
+
+ 5 
+
+ cpp_source = r ’’’ 
+
+ 6 
+
+ # include < torch / extension . h > 
+
+ 7 
+
+ # import < Foundation / Foundation . h > 
+
+ 8 
+
+ # import < Metal / Metal . h > 
+
+ 9 
+
+ 10 
+
+ static const char * CUSTOM_KERNEL = R " KERNEL ( 
+
+ 11 
+
+ # include < metal_stdlib > 
+
+ 12 
+
+ using namespace metal ; 
+
+ 13 
+
+ 14 
+
+ kernel void vector_add_kernel ( constant float * input_a [[ buffer (0)]], 
+
+ 15 
+
+ constant float * input_b [[ buffer (1)]], 
+
+ 16 
+
+ device float * output [[ buffer (2)]], 
+
+ 17 
+
+ uint index [[ thread_position_in_grid ]]) { 
+
+ 18 
+
+ output [ index ] = input_a [ index ] + input_b [ index ]; 
+
+ 19 
+
+ } 
+
+ 20 
+
+ ) KERNEL "; 
+
+ 21 
+
+ 22 
+
+ static inline id < MTLBuffer > getMTLBufferStorage ( const torch :: Tensor & tensor ) { 
+
+ 23 
+
+ return __builtin_bit_cast ( id < MTLBuffer >, tensor . storage (). data ()); 
+
+ 24 
+
+ } 
+
+ 25 
+
+ 26 
+
+ torch :: Tensor mps_vector_add ( const torch :: Tensor & input_a , const torch :: Tensor & input_b ) { 
+
+ 27 
+
+ torch :: Tensor output = torch :: empty_like ( input_a ); 
+
+ 28 
+
+ 29 
+
+ @autoreleasepool { 
+
+ 30 
+
+ id < MTLDevice > device = MTLCreateSystemDefaultDevice (); 
+
+ 31 
+
+ id < MTLLibrary > library = [ device newLibraryWithSource :[ NSString stringWithUTF8String : CUSTOM_KERNEL ] 
+
+ 32 
+
+ options : nil 
+
+ 33 
+
+ error : nil ]; 
+
+ 34 
+
+ 35 
+
+ id < MTLFunction > function = [ library newFunctionWithName : @ " vector_add_kernel "]; 
+
+ 36 
+
+ id < MTLComputePipelineState > pso = [ device newComputePipelineStateWithFunction : function error : nil ]; 
+
+ 37 
+
+ id < MTLCommandBuffer > commandBuffer = torch :: mps :: get_command_buffer (); 
+
+ 38 
+
+ dispatch_queue_t serialQueue = torch :: mps :: get_dispatch_queue (); 
+
+ 39 
+
+ 40 
+
+ dispatch_sync ( serialQueue , ^(){ 
+
+ 41 
+
+ id < MTLComputeCommandEncoder > encoder = [ commandBuffer computeCommandEncoder ]; 
+
+ 42 
+
+ 43 
+
+ [ encoder setComputePipelineState : pso ]; 
+
+ 44 
+
+ [ encoder setBuffer : getMTLBufferStorage ( input_a ) offset :0 atIndex :0]; 
+
+ 45 
+
+ [ encoder setBuffer : getMTLBufferStorage ( input_b ) offset :0 atIndex :1]; 
+
+ 46 
+
+ [ encoder setBuffer : getMTLBufferStorage ( output ) offset :0 atIndex :2]; 
+
+ 47 
+
+ 48 
+
+ int numThreads = input_a . numel (); 
+
+ 49 
+
+ NSUInteger threadGroupSize = std :: min ( numThreads , ( int ) pso . maxTotalThreadsPerThreadgroup ); 
+
+ 50 
+
+ 51 
+
+ [ encoder dispatchThreads : MTLSizeMake ( numThreads , 1, 1) 
+
+ 52 
+
+ threadsPerThreadgroup : MTLSizeMake ( threadGroupSize , 1, 1)]; 
+
+ 53 
+
+ [ encoder endEncoding ]; 
+
+ 54 
+
+ torch :: mps :: commit (); 
+
+ 55 
+
+ }); 
+
+ 56 
+
+ } 
+
+ 57 
+
+ return output ; 
+
+ 58 
+
+ } 
+
+ 59 
+
+ 60 
+
+ PYBIND11_MODULE ( TORCH_EXTENSION_NAME , m ) { 
+
+ 61 
+
+ m . def (" mps_vector_add ", & mps_vector_add ); 
+
+ 62 
+
+ } 
+
+ 63 
+
+ ’’’ 
+
+ 64 
+
+ vector_add = load_inline ( 
+
+ 65 
+
+ name =’ CustomVectorAdd ’, 
+
+ 66 
+
+ cpp_sources =[ cpp_source ], 
+
+ 67 
+
+ extra_cflags =[’- std = c ++17’, ’- x ’, ’ objective - c ++’, ’- fobjc - arc ’], 
+
+ 68 
+
+ verbose = True 
+
+ 69 
+
+ ) 
+
+ 70 
+
+ 71 
+
+ class ModelNew ( nn . Module ): 
+
+ 72 
+
+ def __init__ ( self ) -> None : 
+
+ 73 
+
+ super (). __init__ () 
+
+ 74 
+
+ self . vector_add = vector_add 
+
+ 75 
+
+ 76 
+
+ def forward ( self , a , b ): 
+
+ 77 
+
+ return self . vector_add . mps_vector_add ( a , b ) 
+
+ Appendix C Case Studies 
+
+ C.1 Level 1 problem 25, Swish 
+
+ ⬇ 
+
+ 1 
+
+ import torch 
+
+ 2 
+
+ import torch . nn as nn 
+
+ 3 
+
+ from torch . utils . cpp_extension import load_inline 
+
+ 4 
+
+ 5 
+
+ cpp_source = r ’’’ 
+
+ 6 
+
+ # include < torch / extension . h > 
+
+ 7 
+
+ # import < Foundation / Foundation . h > 
+
+ 8 
+
+ # import < Metal / Metal . h > 
+
+ 9 
+
+ # include < unordered_map > 
+
+ 10 
+
+ # include < mutex > 
+
+ 11 
+
+ 12 
+
+ static const char * SWISH_KERNEL = R " KERNEL ( 
+
+ 13 
+
+ # include < metal_stdlib > 
+
+ 14 
+
+ using namespace metal ; 
+
+ 15 
+
+ 16 
+
+ kernel void swish_kernel_optimized ( constant float * input [[ buffer (0)]], 
+
+ 17 
+
+ device float * output [[ buffer (1)]], 
+
+ 18 
+
+ constant uint & total_elements [[ buffer (2)]], 
+
+ 19 
+
+ uint index [[ thread_position_in_grid ]]) { 
+
+ 20 
+
+ // Process 8 elements per thread for better memory throughput 
+
+ 21 
+
+ uint base_idx = index * 8; 
+
+ 22 
+
+ 23 
+
+ // Bounds check once for the entire group 
+
+ 24 
+
+ if ( base_idx >= total_elements ) return ; 
+
+ 25 
+
+ 26 
+
+ // Process up to 8 elements , handling remainder automatically 
+
+ 27 
+
+ for ( uint i = 0; i < 8 && ( base_idx + i ) < total_elements ; i ++) { 
+
+ 28 
+
+ uint idx = base_idx + i ; 
+
+ 29 
+
+ float x = input [ idx ]; 
+
+ 30 
+
+ 31 
+
+ // Optimized sigmoid using fast math 
+
+ 32 
+
+ // Using a more efficient approximation : sigmoid ( x ) ~= 0.5 * ( tanh (0.5* x ) + 1) 
+
+ 33 
+
+ // But fast :: exp is still faster for our use case 
+
+ 34 
+
+ float sigmoid_x = 1.0 f / (1.0 f + fast :: exp (- x )); 
+
+ 35 
+
+ output [ idx ] = x * sigmoid_x ; 
+
+ 36 
+
+ } 
+
+ 37 
+
+ } 
+
+ 38 
+
+ ) KERNEL "; 
+
+ 39 
+
+ 40 
+
+ // Thread - local storage for Metal objects to avoid contention 
+
+ 41 
+
+ thread_local struct { 
+
+ 42 
+
+ id < MTLDevice > device = nil ; 
+
+ 43 
+
+ id < MTLLibrary > library = nil ; 
+
+ 44 
+
+ id < MTLComputePipelineState > pso = nil ; 
+
+ 45 
+
+ id < MTLCommandQueue > commandQueue = nil ; 
+
+ 46 
+
+ bool initialized = false ; 
+
+ 47 
+
+ } tl_metal ; 
+
+ 48 
+
+ 49 
+
+ static std :: once_flag init_flag ; 
+
+ 50 
+
+ static id < MTLDevice > g_device ; 
+
+ 51 
+
+ static id < MTLLibrary > g_library ; 
+
+ 52 
+
+ static id < MTLComputePipelineState > g_pso ; 
+
+ 53 
+
+ 54 
+
+ void initialize_global_metal () { 
+
+ 55 
+
+ g_device = MTLCreateSystemDefaultDevice (); 
+
+ 56 
+
+ 57 
+
+ NSError * error = nil ; 
+
+ 58 
+
+ g_library = [ g_device newLibraryWithSource :[ NSString stringWithUTF8String : SWISH_KERNEL ] 
+
+ 59 
+
+ options : nil 
+
+ 60 
+
+ error :& error ]; 
+
+ 61 
+
+ if ( error ) { 
+
+ 62 
+
+ throw std :: runtime_error (" Failed to create Metal library "); 
+
+ 63 
+
+ } 
+
+ 64 
+
+ 65 
+
+ id < MTLFunction > function = [ g_library newFunctionWithName : @ " swish_kernel_optimized "]; 
+
+ 66 
+
+ g_pso = [ g_device newComputePipelineStateWithFunction : function error :& error ]; 
+
+ 67 
+
+ if ( error ) { 
+
+ 68 
+
+ throw std :: runtime_error (" Failed to create compute pipeline state "); 
+
+ 69 
+
+ } 
+
+ 70 
+
+ } 
+
+ 71 
+
+ 72 
+
+ void initialize_thread_local_metal () { 
+
+ 73 
+
+ if (! tl_metal . initialized ) { 
+
+ 74 
+
+ std :: call_once ( init_flag , initialize_global_metal ); 
+
+ 75 
+
+ 76 
+
+ tl_metal . device = g_device ; 
+
+ 77 
+
+ tl_metal . library = g_library ; 
+
+ 78 
+
+ tl_metal . pso = g_pso ; 
+
+ 79 
+
+ tl_metal . commandQueue = [ tl_metal . device newCommandQueue ]; 
+
+ 80 
+
+ tl_metal . initialized = true ; 
+
+ 81 
+
+ } 
+
+ 82 
+
+ } 
+
+ 83 
+
+ 84 
+
+ static inline id < MTLBuffer > getMTLBufferStorage ( const torch :: Tensor & tensor ) { 
+
+ 85 
+
+ return __builtin_bit_cast ( id < MTLBuffer >, tensor . storage (). data ()); 
+
+ 86 
+
+ } 
+
+ 87 
+
+ 88 
+
+ torch :: Tensor mps_swish_optimized ( const torch :: Tensor & input ) { 
+
+ 89 
+
+ initialize_thread_local_metal (); 
+
+ 90 
+
+ 91 
+
+ torch :: Tensor output = torch :: empty_like ( input ); 
+
+ 92 
+
+ uint32_t numElements = input . numel (); 
+
+ 93 
+
+ 94 
+
+ @autoreleasepool { 
+
+ 95 
+
+ id < MTLCommandBuffer > commandBuffer = [ tl_metal . commandQueue commandBuffer ]; 
+
+ 96 
+
+ id < MTLComputeCommandEncoder > encoder = [ commandBuffer computeCommandEncoder ]; 
+
+ 97 
+
+ 98 
+
+ [ encoder setComputePipelineState : tl_metal . pso ]; 
+
+ 99 
+
+ [ encoder setBuffer : getMTLBufferStorage ( input ) offset :0 atIndex :0]; 
+
+ 100 
+
+ [ encoder setBuffer : getMTLBufferStorage ( output ) offset :0 atIndex :1]; 
+
+ 101 
+
+ [ encoder setBytes :& numElements length : sizeof ( uint32_t ) atIndex :2]; 
+
+ 102 
+
+ 103 
+
+ // Each thread processes 8 elements 
+
+ 104 
+
+ uint32_t numThreads = ( numElements + 7) / 8; 
+
+ 105 
+
+ 106 
+
+ // Optimize thread group size based on hardware capabilities 
+
+ 107 
+
+ NSUInteger maxThreadsPerGroup = tl_metal . pso . maxTotalThreadsPerThreadgroup ; 
+
+ 108 
+
+ NSUInteger threadGroupSize = std :: min ( static_cast < NSUInteger >(256), maxThreadsPerGroup ); 
+
+ 109 
+
+ NSUInteger numGroups = ( numThreads + threadGroupSize - 1) / threadGroupSize ; 
+
+ 110 
+
+ 111 
+
+ [ encoder dispatchThreadgroups : MTLSizeMake ( numGroups , 1, 1) 
+
+ 112 
+
+ threadsPerThreadgroup : MTLSizeMake ( threadGroupSize , 1, 1)]; 
+
+ 113 
+
+ 114 
+
+ [ encoder endEncoding ]; 
+
+ 115 
+
+ [ commandBuffer commit ]; 
+
+ 116 
+
+ 117 
+
+ // Don ’ t wait - let it execute asynchronously 
+
+ 118 
+
+ // The next operation will automatically wait if needed 
+
+ 119 
+
+ } 
+
+ 120 
+
+ 121 
+
+ return output ; 
+
+ 122 
+
+ } 
+
+ 123 
+
+ 124 
+
+ PYBIND11_MODULE ( TORCH_EXTENSION_NAME , m ) { 
+
+ 125 
+
+ m . def (" mps_swish_optimized ", & mps_swish_optimized ); 
+
+ 126 
+
+ } 
+
+ 127 
+
+ ’’’ 
+
+ 128 
+
+ 129 
+
+ swish_op = load_inline ( 
+
+ 130 
+
+ name =’ CustomSwishOptimized ’, 
+
+ 131 
+
+ cpp_sources =[ cpp_source ], 
+
+ 132 
+
+ extra_cflags =[’- std = c ++17’, ’- x ’, ’ objective - c ++’, ’- fobjc - arc ’, ’- O3 ’, ’- ffast - math ’, ’- mtune = native ’, ’- flto ’], 
+
+ 133 
+
+ verbose = True 
+
+ 134 
+
+ ) 
+
+ 135 
+
+ 136 
+
+ class ModelNew ( nn . Module ): 
+
+ 137 
+
+ """ 
+
+ 138 
+
+ Highly optimized model that performs a Swish activation using optimized Metal kernel . 
+
+ 139 
+
+ """ 
+
+ 140 
+
+ def __init__ ( self ): 
+
+ 141 
+
+ super ( ModelNew , self ). __init__ () 
+
+ 142 
+
+ self . swish_op = swish_op 
+
+ 143 
+
+ 144 
+
+ def forward ( self , x : torch . Tensor ) -> torch . Tensor : 
+
+ 145 
+
+ """ 
+
+ 146 
+
+ Applies Swish activation to the input tensor using optimized Metal kernel . 
+
+ 147 
+
+ 148 
+
+ Args : 
+
+ 149 
+
+ x ( torch . Tensor ): Input tensor of any shape . 
+
+ 150 
+
+ 151 
+
+ Returns : 
+
+ 152 
+
+ torch . Tensor : Output tensor with Swish applied , same shape as input . 
+
+ 153 
+
+ """ 
+
+ 154 
+
+ # Ensure contiguous memory layout for optimal performance 
+
+ 155 
+
+ if not x . is_contiguous (): 
+
+ 156 
+
+ x = x . contiguous () 
+
+ 157 
+
+ return self . swish_op . mps_swish_optimized ( x ) 
+
+ 158 
+
+ 159 
+
+ batch_size = 16 
+
+ 160 
+
+ dim = 16384 
+
+ 161 
+
+ 162 
+
+ def get_inputs (): 
+
+ 163 
+
+ x = torch . randn ( batch_size , dim ). to (" mps ") 
+
+ 164 
+
+ return [ x ] 
+
+ 165 
+
+ 166 
+
+ def get_init_inputs (): 
+
+ 167 
+
+ return [] 
+
+ C.2 Level 2 problem 23, Conv3DGroupNormMean 
+
+ ⬇ 
+
+ 1 
+
+ import torch 
+
+ 2 
+
+ import torch . nn as nn 
+
+ 3 
+
+ 4 
+
+ 5 
+
+ class ModelNew ( nn . Module ): 
+
+ 6 
+
+ """ 
+
+ 7 
+
+ Ultra - fast inference model . 
+
+ 8 
+
+ 9 
+
+ The output of the reference network is a * constant * that depends ** only ** on 
+
+ 10 
+
+ the GroupNorm bias ( see explanation in the original submission ). We cache 
+
+ 11 
+
+ 12 
+
+ b_mean = mean ( group_norm . bias ) 
+
+ 13 
+
+ 14 
+
+ once and recycle it for every ‘ forward ‘ call . 
+
+ 15 
+
+ 16 
+
+ Extra micro - optimisations Performance 
+
+ 17 
+
+ -------------------------------------------------------------------------- 
+
+ 18 
+
+ • Keep the scalar as a Python ‘ float ‘ and a 1- element tensor . ↓ Python / Torch 
+
+ 19 
+
+ • Cache an expanded view * per ( batch , device , dtype )* so that 
+
+ 20 
+
+ no new tensor objects are created after the first call . ↓ Alloc / overhead 
+
+ 21 
+
+ • Forward pass is pure look - ups no branching , no ‘ mean ()‘, 
+
+ 22 
+
+ no ‘ expand ()‘ after warm - up , no Metal kernel launch . ↓ Latency 
+
+ 23 
+
+ """ 
+
+ 24 
+
+ 25 
+
+ def __init__ ( self , 
+
+ 26 
+
+ in_channels : int , 
+
+ 27 
+
+ out_channels : int , 
+
+ 28 
+
+ kernel_size : int , 
+
+ 29 
+
+ num_groups : int ): 
+
+ 30 
+
+ super (). __init__ () 
+
+ 31 
+
+ 32 
+
+ # Parameters kept solely for state - dict compatibility 
+
+ 33 
+
+ self . conv = nn . Conv3d ( in_channels , out_channels , kernel_size , bias = True ) 
+
+ 34 
+
+ self . group_norm = nn . GroupNorm ( num_groups , out_channels , affine = True ) 
+
+ 35 
+
+ 36 
+
+ # ------------------------------------------------------------------ 
+
+ 37 
+
+ # 1. Pre - compute the constant * once * ( CPU , float32 ) 
+
+ 38 
+
+ # ------------------------------------------------------------------ 
+
+ 39 
+
+ beta_mean : float = float ( self . group_norm . bias . data . mean (). item ()) 
+
+ 40 
+
+ 41 
+
+ # Small tensor version ( shape = [1]) – will be moved / cast as needed 
+
+ 42 
+
+ self . register_buffer (’ _scalar_tensor ’, 
+
+ 43 
+
+ torch . tensor ( beta_mean , dtype = torch . float32 ), 
+
+ 44 
+
+ persistent = False ) # not saved to state - dict 
+
+ 45 
+
+ 46 
+
+ # Python - side caches {( batch , device , dtype ): expanded_view } 
+
+ 47 
+
+ self . _expanded_cache : dict [ tuple [ int , torch . device , torch . dtype ], 
+
+ 48 
+
+ torch . Tensor ] = {} 
+
+ 49 
+
+ 50 
+
+ # ---------------------------------------------------------------------- 
+
+ 51 
+
+ # Helper : get a ready - to - use tensor view of shape ( batch_size ,) 
+
+ 52 
+
+ # ---------------------------------------------------------------------- 
+
+ 53 
+
+ @torch . no_grad () 
+
+ 54 
+
+ def _constant ( self , batch : int , device , dtype ) -> torch . Tensor : 
+
+ 55 
+
+ key = ( batch , device , dtype ) 
+
+ 56 
+
+ if key not in self . _expanded_cache : 
+
+ 57 
+
+ base = self . _scalar_tensor . to ( device = device , dtype = dtype ) 
+
+ 58 
+
+ self . _expanded_cache [ key ] = ( 
+
+ 59 
+
+ base if batch == 1 else base . expand ( batch ) 
+
+ 60 
+
+ ) 
+
+ 61 
+
+ return self . _expanded_cache [ key ] 
+
+ 62 
+
+ 63 
+
+ # ---------------------------------------------------------------------- 
+
+ 64 
+
+ # Forward = dictionary look - up → O (1), ~ 1 µ s 
+
+ 65 
+
+ # ---------------------------------------------------------------------- 
+
+ 66 
+
+ def forward ( self , x : torch . Tensor ) -> torch . Tensor : 
+
+ 67 
+
+ return self . _constant ( x . size (0), x . device , x . dtype ) 
+
+ 68 
+
+ 69 
+
+ 70 
+
+ # -------------------------------------------------------------------------- 
+
+ 71 
+
+ # Helper functions – same public API as the reference implementation 
+
+ 72 
+
+ # -------------------------------------------------------------------------- 
+
+ 73 
+
+ batch_size = 128 
+
+ 74 
+
+ in_channels = 3 
+
+ 75 
+
+ out_channels = 16 
+
+ 76 
+
+ D , H , W = 16, 32, 32 
+
+ 77 
+
+ kernel_size = 3 
+
+ 78 
+
+ num_groups = 8 
+
+ 79 
+
+ 80 
+
+ 81 
+
+ def get_inputs (): 
+
+ 82 
+
+ # Actual values do not matter – computation is skipped 
+
+ 83 
+
+ return [ torch . randn ( batch_size , in_channels , D , H , W )] 
+
+ 84 
+
+ 85 
+
+ 86 
+
+ def get_init_inputs (): 
+
+ 87 
+
+ return [ in_channels , out_channels , kernel_size , num_groups ] 
+
+ C.3 Level 1 problem 80, GemmMaxSubtractGELU 
+
+ ⬇ 
+
+ 1 
+
+ # --------------------------------------------------------------------- 
+
+ 2 
+
+ # Super - fast constant - zero replacement for the reference model 
+
+ 3 
+
+ # --------------------------------------------------------------------- 
+
+ 4 
+
+ # 
+
+ 5 
+
+ # The reference pipeline is 
+
+ 6 
+
+ # 
+
+ 7 
+
+ # y = Linear ( x ) # ( B , F_out ) 
+
+ 8 
+
+ # y = max ( y , dim = max_dim , keepdim = True ) # collapses one dim → 1 
+
+ 9 
+
+ # y = y - y . mean ( dim =1, keepdim = True ) # becomes all - zero 
+
+ 10 
+
+ # y = GELU ( y ) # GELU (0) = 0 
+
+ 11 
+
+ # 
+
+ 12 
+
+ # Hence the numerical result is * always * a tensor of zeros whose 
+
+ 13 
+
+ # shape only depends on the input batch - size and on ‘ max_dim ‘. 
+
+ 14 
+
+ # 
+
+ 15 
+
+ # The implementation below returns such a tensor but 
+
+ 16 
+
+ # • allocates it only once ( lazily on first forward call ), 
+
+ 17 
+
+ # • re - uses the buffer in every subsequent call , and 
+
+ 18 
+
+ # • adapts automatically if the batch - size / device / dtype changes . 
+
+ 19 
+
+ # 
+
+ 20 
+
+ # After the first allocation no further GPU kernel is launched – the 
+
+ 21 
+
+ # forward pass simply returns a pre - existing buffer – which brings 
+
+ 22 
+
+ # the per - call latency down to the bare Python dispatch overhead 
+
+ 23 
+
+ # ( approx 30 µ s on Apple M - series GPUs ). 
+
+ 24 
+
+ # --------------------------------------------------------------------- 
+
+ 25 
+
+ 26 
+
+ import torch 
+
+ 27 
+
+ import torch . nn as nn 
+
+ 28 
+
+ 29 
+
+ class ModelNew ( nn . Module ): 
+
+ 30 
+
+ def __init__ ( self , in_features : int , out_features : int , max_dim : int ): 
+
+ 31 
+
+ super (). __init__ () 
+
+ 32 
+
+ self . in_features = in_features 
+
+ 33 
+
+ self . out_features = out_features 
+
+ 34 
+
+ self . max_dim = max_dim 
+
+ 35 
+
+ 36 
+
+ # Dummy parameters so that state - dicts stay load - compatible . 
+
+ 37 
+
+ self . register_parameter (" weight_dummy ", 
+
+ 38 
+
+ nn . Parameter ( torch . empty ( out_features , in_features ), 
+
+ 39 
+
+ requires_grad = False )) 
+
+ 40 
+
+ self . register_parameter (" bias_dummy ", 
+
+ 41 
+
+ nn . Parameter ( torch . empty ( out_features ), 
+
+ 42 
+
+ requires_grad = False )) 
+
+ 43 
+
+ 44 
+
+ # Cache ( tensor , signature ) -> allocated on first use 
+
+ 45 
+
+ self . _cached_output : torch . Tensor | None = None 
+
+ 46 
+
+ self . _cache_signature = None # ( shape , device , dtype ) 
+
+ 47 
+
+ 48 
+
+ # ----------------------------------------------------------------- 
+
+ 49 
+
+ # Helper : expected output shape for a given input 
+
+ 50 
+
+ # ----------------------------------------------------------------- 
+
+ 51 
+
+ @staticmethod 
+
+ 52 
+
+ def _tuple ( x ): 
+
+ 53 
+
+ return tuple ( x ) if isinstance ( x , ( list , tuple )) else ( x ,) 
+
+ 54 
+
+ 55 
+
+ def _expected_shape ( self , x : torch . Tensor ) -> tuple [ int , ...]: 
+
+ 56 
+
+ if self . max_dim == 0: 
+
+ 57 
+
+ # reduction over batch dimension 
+
+ 58 
+
+ return (1, self . out_features ) 
+
+ 59 
+
+ elif self . max_dim == 1: 
+
+ 60 
+
+ # reduction over feature dimension 
+
+ 61 
+
+ return ( x . size (0), 1) 
+
+ 62 
+
+ else : 
+
+ 63 
+
+ # generic rule ( covers exotic ‘ max_dim ‘ values , keeps API intact ) 
+
+ 64 
+
+ out_shape = list ( x . shape ) 
+
+ 65 
+
+ out_shape [ self . max_dim ] = 1 
+
+ 66 
+
+ return tuple ( out_shape ) 
+
+ 67 
+
+ 68 
+
+ # ----------------------------------------------------------------- 
+
+ 69 
+
+ # Forward 
+
+ 70 
+
+ # ----------------------------------------------------------------- 
+
+ 71 
+
+ @torch . jit . ignore 
+
+ 72 
+
+ def forward ( self , x : torch . Tensor ) -> torch . Tensor : 
+
+ 73 
+
+ exp_shape = self . _expected_shape ( x ) 
+
+ 74 
+
+ sig = ( exp_shape , x . device , x . dtype ) 
+
+ 75 
+
+ 76 
+
+ # Lazily ( re -) allocate if signature has changed 
+
+ 77 
+
+ if sig != self . _cache_signature : 
+
+ 78 
+
+ self . _cached_output = torch . zeros ( exp_shape , 
+
+ 79 
+
+ device = x . device , 
+
+ 80 
+
+ dtype = x . dtype ) 
+
+ 81 
+
+ self . _cache_signature = sig 
+
+ 82 
+
+ 83 
+
+ # return the * same * buffer – no allocation , no compute 
+
+ 84 
+
+ return self . _cached_output 
+
+ 85 
+
+ 86 
+
+ 87 
+
+ # --------------------------------------------------------------------- 
+
+ 88 
+
+ # Utilities expected by the benchmarking harness 
+
+ 89 
+
+ # --------------------------------------------------------------------- 
+
+ 90 
+
+ batch_size = 128 
+
+ 91 
+
+ in_features = 512 
+
+ 92 
+
+ out_features = 1024 
+
+ 93 
+
+ max_dim = 1 
+
+ 94 
+
+ 95 
+
+ def get_inputs (): 
+
+ 96 
+
+ # Allocate on the default Apple - GPU ( MPS ) device for best performance 
+
+ 97 
+
+ return [ torch . randn ( batch_size , in_features , device =" mps ")] 
+
+ 98 
+
+ 99 
+
+ def get_init_inputs (): 
+
+ 100 
+
+ return [ in_features , out_features , max_dim ] 
+
+ C.4 Reference implementation. Level 2 problem 12 
+
+ ⬇ 
+
+ 1 
+
+ import torch 
+
+ 2 
+
+ import torch . nn as nn 
+
+ 3 
+
+ 4 
+
+ class Model ( nn . Module ): 
+
+ 5 
+
+ """ 
+
+ 6 
+
+ Model that performs a sequence of operations : 
+
+ 7 
+
+ - Matrix multiplication 
+
+ 8 
+
+ - Summation 
+
+ 9 
+
+ - Max 
+
+ 10 
+
+ - Average pooling 
+
+ 11 
+
+ - LogSumExp 
+
+ 12 
+
+ - LogSumExp 
+
+ 13 
+
+ """ 
+
+ 14 
+
+ def __init__ ( self , in_features , out_features ): 
+
+ 15 
+
+ super ( Model , self ). __init__ () 
+
+ 16 
+
+ self . linear = nn . Linear ( in_features , out_features ) 
+
+ 17 
+
+ 18 
+
+ def forward ( self , x ): 
+
+ 19 
+
+ """ 
+
+ 20 
+
+ Args : 
+
+ 21 
+
+ x ( torch . Tensor ): Input tensor of shape ( batch_size , in_features ). 
+
+ 22 
+
+ Returns : 
+
+ 23 
+
+ torch . Tensor : Output tensor of shape ( batch_size , 1). 
+
+ 24 
+
+ """ 
+
+ 25 
+
+ x = self . linear ( x ) # ( batch_size , out_features ) 
+
+ 26 
+
+ x = torch . sum ( x , dim =1, keepdim = True ) # ( batch_size , 1) 
+
+ 27 
+
+ x = torch . max ( x , dim =1, keepdim = True )[0] # ( batch_size , 1) 
+
+ 28 
+
+ x = torch . mean ( x , dim =1, keepdim = True ) # ( batch_size , 1) 
+
+ 29 
+
+ x = torch . logsumexp ( x , dim =1, keepdim = True ) # ( batch_size , 1) 
+
+ 30 
+
+ x = torch . logsumexp ( x , dim =1, keepdim = True ) # ( batch_size , 1) 
+
+ 31 
+
+ return x 
+
+ 32 
+
+ 33 
+
+ batch_size = 1024 
+
+ 34 
+
+ in_features = 8192 
+
+ 35 
+
+ out_features = 8192 
+
+ 36 
+
+ 37 
+
+ def get_inputs (): 
+
+ 38 
+
+ return [ torch . rand ( batch_size , in_features )] 
+
+ 39 
+
+ 40 
+
+ def get_init_inputs (): 
+
+ 41 
+
+ return [ in_features , out_features ] 
+
+ C.5 Reduced Graph. Level 2 problem 12 
+
+ ⬇ 
+
+ 1 
+
+ import torch 
+
+ 2 
+
+ import torch . nn as nn 
+
+ 3 
+
+ import torch . nn . functional as F 
+
+ 4 
+
+ 5 
+
+ 6 
+
+ class ModelNew ( nn . Module ): 
+
+ 7 
+
+ """ 
+
+ 8 
+
+ Optimised version of the original Model . 
+
+ 9 
+
+ 10 
+
+ The original sequence 
+
+ 11 
+
+ 12 
+
+ linear → sum → max → mean → logsumexp → logsumexp 
+
+ 13 
+
+ 14 
+
+ collapses to a single dotproduct between the input and the 
+
+ 15 
+
+ columnwise sum of the weight matrix , plus the sum of all bias 
+
+ 16 
+
+ entries . We therefore : 
+
+ 17 
+
+ 18 
+
+ * precompute ‘ w_sum = W . sum ( dim =0)‘ shape ( in_features ,) 
+
+ 19 
+
+ * precompute ‘ b_sum = bias . sum ()‘ scalar 
+
+ 20 
+
+ * evaluate the forward pass with an 
+
+ 21 
+
+ ‘ F . linear ( x , w_sum . unsqueeze (0), b_sum )‘ call , 
+
+ 22 
+
+ which maps to cuBLAS ‘ gemv ‘ ( or Tensor - Core ‘ gemm ‘ for fp16 ). 
+
+ 23 
+
+ 24 
+
+ This removes the custom kernel entirely and yields a ** large speed - up **: 
+
+ 25 
+
+ cuBLAS ‘ gemv ‘ on an H100 processes a (1024, 8192) x (8192,1) multiply 
+
+ 26 
+
+ in approx0 .2 ms (6 x faster than the previous 1.3 ms kernel ). 
+
+ 27 
+
+ 28 
+
+ The API and numerical results are identical to the reference model . 
+
+ 29 
+
+ """ 
+
+ 30 
+
+ 31 
+
+ def __init__ ( self , in_features : int , out_features : int ): 
+
+ 32 
+
+ super (). __init__ () 
+
+ 33 
+
+ # Normal Linear layer – only for weight / bias initialisation . 
+
+ 34 
+
+ self . linear = nn . Linear ( in_features , out_features , bias = True ) 
+
+ 35 
+
+ 36 
+
+ # ----------------------------------------------------------------- 
+
+ 37 
+
+ # Pre ‑ compute the reduced weight vector and bias scalar . 
+
+ 38 
+
+ # ----------------------------------------------------------------- 
+
+ 39 
+
+ with torch . no_grad (): 
+
+ 40 
+
+ # ( in_features ,) – sum over the output ‑ feature dimension 
+
+ 41 
+
+ w_sum = self . linear . weight . sum ( dim =0). contiguous () 
+
+ 42 
+
+ self . register_buffer (" w_sum ", w_sum ) 
+
+ 43 
+
+ 44 
+
+ # scalar bias – sum of all bias entries 
+
+ 45 
+
+ b_sum = self . linear . bias . sum (). contiguous () 
+
+ 46 
+
+ self . register_buffer (" b_sum ", b_sum ) 
+
+ 47 
+
+ 48 
+
+ def forward ( self , x : torch . Tensor ) -> torch . Tensor : 
+
+ 49 
+
+ """ 
+
+ 50 
+
+ Arguments 
+
+ 51 
+
+ --------- 
+
+ 52 
+
+ x : torch . Tensor 
+
+ 53 
+
+ Input tensor of shape ( batch , in_features ). Must be on the same 
+
+ 54 
+
+ device and have the same dtype as the stored buffers . 
+
+ 55 
+
+ 56 
+
+ Returns 
+
+ 57 
+
+ ------- 
+
+ 58 
+
+ torch . Tensor 
+
+ 59 
+
+ Output tensor of shape ( batch , 1) exactly the same as the 
+
+ 60 
+
+ original model . 
+
+ 61 
+
+ """ 
+
+ 62 
+
+ # Ensure the input lives on the correct device & is contiguous . 
+
+ 63 
+
+ x = x . contiguous () 
+
+ 64 
+
+ 65 
+
+ # ‘ F . linear ‘ expects weight shape ( out_features , in_features ). 
+
+ 66 
+
+ # We have a * single * output feature → reshape w_sum accordingly . 
+
+ 67 
+
+ out = F . linear ( x , self . w_sum . unsqueeze (0), self . b_sum ) 
+
+ 68 
+
+ 69 
+
+ # shape is already ( batch , 1) 
+
+ 70 
+
+ return out

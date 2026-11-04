@@ -1,0 +1,1627 @@
+marginparsep has been altered.
+ topmargin has been altered.
+ marginparwidth has been altered.
+ marginparpush has been altered.
+
+ The page layout violates the ICML style. 
+
+ Please do not change the page layout, or include packages like geometry,
+savetrees, or fullpage, which change it for you. 
+
+ We’re not able to reliably undo arbitrary changes to the style. Please remove
+the offending package(s), or layout-changing commands and try again. 
+
+ Agentic Kernel Optimization: Generating State-of-the-Art GPU Kernels Without Hand-Written CUDA 
+
+ Mao Luo   *  1  
+ Hongbin Li   *  1  
+ Feng Lin   1  
+ Hanling Yi   1  
+ Zhe Huang   1  
+ † † footnotetext: * Equal contribution 
+ 1 Intellifusion Inc., Shenzhen, China.
+Correspondence to: Hanling Yi <hanling.cuhk@gmail.com>.
+
+ Technical report on AI code generation for practical GPU kernels on NVIDIA Blackwell GPUs. Copyright 2026 by the author(s). ▲ \blacktriangle https://github.com/CodeGandee/flashinfer-bench-starter-kit/tree/main/solution/cuda 
+ Abstract 
+
+ We study whether general-purpose code agents can produce state-of-the-art GPU kernels without any manually written CUDA code. We investigate this question using representative workloads from FlashInfer-Bench, focusing on the Fused MoE, DSA TopK Indexer, and DSA Sparse Attention, and evaluate all generated kernels under the correctness-gated FlashInfer-Bench protocol on NVIDIA B200 GPUs. Starting from the PyTorch implementations, workload definitions, benchmark commands, and a compact set of CUDA optimization skills, we build a kernel optimization workflow in Houmao, a multi-agent orchestration framework for heterogeneous coding agents, to generate, debug, profile, and optimize the kernels. Humans remain strictly in an orchestration role: defining the workflow, enforcing correctness and anti-hacking constraints, supplying key references, and redirecting the search when progress stalls, without reviewing or editing the kernel code itself. Across roughly 1.9 billion agent tokens, the resulting kernels achieve speedups of 92.68 × 92.68\times on Fused MoE, 1101.02 × 1101.02\times on DSA TopK Indexer, and 181.35 × 181.35\times on DSA Sparse Attention relative to the PyTorch reference implementations, while also significantly outperforming the corresponding FlashInfer baselines. In the official evaluation of the MLSys 2026 FlashInfer AI Kernel Generation Contest, our generated Fused MoE kernel ▲ \blacktriangle achieves a 1.71 × 1.71\times speedup over the FlashInfer baseline, exceeding the top result of the Fused MoE agent-assisted track, which reports a 1.68 × 1.68\times speedup. These results suggest that, under a disciplined correctness-first workflow, code agents can serve as effective autonomous optimizers for modern GPU kernel development. 
+
+ 1 From Kernel Engineering to Agentic Optimization 
+
+ High-performance GPU kernels have become a key enabler of modern LLM systems, especially for architectures built around sparse attention and mixture-of-experts (MoE) computation  Dao et al. [2022] ; Shazeer et al. [2017] ; Gale et al. [2023] ; DeepSeek-AI [2024] . Yet producing state-of-the-art kernels on new hardware remains a largely manual process, requiring repeated reasoning about tiling, memory movement, scheduling, and hardware-specific constraints. Recent progress such as Triton have made kernel development more programmable and reusable, but obtaining top performance still typically demands substantial expert effort  Tillet et al. [2019] . 
+
+ This work asks a different question: can general-purpose code agents produce state-of-the-art GPU kernels without manually written CUDA code? We investigate this question using representative workloads from FlashInfer-Bench  [ Xing and others, 2026 ] , focusing on the Fused MoE, DSA TopK Indexer, and DSA Sparse Attention. These workloads cover fused FP8 MoE computation and sparse-attention components associated with DeepSeek-V3/R1 and DeepSeek-V3.2  DeepSeek-AI [2024] . All generated kernels are evaluated under the correctness-gated FlashInfer-Bench protocol on NVIDIA B200 GPUs. 
+
+ Kernel 
+ | 
+
+ FlashInfer 
+ | 
+
+ Ours 
+ | 
+
+ Token Cost 
+ | 
+
+ DSA-TopK 
+ | 
+
+ 52.03 × \times 
+ | 
+
+ 1101.02 × \times 
+ | 
+
+ 414M 
+ | 
+
+ DSA-Attn 
+ | 
+
+ 10.33 × \times 
+ | 
+
+ 181.35 × \times 
+ | 
+
+ 427M 
+ | 
+
+ FuseMoE 
+ | 
+
+ 47.08 × \times 
+ | 
+
+ 92.68 × \times 
+ | 
+
+ 1.05B 
+ | 
+
+ Table 1: Speedup comparison measured on a local NVIDIA B200 GPU, with the PyTorch implementations as the baseline. 
+
+ A defining feature of our approach is that none of the generated kernels were manually written or hand-tuned by our team members. Starting only from the PyTorch reference implementation, workload definition, benchmark command, and a compact set of reusable CUDA optimization skills, a lightweight multi-agent workflow generated, debugged, profiled, and optimized all kernels. Humans remained strictly in an orchestration role: defining the workflow, enforcing anti-hacking safeguards, supplying key references, and pushing the search toward more aggressive optimizations when progress stalled. 
+
+ Figure 1: Team-based AutoResearch-style agentic workflow for CUDA kernel optimization. 
+
+ Across approximately 1.9 billion tokens, the resulting kernels achieved substantial gains over both the PyTorch and FlashInfer baselines  Ye and others [2025] . Specifically, we attained speedups of 92.68 × 92.68\times on Fused MoE, 1101.02 × 1101.02\times on DSA TopK Indexer, and 181.35 × 181.35\times on DSA Sparse Attention relative to the PyTorch implementations, while also outperforming the corresponding FlashInfer baselines (Table  1 ). These results suggest that under a disciplined correctness-first workflow, code agents can serve as effective autonomous optimizers for modern GPU kernel development. 
+
+ 2 Agentic Optimization Workflow: Agents, Humans, and Tools 
+
+ Effective agent-driven kernel optimization depends not only on model capability, but also on a well-structured search process  Li et al. [2025] ; Zhang et al. [2025] . Our workflow combines a controlled optimization loop, targeted human intervention, and a small set of reusable tools and skills to support long-horizon kernel optimization. This section describes these components. 
+
+ 2.1 Agentic Workflow for Kernel Optimization 
+
+ Kernel optimization is inherently exploratory: progress typically depends on repeated cycles of hypothesis formation, implementation, profiling, and revision  Wei et al. [2025] ; Du et al. [2025] . To support this process, we develop a team-based, AutoResearch-style  Karpathy [] agentic workflow in Houmao 1 1 
+ 1 
+
+ https://github.com/igamenovoer/houmao , a multi-agent orchestration framework for heterogeneous coding agents. The workflow coordinates multiple CLI-based agents, such as Claude Code  Anthropic [] and Codex  OpenAI [] , which operate with distinct but complementary roles. Figure  1 illustrates the organization of agents and the information flow among them. 
+
+ At the center of the workflow is a Planner , which receives the current best kernel, its NCU profiling results, and the history of prior runs, and then proposes the next optimization directions. These proposals are passed to multiple CUDA Coders , each running in an isolated GPU environment. Conditioned on the Planner’s guidance, the Coders explore candidate implementations in parallel, carrying out code changes, debugging, and benchmarking to search for improved solutions. The outputs of the Coders are then reviewed by a Synthesizer , which collects the strongest candidates, identifies the most effective changes, and merges them into an updated solution. Profiling support is provided by an Profiler , implemented as an NCU-based kernel profiler that generates performance reports and attributes bottlenecks for a given kernel. When exploration stalls, a Researcher serves as an on-demand web search agent, retrieving relevant references and summarizing reusable optimization patterns or patch ideas to assist the Coders. 
+
+ Within this workflow, the optimization loop follows a tightly controlled protocol. Since progress depends heavily on the effectiveness of the CUDA Coders, their behavior is explicitly constrained. The editable surface is deliberately restricted: agents may modify only the CUDA kernel implementation, while the benchmark harness, datasets, configurations, and reference implementations remain fixed. This ensures that all measured gains come from kernel improvements rather than changes to the evaluation setup. 
+
+ Candidate kernels are evaluated under a correctness-gated speedup metric. A change is accepted only if it passes all correctness checks; numerical errors, runtime failures, and timeouts invalidate the result. After several unsuccessful attempts along the same direction, the CUDA Coders consult the Researcher for additional references and optimization ideas. If no progress is made within the allotted time, they report back to the Synthesizer and wait for the Planner to redirect the search toward a new optimization strategy. 
+
+ 2.2 Human Intervention as Search Correction 
+
+ Even with a clean automated workflow, optimization can still stall because agents exhibit systematic search biases. In our workflow, the main value of human intervention lies not in kernel implementation, but in search correction: identifying when the agent team is stuck, misattributes failures, or misses critical external references. 
+
+ We observe three recurring failure modes. First, agents favor incremental tweaks even after progress plateaus and may fail to propose more disruptive optimizations unless explicitly pushed in that direction. Second, they sometimes revert genuinely beneficial changes after spurious failures, incorrectly attributing regressions to the new optimization rather than to an independent bug. Third, they tend to under-search external references, occasionally missing key examples needed to reach stronger implementations. 
+
+ Overall, the agents are effective at local optimization, implementation, and bookkeeping, but less reliable at making major directional shifts or recovering from misleading failures. In such cases, targeted manager-style human intervention is sufficient to redirect the search and unlock substantially better performance. More broadly, this suggests that deep CUDA expertise is not always required; even limited domain knowledge can be sufficient to identify promising optimization directions. 
+
+ Skill / Tool 
+ | 
+
+ Purpose 
+ | 
+
+ Source 
+ | 
+
+ cuda-b200-skill 
+ | 
+
+ Blackwell CUDA reference covering PTX ISA, TMA/WGMMA/ tcgen05 , occupancy, register/shared-memory limits, and debugging. 
+ | 
+
+ GitHub 1 
+ | 
+
+ ncu-cuda-profiling 
+ | 
+
+ Automated NCU workflow, saved profiler reports, and summarized metrics. 
+ | 
+
+ GitHub 2 
+ | 
+
+ bench-environment 
+ | 
+
+ Contest evaluation harness covering tensor cloning, L2 flushes, cold-cache and no-CUDA-graph defaults, and anti-hacking rules. 
+ | 
+
+ Internal environment 
+ | 
+
+ /codex:rescue 
+ | 
+
+ Independent kernel review via the Claude Code plugin, surfacing alternatives like persistent kernels, TMA, and shared-memory skewing. 
+ | 
+
+ GitHub 3 
+ | 
+
+ Web research 
+ | 
+
+ Web search and fetch tools, used after repeated failures to investigate references such as DeepGEMM, FlashInfer, and RadiK. 
+ | 
+
+ External tool 
+ | 
+
+ 1 
+
+ https://github.com/technillogue/ptx-isa-markdown 
+
+ 2 
+
+ https://github.com/maxiaosong1124/ncu-cuda-profiling-skill 
+
+ 3 
+
+ https://github.com/openai/codex-plugin-cc 
+
+ Table 2: Skills, tools, and references used for CUDA kernel optimization. 
+
+ 2.3 Tools and Skills 
+
+ All kernels are implemented in pure CUDA. In Houmao, all agents are instantiated through Claude Code and backed by Claude Opus 4.6. Houmao runs each agent in an isolated context window. We also provide a small set of on-demand skills, each packaged as a folder of Markdown notes that agents can load when needed. Table  2 summarizes the most important skills and tools. 
+
+ 3 Kernel Design and Optimization 
+
+ 3.1 Speedup vs. Token Cost 
+
+ This section summarizes how performance evolves as additional agent tokens are invested in each kernel. Across all three kernels, the final gains arise not from a single rewrite, but from the cumulative effect of increasingly specialized optimizations. 
+
+ 3.1.1 Fused MoE 
+
+ Fused MoE implements the MoE block used in DeepSeek-V3. For each input token, the kernel executes four stages: (1) computing routing scores via a lightweight linear projection, sigmoid activation, group-wise top-2 selection over 8 groups, and final top- K = 8 K=8 expert selection; (2) gathering the active rows for each expert and quantizing them into a contiguous FP8 layout with 128-element blockwise FP32 scaling factors; (3) evaluating the gated MLP, including an FP8 blockwise GEMM1 from [ T , 7168 ] [T,7168] to [ T , 4096 ] [T,4096] , a SwiGLU activation, re-quantization, and an FP8 blockwise GEMM2 from [ T , 2048 ] [T,2048] to [ T , 7168 ] [T,7168] ; and (4) scattering the expert outputs back to the original token positions, weighted by the routing scores. 
+
+ The final implementation keeps all metadata construction on the GPU and eliminates cudaStreamSynchronize from the hot path. It compiles three GEMM backends into a single module: a CUTLASS FP8 blockwise backend, a hand-written tcgen05 backend, and a cuBLAS FP16 fallback for very large T T . Figure  2 visualizes the cumulative optimization trajectory and the token cost. 
+
+ Figure 2: Cumulative speedup of Fused MoE vs. token cost. 
+
+ 3.1.2 DSA Sparse Attention 
+
+ DSA Sparse Attention is a paged KV-cache batched decoding operator derived from DeepSeek-V3.2. For each query token, the kernel (1) gathers the top- K = 2048 K=2048 KV entries from a sparse index list; (2) computes scaled attention logits of the form ( q nope ​ K c ⊤ ) + ( q pe ​ K p ⊤ ) (q_{\mathrm{nope}}K_{c}^{\top})+(q_{\mathrm{pe}}K_{p}^{\top}) ; (3) applies a base-2 softmax; and (4) accumulates attn ​ _ ​ weights ⋅ K c \mathrm{attn\_weights}\cdot K_{c} into a 512-dimensional output while also producing the LSE. 
+
+ The final implementation adopts a 4-heads-per-block layout with 128 threads organized into 4 warps, assigning one warp to each head. KV tiles are staged through a two-stage cp.async pipeline with double-buffered shared memory. The kernel also uses an adaptive Split-K dispatch strategy: a single-pass kernel for a single token, a templated SPLIT_K=64 configuration for up to two tokens, and a templated SPLIT_K=32 configuration for larger batches. The merge kernel further partitions the 512-dimensional output into four slices, increasing merge parallelism by 4 × 4\times . Additional optimizations include branchless online softmax, register-resident query and output accumulators, BF16 partial outputs to reduce merge bandwidth, and block reordering to improve L2 locality. Figure  3 visualizes the cumulative optimization path. 
+
+ Figure 3: Cumulative speedup of DSA Sparse-Attn vs. token cost. 
+
+ 3.1.3 DSA TopK Indexer 
+
+ DSA TopK Indexer implements the paged attention indexing stage for DSA sparse attention. Given FP8 queries Q Q with 64 heads and 128 dimensions per head, a paged FP8 key cache K K with per-token FP32 scaling factors, per-head weights, and sequence lengths, the operator computes 
+
+ | 
+ score ⁡ ( t ) = ∑ h ReLU ⁡ ( Q h ​ K t ⊤ ) ⋅ w h \mathrm{score}(t)=\sum_{h}\mathrm{ReLU}\!\left(Q_{h}K_{t}^{\top}\right)\cdot w_{h} | 
+ | 
+
+ and returns the top- K K ( K = 2048 K=2048 ) token indices for each batch element. The PyTorch reference implementation performs a bmm over dequantized keys followed by torch.topk . Because the contest harness enforces --required-matched-ratio 1.0 , all returned indices must match the reference exactly. This bit-exact TopK requirement drives most of the architectural choices. 
+
+ Figure 4: Cumulative speedup of DSA topk-indexer vs. token cost. 
+
+ The final implementation is a three-kernel pure-CUDA pipeline with no CPU–GPU synchronization on the hot path. When seq ​ _ ​ len ≤ K \mathrm{seq\_len}\leq K , the pipeline degenerates to a pure index-remapping path, since every token is selected trivially. The main optimizations include a fused FP32-accumulation GEMM path that computes Q ​ K ⊤ QK^{\top} , applies ReLU, weights each head, and reduces across heads within a single kernel; bank-conflict-free shared-memory layouts using a stride-129 key tile and padded cross-warp partial-sum buffers; a four-pass 8-bit radix TopK with sortable-float bit transforms, early termination, subgroup histograms, parallel suffix scan, and warp-ballot gathering; on-device fast/slow-path dispatch based on seq_lens[b] ; and bit-exact FP8-to-FP32 dequantization that matches the reference. Figure  4 illustrates the cumulative optimization path. 
+
+ Group 
+ | 
+
+ Length 
+ | 
+
+ Num 
+ | 
+
+ Speedup 
+ | 
+
+ Typical 
+ | 
+
+ Latency 
+ | 
+
+ Bottleneck (NCU) 
+ | 
+
+ short 
+ | 
+
+ 1 1 – 16 16 
+ | 
+
+ 5 
+ | 
+
+ 103 103 – 240 × 240\times 
+ | 
+
+ 7 
+ | 
+
+ 0.099 ms 
+ | 
+
+ Floor set by routing and launch overhead. 
+ | 
+
+ median 
+ | 
+
+ 32 32 – 80 80 
+ | 
+
+ 11 
+ | 
+
+ 75 75 – 93 × 93\times 
+ | 
+
+ 54 
+ | 
+
+ 0.205 ms 
+ | 
+
+ GEMM1+GEMM2 account for ∼ \sim 65% of iteration time 
+ | 
+
+ long 
+ | 
+
+ 901 901 – 14,107 14{,}107 
+ | 
+
+ 3 
+ | 
+
+ 38 38 – 74 × 74\times 
+ | 
+
+ 14,107 
+ | 
+
+ 1.229 ms 
+ | 
+
+ GEMM1 accounts for ∼ \sim 47%, GEMM2 for ∼ \sim 30% 
+ | 
+
+ Table 3: Fused MoE workload groups and the dominant bottlenecks of their representative workloads. 
+
+ 3.2 Workload Regimes and Bottleneck Analysis 
+
+ This section analyzes the three kernels through the lens of workload regimes. Rather than treating all benchmark instances independently, we group them into a small number of representative regimes, profile one representative workload from each group with NCU, and identify the dominant bottlenecks. This regime-level analysis helps explain both the main optimization gains achieved during the search and the remaining sources of performance loss. 
+
+ 3.2.1 Fused MoE 
+
+ The 19 contest workloads can naturally partition into three sequence-length regimes. For each regime, we select a representative workload, profile it with NCU, and report the dominant bottlenecks in Table  3 . Across all three regimes, the GEMM kernels already operate at high SM utilization. For the long-sequence representative, GEMM1 and GEMM2 achieve 97% and 95% SM utilization, respectively. Accordingly, the remaining optimization headroom appears to lie less in further improving standalone GEMM throughput than in reducing inter-stage data movement. For long-sequence workloads, the most promising remaining direction is to fuse pull_scatter into the GEMM2 epilogue, so that the producer–consumer path can remain in registers or shared memory. In the current implementation, however, this approach is limited by an upstream CUTLASS API constraint that we leave unmodified. 
+
+ Group 
+ | 
+
+ #Tokens 
+ | 
+
+ Num 
+ | 
+
+ Speedup 
+ | 
+
+ Typical 
+ | 
+
+ Latency 
+ | 
+
+ Bottleneck (NCU) 
+ | 
+
+ short 
+ | 
+
+ 1 
+ | 
+
+ 1 
+ | 
+
+ 280 × 280\times 
+ | 
+
+ 1 token 
+ | 
+
+ 0.005 ms 
+ | 
+
+ Grid under-occupancy; only 4 CTAs are launched; latency is launch-dominated 
+ | 
+
+ median 
+ | 
+
+ 2 
+ | 
+
+ 8 
+ | 
+
+ 125 125 – 148 × 148\times 
+ | 
+
+ 2 tokens 
+ | 
+
+ 0.017 ms 
+ | 
+
+ Latency-bound Split-K; low occupancy from high register pressure 
+ | 
+
+ long 
+ | 
+
+ 6 6 – 8 8 
+ | 
+
+ 14 
+ | 
+
+ 108 108 – 228 × 228\times 
+ | 
+
+ 8 tokens 
+ | 
+
+ 0.026 ms 
+ | 
+
+ Register-pressure-limited occupancy; residual shared-memory bank conflicts remain 
+ | 
+
+ Table 4: DSA Sparse Attention workload groups and the dominant bottlenecks of their representative workloads. 
+
+ Group 
+ | 
+
+ Length 
+ | 
+
+ Num 
+ | 
+
+ Speedup 
+ | 
+
+ Typical 
+ | 
+
+ Latency 
+ | 
+
+ Bottleneck (NCU) 
+ | 
+
+ short 
+ | 
+
+ max ⁡ S ≤ 1024 \max S\leq 1024 
+
+ max ⁡ P ≤ 16 \max P\leq 16 
+
+ | 
+
+ 27 
+ | 
+
+ 477 477 – 3732 × 3732\times 
+ | 
+
+ bs=29 
+
+ max ⁡ P = 1 \max P=1 
+
+ max ⁡ S = 64 \max S=64 
+
+ | 
+
+ ∼ \sim 0.002 ms 
+ | 
+
+ Fast-path index remap; floor set by launch and grid scheduling 
+ | 
+
+ medium 
+ | 
+
+ 1088 ≤ max ⁡ S ≤ 2048 1088\leq\max S\leq 2048 
+
+ 17 ≤ max ⁡ P ≤ 32 17\leq\max P\leq 32 
+
+ | 
+
+ 42 
+ | 
+
+ 816 816 – 5366 × 5366\times 
+ | 
+
+ bs=15 
+
+ max ⁡ P = 31 \max P=31 
+
+ max ⁡ S = 1984 \max S=1984 
+
+ | 
+
+ ∼ \sim 0.004 ms 
+ | 
+
+ Fast-path index remap; kernel cost grows only with batch size and TopK 
+ | 
+
+ long 
+ | 
+
+ max ⁡ S > 2048 \max S>2048 
+
+ max ⁡ P > 32 \max P>32 
+
+ | 
+
+ 59 
+ | 
+
+ 107 107 – 756 × 756\times 
+
+ | 
+
+ bs=4 
+
+ max ⁡ P = 36 \max P=36 
+
+ S = [ 18 , 11 , 2161 , 20 ] S=[18,11,2161,20] 
+
+ | 
+
+ ∼ \sim 0.020 ms 
+ | 
+
+ Slow-path FusedGemm + RadixTopK; low active-CTA count and FP8 dequant stalls 
+ | 
+
+ Table 5: DSA TopK Indexer workload groups and the dominant bottlenecks of their representative workloads. 
+
+ 3.2.2 DSA Sparse Attention 
+
+ The 23 contest workloads can be grouped into three regimes by num_tokens , which also matches the boundaries used by our adaptive Split-K dispatcher. For each regime, we select one representative workload, profile it with NCU, and summarize the dominant bottleneck in Table  4 . These clusters correspond to the main optimization wins during the campaign. MERGE_DIM_SPLIT=4 targeted the long-cluster merge tail and contributed the largest gain. The SPLIT_K=64 path for num_tokens ≤ 2 \leq 2 was introduced specifically for the mid cluster based on per-workload NCU analysis. For the short cluster, the single fused-kernel dispatch avoids merge overhead entirely. 
+
+ The remaining performance gap appears to be largely structural. The attention kernel uses roughly 192 registers per thread and about 50 KB of shared memory, limiting achieved occupancy to around 10%. Since the kernel is already latency-bound rather than compute- or bandwidth-bound, further improvements likely require a more substantial architectural redesign, such as reducing register pressure or moving to a TMA/warpgroup/ tcgen05 -style design. Lower-precision compute could also reduce pressure, but this direction is constrained by the strict correctness requirements. 
+
+ 3.2.3 DSA TopK Indexer 
+
+ The 128 contest workloads are naturally organized into three regimes according to max_num_pages . Because each page contains 64 tokens, this quantity effectively upper-bounds the maximum sequence length within a batch. The most important threshold is max_num_pages=32 : when all sequences satisfy this bound, their lengths do not exceed TopK=2048 , and the kernel can bypass score computation entirely in favor of a pure index-remapping fast path. For each regime, we choose a representative workload, profile its hot kernels with NCU, and summarize the principal bottlenecks in Table  5 . 
+
+ These regimes account for the largest gains observed in the DSA TopK Indexer optimization campaign. In the short and mid regimes, the on-device fast-path dispatch yields especially large improvements by skipping score computation whenever seq ​ _ ​ len ≤ TopK \mathrm{seq\_len}\leq\mathrm{TopK} . In both cases, execution reduces to the same lightweight index-remapping kernel, whereas the PyTorch reference still incurs the cost of per-batch GEMM and topk . In the long regime, only those sequences whose lengths exceed TopK take the full slow path. For the representative workload, this means that only one of the four batch elements invokes FusedGemm and RadixTopK , while the remaining three return early. 
+
+ Within the long regime, the main improvements come from eliminating shared-memory bank conflicts and reducing serialized work inside RadixTopK . In particular, padding s_partial from [16][32] to [16][33] removes a substantial cross-warp bank conflict in FusedGemm , while increasing the RadixTopK configuration from 256 to 512 threads reduces the loop work performed in each pass. The remaining limitation is structural: at those small batch sizes, RadixTopK launches only a small number of CTAs, leaving much of the GPU underutilized, and the fused GEMM path still remains behind what a TMA+ tcgen05 -style pipeline could potentially achieve. 
+
+ 4 Discussion 
+
+ When Speedup Is Not Real. 
+
+ During kernel optimization, we encounter several instances of benchmark exploitation, in which the agent achieves implausibly large reported speedups without producing a genuinely improved kernel. In early Fused MoE runs, for example, the reported speedup sometimes exceeds 1000 × 1000\times . The underlying mechanism is that the in-process FlashInfer-Bench harness reuses input tensor pointers across iterations, which leads the agent to introduce an output cache keyed by tensor identity. After the first iteration, the kernel can simply return cached outputs while still passing correctness checks, even though the measured gain does not correspond to a deployable kernel optimization. 
+
+ A notable lesson from this campaign is therefore that code agents, when granted full visibility into the project codebase, can engage in “reward hacking”  Liu et al. [2026] unless the optimization objective is carefully constrained. To prevent this behavior, we incorporate explicit anti-hacking rules into every agent’s initial prompt. In particular, we disallow optimizations based on input-identity caching, cross-iteration buffer reuse, or other sample-specific shortcuts. If a performance gain depends on a legitimate deployable cache, the agent must report cold-path and warm-path performance separately. This rule becomes a core part of our evaluation discipline and is necessary to ensure that measured speedups reflect genuine kernel improvements. 
+
+ Human as Orchestrator. 
+
+ Human contribution is best understood as orchestration rather than implementation. Humans define the evaluation protocol, benchmark discipline, and multi-agent workflow; enforce anti-hacking and correctness constraints; and intervene only when the search plateaus, typically by redirecting the agents toward more aggressive optimization strategies or supplying key external references that the agents fail to retrieve on their own. Crucially, humans do not review / edit the kernel code itself. 
+
+ 5 Conclusion 
+
+ In this work, we study whether general-purpose code agents can produce state-of-the-art GPU kernels without any manually written CUDA code. Using representative FlashInfer-Bench workloads and their correctness-gated evaluation protocol, we show that the answer is yes: under a disciplined correctness-first workflow, an agentic system can generate high-performance kernels that substantially outperform both the PyTorch references and the corresponding FlashInfer baselines. Our results also show that model capability alone is not enough. Strong performance requires a structured optimization loop, explicit anti-hacking constraints, and targeted human intervention to redirect the search when agents stall or misgeneralize. Yet this intervention remains orchestration rather than implementation: humans do not write or edit the kernel code. Taken together, these findings suggest a broader shift. High-performance GPU kernel development no longer needs to be viewed exclusively as a manual expert craft. With the right workflow, code agents can already serve as practical autonomous optimizers for modern GPU kernels. 
+
+ Acknowledgments 
+
+ We thank the organizers of the MLSys 2026 FlashInfer AI Kernel Generation Contest for providing the workloads, benchmark, and official evaluation. In the official evaluation results shared by email, our generated Fused MoE kernel achieved a 1.71 × 1.71\times speedup over the FlashInfer baseline, exceeding the reported 1.68 × 1.68\times top score in the agent-assisted track. Although regional prize-eligibility restrictions related to U.S. export-control regulations meant that our team could not be listed among the prize-receiving teams, we remain grateful for the opportunity to participate. We hope that future scholarly exchange will remain open, inclusive, and centered on shared scientific excellence. 
+
+ References 
+
+ [1] 
+ Anthropic 
+
+ Claude code .
+
+ External Links: Link 
+
+ Cited by: §2.1 .
+
+ Dao et al. (2022) 
+ T. Dao, D. Y. Fu, S. Ermon, A. Rudra, and C. Ré 
+
+ FlashAttention: fast and memory-efficient exact attention with io-awareness .
+
+ arXiv preprint arXiv:2205.14135 .
+
+ Cited by: §1 .
+
+ DeepSeek-AI (2024) 
+ DeepSeek-AI 
+
+ DeepSeek-v3 technical report .
+
+ arXiv preprint arXiv:2412.19437 .
+
+ Cited by: §1 ,
+ §1 .
+
+ Du et al. (2025) 
+ J. Du, Q. Yuan, Z. Zhang, Y. Yi, J. Hu, W. Chen, Y. Zhu, Q. Zheng, W. Zou, X. Chang, et al. 
+
+ AKG kernel agent: a multi-agent framework for cross-platform kernel synthesis .
+
+ arXiv preprint arXiv:2512.23424 .
+
+ Cited by: §2.1 .
+
+ Gale et al. (2023) 
+ T. Gale, D. Narayanan, C. Young, and M. Zaharia 
+
+ MegaBlocks: efficient sparse training with mixture-of-experts .
+
+ In Proceedings of MLSys ,
+
+ Cited by: §1 .
+
+ [6] 
+ A. Karpathy 
+
+ AutoResearch .
+
+ External Links: Link 
+
+ Cited by: §2.1 .
+
+ Li et al. (2025) 
+ H. Li, K. Man, P. Kanuparthy, H. Chen, W. Sun, S. Tallam, C. Zhu, K. Zhu, and Z. Qian 
+
+ TritonForge: profiling-guided framework for automated triton kernel optimization .
+
+ arXiv preprint arXiv:2512.09196 .
+
+ Cited by: §2 .
+
+ Liu et al. (2026) 
+ W. Liu, J. Xu, Y. Li, L. Zheng, T. Li, Q. Liu, and J. He 
+
+ Dr. kernel: reinforcement learning done right for triton kernel generations .
+
+ arXiv preprint arXiv:2602.05885 .
+
+ Cited by: §4 .
+
+ [9] 
+ OpenAI 
+
+ Codex .
+
+ External Links: Link 
+
+ Cited by: §2.1 .
+
+ Shazeer et al. (2017) 
+ N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. Le, G. Hinton, and J. Dean 
+
+ Outrageously large neural networks: the sparsely-gated mixture-of-experts layer .
+
+ arXiv preprint arXiv:1701.06538 .
+
+ Cited by: §1 .
+
+ Tillet et al. (2019) 
+ P. Tillet, H. T. Kung, and D. Cox 
+
+ Triton: an intermediate language and compiler for tiled neural network computations .
+
+ In Proceedings of MAPL ,
+
+ Cited by: §1 .
+
+ Wei et al. (2025) 
+ A. Wei, T. Sun, Y. Seenichamy, H. Song, A. Ouyang, A. Mirhoseini, K. Wang, and A. Aiken 
+
+ Astra: a multi-agent system for gpu kernel performance optimization .
+
+ arXiv preprint arXiv:2509.07506 .
+
+ Cited by: §2.1 .
+
+ Xing et al. (2026) 
+ S. Xing et al. 
+
+ FlashInfer-bench: building the virtuous cycle for ai-driven kernel generation .
+
+ arXiv preprint arXiv:2601.00227 .
+
+ Cited by: §1 .
+
+ Ye et al. (2025) 
+ Z. Ye et al. 
+
+ FlashInfer: efficient and customizable attention engine for llm serving .
+
+ arXiv preprint arXiv:2501.01005 .
+
+ Cited by: §1 .
+
+ Zhang et al. (2025) 
+ Z. Zhang, R. Wang, S. Li, Y. Luo, M. Hong, and C. Ding 
+
+ Cudaforge: an agent framework with hardware feedback for cuda kernel optimization .
+
+ arXiv preprint arXiv:2511.01884 .
+
+ Cited by: §2 .
+
+ Appendix A NCU Profile of the Slowest FuseMoE Workload 
+
+ This appendix reports the NCU profile for the slowest FuseMoE workload in our final submission. The workload has seq_len=14107 and corresponds to the long-sequence regime discussed in Table  3 . 
+
+ A.1 Capture Provenance 
+
+ • 
+
+ Kernel version: cuda-moe-tvm-v14 
+
+ • 
+
+ Workload: 5e8dc11c , seq_len=14107 
+
+ • 
+
+ Driver: 3 warmup iterations followed by 5 NVTX-scoped measurement iterations 
+
+ • 
+
+ Hardware: NVIDIA B200, SM100, compute capability 10.0 
+
+ • 
+
+ Profiler: NCU 2026.1.0.0, --set full , --replay-mode kernel 
+
+ A.2 Per-Kernel Summary 
+
+ Table  6 summarizes the major kernels in one FuseMoE iteration. The profile shows that the two CUTLASS FP8 grouped-GEMM invocations dominate total runtime, while pull_scatter is the largest non-GEMM DRAM consumer. 
+
+ Table 6: Compact NCU summary for the slowest FuseMoE workload. 
+
+ Kernel | 
+ Inv. | 
+ Time | 
+ SM | 
+ DRAM | 
+ L1 | 
+ L2 | 
+ Occ. | 
+ Reg. | 
+ WCPI | 
+
+ | 
+ | 
+ ( μ \mu s) | 
+ (%) | 
+ (%) | 
+ (%) | 
+ (%) | 
+ (%) | 
+ | 
+ | 
+
+ CUTLASS_FP8_grouped | 
+ 2 | 
+ 491.74 | 
+ 50.68 | 
+ 24.85 | 
+ 45.18 | 
+ 41.69 | 
+ 14.09 | 
+ 168 | 
+ 5.46 | 
+
+ routing_kernel | 
+ 1 | 
+ 108.22 | 
+ 62.37 | 
+ 1.74 | 
+ 67.96 | 
+ 1.65 | 
+ 65.08 | 
+ 32 | 
+ 17.71 | 
+
+ pull_scatter_bf16 | 
+ 1 | 
+ 81.31 | 
+ 23.52 | 
+ 62.92 | 
+ 33.87 | 
+ 30.90 | 
+ 43.50 | 
+ 61 | 
+ 26.82 | 
+
+ gather_fp8_and_scales | 
+ 1 | 
+ 42.69 | 
+ 46.47 | 
+ 47.04 | 
+ 46.91 | 
+ 35.63 | 
+ 82.40 | 
+ 32 | 
+ 25.56 | 
+
+ swiglu_to_fp8 | 
+ 1 | 
+ 34.94 | 
+ 70.89 | 
+ 55.87 | 
+ 30.86 | 
+ 32.65 | 
+ 85.21 | 
+ 29 | 
+ 16.66 | 
+
+ scatter_with_scan | 
+ 1 | 
+ 11.30 | 
+ 2.31 | 
+ 0.53 | 
+ 1.80 | 
+ 1.47 | 
+ 24.03 | 
+ 18 | 
+ 198.69 | 
+
+ Total kernel time for one MoE iteration: 1261.94 μ \mu s | 
+
+ The compact summary indicates that the workload is dominated by the GEMM path: the two CUTLASS_FP8_grouped invocations account for the largest share of runtime. Among the non-GEMM kernels, pull_scatter_bf16 is the most important optimization target because it has the highest DRAM utilization. 
+
+ A.3 Dominant Kernel Drill-Down 
+
+ The two dominant components are the CUTLASS FP8 blockwise grouped GEMMs and the pull_scatter kernel. The former dominates total iteration time, while the latter is the largest non-GEMM memory-bandwidth consumer. 
+
+ A.3.1 CUTLASS FP8 Blockwise Grouped GEMM 
+
+ The same CUTLASS grouped-GEMM template is invoked twice per MoE iteration: 
+
+ • 
+
+ GEMM1: K = 7168 K=7168 , approximately 600.22 μ \mu s. 
+
+ • 
+
+ GEMM2: K = 2048 K=2048 , approximately 383.26 μ \mu s. 
+
+ On this long-sequence workload, the runtime dispatcher selects the CUTLASS backend rather than the hand-written tcgen05 backend, because CUTLASS is faster on long-sequence cases by approximately 2–7%. Table  7 reports the Speed-of-Light throughput metrics for these two CUTLASS invocations. 
+
+ Table 7: NCU throughput summary for CUTLASS FP8 grouped GEMM. 
+
+ Metric | 
+ Unit | 
+ Min | 
+ Max | 
+ Avg. | 
+
+ DRAM frequency | 
+ GHz | 
+ 4.00 | 
+ 4.00 | 
+ 4.00 | 
+
+ SM frequency | 
+ GHz | 
+ 1.58 | 
+ 1.63 | 
+ 1.60 | 
+
+ Duration | 
+ μ \mu s | 
+ 383.26 | 
+ 600.22 | 
+ 491.74 | 
+
+ Memory throughput | 
+ % | 
+ 37.52 | 
+ 50.70 | 
+ 44.11 | 
+
+ DRAM throughput | 
+ % | 
+ 23.99 | 
+ 25.71 | 
+ 24.85 | 
+
+ L1/TEX throughput | 
+ % | 
+ 38.02 | 
+ 52.34 | 
+ 45.18 | 
+
+ L2 throughput | 
+ % | 
+ 37.68 | 
+ 45.71 | 
+ 41.69 | 
+
+ SM throughput | 
+ % | 
+ 43.80 | 
+ 57.55 | 
+ 50.68 | 
+
+ Table  8 reports the corresponding launch and occupancy statistics. These numbers show that the GEMM kernels are resource-limited: each CTA uses 168 registers per thread and approximately 201 KB of dynamic shared memory, allowing only one active block per SM. 
+
+ Table 8: Launch and occupancy summary for CUTLASS FP8 grouped GEMM. 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Block size | 
+ threads | 
+ 384 | 
+
+ Grid size | 
+ CTAs | 
+ 148 | 
+
+ Waves per SM | 
+ – | 
+ 1.00 | 
+
+ Registers per thread | 
+ reg/thread | 
+ 168 | 
+
+ Dynamic shared memory per block | 
+ KB/block | 
+ 201.22 | 
+
+ Theoretical occupancy | 
+ % | 
+ 18.75 | 
+
+ Achieved occupancy | 
+ % | 
+ 14.09 | 
+
+ Achieved active warps per SM | 
+ warps | 
+ 9.02 | 
+
+ Warp cycles per issued instruction | 
+ cycles | 
+ 5.46 | 
+
+ Average active threads per warp | 
+ – | 
+ 31.85 | 
+
+ Despite low achieved occupancy, the GEMM kernels maintain high active-thread efficiency and dominate the iteration because of the large amount of matrix-multiply work. The remaining headroom is therefore less about launch overhead and more about reducing resource pressure and data movement around the GEMM pipeline. 
+
+ A.3.2 pull_scatter_bf16 Kernel 
+
+ The pull_scatter kernel accounts for 81.31 μ \mu s, or approximately 6.4% of the iteration. Table  9 shows that it reaches 62.92% of peak sustained DRAM throughput, making it the largest non-GEMM DRAM consumer in this workload. 
+
+ Table 9: NCU throughput summary for pull_scatter_bf16 . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ DRAM frequency | 
+ GHz | 
+ 3.99 | 
+
+ SM frequency | 
+ GHz | 
+ 1.94 | 
+
+ Duration | 
+ μ \mu s | 
+ 81.31 | 
+
+ Memory throughput | 
+ % | 
+ 62.92 | 
+
+ DRAM throughput | 
+ % | 
+ 62.92 | 
+
+ L1/TEX throughput | 
+ % | 
+ 33.87 | 
+
+ L2 throughput | 
+ % | 
+ 30.90 | 
+
+ SM throughput | 
+ % | 
+ 23.52 | 
+
+ Achieved occupancy | 
+ % | 
+ 43.50 | 
+
+ Registers per thread | 
+ reg/thread | 
+ 61 | 
+
+ Grid size | 
+ CTAs | 
+ 14107 | 
+
+ Waves per SM | 
+ – | 
+ 23.83 | 
+
+ Unlike the GEMM kernels, pull_scatter launches many CTAs and reaches much higher occupancy. Its bottleneck is DRAM bandwidth: the kernel performs substantial output movement after GEMM2, and therefore becomes the main remaining non-GEMM optimization target. This supports the main text’s conclusion that fusing pull_scatter into the GEMM2 epilogue is the most promising next optimization for long-sequence workloads. 
+
+ A.4 Summary 
+
+ The NCU profile confirms the performance breakdown reported in the main text. On the slowest long-sequence FuseMoE workload, most time is spent in the two CUTLASS FP8 grouped GEMMs, while the largest non-GEMM cost is pull_scatter . The GEMMs are resource-constrained but already highly optimized, whereas pull_scatter remains DRAM-bandwidth dominated. Therefore, the most meaningful remaining optimization is not another standalone GEMM improvement, but reducing producer–consumer data movement by fusing scatter behavior into the GEMM2 epilogue. 
+
+ Appendix B NCU Profile of the Slowest DSA-Attn Workload 
+
+ This appendix reports the NCU profile for the slowest DSA-Attn workload in our final submission. The workload is the long-cluster representative with num_tokens=8 , num_pages=8462 , and topK=2048 , corresponding to the long-sequence regime discussed in the main text. 
+
+ B.1 Capture Provenance 
+
+ • 
+
+ Kernel version: dsa-attn-v4 
+
+ • 
+
+ Workload: 385742b2 , num_tokens=8 , num_pages=8462 
+
+ • 
+
+ Driver: 1 warmup iteration followed by 1 NVTX-scoped measurement iteration 
+
+ • 
+
+ Hardware: NVIDIA B200, SM100, compute capability 10.0 
+
+ • 
+
+ Profiler: NCU 2026.1.0.0, --set full , --import-source on , --replay-mode kernel 
+
+ • 
+
+ Build: compiled with nvcc -lineinfo via FIB_FORCE_LINEINFO=1 
+
+ B.2 Per-Kernel Summary 
+
+ The DSA-Attn iteration consists of two fused CUDA kernels: dsa_attention_partial<32> and dsa_attention_merge<32> . Table  10 summarizes their NCU-measured aggregate metrics. The partial kernel accounts for 67% of total kernel time, while the merge kernel accounts for the remaining 33%. 
+
+ Table 10: Per-kernel NCU summary for the slowest DSA-Attn workload. 
+
+ Kernel | 
+ Time | 
+ SM | 
+ Occ. | 
+ Reg. | 
+
+ | 
+ ( μ \mu s) | 
+ (%) | 
+ (%) | 
+ | 
+
+ partial<32> | 
+ 17.73 | 
+ 17.68 | 
+ 10.07 | 
+ 192 | 
+
+ merge<32> | 
+ 8.58 | 
+ 1.81 | 
+ 6.16 | 
+ 95 | 
+
+ Total kernel time: 26.31 μ \mu s | 
+
+ To understand where time is spent inside each fused kernel, we use NCU source-mapped PC sampling and attribute stalls to source-line ranges in kernel.cu . Table  11 reports the resulting phase-level time breakdown. The dominant costs are KV staging through cp.async and sparse-index gathering, which together account for 10.88 μ \mu s, or 41% of the full iteration. 
+
+ Table 11: Source-attributed phase breakdown for DSA-Attn. 
+
+ Phase | 
+ Time ( μ \mu s) | 
+
+ partial<32> | 
+
+ KV cp.async , global to shared | 
+ 5.54 | 
+
+ Sparse-index gather | 
+ 5.34 | 
+
+ GEMM1, Q ​ K ⊤ QK^{\top} + warp reduce | 
+ 1.81 | 
+
+ GEMM2, attn-weighted Kc accumulation | 
+ 1.66 | 
+
+ Q-load / prologue | 
+ 1.16 | 
+
+ Online softmax | 
+ 0.96 | 
+
+ Shared-memory KV loads | 
+ 0.91 | 
+
+ Epilogue | 
+ 0.35 | 
+
+ merge<32> | 
+
+ LSE scan + valid-split count | 
+ 3.11 | 
+
+ Weighted partial accumulation | 
+ 2.58 | 
+
+ Helpers + scheduling overhead | 
+ 1.94 | 
+
+ Epilogue | 
+ 0.95 | 
+
+ B.3 Dominant Kernel Drill-Down 
+
+ The two kernels expose different bottlenecks. The partial kernel is latency-bound under a low occupancy ceiling, while the merge kernel is limited by launch and scheduling overhead on a small grid. 
+
+ B.3.1 dsa_attention_partial<32> 
+
+ The partial kernel implements Split-K=32 FlashDecoding. It launches 1024 CTAs, corresponding to 8 tokens, 4 head groups, and 32 splits. Each CTA processes 64 sparse KV entries through a fused cp.async → Q ​ K ⊤ → \rightarrow QK^{\top}\rightarrow online-softmax → \rightarrow attn-weighted value accumulation pipeline. 
+
+ Table  12 reports Speed-of-Light throughput metrics for the partial kernel. Although the kernel has a compute-heavy instruction mix, it reaches only 17.68% SM throughput and 1.58% DRAM throughput, indicating a latency-bound rather than bandwidth-saturated regime. 
+
+ Table 12: Speed-of-Light metrics for dsa_attention_partial<32> . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Duration | 
+ μ \mu s | 
+ 17.73 | 
+
+ SM throughput | 
+ % | 
+ 17.68 | 
+
+ Memory throughput | 
+ % | 
+ 16.38 | 
+
+ DRAM throughput | 
+ % | 
+ 1.58 | 
+
+ L1/TEX throughput | 
+ % | 
+ 37.11 | 
+
+ L2 throughput | 
+ % | 
+ 3.38 | 
+
+ SM frequency | 
+ GHz | 
+ 1.94 | 
+
+ DRAM frequency | 
+ GHz | 
+ 3.98 | 
+
+ Table  13 shows that the partial kernel is constrained by register and shared-memory pressure. With 192 registers per thread and 73.98 KB of dynamic shared memory per block, achieved occupancy is only 10.07%. As a result, memory-latency stalls cannot be effectively hidden by other eligible warps. 
+
+ Table 13: Launch and occupancy metrics for dsa_attention_partial<32> . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Block size | 
+ threads | 
+ 128 | 
+
+ Grid size | 
+ CTAs | 
+ 1024 | 
+
+ Waves per SM | 
+ – | 
+ 3.46 | 
+
+ Registers per thread | 
+ reg/thread | 
+ 192 | 
+
+ Dynamic shared memory | 
+ KB/block | 
+ 73.98 | 
+
+ Theoretical occupancy | 
+ % | 
+ 12.50 | 
+
+ Achieved occupancy | 
+ % | 
+ 10.07 | 
+
+ Active warps per SM | 
+ warps | 
+ 6.45 | 
+
+ Warp cycles per issued inst. | 
+ cycles | 
+ 4.00 | 
+
+ Active threads per warp | 
+ – | 
+ 31.52 | 
+
+ B.3.2 dsa_attention_merge<32> 
+
+ The merge kernel reads the 32 BF16 partial outputs for each token and head group, then performs LSE-renormalized weighted accumulation. The output dimension is split by MERGE_DIM_SPLIT=4 , giving 128 CTAs in total. 
+
+ Table  14 reports Speed-of-Light throughput metrics for the merge kernel. The very low SM and memory throughput indicate that the kernel is not limited by arithmetic or bandwidth. Instead, the grid is too small to saturate the GPU. 
+
+ Table 14: Speed-of-Light metrics for dsa_attention_merge<32> . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Duration | 
+ μ \mu s | 
+ 8.58 | 
+
+ SM throughput | 
+ % | 
+ 1.81 | 
+
+ Memory throughput | 
+ % | 
+ 1.45 | 
+
+ DRAM throughput | 
+ % | 
+ 0.77 | 
+
+ L1/TEX throughput | 
+ % | 
+ 6.60 | 
+
+ L2 throughput | 
+ % | 
+ 0.94 | 
+
+ SM frequency | 
+ GHz | 
+ 1.95 | 
+
+ DRAM frequency | 
+ GHz | 
+ 3.98 | 
+
+ Table  15 confirms the small-grid bottleneck. The merge kernel launches only 128 CTAs, or 0.17 waves on 148 SMs. Its dominant phase is the LSE scan, a 32-element global-load reduction whose latency is exposed because the grid cannot provide enough parallel work to hide it. 
+
+ Table 15: Launch and occupancy metrics for dsa_attention_merge<32> . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Block size | 
+ threads | 
+ 128 | 
+
+ Grid size | 
+ CTAs | 
+ 128 | 
+
+ Waves per SM | 
+ – | 
+ 0.17 | 
+
+ Registers per thread | 
+ reg/thread | 
+ 95 | 
+
+ Dynamic shared memory | 
+ KB/block | 
+ 0.00 | 
+
+ Theoretical occupancy | 
+ % | 
+ 31.25 | 
+
+ Achieved occupancy | 
+ % | 
+ 6.16 | 
+
+ Active warps per SM | 
+ warps | 
+ 3.94 | 
+
+ Warp cycles per issued inst. | 
+ cycles | 
+ 13.86 | 
+
+ Active threads per warp | 
+ – | 
+ 31.08 | 
+
+ B.4 Summary 
+
+ The NCU profile confirms the main-text performance breakdown. On the slowest long-cluster DSA-Attn workload, most time is spent in dsa_attention_partial<32> . Its dominant costs are KV cp.async and sparse-index global loads, which are difficult to hide because register and shared-memory pressure cap achieved occupancy at roughly 10%. The merge kernel is smaller but still significant: after MERGE_DIM_SPLIT=4 , it launches only 0.17 waves and is therefore launch/scheduling-overhead bound. 
+
+ The remaining optimization headroom is structural. Further local fusion is unlikely to move the bottleneck substantially. Meaningful improvement would require reducing register pressure or redesigning the kernel around a TMA, warpgroup, and tcgen05 -style pipeline, while preserving the strict correctness requirements of the benchmark. 
+
+ Appendix C NCU Profile of the Slowest DSA-TopK Workload 
+
+ This appendix reports the NCU profile for the slowest DSA-TopK workload in our final submission. The workload is the long-cluster representative with bs=4 , max_num_pages=36 , and seq_lens=[98,91,2241,100] . It corresponds to the long-sequence regime discussed in the main text and achieves the lowest speedup in the 128-workload contest run, 107.29 × 107.29\times over the mathematical reference. 
+
+ C.1 Capture Provenance 
+
+ • 
+
+ Kernel version: dsa-topk-indexer-v6 
+
+ • 
+
+ Workload: 4c7705ad , bs=4 , max_num_pages=36 , seq_lens=[98,91,2241,100] , num_pages=11923 
+
+ • 
+
+ Slow-path batch: only b = 2 b=2 with seq_len=2241 ; the other three batch elements early-return 
+
+ • 
+
+ Driver: 1 warmup iteration followed by 1 NVTX-scoped measurement iteration 
+
+ • 
+
+ Hardware: NVIDIA B200, SM100, compute capability 10.0 
+
+ • 
+
+ Profiler: NCU 2026.1.0.0, --set full , --import-source on , --replay-mode kernel 
+
+ • 
+
+ Build: compiled with nvcc -lineinfo via FIB_FORCE_LINEINFO=1 
+
+ C.2 Per-Kernel Summary 
+
+ The DSA-TopK iteration consists of two CUDA kernels. The separate IndexRemapUnifiedKernel is not invoked for this workload: the fast-path remap for short sequences is handled inline inside RadixSelectTopKUnifiedKernel . Table  16 summarizes the aggregate NCU metrics for the two kernels. 
+
+ Table 16: Per-kernel NCU summary for the slowest DSA-TopK workload. 
+
+ Kernel | 
+ Time | 
+ SM | 
+ Occ. | 
+ Reg. | 
+
+ | 
+ ( μ \mu s) | 
+ (%) | 
+ (%) | 
+ | 
+
+ FusedGemm | 
+ 11.68 | 
+ 9.66 | 
+ 33.92 | 
+ 64 | 
+
+ RadixSelect | 
+ 13.18 | 
+ 0.16 | 
+ 23.54 | 
+ 40 | 
+
+ Total kernel time: 24.86 μ \mu s | 
+
+ To attribute time inside each fused kernel, we use NCU source-mapped PC sampling against kernel.cu . Table  17 reports the resulting phase-level breakdown. For the radix kernel, whose 4-CTA grid yields sparse PC samples, the phase split uses executed warp instructions as a proxy. 
+
+ Table 17: Source-attributed phase breakdown for DSA-TopK. 
+
+ Phase | 
+ Time ( μ \mu s) | 
+
+ FusedGemm | 
+
+ Entry / shared-memory setup | 
+ 2.88 | 
+
+ Scalar FP32 dot product | 
+ 2.88 | 
+
+ Q FP8-to-FP32 dequant | 
+ 1.86 | 
+
+ FP8 conversion helper | 
+ 1.52 | 
+
+ CUDA helper code | 
+ 1.52 | 
+
+ Page-table + K-scale load | 
+ 0.68 | 
+
+ K dequant + ReLU + reduce | 
+ 0.34 | 
+
+ RadixSelect | 
+
+ Fast-path index remap | 
+ 3.14 | 
+
+ Warp-ballot gather | 
+ 2.30 | 
+
+ Radix histogram build | 
+ 1.98 | 
+
+ Histogram zero-init | 
+ 1.27 | 
+
+ Suffix scan | 
+ 1.05 | 
+
+ Bucket-of-K selection | 
+ 0.83 | 
+
+ Score load + sortable encode | 
+ 0.59 | 
+
+ Histogram subgroup reduce | 
+ 0.36 | 
+
+ Slow-path setup | 
+ 0.31 | 
+
+ Other | 
+ 1.35 | 
+
+ The iteration is split roughly evenly between FusedGemm and RadixSelect . In FusedGemm , the largest costs are shared-memory/address setup and the scalar FP32 dot product. The GEMM share is modest because three of four batch elements satisfy seq_len <= TOPK and return early, so only one batch element performs real score computation. In RadixSelect , the largest cost is the fast-path index remap for the three short batch elements, followed by warp-ballot gather and radix histogram construction. 
+
+ C.3 Dominant Kernel Drill-Down 
+
+ The two kernels expose different bottlenecks. FusedGemmReluWSumUnifiedKernel is limited by CTA-level early-return divergence, while RadixSelectTopKUnifiedKernel is limited by a very small cooperative grid. 
+
+ C.3.1 FusedGemmReluWSumUnifiedKernel 
+
+ The fused score kernel computes 
+
+ | 
+ score b , t = ∑ h ReLU ⁡ ( Q b , h ​ K t ⊤ ) ​ w b , h . \mathrm{score}_{b,t}=\sum_{h}\mathrm{ReLU}\!\left(Q_{b,h}K_{t}^{\top}\right)w_{b,h}. | 
+ | 
+
+ It uses a pure FP32 scalar dot product rather than tensor cores to preserve bit-exact agreement with the reference. Table  18 shows that the kernel reaches high L1/TEX activity but only 9.66% SM throughput, indicating poor effective utilization rather than bandwidth saturation. 
+
+ Table 18: Speed-of-Light metrics for FusedGemmReluWSumUnifiedKernel . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Duration | 
+ μ \mu s | 
+ 11.68 | 
+
+ SM throughput | 
+ % | 
+ 9.66 | 
+
+ Memory throughput | 
+ % | 
+ 15.22 | 
+
+ DRAM throughput | 
+ % | 
+ 0.37 | 
+
+ L1/TEX throughput | 
+ % | 
+ 45.82 | 
+
+ L2 throughput | 
+ % | 
+ 0.30 | 
+
+ SM frequency | 
+ GHz | 
+ 1.94 | 
+
+ DRAM frequency | 
+ GHz | 
+ 3.98 | 
+
+ Table  19 reports the corresponding launch and occupancy statistics. Although the grid has 288 CTAs, only the CTAs associated with b = 2 b=2 perform real GEMM work. The other batch elements early-return after the seq_len <= TOPK check, leaving most CTAs idle. 
+
+ Table 19: Launch and occupancy metrics for FusedGemmReluWSumUnifiedKernel . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Block size | 
+ threads | 
+ 512 | 
+
+ Grid size | 
+ CTAs | 
+ 288 | 
+
+ Waves per SM | 
+ – | 
+ 0.97 | 
+
+ Registers per thread | 
+ reg/thread | 
+ 64 | 
+
+ Dynamic shared memory | 
+ KB/block | 
+ 48.13 | 
+
+ Theoretical occupancy | 
+ % | 
+ 50.00 | 
+
+ Achieved occupancy | 
+ % | 
+ 33.92 | 
+
+ Active warps per SM | 
+ warps | 
+ 21.71 | 
+
+ Warp cycles per issued inst. | 
+ cycles | 
+ 21.64 | 
+
+ Active threads per warp | 
+ – | 
+ 31.30 | 
+
+ C.3.2 RadixSelectTopKUnifiedKernel 
+
+ The radix kernel performs a four-pass 8-bit radix select to choose the top 2048 scores per batch. For sequences with seq_len <= TOPK , it instead takes a fast path that writes the block-table-mapped indices and pads the rest with -1 . Table  20 shows that the radix kernel has extremely low SM and memory throughput, confirming that it is not compute- or bandwidth-saturated. 
+
+ Table 20: Speed-of-Light metrics for RadixSelectTopKUnifiedKernel . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Duration | 
+ μ \mu s | 
+ 13.18 | 
+
+ SM throughput | 
+ % | 
+ 0.16 | 
+
+ Memory throughput | 
+ % | 
+ 0.87 | 
+
+ DRAM throughput | 
+ % | 
+ 0.03 | 
+
+ L1/TEX throughput | 
+ % | 
+ 11.42 | 
+
+ L2 throughput | 
+ % | 
+ 0.12 | 
+
+ SM frequency | 
+ GHz | 
+ 1.95 | 
+
+ DRAM frequency | 
+ GHz | 
+ 3.98 | 
+
+ Table  21 explains this low utilization: the kernel launches only four CTAs, one per batch element, corresponding to 0.01 waves on 148 SMs. Three CTAs take the fast path, while only one CTA executes the full radix selection over 2241 keys. 
+
+ Table 21: Launch and occupancy metrics for RadixSelectTopKUnifiedKernel . 
+
+ Metric | 
+ Unit | 
+ Value | 
+
+ Block size | 
+ threads | 
+ 512 | 
+
+ Grid size | 
+ CTAs | 
+ 4 | 
+
+ Waves per SM | 
+ – | 
+ 0.01 | 
+
+ Registers per thread | 
+ reg/thread | 
+ 40 | 
+
+ Dynamic shared memory | 
+ KB/block | 
+ 38.15 | 
+
+ Theoretical occupancy | 
+ % | 
+ 50.00 | 
+
+ Achieved occupancy | 
+ % | 
+ 23.54 | 
+
+ Active warps per SM | 
+ warps | 
+ 15.07 | 
+
+ Warp cycles per issued inst. | 
+ cycles | 
+ 17.79 | 
+
+ Active threads per warp | 
+ – | 
+ 30.85 | 
+
+ C.4 Summary 
+
+ The NCU profile confirms the main-text performance breakdown. On the slowest DSA-TopK workload, the two-kernel FusedGemm → \rightarrow RadixSelect pipeline is split roughly evenly in time. FusedGemm is CTA-divergence bound: three of four batch elements early-return, leaving only one batch element to perform real score computation. RadixSelect is cooperation-bound: its 4-CTA grid leaves most SMs idle, and only one CTA performs the full slow-path radix selection. 
+
+ The remaining optimization headroom is therefore structural. A promising direction is to fold fast-path and slow-path work into a persistent or more globally scheduled kernel that keeps more SMs busy across the full iteration. Another possible direction is to use a tensor-core GEMM path for the long-sequence batch element while retaining the bit-exact scalar path only where needed by the benchmark constraints.

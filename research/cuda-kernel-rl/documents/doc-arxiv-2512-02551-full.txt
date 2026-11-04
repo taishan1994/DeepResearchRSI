@@ -1,0 +1,965 @@
+CUDA-L2: Surpassing cuBLAS Performance for Matrix Multiplication through Reinforcement Learning 
+
+ Songqiao Su
+
+ Xiaofei Sun
+
+ Xiaoya Li
+
+ Albert Wang
+
+ Jiwei Li
+
+ Chris Shum
+
+ DeepReinforce Team
+
+ github.com/deepreinforce-ai/CUDA-L2 
+
+ Abstract 
+
+ Matrix multiplication (matmul) is one of the most fundamental operations in LLMs. However, manually optimizing Matmul kernels is challenging due to the fact that different matrix dimension (M, N, K) require different optimization strategies and that optimizations rarely transform across different GPU architectures, which make comprehensive manual tuning hard at scale.
+In this paper, we propose CUDA-L2, a system that combines large language models (LLMs) and reinforcement learning (RL) to automatically optimize Half-precision General Matrix Multiply (HGEMM) CUDA kernels.
+Using CUDA execution speed as the RL reward, CUDA-L2 automatically optimizes HGEMM kernels across 1,000 configurations. These configurations represent all 10 3 10^{3} combinations of M, N, K values from {64, 128, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384}, and already covers those
+used in attention and FFN layers of widely open-sourced models like Qwen, Llama and DeepSeek. 
+
+ CUDA-L2 systematically outperforms major matmul baselines to date, from the widely-used torch.matmul to state-of-the-art Nvidia’s closed-source libraries, i.e., cuBLAS , cuBLASLt . In offline mode, where kernels are executed consecutively without time intervals, CUDA-L2 yields +22.0% over torch.matmul on average; +19.2% over
+ cuBLAS using the optimal layout configuration
+(normal-normal NN and transposed-normal TN); +16.8% over cuBLASLt-heuristic , which queries cuBLASLt library and selects the algorithm based on the heuristic’s suggestion; and +11.4% over the most competitive cuBLASLt-AutoTuning model, which selects the fastest algorithm from up to 100 candidates from cuBLASLt ’s suggestions. In server mode, where kernels are executed at random intervals simulating real-time inference, the speedups further increase to +28.7%, +26.0%, +22.4%, and +15.9% for torch.matmul , cuBLAS , cuBLASLt-heuristic , and cuBLASLt-AutoTuning respectively. 
+
+ CUDA-L2 shows that even the most performance-critical, heavily-optimized kernels like HGEMM can be improved through LLM-guided RL automation by systematically exploring configuration spaces at scales impractical for humans.
+While the current version of CUDA-L2 only focuses on A100 GPUs, the framework is designed for broad applicability, with ongoing work to extend it to other GPU architectures, including Ada Lovelace, Hopper and Blackwell. 🖂 
+
+ Figure 1 : 
+Benchmark results on 1,000 (M, N, K) configurations for Half-precision General Matrix Multiply (HGEMM). We report CUDA-L2’s performance against
+ torch.matmul ,
+ cuBLAS , cuBLASLt-heuristic , and cuBLASLt-AutoTuning for NN, TN, and max(NN,TN) layouts: (a) Offline scenario: kernel executed consecutively without time intervals. (b) Server scenario: kernel executed at intervals, simulating real-time inference. 
+
+ 🖂 🖂 footnotetext:  Email: {songqiao_su, xiaofei_sun, xiaoya_li, albert_wang, jiwei_li, chris_shum}@deep-reinforce.com 
+
+ 1 Introduction 
+
+ Matrix multiplication (matmul) is one of the most fundamental operations in deep learning and LLMs and accounts for a very significant portion of computation time in both training and inference.
+Consequently, its CUDA kernels are among the most deeply optimized by human experts. 
+
+ However, manually optimizing matmul kernels across diverse matrix sizes remains challenging due to the vast configuration space and architecture-specific constraints: different matrix dimension triplets (M, N, K) may require distinct optimization strategies, and these strategies rarely transfer across GPU architectures due to different hardware characteristics.
+Moreover, even for identical matrix dimensions on the same GPU, optimal kernel can be different depending on
+setups such as
+accumulator precision, where using FP16 versus FP32 accumulators (both valid choices for FP16 inputs) leads to different register pressure and thus different optimization strategies.
+Therefore, despite being deeply optimized, matmul is far from a solved problem, and significant performance gains are still possible.
+This is evidenced by the 13% speedup from targeted Grouped GEMM optimizations for the deepseek-R1 model by the Tensor-RT LLM team 1 1 
+ 1 
+
+ https://nvidia.github.io/TensorRT-LLM/blogs/tech_blog/blog3_Optimizing_DeepSeek_R1_Throughput_on_NVIDIA_Blackwell_GPUs.html . This speedup was achieved when human expertise was narrowly focused on a single target.
+Systematically improving matmul kernels calls for automated optimization methods that can scale across the vast space of problems and GPU architectures. 
+
+ Rapid advancements in LLMs [ 1 , 3 , 5 , 15 , 17 ] open the door to automatic kernel generation, and
+the past year has witnessed a growing interest in harnessing LLMs, especially RL-augmented LLMs, for autonomous CUDA kernel generation [ 10 , 2 , 7 , 6 , 16 ] . Existing work, such as Sakana AI’s AI CUDA Engineer [ 6 ] and CUDA-L1 [ 7 ] , primarily optimize kernels from benchmarks like KernelBench [ 10 ] , which covers a diverse range of CUDA operations, each evaluated on a single, fixed configuration (e.g., one specific input dimension). However, it remains unclear how these benchmark-optimized kernels translate to real-world production environments. To the best of our knowledge, no prior work has achieved performance comparable to manually-optimized matmul kernels, particularly when compared against NVIDIA’s highly-optimized cuBLAS library. 
+
+ In this work, we propose CUDA-L2, a system that combines LLMs and RL to automatically optimize matmul CUDA kernels.
+CUDA-L2
+covers 1,000 configurations that represent all 10 3 10^{3} combinations of M, N, K values from {64, 128, 256, 512, 1024, 2048, 4096, 8192, 12288, 16384},
+the size of
+which already covers those
+used in attention and FFN layers of open-sourced models like Qwen [ 17 ] ,
+Llama [ 4 ] ,
+and DeepSeek [ 5 ] .
+To tackle the challenging task of matrix multiplication,
+CUDA-L2 extends CUDA-L1 through several technical enhancements, including (1) continued pretraining with more diverse CUDA code; (2) multi-stage RL training progressing from broad (general kernel types) to specialized domains (matmul-specific kernels);
+(3) including more comprehensive NCU (NVIDIA Nsight Compute) profiling metrics (e.g., memory throughput, SM occupancy, cache efficiency) in the context for better optimization decisions; and (4)
+incorporating
+retrieval-augmented context to accommodate new knowledge or architectural characteristics not covered in the foundation model. 
+
+ CUDA-L2 systematically outperforms major matmul baselines to date, ranging from the widely-used torch.matmul to state-of-the-art optimized libraries ( cuBLAS , cuBLASLt ). We evaluate under two scenarios: (1) offline, where kernels are executed consecutively without time intervals, and (2) server, where kernels are executed at random intervals simulating real-time inference. In the offline scenario, across 1,000 configurations, CUDA-L2 yields +22.0% over torch.matmul on average; +19.2% over cuBLAS using its optimal layout configuration (NN or TN); +16.8% over cuBLASLt-heuristic , which queries the cuBLASLt library and selects the algorithm based on the heuristic’s suggestions; and +11.4% over the most competitive cuBLASLt-AutoTuning setup, which selects the top-performing algorithm from up to 100 candidates from cuBLASLt ’s heuristic API. In the server scenario, the speedups further increase to +28.7%, +26.0%, +22.4%, and +15.9% for torch.matmul , cuBLAS , cuBLASLt-heuristic , and cuBLASLt-AutoTuning respectively. 
+
+ CUDA-L2 shows that even for the most performance-critical and highly optimized CUDA kernels like HGEMM, LLM-guided RL can discover superior implementations by scaling optimization across configuration spaces,
+the scale of which is difficult for manual tuning.
+While the current version of CUDA-L2 is limited to A100 Ampere architectures, the framework is a general one and designed for broad applicability, with ongoing work to extend it to additional GPU architectures,
+including
+Ampere (e.g., RTX 3090),
+Ada Lovelace (e.g,RTX 4090), Hopper (e.g., H100), and Blackwell (e.g., B200). 
+
+ 2 Preliminaries 
+
+ In this section, we first describe preliminaries for developing HGEMM kernels. 
+
+ 2.1 HGEMM 
+
+ HGEMM 
+
+ Half-precision General Matrix Multiplication (HGEMM) is one of the most widely used matmul kernels in current LLMs. It
+computes the matrix product C = α ​ A ​ B + β ​ C C=\alpha AB+\beta C using 16-bit arithmetic.
+An ( M , N , K ) (M,N,K) triplet denotes a dimension configuration for HGEMM, where matrix A ∈ ℝ M × K {A}\in\mathbb{R}^{M\times K} and matrix B ∈ ℝ K × N {B}\in\mathbb{R}^{K\times N} .
+In practice, the common case is α = 1 \alpha=1 and β = 0 \beta=0 , yielding C = A ​ B C=AB , which we focus on in this work.
+We adopt this setup throughout the paper.
+An ( M , N , K ) (M,N,K) triplet denotes a dimension configuration where A ∈ ℝ M × K {A}\in\mathbb{R}^{M\times K} and B ∈ ℝ K × N {B}\in\mathbb{R}^{K\times N} . 
+
+ Modern HGEMM implementations follow a tiled approach to maximize data reuse. The computation is organized into three main phases:
+First, the matrices A and B are divided into smaller tiles. Each thread block computes one tile of the output matrix C, with dimensions BM × BN. Within each thread block, tiles are further subdivided to match the GPU’s tensor core dimensions.
+Second, during the mainloop, data flows through multiple memory levels. Tiles of size BM × BK from A and BK × BN from B are loaded from global memory into shared memory, then from shared memory into registers. Once in registers, tensor cores perform the actual matrix multiply-accumulate operations. This process repeats across all tiles along the K dimension, with partial results accumulated in registers.
+Finally, in the epilogue phase, the accumulated results are written back from registers to shared memory, and then from shared memory to global memory. 
+
+ 2.2 Baselines for Comparison 
+
+ 2.2.1 torch.matmul 
+
+ PyTorch’s torch.matmul naturally constitutes a baseline. PyTorch’s implementation automatically selects optimized kernels based on input dimensions and data types. For half-precision operations, it dispatches to cuBLAS internally but includes additional overhead from PyTorch’s tensor dispatch system and memory management.
+ torch.matmul 
+represents a standard and robust practice for the majority of users who rely on default PyTorch operations. 
+
+ 2.2.2 cuBLAS 
+
+ NVIDIA’s cuBLAS library provides a strong optimized baseline and delivers high performance without requiring any manual tuning. We evaluate two
+most widely-used
+matrix layouts:
+ cuBLAS-NN (all row-major) and cuBLAS-TN (mixed layout).
+For each (M, N, K) configuration, we also compare CUDA-L2 with cuBLAS using the optimal layout with respect to each dimension, i.e., max( cuBLAS-NN , cuBLAS-TN ), denoted by cuBLAS-max .
+We use the cublasGemmEx function offered by
+NVIDIA’s cuBLAS library
+with the CUBLAS_GEMM_DEFAULT_TENSOR_OP operation to enable Ampere FP16 Tensor Cores and allow cuBLAS ’s internal heuristics to automatically select the optimal algorithm. Code snippets for the
+ cuBLAS-NN 
+and cuBLAS-TN baselines are provided in Listing  6 in Appendix. 
+
+ 2.2.3 cuBLASLt 
+
+ cuBLASLt provides a lower-level, more controllable interface to NVIDIA’s optimized GEMM kernels than the higher-level cuBLAS. Unlike cuBLAS ’s black-box heuristics that hide algorithm selection, cuBLASLt exposes all available algorithm variants to developers and allows for explicitly enumerating and evaluating them. Though this enables tuning that can yield additional speedups over cuBLAS ’s defaults, it also demands substantial expertise and tuning effort.
+We compare CUDA-L2 with two
+ cuBLASLt setups based on API offered by Nvidia, cuBLASLt-heuristic and cuBLASLt-AutoTuning . 
+
+ cuBLASLt-heuristic 
+
+ The heuristic strategy
+uses NVIDIA’s cublasLtMatmulAlgoGetHeuristic API, which is the standard recommended approach for cuBLASLt optimization. For each matrix configuration, it queries the library for algorithm recommendations and selects the top-ranked algorithm from the heuristic’s suggestions, which is simply the recommendation with index 0.
+Similar to cuBLAS ,
+for each dimension ,
+we benchmark
+CUDA-L2 against cuBLASLt-heuristic-NN , cuBLASLt-heuristic-TN 
+and cuBLASLt-heuristic-max .
+To avoid
+the overhead introduced by
+calling the API repeatedly during evaluation, the algorithm selection
+for NN and TN
+is performed beforehand.
+The code for cuBLASLt-heuristic-TN is shown in Listing
+ 7 . 
+
+ cuBLASLt-AutoTuning 
+
+ AutoTuning 2 2 
+ 2 
+
+ https://github.com/NVIDIA/CUDALibrarySamples/tree/master/cuBLASLt/LtSgemmSimpleAutoTuning 
+employs an exhaustive strategy that first retrieves up to 100 algorithm candidates for each (M, N, K) from cuBLASLt ’s heuristic API cublasLtMatmulAlgoGetHeuristic .
+Next,
+each returned algorithm is evaluated with randomized execution order and random input matrixes.
+The fastest algorithm is selected based on median execution time, as suggested by cuBLASLt ’s documents.
+Again, both NN and TN layouts are tested, using whichever achieves a faster speed.
+Selected algorithms are cached to eliminate overhead during evaluation. 
+
+ 2.3 Kernel Successfulness 
+
+ A custom HGEMM kernel is successful if it is both executable and correct. 
+
+ 2.3.1 Executability 
+
+ A kernel is executable if it successfully compiles, launches, and executes to completion within a reasonable time limit.
+ compute-sanitizer –tool memcheck is used to check for memory access violations. 
+
+ 2.3.2 Correctness 
+
+ To valid kernel correctness, we need to compare its output to a reference correct kernel with the same inputs.
+For HGEMM, we use the FP32 CPU implementation as the reference kernel due to its well-established correctness and numerical stability: 
+
+ | 
+ ref = MatMul ( float ( a . cpu ( ) ) , float ( b . cpu ( ) ) \text{ref}=\mathrm{MatMul}(\mathrm{float}(\mathrm{a.cpu()}),\,\mathrm{float}(\mathrm{b.cpu()}) | 
+ | 
+ (1) | 
+
+ Theoretically, a kernel is correct if it produces outputs identical to those of a reference implementation. However, exact equivalence is usually
+impossible
+on GPUs due to the non-associative nature of floating-point arithmetic, i.e., ( a + b ) + c ≠ a + ( b + c ) (a+b)+c\neq a+(b+c) . To address this, we adopt
+the following two practical criterion: 
+
+ Exact Match with binary Inputs. 
+
+ We randomly generate matrices A , B A,B with elements being binary in { 0 , 1 } \{0,1\} . For matrix multiplication C = A × B C=A\times B , each output element is: 
+
+ | 
+ c i ​ j = ∑ k = 1 K a i ​ k ⋅ b k ​ j c_{ij}=\sum_{k=1}^{K}a_{ik}\cdot b_{kj} | 
+ | 
+
+ Since a i ​ k , b k ​ j ∈ { 0 , 1 } a_{ik},b_{kj}\in\{0,1\} , each product is either 0 or 1, and the sum is guaranteed to be a non-negative integer. We first compute the reference output C ref C^{\text{ref}} using FP32 on CPU, which provides exact integer results. We then compute the output C custom C^{\text{custom}} using the custom kernel. For each position ( i , j ) (i,j) where c i ​ j ref < 2048 c^{\text{ref}}_{ij}<2048 , we require c i ​ j test = c i ​ j ref c^{\text{test}}_{ij}=c^{\text{ref}}_{ij} exactly,
+and we ignore positions c i ​ j ref > 2048 c^{\text{ref}}_{ij}>2048 .
+This is because
+half-precision has 10 mantissa bits plus 1 implicit leading bit, yielding 11 bits of significand precision. Thus all integers in [ 0 , 2048 ) [0,2048) are exactly representable in half-precision, while integers ≥ 2048 \geq 2048 may not be.
+Crucially, since each term a i ​ k ⋅ b k ​ j ∈ { 0 , 1 } a_{ik}\cdot b_{kj}\in\{0,1\} , the partial sums are monotonically non-decreasing. If the final element value is below 2048, all intermediate values must also be below 2048, ensuring exactness for all intermediate steps when doing the addition for ∑ k a i ​ k ⋅ b k ​ j \sum_{k}a_{ik}\cdot b_{kj} . 3 3 
+ 3 
+
+ As a side note, sampling elements from { − 1 , 0 , 1 } \{-1,0,1\} does not guarantee this property, since the partial sums are no longer monotonically non-decreasing. There can be cases where an intermediate sum exceeds 2048 (exactness already lost) before later cancellations bring the final result below 2048. 4 4 
+ 4 
+
+ One might consider using fractional values such as 1 / 2 1/2 , 1 / 4 1/4 , or 1 / 8 1/8 , but this does not fundamentally change the analysis as it merely shifts the threshold. For example,
+in FP16, the exactness threshold depends on the smallest representable increment at a given magnitude.
+Take 1/2 as an example, if elements are sampled from { 0 , 1 / 2 , 1 } \{0,1/2,1\} , partial sums may be half-integers and the unit in the last place (ULP) equals 1 / 2 1/2 only for magnitudes in [ 512 , 1024 ) [512,1024) ; once the magnitude reaches [ 1024 , 2048 ) [1024,2048) , the ULP increases to 1, meaning half-integers can no longer be represented exactly and are rounded to the nearest integer. Therefore, the exactness threshold for half-integer sums is 1024. 
+We can adjust the binary probability for { 0 , 1 } \{0,1\} based on matrix sizes to ensure a significant proportion of
+ c i ​ j ref c^{\text{ref}}_{ij} is below 2048 but larger than 0.
+We repeat this process multiple times with different random inputs; if any single iteration fails, the kernel is considered incorrect. 
+
+ Baseline-Bounded Deviation 
+
+ We select a set of highly reliable baseline kernels developed by Nvidia: including cuBLAS-NN ,
+ cuBLAS-TN , cuBLAS-TN , cuBLASLt-heuristic-NN , cuBLASLt-heuristic-TN , cuBLASLt-AutoTuning-NN , cuBLASLt-AutoTuning-TN .
+For each test input, we compute the maximum elementwise difference among the outputs of these baseline kernels, which reflects the upper bound of variability for floating-point computations. A custom kernel is considered incorrect if its maximum elementwise deviation from the reference output exceeds this baseline’s value. 
+
+ 2.4 Evaluation 
+
+ To benchmark a custom kernel against a reference kernel,
+we first define the single-run speedup s ⁡ ( custom ) s(\text{custom}) as: 
+
+ | 
+ s ⁡ ( custom ) = t ref t custom − 1 s(\text{custom})=\frac{t_{\text{ref}}}{t_{\text{custom}}}-1 | 
+ | 
+ (2) | 
+
+ where t ref t_{\text{ref}} and t custom t_{\text{custom}} denote the execution time of the reference and custom kernels, respectively.
+Each run execute both the custom and reference kernels.
+To account for GPU performance variability,
+each evaluation runs for a minimum of 30 seconds
+after a 10-second warmup period.
+In each iteration, we randomize execution order to eliminate ordering effect.
+The final evaluation score is the mean speed score over all runs. 
+
+ 2.4.1 Avoiding Timing Measurement Hacking 
+
+ ⬇ 
+
+ 1 
+
+ torch . cuda . synchronize () 
+
+ 2 
+
+ start_event = torch . cuda . Event ( enable_timing = True ) 
+
+ 3 
+
+ end_event = torch . cuda . Event ( enable_timing = True ) 
+
+ 4 
+
+ start_event . record () 
+
+ 5 
+
+ kernel ( a , b , b_col_major , out ) 
+
+ 6 
+
+ end_event . record () 
+
+ 7 
+
+ torch . cuda . synchronize () 
+
+ 8 
+
+ elapsed_time_ms = start_event . elapsed_time ( end_event ) 
+
+ Listing 1: Execution time for HGEMM kernels. 
+
+ Code for measuring the execution time for HGEMM kernels is shown in Listing 1 , following the standard kernel timing strategy adopted in [ 7 , 10 ] .
+ [ 7 ] identified two strategies to hack this evaluation during RL training: (1) creating additional CUDA streams that execute asynchronously; and (2) python’s lazy mode where
+the calling of the kernel function does not
+ensure the output is actually materialized/computed.
+CUDA-L2 avoids both issues by (1) disallowing additional CUDA stream creation; (2) generating HGEMM kernels only as CUDA code in .cu files, which naturally bypasses Python’s lazy evaluation. 
+
+ 2.4.2 Offline v.s. Server Mode 
+
+ Following MLPerf [ 9 , 12 ] , a widely-used benchmark criteria for machine learning performance,
+kernels
+evaluations are performed under two scenarios: (1) offline , where kernels are executed back-to-back without pauses, and (2) server , where kernels are executed at intervals to simulate real-time inference. It’s worth noting that the interval time is not included in the execution time used for the speedup comparison in server mode.
+The offline scenario measures peak throughput by keeping the GPU fully busy, while the server scenario reflects real-world deployment where requests arrive at unpredictable times. Performance differs between them because back-to-back execution in offline mode keeps GPU caches warm with GPU running at full speed,
+while in server mode, GPU’s caches can cool down and then start from a cold stat. 
+
+ 3 CUDA-L2 for HGEMM 
+
+ 3.1 A Brief Review of CUDA-L1 
+
+ CUDA-L1 is a pipelined system described in [ 7 ] for optimizing kernels in KernelBench [ 10 ] , a benchmark comprising 250 diverse CUDA kernel tasks spanning from basic operators to full model architectures. CUDA-L1 consists of three components: (1) an SFT module that fine-tunes a pre-trained LLM on kernels generated by existing LLMs; (2) a self-supervised learning module that trains the LLM on successful
+self-generated kernels; and (3) a contrastive RL module that uses kernel execution speed as the reward signal.
+However, CUDA-L1 has limitations that hinder its effectiveness on the more challenging HGEMM task. First, the SFT stage only fine-tunes on KernelBench kernels, limiting the model’s ability to generalize to other kernel types. Second, the pre-trained LLM has limited access to the
+most recent knowledge
+critical to HGEMM optimization, such as newer CUTLASS versions, the CuTe library, and new GPU architectures. 
+
+ 3.2 CUDA-L2 
+
+ CUDA-L2 extends CUDA-L1 with the following key technical enhancements:
+(1) continued pretraining with more diverse CUDA code; (2) multi-stage RL training progressing from broad (general kernel types) to specialized domains (matmul-specific kernels); (3) including more comprehensive NCU profiling metrics (e.g., memory throughput, SM occupancy, cache efficiency) in the context for better optimization decisions; and (4) incorporating retrieval-augmented context to accommodate new knowledge or architectural characteristics not covered in the foundation model. 
+
+ 3.2.1 Continued Pretraining 
+
+ To enable more general-purpose CUDA optimization, we extend pretraining beyond KernelBench to diverse CUDA code covering a wide range of kernel types. We collect CUDA code from two sources: (1) web sources, which we clean, extract and segment using a combination of rule-based filtering and LLM-based cleaning; and (2) implementations from established libraries including PyTorch, ATen, CUTLASS, Nvidia’s tutorials and examples, etc.
+For web-sourced code, since instruction tuning [ 11 , 14 ] requires descriptive prompts that do not naturally accompany raw CUDA code, we use Claude Sonnet 4 to generate instruction descriptions for each CUDA code snippet. To further augment the model with retrieval capabilities, we use each instruction as a search query to retrieve relevant documentation and code examples in the search engine, which are concatenated as additional context. The resulting instruction-context-code triplets are used for continued pretraining on DeepSeek 671B [ 8 ] , enabling the model to acquire more general CUDA optimization capabilities. 
+
+ 3.2.2 General Kernel RL 
+
+ In the continued pretraining stage, we
+collected roughly 1K CUDA kernels
+from established libraries, covering a large range of operations including linear algebra, convolution operations, reduction operations,
+element-wise operations, attentions, sampling, and others
+that cannot be readily categorized
+(e.g., embedding lookups,
+loss functions,
+gradient clipping,
+optimizer steps).
+Each CUDA kernel is paired with an official/successful implementation from Pytorch, ATen, CUTLASS, etc. With reference implementations of these kernels, we train a general-kernel LLM-guided RL with the reward being the
+average speedup score across all test iterations.
+CUDA-L2 adopts a
+contrastive RL training strategy
+described in [ 7 ] ,
+where the model is prompted to perform comparative analysis of previously generated CUDA variants and their execution performances.
+GRPO [ 5 , 13 ] is adopted for LLM parameter updates.
+As suggested in [ 7 ] , rewards will be smoothed and clipped to alleviate the effect of reward hacking during RL training. 
+
+ 3.2.3 HGEMM RL 
+
+ In the last stage, we continue to train RL by limiting kernels to HGEMM with varying configurations of M, N, K.
+The contrastive RL strategy is adopted. 
+
+ Reward 
+
+ The reward for a generated HGEMM kernel is computed by averaging speedup scores across all test iterations, similar to the evaluation section. To foster correctness, we also penalize
+the reward by numerical deviation from the FP32 CPU ground truth.
+Code length will further be penalized, pushing the model to generate concise code. 
+
+ | 
+ r ⁡ ( custom ) = 1 N ​ ∑ i = 1 N [ t ref i t custom i − α ⋅ diff i ] − β ​ L ​ ( custom ) r(\text{custom})=\frac{1}{N}\sum_{i=1}^{N}\left[\frac{t^{i}_{\text{ref}}}{t^{i}_{\text{custom}}}-\alpha\cdot\text{diff}^{i}\right]-\beta\text{L}(\text{custom}) | 
+ | 
+ (3) | 
+
+ where diff i = max j ⁡ | out FP32 i ​ [ j ] − out custom i ​ [ j ] | \text{diff}^{i}=\max_{j}|\text{out}_{\text{FP32}}^{i}[j]-\text{out}_{\text{custom}}^{i}[j]| is the maximum element-wise absolute difference and α > 0 \alpha>0 is the penalty coefficient.
+L( custom ) denotes the length of the generated code and β > 0 \beta>0 is the associative penalty coefficient. 
+
+ NCU (NVIDIA Nsight Compute) profiling metrics are incorporated in the context for HGEMM training, enabling the model to learn from detailed performance characteristics such as memory throughput, compute utilization, warp occupancy, and cache hit rates rather than relying solely on end-to-end execution time. 
+
+ Generated HGEMM kernels will be parsed into .cu files and compiled with nvcc. Therefore, CUDA C/C++, CuTe, inline PTX assembly, CUDA intrinsics, and CUTLASS templates can be used, but not Python-based DSLs like Triton. 
+
+ 4 Results 
+
+ In this section, we present the performance of CUDA-L2 against baseline kernels. 
+
+ Table 1 : Performance comparison of CUDA-L2 against baseline implementations (speedup ratio).
+Offline denotes that case where kernels are executed back-to-back without pauses, and server denotes kernels being executed at random intervals to simulate real-time inference.
+max denotes comparing against the best kernel across TN and NN for each configuration. 
+
+ 4.1 Overall Results 
+
+ Comparisons within Baselines 
+
+ Results are shown in Table 1 . Before examining CUDA-L2’s performance, we first compare the baselines against each other. Since the table shows CUDA-L2’s speedup over each baseline, a higher percentage indicates a weaker baseline.
+Comparing TN (transposed-normal) and NN (normal-normal) layouts, the NN layout slightly outperforms TN across all libraries. Specifically, for cuBLAS , CUDA-L2 gains 20.0% over NN versus 21.4% over TN. The same pattern holds for cuBLASLt-heuristic (17.3% vs 19.1%) and cuBLASLt-AutoTuning (12.1% vs 13.3%). 
+
+ Among the baseline libraries, torch.matmul is the weakest (22.0% speedup). cuBLAS-max performs better (19.2%) by selecting the optimal layout per configuration. cuBLASLt-heuristic improves further (16.8%) through algorithmic selection based on problem characteristics. The strongest baseline is cuBLASLt-AutoTuning (11.4%), which exhaustively
+test up to 100 kernel candidates per configuration. 
+
+ CUDA-L2 Performance 
+
+ CUDA-L2 consistently outperforms all baselines, from the commonly used torch.matmul to NVIDIA’s heavily-optimized cuBLASLt-AutoTuning . In offline mode, CUDA-L2 achieves average speedups of 22.0% over torch.matmul , 19.2% over cuBLAS-max , 16.8% over cuBLASLt-heuristic-max , and 11.4% over cuBLASLt-AutoTuning-max . In server mode, these gains increase to 28.7%, 26.0%, 22.4%, and 15.9% respectively. The win rates span 79.3% to 95.7% across all baselines, confirming that improvements are systematic rather than driven by outliers. 
+
+ It is also worth noting the difference between the offline and server modes.
+We attribute this to
+the difference in GPU
+thermal dynamics for GPU environment between the two modes. In the offline model, continuous execution keeps the GPU in a steady thermal state with predictable clock behavior, while in the server mode, idle periods between requests allow the GPU to cool, causing subsequent kernel launches to experience clock boosting followed by thermal throttling. The explains the larger variance of the server mode v.s. offline mode. 
+
+ 4.2 Max(CUDA-L2, baseline) 
+
+ Table 2 : Comparing max(CUDA-L2, baseline) against baseline, which represents a real-world situation where users have access to all kernels and can choose whichever runs faster. 
+
+ It is interesting to consider a real-world scenario
+where
+users have access to all kernels and can choose whichever works best.
+Table  2 presents the mean speedup comparing max(CUDA-L2, baseline) against baselines, where max(CUDA-L2, baseline) denotes selecting the faster kernel between CUDA-L2 and the baseline for each configuration.
+As expected,
+ max(CUDA-L2, baseline) provides additional gains across all baselines. In offline mode, the speedup increases from 22.0% to 23.1% for torch.matmul , from 19.2% to 20.2% for cuBLAS-max , from 16.8% to 17.0% for cuBLASLt-heuristic-max , and from 11.4% to 13.2% for cuBLASLt-AutoTuning-max . The server mode follows the same pattern, with speedups rising from 28.7% to 29.8%, 26.0% to 27.2%, 22.4% to 22.7%, and 15.9% to 18.1% respectively. 
+
+ 4.3 Speedup vs. Problem Size 
+
+ Table 3 : Speedup over cuBLASLt-AutoTuning-max by matrix size in offline mode. 
+
+ Figure  3 shows how CUDA-L2’s speedup against cuBLASLt-AutoTuning-max varies with matrix dimensions. We observe a clear trend that as problem size increases, the speedup decreases. In the left panel, speedup drops from around 1.4 × \times for smaller problems ( l ​ o ​ g 2 ​ ( M ∗ N ∗ K ) log_{2}(M*N*K) ≈ \approx 18-20) to approximately 1.0 × \times for larger problems ( l ​ o ​ g 2 ​ ( M ∗ N ∗ K ) log_{2}(M*N*K) > > 38).
+The middle and right panels confirm this pattern. When plotting against average dimension or maximum dimension, smaller matrices consistently show higher speedups (1.3-1.4 × \times ), while larger matrices converge toward the baseline performance. 
+
+ This behavior is expected. For small matrix multiplications, the GPU is underutilized and there is significant room for optimization through better memory access patterns, tiling strategies, and kernel configurations. CUDA-L2 exploits these opportunities effectively.
+On the contrary,
+large matrices saturate the GPU’s floating-point throughput, leaving less room for improvement. 
+
+ 5 Optimization Techniques Discovered and Applied by CUDA-L2 
+
+ In this section, we describe CUDA optimization techniques discovered and applied by CUDA-L2. 
+
+ 5.1 Abstraction Selection 
+
+ We first observe that CUDA-L2 automatically selects appropriate implementation abstractions based on ( M , N , K ) (M,N,K) . For smaller matrices, it generates lightweight kernels directly using raw WMMA. These kernels
+employ simpler memory access patterns, fewer pipeline stages, and minimal synchronization, which lead to faster speed. 
+
+ For larger matrices, CUDA-L2 leans towards using CuTe ’s abstractions to manage sophisticated tiled MMA operations with multi-stage pipelining.
+CuTe’s abstractions result in more concise code compared to raw CUDA intrinsics. Since the RL reward favors shorter code, CUDA-L2 naturally leans towards CuTe for complex optimizations. This allows CUDA-L2 to
+more easily
+explore advanced techniques such as multi-stage pipelining, tile shape tuning, and swizzle patterns, which yield significant speedups for large matrices. 
+
+ 5.2 Padding the Input Matrix with Zeros 
+
+ Matrix multiplication on GPUs is typically implemented using a tiled approach, where the two input matrices are partitioned into smaller tiles that can be efficiently processed by thread blocks. Each thread block loads a tile of the input matrices into shared memory, performs local computation, and writes the result back to global memory. 
+
+ In this tiled approach, each thread block computes a BM × BN \mathrm{BM}\times\mathrm{BN} output tile. A common constraint is that the matrix dimension M M must be divisible by BM \mathrm{BM} and N N must be divisible by BN \mathrm{BN} ;
+otherwise, thread blocks handling boundary tiles may issue out-of-bounds memory accesses. For example, when M = 8192 M=8192 , typical choices include BM ∈ { 64,128,256 } \mathrm{BM}\in\{64,128,256\} . 
+
+ We observe an interesting strategy discovered by CUDA-L2: setting BM \mathrm{BM} to values where M \mathrm{M} is not divisible by BM \mathrm{BM} , then padding the input matrix with zeros to make M \mathrm{M} larger to satisfy the divisibility constraint.
+This provides the flexibility to explore a bigger set of BM \mathrm{BM} values beyond those that evenly divide the original dimension. While padding introduces computational overhead from processing additional rows, the RL model automatically finds the sweet spot of
+balancing this overhead and the performance gains by selecting a more effective BM \mathrm{BM} . 
+
+ For example, in the generated kernel for (M=8192, N=512, K=2048) , CUDA-L2 selects BM = 160 \mathrm{BM}=160 , which does not divide 8192, and pads M M to 8320 (about 1.6% overhead), ultimately outperforming the conventional choice of BM = 128 \mathrm{BM}=128 .
+The speedup over cublaslt-AutoTuning-TN is +15.2% when BM \mathrm{BM} is set 160, and decreases to 0.4% when BM \mathrm{BM} is set 128 and -15.7% when BM \mathrm{BM} is set 256. 
+
+ 5.3 Proficiency in Using CUDA Optimization Techniques 
+
+ We observe that CUDA-L2
+is
+proficient in using the following CUDA optimization techniques: 
+
+ • 
+
+ Shared memory with bank conflict avoidance , which uses a swizzle pattern to reorganize data layout, preventing conflicts from multiple threads accessing the same memory bank. It is parameterized by three parameters: bits , base , and shift , controlling the bit-level permutation of shared memory addresses. 
+
+ • 
+
+ Multi-stage pipelining , which partitions shared memory into multiple buffering stages so that during the time that
+the current tile is being computed, subsequent tiles are prefetched into other buffers. It is parameterized by the number of buffering stages, denoted by n_stage . 
+
+ • 
+
+ Asynchronous memory copy , which enables non-blocking 128-bit transfers from global to shared memory. 
+
+ • 
+
+ Register accumulation , which stores partial results in register files to minimize memory traffic. 
+
+ • 
+
+ Block swizzle ,
+which improves L2 cache hit rates by reordering thread block execution so that spatially adjacent blocks can run concurrently,
+while by default, thread blocks are launched in row-major order, causing adjacent blocks to access disjoint memory regions resulting in poor L2 cache utilization.
+Block swizzle is parameterized by swizzle_stride , which determines the stride pattern used to reorder block indices. 
+
+ • 
+
+ Epilogue optimization , which efficiently transfers accumulated results from registers to global memory, potentially using direct register-to-shared-memory copies with wide data types (e.g., 128-bit) to minimize intermediate temporaries and reduce memory traffic. 
+
+ With these techniques, CUDA-L2 can also automatically determine which to apply and figure out their optimal parameters. For instance, it decides whether to use block swizzle or bypass it entirely, whether to enable multi-stage pipelining or rely on simple loops, and how to set tile sizes, pipeline stages, etc. 
+
+ Moreover, within each technique, CUDA-L2 can discover novel variations beyond standard implementations. Rather than applying a one-size-fits-all strategy, these variations target specific MNK configurations where they outperform conventional approaches.
+The following are a few examples: 
+
+ 5.3.1 Double-Buffered Register Fragments with Ping-Pong Execution 
+
+ In matrix multiplication, kernels must iteratively load data from shared memory into registers before performing tensor core computations. Typically, matrices A and B are loaded sequentially, causing compute units to stall while waiting for data to arrive.
+CUDA-L2 finds the optimized double-buffer approach that allocates two sets of register fragments and alternates between them in a ping-pong fashion: while the tensor cores compute using one buffer, the next iteration’s data is prefetched into the other. This overlaps data movement with computation, eliminating the stall cycles present in the single-buffer approach. 
+
+ Single-buffer allocation works better for small K or when register usage is already high, since double buffering doubles register consumption and can cause performance degradation. Double-buffer allocation performs better with large K and sufficient available registers, where hiding memory access latency significantly improves throughput. Code is shown in Listing  2 . 
+
+ ⬇ 
+
+ 1 
+
+ auto tCrA = thr_mma . partition_fragment_A ( 
+
+ 2 
+
+ gA ( _ , _ , 0)); 
+
+ 3 
+
+ auto tCrB = thr_mma . partition_fragment_B ( 
+
+ 4 
+
+ gB ( _ , _ , 0)); 
+
+ 5 
+
+ auto tCrD = thr_mma . partition_fragment_C ( gD ); 
+
+ 6 
+
+ 7 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 8 
+
+ tAsA ( _ , _ , ik_next , ismem_read ), 
+
+ 9 
+
+ tCrA_view ( _ , _ , ik_next )); 
+
+ 10 
+
+ cute :: gemm ( tiled_mma , tCrD , 
+
+ 11 
+
+ tCrA ( _ , _ , ik ), tCrB ( _ , _ , ik ), tCrD ); 
+
+ Standard: Single-Buffer 
+
+ ⬇ 
+
+ 1 
+
+ auto tCrA_buf0 = thr_mma . partition_fragment_A ( 
+
+ 2 
+
+ gA ( _ , _ , 0)); 
+
+ 3 
+
+ auto tCrA_buf1 = thr_mma . partition_fragment_A ( 
+
+ 4 
+
+ gA ( _ , _ , 0)); 
+
+ 5 
+
+ auto tCrA_view0 = s2r_thr_copy_a . retile_D ( tCrA_buf0 ); 
+
+ 6 
+
+ auto tCrA_view1 = s2r_thr_copy_a . retile_D ( tCrA_buf1 ); 
+
+ 7 
+
+ 8 
+
+ bool use_buf0 = ( ik % 2 == 0); 
+
+ 9 
+
+ if ( use_buf0 ) { 
+
+ 10 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 11 
+
+ tAsA ( _ , _ , ik_next , ismem_read ), 
+
+ 12 
+
+ tCrA_view1 ( _ , _ , ik_next )); 
+
+ 13 
+
+ cute :: gemm ( tiled_mma , tCrD , 
+
+ 14 
+
+ tCrA_buf0 ( _ , _ , ik ), tCrB_buf0 ( _ , _ , ik ), tCrD ); 
+
+ 15 
+
+ } else { 
+
+ 16 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 17 
+
+ tAsA ( _ , _ , ik_next , ismem_read ), 
+
+ 18 
+
+ tCrA_view0 ( _ , _ , ik_next )); 
+
+ 19 
+
+ cute :: gemm ( tiled_mma , tCrD , 
+
+ 20 
+
+ tCrA_buf1 ( _ , _ , ik ), tCrB_buf1 ( _ , _ , ik ), tCrD ); 
+
+ 21 
+
+ } 
+
+ Optimized: Double-Buffer 
+
+ Listing 2: Register fragment buffering: single-buffer (left) vs. double-buffer with ping-pong (right). 
+
+ 5.3.2 Aggressive Register-Level Prefetching 
+
+ Matrices A and B must be loaded from shared memory into registers before performing tensor core computations. Prefetching is a technique that initiates these loads ahead of time, allowing the kernel to load data for future tiles while computing on the current tile. With standard single-step prefetching, kernels prefetch data for only the next tile (one tile ahead) during the current computation. While this provides basic overlap of memory loads and computation, it may not be sufficient when loading data takes longer than computing a single tile. This leaves the GPU with idle execution slots that could be used for additional prefetching. 
+
+ In some configurations,
+CUDA-L2 chooses to prefetch more aggressively
+by loading
+multiple iterations ahead. Preloading data multiple iterations ahead allows the kernel to fully overlap memory operations with tensor core computations, leading to speedups.
+Generally, single-step prefetching works better for configurations with few loop iterations or high register pressure, as multi-step prefetching requires additional register storage for the extra buffered data. Multi-step prefetching works better when iteration counts are high and register headroom is sufficient. 
+
+ ⬇ 
+
+ 1 
+
+ #pragma unroll 
+
+ 2 
+
+ for ( int ik = 0; ik < nk ; ++ ik ) { 
+
+ 3 
+
+ int ik_next = ( ik + 1) % nk ; 
+
+ 4 
+
+ 5 
+
+ // K+1 prefetch 
+
+ 6 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 7 
+
+ tAsA ( _ , _ , ik_next , ismem_read ), 
+
+ 8 
+
+ tCrA_view ( _ , _ , ik_next )); 
+
+ 9 
+
+ cute :: copy ( s2r_tiled_copy_b , 
+
+ 10 
+
+ tBsB ( _ , _ , ik_next , ismem_read ), 
+
+ 11 
+
+ tCrB_view ( _ , _ , ik_next )); 
+
+ 12 
+
+ cute :: gemm ( tiled_mma , tCrD , 
+
+ 13 
+
+ tCrA ( _ , _ , ik ), tCrB ( _ , _ , ik ), tCrD ); 
+
+ 14 
+
+ } 
+
+ Standard: Single-Step Prefetch 
+
+ ⬇ 
+
+ 1 
+
+ // Prime pipeline with K+0, K+1, K+2 
+
+ 2 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 3 
+
+ tAsA ( _ , _ , 0, ismem_read ), tCrA_view ( _ , _ , 0)); 
+
+ 4 
+
+ cute :: copy ( s2r_tiled_copy_b , 
+
+ 5 
+
+ tBsB ( _ , _ , 0, ismem_read ), tCrB_view ( _ , _ , 0)); 
+
+ 6 
+
+ if ( nk > 1) { 
+
+ 7 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 8 
+
+ tAsA ( _ , _ , 1, ismem_read ), tCrA_view ( _ , _ , 1)); 
+
+ 9 
+
+ cute :: copy ( s2r_tiled_copy_b , 
+
+ 10 
+
+ tBsB ( _ , _ , 1, ismem_read ), tCrB_view ( _ , _ , 1)); 
+
+ 11 
+
+ } 
+
+ 12 
+
+ #pragma unroll 
+
+ 13 
+
+ for ( int ik = 0; ik < nk ; ++ ik ) { 
+
+ 14 
+
+ int ik_prefetch = ik + 4; // K+4 distance 
+
+ 15 
+
+ if ( ik_prefetch < nk ) { 
+
+ 16 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 17 
+
+ tAsA ( _ , _ , ik_prefetch , ismem_read ), 
+
+ 18 
+
+ tCrA_view ( _ , _ , ik_prefetch )); 
+
+ 19 
+
+ cute :: copy ( s2r_tiled_copy_b , 
+
+ 20 
+
+ tBsB ( _ , _ , ik_prefetch , ismem_read ), 
+
+ 21 
+
+ tCrB_view ( _ , _ , ik_prefetch )); 
+
+ 22 
+
+ } 
+
+ 23 
+
+ cute :: gemm ( tiled_mma , tCrD , 
+
+ 24 
+
+ tCrA ( _ , _ , ik ), tCrB ( _ , _ , ik ), tCrD ); 
+
+ 25 
+
+ } 
+
+ Optimized: Multi-Step Prefetch 
+
+ Listing 3: Register-level prefetching: single-step (left) vs. aggressive multi-step (right). 
+
+ 5.3.3 Epilogue Optimization with Direct Register-to-Shared-Memory Copy 
+
+ The epilogue stage first copies results in registers to shared memory and then to global memory.
+In the shared memory copying stage, normally,
+the kernel first copies register fragments to a temporary tensor in the shared memory, then performs a second copy from the temporary to shared memory.
+This is only necessay when the register layout doesn’t match the shared memory layout directly, so CUTLASS/CuTe creates this intermediate tensor to reorganize the data. 
+
+ For cases where register layout actually matches the the shared memory layout, CUDA-L2 eliminates
+the intermediate temporary tensor and performs direct register-to-shared-memory transfers. Additionally, it employs wider copy atoms (e.g., uint128_t ) to transfer more data per instruction, reducing the total number of copy operations and improving memory bandwidth utilization. 
+
+ ⬇ 
+
+ 1 
+
+ // Copy via intermediate tensor 
+
+ 2 
+
+ auto t = make_tensor_like < half >( 
+
+ 3 
+
+ tCrC_r2sx ( _ , i + j )); 
+
+ 4 
+
+ cute :: copy ( tCrC_r2sx ( _ , i + j ), t ); 
+
+ 5 
+
+ cute :: copy ( r2s_tiled_copy_c , t , 
+
+ 6 
+
+ tCsC_r2s ( _ , 0, 0, j )); 
+
+ Standard: Two-Step Copy 
+
+ ⬇ 
+
+ 1 
+
+ // Direct R2S with wide atom 
+
+ 2 
+
+ using R2SCopyAtomC = Copy_Atom 
+
+ 3 
+
+ UniversalCopy < cute :: uint128_t >, T >; 
+
+ 4 
+
+ cute :: copy ( tCrC_r2sx ( _ , i + j ), 
+
+ 5 
+
+ tCsC_r2s ( _ , 0, 0, j )); 
+
+ Optimized: Direct Wide Copy 
+
+ Listing 4: Epilogue register-to-shared-memory copy: two-step (left) vs. direct wide copy (right). 
+
+ 5.3.4 Staggered/Split A-B Prefetch Scheduling 
+
+ In standard prefetching, kernels prefetches both A and B matrices back-to-back before executing the MMA operation. Specifically, data for the next iteration is prefetched into registers while the MMA computes using already-loaded data from the current iteration. In some cases, issuing both prefetches consecutively can create instruction bubbles and underutilize available execution units, as the memory and compute pipelines are not fully overlapped. 
+
+ CUDA-L2 finds
+modification to this approach
+that separates the A and B prefetches around the MMA operation: the A matrix prefetch is issued first, then the MMA executes using previously loaded data, and finally the B matrix prefetch is issued. Since the MMA operates on already-resident register data from the current iteration, it does not depend on the prefetches being completed. This interleaving increases instruction-level parallelism by allowing the A prefetch and MMA to overlap in the pipeline, with the B prefetch filling the gap after the MMA issues. 
+
+ Consecutive prefetching works better when memory access is the bottleneck, where batching both prefetches together makes better use of available bandwidth. Staggered prefetching works better when computation is the bottleneck.
+Code is shown in Listing  5 . 
+
+ ⬇ 
+
+ 1 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 2 
+
+ tAsA ( _ , _ , ik_next , ismem_read ), 
+
+ 3 
+
+ tCrA_view ( _ , _ , ik_next )); 
+
+ 4 
+
+ cute :: copy ( s2r_tiled_copy_b , 
+
+ 5 
+
+ tBsB ( _ , _ , ik_next , ismem_read ), 
+
+ 6 
+
+ tCrB_view ( _ , _ , ik_next )); 
+
+ 7 
+
+ cute :: gemm ( tiled_mma , tCrD , 
+
+ 8 
+
+ tCrA ( _ , _ , ik ), tCrB ( _ , _ , ik ), tCrD ); 
+
+ Standard: Consecutive Prefetch 
+
+ ⬇ 
+
+ 1 
+
+ cute :: copy ( s2r_tiled_copy_a , 
+
+ 2 
+
+ tAsA ( _ , _ , ik_next , ismem_read ), 
+
+ 3 
+
+ tCrA_view ( _ , _ , ik_next )); 
+
+ 4 
+
+ cute :: gemm ( tiled_mma , tCrD , 
+
+ 5 
+
+ tCrA ( _ , _ , ik ), tCrB ( _ , _ , ik ), tCrD ); 
+
+ 6 
+
+ cute :: copy ( s2r_tiled_copy_b , 
+
+ 7 
+
+ tBsB ( _ , _ , ik_next , ismem_read ), 
+
+ 8 
+
+ tCrB_view ( _ , _ , ik_next )); 
+
+ Optimized: Staggered Prefetch 
+
+ Listing 5: A-B prefetch scheduling: consecutive (left) vs. staggered (right). 
+
+ 6 Analysis 
+
+ In this section, we conduct a systematic analysis of the 1,000 optimal configurations discovered by RL to
+understand which optimization techniques and parameter settings should be applied under different problem dimensions and hardware constraints. 
+
+ Table 4 : Hyperparameter Selection Patterns in Optimized CUDA Matrix Multiplication Kernels 
+
+ 6.1 How to Choose BM, BN, BK 
+
+ Figure 4 (a)(b)(c) illustrates the relationship between problem dimensions and their corresponding tile sizes parameterized by BM, BN and BK, which determine how the input matrices are divided into smaller blocks for efficient computation on the GPU. 
+
+ Figure 4 (a) shows that BM scales proportionally with the M dimension ( ρ = 0.652 \rho=0.652 ). As M increases from small values ( ≤ \leq 256) to large values ( > > 4K), BM grows from approximately 60 to 160. This strong positive correlation indicates that larger M dimensions require larger M-tiles to maintain efficiency.
+A similar trend is observed between N and BN in Figure 4 (b), with an even stronger correlation ( ρ = 0.705 \rho=0.705 ).
+In contrast, Figure 4 (c) reveals that BK has only a weak correlation with K ( ρ = 0.256 \rho=0.256 ), indicating that BK selection depends on additional factors beyond K alone, such as register pressure, memory bandwidth constraints, and the number of pipeline stages. 
+
+ Figure 4 (d) reveals that the values of BM and BN are highly correlated ( ρ = 0.695 \rho=0.695 ), indicating that optimal configurations tend to use similar or same values for both tile dimensions.
+This is because the tensor cores operate in square or near-square instruction format (e.g., 16 × \times 8 × \times 16), and that
+balanced tiles reduce the risk of resource imbalance where one dimension becomes a bottleneck. 
+
+ 6.2 How to Choose Stage Number in Multi-stage Pipelining 
+
+ Figure 4 (e) shows how matrix dimensions
+affect the number of pipeline stages in optimized CUDA kernels. Each box shows the distribution of dimension values for different stage counts.
+It shows a clear positive relationship: as the K dimension increases, the number of pipeline stages should increase to achieve the optimal performance.
+Small K ( ≤ \leq 128) needs only 2-3 stages for adequate latency hiding, while large K ( > > 8K) requires 6+ stages to maintain high throughput by keeping multiple data loads in flight simultaneously. 
+
+ 6.3 When and How to Use Block Swizzling 
+
+ BlockSwizzle is a memory optimization technique that improves cache locality and load balancing by reordering how thread blocks access global memory.
+Figure 4 (f) shows the relationship between matrix problem ( M × N × K M\times N\times K ) and BlockSwizzle usage across different configurations. The first box represents configurations that do not use BlockSwizzle, which typically handle smaller problem sizes. The subsequent boxes show increasingly larger swizzle stride values, with each handling progressively larger problems. 
+
+ The decision of when to enable BlockSwizzle is primarily driven by problem size. For small problems (less than 2 27 2^{27} or approximately 134 million operations), BlockSwizzle is optional and used in only 44% of configurations, as the overhead may outweigh the benefits when data fits comfortably in cache. However, as problem size grows, BlockSwizzle becomes increasingly prevalent: medium problems ( 2 27 2^{27} to 2 33 2^{33} ) use it 73-80% of the time, while very large problems (greater than 2 36 2^{36} or 68 billion operations) employ it almost every time at 99% usage. 
+
+ The value of swizzle_stride parameter, which controls the granularity of the block reordering, should be chosen adaptively based on problem dimensions. Smaller problems that do use swizzling typically employ stride values of 8-128, while larger problems benefit from stride values of 512-16,384. The strong correlation ( ρ = 0.453 \rho=0.453 ) demonstrates that both the decision to use BlockSwizzle and the selection of an appropriate stride value are fundamentally tied to problem scale, with the optimization becoming essential as memory access patterns grow more complex at larger scales. 
+
+ 7 Conclusion 
+
+ In this paper, we propose CUDA-L2, a system that combines large language models and reinforcement learning to automatically optimize HGEMM CUDA kernels across diverse configurations. Through continued pretraining on diverse CUDA code, multi-stage RL training progressing from general kernel optimization to matmul-specific optimization, and retrieval-augmented context, CUDA-L2 achieves an 11.4% speedup over NVIDIA’s cuBLASLt-AutoTuning library on A100 GPUs across 1000 configurations in offline mode, and 15.9% speedup in server mode. Against more commonly used baselines, CUDA-L2 delivers even larger gains: 22.0% over torch.matmul (28.7% server) and 19.2% over cuBLAS (26.0% server).
+CUDA-L2 demonstrates that even for heavily-optimized, performance-critical kernels like HGEMM, LLM-guided RL can discover superior implementations by systematically exploring configuration spaces at scales impractical for manual optimization.

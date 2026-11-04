@@ -1,0 +1,711 @@
+HIERA: Workload-Aware Planning Across Implementation Spaces 
+ for GPU Kernel Optimization 
+
+ Jinghao Wang
+
+ Qiqi Gu
+
+ Chenpeng Wu
+
+ Jianguo Yao
+
+ Haibing Guan
+
+ Xijun Li
+
+ Abstract 
+
+ High-performance GPU kernels underpin modern deep learning and scientific computing. As workloads become increasingly diverse and GPU hardware evolves rapidly, developing efficient methods for automated GPU kernel generation and optimization has become increasingly important. Existing LLM-based methods typically optimize within a fixed implementation space, limiting either optimization flexibility or search efficiency. We propose HIERA , a hierarchical search-space planning framework for GPU kernel optimization. HIERA constructs contract-augmented task specifications, selects an appropriate implementation space across PyTorch operators, CUDA libraries, and custom CUDA kernels, and uses profiling feedback and expert knowledge to guide structured iterative refinement. Experiments on KernelBench across multiple various workload levels and base LLMs show that HIERA delivers stronger overall implementation validity, sample efficiency, and optimization performance than existing training-free methods, while remaining competitive with the training-based CUDA-L1 without additional model training. A case study on a specialized stencil operator from scientific computing further achieves a 1.53 × 1.53\times speedup over cuDNN, demonstrating the potentiality of the general framework beyond standard machine-learning workloads. 
+
+ 1 Shanghai Key Laboratory of Scalable Computing and Systems 
+ 2 School of Computer Science, Shanghai Jiao Tong University 
+ ✉Corresponding author 
+
+ Introduction 
+
+ High-performance GPU kernels form a critical foundation of modern deep learning and scientific computing systems  ( Chen et al. 2018 ; Zheng et al. 2020 ) . To simplify GPU programming, vendor libraries and framework primitives, such as cuBLAS, cuDNN, and PyTorch operators, provide optimized implementations for common computation patterns  ( NVIDIA Corporation 2026 ; Chetlur et al. 2014 ; Paszke et al. 2019 ) . By encapsulating widely used kernels and established optimization strategies, these abstractions substantially reduce the effort required for GPU kernel development and optimization  ( Chetlur et al. 2014 ; Paszke et al. 2019 ) . However, relying exclusively on these abstractions remains insufficient. Rapid hardware evolution makes optimized implementations costly to maintain and retune across architectures  ( Chetlur et al. 2014 ; Chen et al. 2018 ; Zheng et al. 2020 ) , while fixed library primitives cannot adequately cover the growing diversity of specialized workloads, such as complex scientific-computing operators  ( Tillet et al. 2019 ; Shi et al. 2023 ; Zhuang et al. 2024 ; Holewinski et al. 2012 ) . As existing libraries and framework primitives increasingly struggle to meet evolving workload and hardware requirements, GPU kernel development and optimization still rely heavily on manual implementation and tuning. This process demands substantial domain expertise and engineering effort, motivating the development of automated approaches to GPU kernel generation and optimization  ( Chetlur et al. 2014 ; Ouyang et al. 2025 ; Zhang et al. 2025 ) . 
+
+ Figure 1: 
+Comparison of prior methods operating within fixed implementation spaces and our proposed HIERA ’s workload-aware cross-granularity planning.
+
+ Recent LLM-based systems have automated GPU kernel generation through iterative code synthesis and execution-driven refinement  ( Ouyang et al. 2025 ; Zhang et al. 2025 ; Wei et al. 2025 ; Andrews and Witteveen 2025 ) . Nevertheless, many existing methods optimize within a predetermined implementation space  ( Zhang et al. 2025 ; Li et al. 2026b ; Baronio et al. 2026 ; Wang et al. 2025a ; Saba et al. 2026 ) . As illustrated in Figure  1 , methods concentrated in the upper-left region rely primarily on high-level operators or optimized libraries. These approaches generally preserve higher-level semantics and reduce implementation complexity  ( Chen et al. 2018 ; Zheng et al. 2020 ) , but may miss optimization opportunities that require custom fusion, shape specialization, or direct control over GPU execution  ( Shi et al. 2023 ; Zhuang et al. 2024 ; Cheng et al. 2026 ) . In contrast, methods in the lower-right region directly explore custom CUDA implementations, providing greater optimization freedom but requiring the model to navigate a large and weakly structured space of interacting low-level decisions  ( Zhang et al. 2025 ; Chen et al. 2025 ; Li et al. 2026b ; Baronio et al. 2026 ) . Under limited candidate-generation budgets, such exploration can spend substantial resources on implementations that fail compilation or correctness checks, or yield little performance improvement  ( Ouyang et al. 2025 ; Zhang et al. 2026 ; Sarkar 2026 ; Li et al. 2026a ) . More importantly, execution and profiling feedback can guide refinement only within the chosen implementation space; they do not determine whether that space is appropriate for the workload  ( Zhang et al. 2025 ; Wei et al. 2025 ; Andrews and Witteveen 2025 ) . This limitation motivates treating implementation-space selection itself as an explicit part of the optimization process . 
+
+ To address this gap, we propose HIERA , a hierarchical search-space planning framework for GPU kernel optimization. HIERA treats implementation granularity as an explicit optimization decision: it first selects a workload-appropriate implementation space and then structures refinement within that space using profiling feedback and expert domain knowledge. The main contributions of this work are summarized as follows: 
+
+ • 
+
+ We identify the limitations of predetermined implementation spaces for efficient LLM-based GPU kernel optimization, and formulate implementation-space selection as an explicit workload-aware planning problem. 
+
+ • 
+
+ We introduce a contract-augmented task specification that fixes callable interfaces, parameter semantics, compilation rules, and verification behavior. This design focuses candidate generation on performance-critical implementation choices and reduces ambiguity in code generation and evaluation. 
+
+ • 
+
+ We develop a hierarchical search-space planning mechanism that first selects an appropriate implementation regime spanning custom CUDA kernels, optimized CUDA libraries, and PyTorch operators, and then combines profiling feedback with expert-curated optimization knowledge to guide structured refinement within the selected space. 
+
+ • 
+
+ We conduct comprehensive comparative, limited-budget, and ablation studies on KernelBench across three workload levels and three base LLMs. The results show that HIERA consistently improves implementation validity, sample efficiency, and optimization performance over existing training-free methods, while confirming the complementary contributions of contract augmentation and hierarchical planning. A stencil case study further demonstrates its feasibility on a specialized scientific-computing operator under the evaluated configuration. 
+
+ Related Work 
+
+ Tensor Compilers and GPU DSLs. 
+
+ Tensor compilers and GPU programming systems provide structured optimization spaces for efficient kernel generation. TVM and Ansor search over compiler schedules and program transformations, while Triton provides a high-level language and compiler for custom GPU kernels  ( Chen et al. 2018 ; Zheng et al. 2020 ; Tillet et al. 2019 ) . However, these systems remain constrained by predefined compiler IRs, scheduling languages, or DSL models  ( Feng et al. 2023 ) . In contrast, HIERA treats the choice among high-level operators, optimized libraries, and custom CUDA implementations as part of the optimization process. 
+
+ GPU Kernel Generation Benchmarks. 
+
+ KernelBench evaluates whether LLMs can generate GPU implementations that are both functionally correct and faster than their PyTorch references. Its original release contains 250 workloads across three levels, and adopts the fast p \mathrm{fast}_{p} metric to report the fraction of valid implementations exceeding a specified speedup threshold  ( Ouyang et al. 2025 ; Scaling Intelligence Lab 2026 ) . We use KernelBench for evaluation, but augment its task artifacts with contract-augmented specifications that fix callable bindings, parameter semantics, and compilation rules, thereby focusing generation on contract-compliant implementations. 
+
+ Agentic, Feedback-Driven CUDA Optimization. 
+
+ CUDAForge is a training-free Coder–Judge framework that iteratively refines CUDA implementations using correctness results, GPU specifications, and Nsight Compute metrics. It demonstrates the effectiveness of hardware-aware feedback for low-level optimization, but restricts exploration to a fixed custom-CUDA space  ( Zhang et al. 2025 ) . This restriction can be inefficient for composite and model-level workloads, where reconstructing operator dependencies and intermediate data flows directly in CUDA consumes substantial search resources. HIERA instead selects an implementation space according to workload characteristics before performing structured within-space refinement. 
+
+ Reinforcement Learning for CUDA Optimization. 
+
+ CUDA-L1 uses contrastive reinforcement learning to favor correct and efficient CUDA implementations, while Kevin trains models on multi-turn refinement trajectories using correctness and speedup feedback  ( Li et al. 2026b ; Baronio et al. 2026 ) . These methods encode optimization preferences implicitly in model parameters and require training. In contrast, HIERA uses explicit planning decisions that can be inspected and extended without retraining the underlying model. 
+
+ Overall, prior work has advanced GPU kernel optimization through compiler abstractions, standardized benchmarks, feedback-driven refinement, and reinforcement learning. However, these approaches generally optimize within predefined representations or implementation spaces and do not explicitly treat implementation granularity as an optimization decision. HIERA addresses this gap by combining contract-augmented task specifications with workload-aware cross-granularity implementation-space planning and expert-guided optimization-direction pruning, enabling structured coarse-to-fine optimization across heterogeneous workloads. 
+
+ Figure 2: Overview of HIERA. The framework constructs a contract-augmented task specification, performs hierarchical planning over implementation spaces and optimization directions, and iteratively refines candidate implementations using evaluation and profiling feedback. 
+
+ Method 
+
+ Problem Formulation and Framework Overview 
+
+ Given a kernel optimization task τ \tau , a reference implementation f τ f_{\tau} , a target hardware platform ℋ \mathcal{H} , and a finite search budget B B , our objective is to identify the fastest valid implementation explored within the budget. Let 𝒞 B ​ ( τ ) \mathcal{C}_{B}(\tau) denote the set of explored candidate implementations, and let Valid ⁡ ( x , τ ) ∈ { 0 , 1 } \mathrm{Valid}(x;\tau)\in\{0,1\} indicate whether candidate x x compiles successfully and satisfies the interface and semantic requirements of τ \tau . For a valid candidate, its speedup over the reference implementation is defined as 
+
+ | 
+ s ⁡ ( x , τ , ℋ ) = t ⁡ ( f τ , ℋ ) t ⁡ ( x , τ , ℋ ) , s(x;\tau,\mathcal{H})=\frac{t(f_{\tau};\mathcal{H})}{t(x;\tau,\mathcal{H})}, | 
+ | 
+ (1) | 
+
+ where t ⁡ ( ⋅ , ℋ ) t(\cdot;\mathcal{H}) denotes the execution latency on the target hardware. The optimization objective is 
+
+ | 
+ x τ ∗ = arg ⁡ max x ∈ 𝒞 B ​ ( τ ) ⁡ s ⁡ ( x , τ , ℋ ) s.t. Valid ⁡ ( x , τ ) = 1 . x_{\tau}^{*}=\arg\max_{x\in\mathcal{C}_{B}(\tau)}s(x;\tau,\mathcal{H})\quad\text{s.t.}\quad\mathrm{Valid}(x;\tau)=1. | 
+ | 
+ (2) | 
+
+ Figure  2 presents the overall workflow of HIERA. The framework first combines the KernelBench task with fixed template artifacts, interface declarations, parameter semantics, and compilation rules to construct a contract-augmented task specification. The Search-Space Decision Agent then performs hierarchical planning by selecting a workload-appropriate implementation space, followed by an optimization direction within that space based on the current candidate, profiling feedback, and expert domain knowledge. The Strategy Planning Agent translates the selected direction into structured optimization strategies, which guide the Optimization Agent in generating candidate implementations. The candidates undergo compilation checking, correctness verification, performance evaluation, and NCU profiling, after which selected candidates and their feedback are used in the next refinement round. 
+
+ Contract-Augmented Task Specification 
+
+ Generating a complete executable program unnecessarily expands the search space, as the model must reconstruct host-side wrappers, callable bindings, data-preparation logic, reference code, and build configurations that are fixed by the task and are not optimization targets. HIERA therefore converts each KernelBench task into a contract-augmented specification that explicitly defines the compilation rules, interface declarations, and parameter semantics. These contracts preserve the required external behavior while restricting generation to performance-critical implementation choices. 
+
+ Concretely, for every KernelBench task, HIERA keeps the extension wrapper ( torch_demo.py ), C++ binding source ( cpp_source.cpp ), and correctness reference ( groundtruth.py ) fixed. Level 2 and Level 3 tasks additionally include a parameter-semantics file ( params_semantics.json ) describing argument roles, constraints, and dependencies, whereas Level 1 tasks omit this file because their parameter semantics can be inferred from the interface and reference implementation. The model generates only the candidate implementation in cuda_source.cu using a structured response. Each candidate is then combined with the fixed task artifacts and compiled through the prescribed PyTorch-extension entry point. This design eliminates repeated boilerplate generation and focuses the search budget on performance-relevant decisions. 
+
+ Cross-Granularity Search-Space Planning 
+
+ Most existing kernel optimization methods operate within a fixed implementation level or representation. However, the appropriate implementation granularity depends strongly on the workload  ( Wu et al. 2025 ) . For simple operator-level tasks, composing high-level operators may introduce dispatch and intermediate-materialization overheads  ( Shi et al. 2023 ; Zhuang et al. 2024 ) . Conversely, implementing model-level workloads entirely in custom CUDA may require reconstructing complex operator dependencies, intermediate data flows, and execution logic, consuming substantial search budget before performance optimization begins. HIERA therefore treats implementation-space selection as an explicit planning decision. 
+
+ At planning step t t , the Search-Space Decision Agent (SSDA) first selects one of three nested implementation spaces with increasing permissiveness: pure CUDA , CUDA libraries , or CUDA libraries with PyTorch operators . The first permits only custom CUDA kernels; the second additionally permits optimized libraries such as cuBLAS; and the third further permits high-level PyTorch operators. The selected space g t g_{t} defines the admissible implementation choices for the current refinement step, avoiding unnecessary low-level reconstruction for composite workloads while preserving fine-grained control when custom CUDA optimization is advantageous. 
+
+ Domain-Guided Optimization-Direction Pruning 
+
+ Within the selected implementation space, the Search-Space Decision Agent (SSDA) further prunes the refinement space by selecting an optimization direction. Based on recurring bottlenecks and optimization principles identified in prior GPU optimization studies and expert practice, we summarize five broadly applicable directions that cover the major performance dimensions targeted by modern GPU kernels. This taxonomy is operational rather than exhaustive and can be extended with workload or architecture-specific directions. 
+
+ Specifically, we consider control-flow and boundary specialization ( C C ), thread- and warp-level parallelism ( P P ), memory transaction efficiency ( M M ), data reuse and data-movement pipelining ( R R ), and Tensor Core and instruction-pipeline utilization ( T T )  ( Wang et al. 2025b ; Shi et al. 2023 ; Weng et al. 2021 ; Spector et al. 2024 ) . Let 𝒟 = { C , P , M , R , T } \mathcal{D}=\{C,P,M,R,T\} denote the candidate direction set. These directions correspond to divergent or redundant execution, insufficient parallelism, inefficient global-memory transactions, limited on-chip reuse or data-movement overlap, and underutilized compute instructions, respectively. 
+
+ At refinement step t t , the agent scores each direction using the task specification τ \tau , selected implementation space g t g_{t} , current candidate x t x_{t} , profiling feedback F t F_{t} , expert knowledge ℰ \mathcal{E} , and a fixed scoring rubric ℛ \mathcal{R} : 
+
+ | 
+ 𝐬 t = SSDA ⁡ ( τ , g t , x t , F t , ℰ , ℛ ) = ( s t d ) d ∈ 𝒟 , \mathbf{s}_{t}=\operatorname{SSDA}\left(\tau,g_{t},x_{t},F_{t},\mathcal{E};\mathcal{R}\right)=\left(s_{t}^{d}\right)_{d\in\mathcal{D}}, | 
+ | 
+ (3) | 
+
+ where s t d s_{t}^{d} denotes the relevance score of direction d d . The primary direction is selected as 
+
+ | 
+ d t ∗ = arg ⁡ max d ∈ 𝒟 ⁡ s t d . d_{t}^{*}=\arg\max_{d\in\mathcal{D}}s_{t}^{d}. | 
+ | 
+ (4) | 
+
+ The Strategy Planning Agent (SPA) translates the selected direction into a structured, actionable optimization strategy: 
+
+ | 
+ π t = SPA ⁡ ( τ , g t , x t , F t , d t ∗ , ℰ ) , π t ∈ Π g t , d t ∗ , \pi_{t}=\operatorname{SPA}\left(\tau,g_{t},x_{t},F_{t},d_{t}^{*},\mathcal{E}\right),\qquad\pi_{t}\in\Pi_{g_{t},d_{t}^{*}}, | 
+ | 
+ (5) | 
+
+ where π t \pi_{t} specifies concrete transformation steps and implementation constraints, and Π g t , d t ∗ \Pi_{g_{t},d_{t}^{*}} denotes the strategy space admissible under g t g_{t} and d t ∗ d_{t}^{*} . The Optimization Agent (OA) then applies this strategy to generate the next candidate kernel set: 
+
+ | 
+ 𝒳 t + 1 = OA ⁡ ( τ , g t , x t , F t , π t ) . \mathcal{X}_{t+1}=\operatorname{OA}\left(\tau,g_{t},x_{t},F_{t},\pi_{t}\right). | 
+ | 
+ (6) | 
+
+ Feedback-Driven Candidate Evaluation and Iteration 
+
+ Each generated candidate is combined with the fixed template code and subjected to compilation checking and correctness verification. Candidates that fail either check are discarded. Valid candidates are then evaluated on the target GPU and profiled with NVIDIA Nsight Compute (NCU) to obtain execution latency and hardware-level bottleneck metrics. 
+
+ After each evaluation round, the framework records the candidate source code, compilation result, correctness outcome, execution latency, profiling output, selected implementation space, and optimization direction. Valid candidates are ranked according to measured performance, and the strongest candidates are retained as parents for the next iteration. The resulting feedback is provided to the decision and planning modules, allowing subsequent refinement to be guided by both observed performance and hardware-level evidence. The complete record of intermediate decisions and evaluation outcomes makes each optimization trajectory traceable and supports subsequent diagnosis and analysis. 
+
+ Experimental Setup 
+
+ Research Questions 
+
+ To systematically evaluate the effectiveness and behavior of
+ HIERA , we conduct experiments to answer the following
+research questions. 
+
+ Research Questions 
+
+ RQ1: How does HIERA compare with existing methods in GPU kernel generation and optimization? 
+ RQ2: How do implementation-space design choices and the key components of HIERA affect implementation validity and optimization performance? 
+ RQ3: Can HIERA effectively be applied to other application scenarios, such as representative stencil computations in scientific computing? 
+
+ Benchmark and Task Preparation 
+
+ We evaluate HIERA on the first three levels of KernelBench  ( Ouyang et al. 2025 ) , comprising 250 PyTorch workloads: 100 Level-1 operator-level tasks, 100 Level-2 fused-operator tasks, and 50 Level-3 model-level workloads. These levels span individual tensor operators, multi-operator compositions, and complete model architectures. For all methods, we use the original PyTorch reference implementations and prescribed input-generation procedures, and evaluate the same task set under identical hardware and evaluation settings. 
+
+ Compared Methods and Experimental Variants 
+
+ Baselines. 
+
+ We compare HIERA with three representative baselines: KernelBench-Caesar, CUDAForge, and CUDA-L1  ( Ouyang et al. 2025 ; Zhang et al. 2025 ; Li et al. 2026b ) . KernelBench-Caesar is the official iterative workflow released with KernelBench, which generates and refines candidate implementations using execution feedback  ( Ouyang et al. 2025 ; Scaling Intelligence Lab 2026 ) . CUDAForge is evaluated using its official Coder–Judge refinement pipeline  ( Zhang et al. 2025 ) . CUDA-L1 is a specialized training-based method evaluated using its official reproduction protocol  ( Li et al. 2026b ) . 
+
+ Base LLMs. 
+
+ We use three base LLMs: DeepSeek-V3.2, Qwen3.6-Plus, and Gemini-3.6-Flash. 
+
+ Implementation-space comparison. 
+
+ To evaluate the effectiveness of adaptive cross-granularity planning, we compare HIERA with three fixed implementation-space variants on 90 randomly sampled KernelBench tasks, including 30 tasks from each of Levels 1–3. Pure CUDA permits only custom CUDA implementations, CUDA Libraries additionally allows optimized CUDA libraries, CUDA Libraries + PyTorch further allows high-level PyTorch operators, HIERA dynamically selects the permitted implementation space according to workload characteristics and iterative feedback. All variants use the same sampled tasks, contract-augmented task specification, Qwen3.6-Plus LLM, optimization-direction planning procedure, candidate-generation budget, and evaluation protocol. 
+
+ Ablation variants. 
+
+ We construct two ablated variants to quantify the contributions of the principal components of HIERA . HIERA w/o Contract uses only the original task specification and requires the model to generate both the candidate implementation and all supporting files that are fixed in the contract-augmented specification. HIERA w/o Planning removes the hierarchical planning agent and directly refines candidate implementations using a fixed optimization prompt that imposes no constraints on the implementation space. Both variants use Qwen3.6-Plus and follow the same candidate-generation budget, verification procedure, and evaluation protocol as the complete framework. 
+
+ Implementation and Evaluation Protocol 
+
+ Main comparison protocol. 
+
+ HIERA , KernelBench-Caesar, and CUDAForge each perform three refinement rounds with six candidates per round, yielding a maximum budget of B = 18 B=18 candidates per task. For each base LLM, we align the model version, sampling temperature of 0.3, candidate-generation budget, and evaluation settings while preserving the original candidate-selection and refinement mechanisms of each framework. Each candidate is compiled using the prescribed KernelBench task harness and verified against the original PyTorch reference implementation. Compilation or functional-verification failures are treated as invalid. Valid candidates are evaluated in FP32 using three warmup runs followed by 100 measurement runs, and the fastest valid implementation discovered within the full budget is used for comparison. 
+
+ Limited-budget evaluation. 
+
+ To evaluate optimization performance under limited search budgets, we report cumulative results at B ∈ { 1 , 6 , 12 , 18 } B\in\{1,6,12,18\} . For the iterative methods, B = 6 B=6 , 12 12 , and 18 18 correspond to the cumulative candidates generated after the first, second, and third rounds, respectively, while B = 1 B=1 uses the first generated candidate. At each budget, we report the best valid implementation discovered among the first B B candidates. All budget points are extracted from the same generation trajectories rather than from independently rerun experiments. 
+
+ Case-study protocol. 
+
+ We evaluate HIERA on a representative 2D box stencil from scientific computing. The stencil has radius R = 3 R=3 , corresponding to a 7 × 7 7\times 7 neighborhood with 49 stencil points. The input size is 10240 × 10240 10240\times 10240 , and the stencil computation is repeated 10,240 times. We report the amortized per-step latency. The search consists of five iterations with a population size of ten, yielding a total budget of 50 candidate evaluations. We use cuDNN
+ cudnnConvolutionForward as the dense reference: a single-channel
+ 7 × 7 7\times 7 zero-padded cross-correlation (padding 3 3 , stride 1 1 ,
+FP64, IMPLICIT_PRECOMP_GEMM ) implementing the same stencil. 
+
+ Hardware and software environment. 
+
+ Each optimization task is assigned to a single GPU. Table  1 summarizes the hardware and software environment. 
+
+ Table 1: Hardware and software environment. 
+
+ Component | 
+ Configuration | 
+
+ GPU | 
+ NVIDIA A100-PCIE-40GB | 
+
+ CPU | 
+ Intel Xeon Gold 6430 | 
+
+ Operating system | 
+ Ubuntu 20.04.6 LTS | 
+
+ NVIDIA driver | 
+ 565.57.01 | 
+
+ CUDA Toolkit | 
+ 12.8 | 
+
+ Python | 
+ 3.12.13 | 
+
+ PyTorch | 
+ 2.7.1+cu126 | 
+
+ cuDNN | 
+ 9.5.1 | 
+
+ Evaluation Metrics 
+
+ We adopt the standard KernelBench evaluation metrics. Let s i ​ ( B ) s_{i}(B) denote the speedup of the best valid implementation discovered for task i i within budget B B , relative to its PyTorch reference implementation. We report fast 0 \mathrm{fast}_{0} , the fraction of tasks with at least one functionally valid implementation; fast 1 \mathrm{fast}_{1} , the fraction whose best valid implementation outperforms the reference; and fast 2 \mathrm{fast}_{2} , the fraction whose best valid implementation achieves more than 2 × 2\times speedup. 
+
+ Scope and Limitations 
+
+ Our evaluation is subject to several scope constraints. All experiments are conducted on NVIDIA A100 GPUs. KernelBench is evaluated in FP32, whereas the stencil case study uses FP64; performance across other GPU architectures, multi-GPU settings, and precision formats remains to be investigated. Although latency measurements are repeated, candidate generation remains stochastic. Besides, considering the limited time budget, the stencil study only considers one operator and configuration and should therefore be viewed as evidence of feasibility rather than comprehensive validation across scientific computing workloads. 
+
+ Results 
+
+ RQ1: Main Results 
+
+ Performance under limited candidate-generation budgets. 
+
+ Figure  3 shows that HIERA achieves substantially stronger
+sample efficiency and optimization quality across search budgets. At B = 1 B=1 , it achieves 71.6 % 71.6\% fast 0 and 32.4 % 32.4\% fast 1 , outperforming KernelBench by 30.8 30.8 and 22.4 22.4 percentage points and CUDAForge by 52.4 52.4 and 13.6 13.6 points, respectively. This advantage persists at B = 18 B=18 : HIERA reaches 92.4 % 92.4\% fast 0 and 60.4 % 60.4\% fast 1 , exceeding KernelBench ( 85.2 % 85.2\% / 29.6 % 29.6\% ) and CUDAForge ( 85.6 % 85.6\% / 44.8 % 44.8\% ). For the more stringent fast 2 metric, HIERA also leads at small budgets ( 8.8 % 8.8\% at B = 1 B=1 and 11.6 % 11.6\% at B = 6 B=6 ). Overall, HIERA provides the best budget–quality trade-off for correctness and acceleration. 
+
+ Figure 3: Limited-budget performance on KernelBench. At each budget B B , we report the best valid implementation among the first B B generated candidates. All points are extracted from the same generation trajectories. 
+
+ Comparison with baselines and base LLMs. 
+
+ Table  2 compares HIERA with KernelBench and CUDAForge under three base LLMs, together with the training-based CUDA-L1 baseline. We report fast 0 \mathrm{fast}_{0} , fast 1 \mathrm{fast}_{1} , and fast 2 \mathrm{fast}_{2} following the KernelBench protocol. Higher values are better. 
+
+ Table 2: Comparison with baselines under different base LLMs. Results are percentages. Bold indicates the best result among methods using the same base LLM. † \dagger indicates that CUDA-L1 does not vary with the base LLM setting and is therefore reported once. 
+
+ Base LLM | 
+ Method | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ | 
+ | 
+ fast 0 \mathrm{fast}_{0} | 
+ fast 1 \mathrm{fast}_{1} | 
+ fast 2 \mathrm{fast}_{2} | 
+ fast 0 \mathrm{fast}_{0} | 
+ fast 1 \mathrm{fast}_{1} | 
+ fast 2 \mathrm{fast}_{2} | 
+ fast 0 \mathrm{fast}_{0} | 
+ fast 1 \mathrm{fast}_{1} | 
+ fast 2 \mathrm{fast}_{2} | 
+
+ DeepSeek-V3.2 | 
+ HIERA | 
+ 91 | 
+ 56 | 
+ 22 | 
+ 90 | 
+ 35 | 
+ 9 | 
+ 64 | 
+ 42 | 
+ 10 | 
+
+ KernelBench-Caesar | 
+ 77 | 
+ 17 | 
+ 3 | 
+ 80 | 
+ 34 | 
+ 5 | 
+ 46 | 
+ 12 | 
+ 2 | 
+
+ CUDAForge | 
+ 90 | 
+ 22 | 
+ 6 | 
+ 78 | 
+ 27 | 
+ 15 | 
+ 60 | 
+ 32 | 
+ 10 | 
+
+ Qwen3.6-Plus | 
+ HIERA | 
+ 97 | 
+ 68 | 
+ 18 | 
+ 99 | 
+ 62 | 
+ 20 | 
+ 70 | 
+ 42 | 
+ 10 | 
+
+ KernelBench-Caesar | 
+ 91 | 
+ 21 | 
+ 6 | 
+ 90 | 
+ 40 | 
+ 13 | 
+ 64 | 
+ 26 | 
+ 6 | 
+
+ CUDAForge | 
+ 90 | 
+ 47 | 
+ 18 | 
+ 88 | 
+ 45 | 
+ 28 | 
+ 72 | 
+ 40 | 
+ 8 | 
+
+ Gemini-3.6-Flash | 
+ HIERA | 
+ 95 | 
+ 63 | 
+ 20 | 
+ 96 | 
+ 50 | 
+ 14 | 
+ 68 | 
+ 40 | 
+ 12 | 
+
+ KernelBench-Caesar | 
+ 80 | 
+ 19 | 
+ 4 | 
+ 85 | 
+ 32 | 
+ 11 | 
+ 52 | 
+ 14 | 
+ 2 | 
+
+ CUDAForge | 
+ 92 | 
+ 45 | 
+ 16 | 
+ 91 | 
+ 40 | 
+ 20 | 
+ 70 | 
+ 34 | 
+ 8 | 
+
+ – | 
+ CUDA-L1 † | 
+ 74 | 
+ 19 | 
+ 10 | 
+ 81 | 
+ 36 | 
+ 13 | 
+ 72 | 
+ 50 | 
+ 6 | 
+
+ HIERA consistently delivers the strongest optimization quality across diverse base LLMs, achieving the best or tied-best result in 22 of 27 comparisons against the LLM-conditioned baselines. Its most pronounced advantage is in fast 1 \mathrm{fast}_{1} , where it ranks first among the inference-time methods across all workload levels and base models, showing that HIERA reliably converts correct generations into practical speedups rather than merely improving implementation validity. It also leads fast 0 \mathrm{fast}_{0} in seven of nine level–model settings, reaching 99% on Qwen3.6-Plus Level 2 and 96% on Gemini-3.6-Flash Level 2. Despite requiring no reinforcement-learning training, HIERA outperforms the training-based CUDA-L1 on all Level 1 and Level 2 metrics when averaged across the three base LLMs. 
+
+ RQ2: Design Effectiveness 
+
+ Cross-Granularity Search-Space Comparison 
+
+ Figure 4: Distribution of the best verified speedup achieved by three fixed implementation spaces and HIERA on 90 KernelBench tasks sampled from Levels 1–3. 
+
+ Figure  4 shows that implementation-space selection substantially affects both optimization quality and result stability. Pure CUDA offers the greatest optimization potential, reaching a maximum speedup of 9.32 × 9.32\times , but yields a mean of only 1.00 × 1.00\times , a median of 0.62 × 0.62\times , and the largest variance ( 1.79 1.79 ). Expanding the space to CUDA Libraries reduces the variance to 0.27 0.27 , while CUDA Libraries + PyTorch further improves the mean and median to 1.10 × 1.10\times and 1.01 × 1.01\times , respectively, with the lowest variance ( 0.26 0.26 ), although its observed maximum speedup is 2.98 × 2.98\times . By adaptively selecting the implementation space, HIERA achieves the highest mean ( 1.42 × 1.42\times ) and median ( 1.15 × 1.15\times ), while reducing variance by 23.4 % 23.4\% relative to Pure CUDA . These results show that HIERA combines the stability of broader implementation spaces with the optimization potential of custom CUDA. 
+
+ Ablation Study 
+
+ (a) Effect of removing the contract-augmented template layer. 
+
+ (b) Effect of removing Agent-based search-space planning. 
+
+ Figure 5: Ablation results across KernelBench Levels 1–3. Blue bars denote the complete HIERA framework. Orange bars denote the corresponding ablated variant. 
+
+ Effect of contract-augmented templates. 
+
+ Removing the contract-augmented specification consistently degrades both implementation validity and optimization performance, with the effect increasing with workload complexity. On Level 1, fast 0 / fast 1 / fast 2 \mathrm{fast}_{0}/\mathrm{fast}_{1}/\mathrm{fast}_{2} decrease from 97 / 68 / 18 % 97/68/18\% to 86 / 40 / 0 % 86/40/0\% . The degradation is substantially larger on Levels 2 and 3, where fast 0 \mathrm{fast}_{0} drops by 73 and 60 percentage points, respectively. These results show that explicit interfaces, parameter semantics, and fixed supporting artifacts are increasingly important for producing valid implementations on complex workloads. 
+
+ Effect of hierarchical search-space planning. 
+
+ Removing hierarchical planning has a smaller effect on validity but sharply reduces acceleration rates. On Level 2, fast 0 \mathrm{fast}_{0} decreases only from 99 % 99\% to 96 % 96\% , whereas fast 1 \mathrm{fast}_{1} and fast 2 \mathrm{fast}_{2} fall from 62 / 20 % 62/20\% to 6 / 6 % 6/6\% . Similar reductions occur on Levels 1 and 3, where fast 1 \mathrm{fast}_{1} drops by 52 and 38 percentage points. Thus, generic refinement can still produce valid implementations, but rarely identifies implementation spaces and optimization directions that yield practical speedups. 
+
+ In summary, contract augmentation primarily preserves feasibility, whereas hierarchical planning improves acceleration; their complementary effects enable reliable optimization across workload levels. 
+
+ RQ3: Case Study on Stencil Computation 
+
+ Figure 6: 
+Search progress compared with cuDNN on the 2D box stencil workload
+( R = 3 R=3 , 49 stencil points).
+
+ Figure  6 shows that the runtime decreases from 13.71 13.71  ms in the first iteration to 4.71 4.71  ms in the fifth iteration. The first four iterations remain slower than or close to the cuDNN reference of 7.23 7.23  ms; the fourth iteration reaches 7.39 7.39  ms. In the fifth iteration, the search discovers a candidate with a runtime of 4.71 4.71  ms, which is 34.8 % 34.8\% lower than the cuDNN runtime and corresponds to a 1.53 × 1.53\times speedup. Overall, the search reduces runtime by 65.6 % 65.6\% relative to the first-round candidate, demonstrating that the limited budget is sufficient to find an implementation that outperforms cuDNN. 
+
+ Conclusion 
+
+ We presented HIERA , a workload-aware framework that explicitly plans implementation spaces and optimization directions for GPU kernel optimization. By combining contract-augmented task specifications with feedback-driven refinement, HIERA balances implementation reliability and optimization flexibility under limited search budgets. Future work will extend the framework across GPU architectures, precision formats, and implementation backends, and explore self-improving planning from accumulated optimization trajectories. 
+
+ References 
+
+ Andrews and Witteveen (2025) 
+ M. Andrews and S. Witteveen 
+
+ GPU kernel scientist: an LLM-driven framework for iterative kernel optimization .
+
+ In Third Workshop on Efficient Systems for Foundation Models (ES-FoMo III), ICML ,
+
+ Cited by: Introduction .
+
+ Baronio et al. (2026) 
+ C. Baronio, P. Marsella, B. Pan, S. Guo, and S. Alberti 
+
+ Kevin: multi-turn RL for generating CUDA kernels .
+
+ In International Conference on Learning Representations ,
+
+ Cited by: Introduction ,
+ Reinforcement Learning for CUDA Optimization. .
+
+ Chen et al. (2018) 
+ T. Chen, T. Moreau, Z. Jiang, L. Zheng, E. Yan, H. Shen, M. Cowan, L. Wang, Y. Hu, L. Ceze, C. Guestrin, and A. Krishnamurthy 
+
+ TVM: an automated end-to-end optimizing compiler for deep learning .
+
+ In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18) ,
+
+ pp. 578–594 .
+
+ Cited by: Introduction ,
+ Introduction ,
+ Tensor Compilers and GPU DSLs. .
+
+ Chen et al. (2025) 
+ W. Chen, J. Zhu, Q. Fan, Y. Ma, and A. Zou 
+
+ CUDA-LLM: LLMs can write efficient CUDA kernels .
+
+ External Links: 2506.09092 
+
+ Cited by: Introduction .
+
+ Cheng et al. (2026) 
+ X. Cheng, Z. Zhang, Y. Zhou, J. Ji, J. Jiang, Z. Zhao, Z. Xiao, Z. Ye, Y. Huang, R. Lai, H. Jin, B. Hou, M. Wu, Y. Dong, A. Yip, S. Wang, W. Yang, X. Miao, T. Chen, and Z. Jia 
+
+ MPK: a compiler and runtime for mega-kernelizing tensor programs .
+
+ In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) ,
+
+ Cited by: Introduction .
+
+ Chetlur et al. (2014) 
+ S. Chetlur, C. Woolley, P. Vandermersch, J. Cohen, J. Tran, B. Catanzaro, and E. Shelhamer 
+
+ cuDNN: efficient primitives for deep learning .
+
+ External Links: 1410.0759 
+
+ Cited by: Introduction .
+
+ Feng et al. (2023) 
+ S. Feng, B. Hou, H. Jin, W. Lin, J. Shao, R. Lai, Z. Ye, L. Zheng, C. H. Yu, Y. Yu, and T. Chen 
+
+ TensorIR: an abstraction for automatic tensorized program optimization .
+
+ In Proceedings of the 28th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 ,
+
+ Cited by: Tensor Compilers and GPU DSLs. .
+
+ Holewinski et al. (2012) 
+ J. Holewinski, L. Pouchet, and P. Sadayappan 
+
+ High-performance code generation for stencil computations on GPU architectures .
+
+ In Proceedings of the 26th ACM International Conference on Supercomputing ,
+
+ Cited by: Introduction .
+
+ Li et al. (2026a) 
+ T. Li, R. Rathnasuriya, and W. Yang 
+
+ Correct but slow: an empirical study of the GPU kernel evaluation gap in modern domain-specific languages .
+
+ External Links: 2607.04454 
+
+ Cited by: Introduction .
+
+ Li et al. (2026b) 
+ X. Li, A. Wang, G. Wang, J. Li, and C. Shum 
+
+ CUDA-l1: improving cuda optimization via contrastive reinforcement learning .
+
+ External Links: 2507.14111 ,
+ Link 
+
+ Cited by: Introduction ,
+ Reinforcement Learning for CUDA Optimization. ,
+ Baselines. .
+
+ NVIDIA Corporation (2026) 
+ NVIDIA Corporation 
+
+ cuBLAS library documentation .
+
+ Note: https://docs.nvidia.com/cuda/cublas/ Accessed: 2026-07-29 
+
+ Cited by: Introduction .
+
+ Ouyang et al. (2025) 
+ A. Ouyang, S. Guo, S. Arora, A. L. Zhang, W. Hu, C. Re, and A. Mirhoseini 
+
+ KernelBench: can LLMs write efficient GPU kernels? .
+
+ In Proceedings of the 42nd International Conference on Machine Learning ,
+
+ Cited by: Introduction ,
+ Introduction ,
+ GPU Kernel Generation Benchmarks. ,
+ Benchmark and Task Preparation ,
+ Baselines. .
+
+ Paszke et al. (2019) 
+ A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, A. Desmaison, A. Kopf, E. Yang, Z. DeVito, M. Raison, A. Tejani, S. Chilamkurthy, B. Steiner, L. Fang, J. Bai, and S. Chintala 
+
+ PyTorch: an imperative style, high-performance deep learning library .
+
+ In Advances in Neural Information Processing Systems ,
+
+ Vol. 32 .
+
+ Cited by: Introduction .
+
+ Saba et al. (2026) 
+ T. Saba, A. Ouyang, X. Si, and F. Long 
+
+ CuTeGen: an LLM-based agentic framework for generation and optimization of high-performance GPU kernels using CuTe .
+
+ External Links: 2604.01489 
+
+ Cited by: Introduction .
+
+ Sarkar (2026) 
+ D. Sarkar 
+
+ The correctness illusion in LLM-generated GPU kernels .
+
+ External Links: 2606.20128 
+
+ Cited by: Introduction .
+
+ Scaling Intelligence Lab (2026) 
+ Scaling Intelligence Lab 
+
+ KernelBench: benchmark and toolkit for llm-generated gpu kernels .
+
+ Note: https://github.com/ScalingIntelligence/KernelBench Accessed: 2026-07-28 
+
+ Cited by: GPU Kernel Generation Benchmarks. ,
+ Baselines. .
+
+ Shi et al. (2023) 
+ Y. Shi, Z. Yang, J. Xue, L. Ma, Y. Xia, Z. Miao, Y. Guo, F. Yang, and L. Zhou 
+
+ Welder: scheduling deep learning memory access via tile-graph .
+
+ In 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23) ,
+
+ Cited by: Introduction ,
+ Introduction ,
+ Cross-Granularity Search-Space Planning ,
+ Domain-Guided Optimization-Direction Pruning .
+
+ Spector et al. (2024) 
+ B. F. Spector, S. Arora, A. Singhal, D. Y. Fu, and C. Re 
+
+ ThunderKittens: simple, fast, and adorable AI kernels .
+
+ External Links: 2410.20399 
+
+ Cited by: Domain-Guided Optimization-Direction Pruning .
+
+ Tillet et al. (2019) 
+ P. Tillet, H. Kung, and D. D. Cox 
+
+ Triton: an intermediate language and compiler for tiled neural network computations .
+
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages ,
+
+ pp. 10–19 .
+
+ External Links: Document 
+
+ Cited by: Introduction ,
+ Tensor Compilers and GPU DSLs. .
+
+ Wang et al. (2025a) 
+ J. Wang, V. Joshi, S. Majumder, Xu Chao, B. Ding, Z. Liu, P. P. Brahma, D. Li, Z. Liu, and E. Barsoum 
+
+ GEAK: introducing triton kernel AI agent & evaluation benchmarks .
+
+ External Links: 2507.23194 
+
+ Cited by: Introduction .
+
+ Wang et al. (2025b) 
+ L. Wang, Y. Cheng, Y. Shi, Z. Tang, Z. Mo, W. Xie, L. Ma, Y. Xia, J. Xue, F. Yang, and Z. Yang 
+
+ TileLang: a composable tiled programming model for ai systems .
+
+ External Links: 2504.17577 ,
+ Link 
+
+ Cited by: Domain-Guided Optimization-Direction Pruning .
+
+ Wei et al. (2025) 
+ A. Wei, T. Sun, Y. Seenichamy, H. Song, A. Ouyang, A. Mirhoseini, K. Wang, and A. Aiken 
+
+ Astra: a multi-agent system for GPU kernel performance optimization .
+
+ External Links: 2509.07506 
+
+ Cited by: Introduction .
+
+ Weng et al. (2021) 
+ J. Weng, A. Jain, J. Wang, L. Wang, Y. Wang, and T. Nowatzki 
+
+ UNIT: unifying tensorized instruction compilation .
+
+ In 2021 IEEE/ACM International Symposium on Code Generation and Optimization (CGO) ,
+
+ Cited by: Domain-Guided Optimization-Direction Pruning .
+
+ Wu et al. (2025) 
+ M. Wu, X. Cheng, S. Liu, C. Shi, J. Ji, M. K. Ao, P. Velliengiri, X. Miao, O. Padon, and Z. Jia 
+
+ Mirage: a multi-level superoptimizer for tensor programs .
+
+ In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) ,
+
+ Cited by: Cross-Granularity Search-Space Planning .
+
+ Zhang et al. (2026) 
+ Y. Zhang, P. Yu, J. Wang, M. X. Fan, J. Reed, A. Mirhoseini, and W. Su 
+
+ KernelBench-Verified: do LLM-generated kernels actually beat PyTorch? .
+
+ External Links: 2607.16241 
+
+ Cited by: Introduction .
+
+ Zhang et al. (2025) 
+ Z. Zhang, R. Wang, S. Li, Y. Luo, M. Hong, and C. Ding 
+
+ CudaForge: an agent framework with hardware feedback for CUDA kernel optimization .
+
+ External Links: 2511.01884 
+
+ Cited by: Introduction ,
+ Introduction ,
+ Agentic, Feedback-Driven CUDA Optimization. ,
+ Baselines. .
+
+ Zheng et al. (2020) 
+ L. Zheng, C. Jia, M. Sun, Z. Wu, C. H. Yu, A. Haj-Ali, Y. Wang, J. Yang, D. Zhuo, K. Sen, J. E. Gonzalez, and I. Stoica 
+
+ Ansor: generating high-performance tensor programs for deep learning .
+
+ In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20) ,
+
+ Cited by: Introduction ,
+ Introduction ,
+ Tensor Compilers and GPU DSLs. .
+
+ Zhuang et al. (2024) 
+ D. Zhuang, Z. Zheng, H. Xia, X. Qiu, J. Bai, W. Lin, and S. L. Song 
+
+ MonoNN: enabling a new monolithic optimization space for neural network inference tasks on modern GPU-centric architectures .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ Cited by: Introduction ,
+ Introduction ,
+ Cross-Granularity Search-Space Planning .

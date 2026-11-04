@@ -1,0 +1,951 @@
+KernelSkill: A Multi-Agent Framework for GPU Kernel Optimization 
+
+ Qitong Sun
+
+ Affiliation:  School of Computer Science and Engineering, Beihang University, China
+
+ Affiliation:  Zhejiang Lab, China
+
+ Jun Han
+
+ Affiliation:  School of Computer Science and Engineering, Beihang University, China
+
+ Tianlin Li
+
+ Affiliation:  School of Computer Science and Engineering, Beihang University, China
+
+ Affiliation:  Zhejiang Lab, China
+
+ Correspondence to: tianlin001@buaa.edu.cn 
+
+ Zhe Tang
+
+ Affiliation:  Zhejiang Lab, China
+
+ Sheng Chen
+
+ Affiliation:  Zhejiang Lab, China
+
+ Fei Yang
+
+ Affiliation:  Zhejiang Lab, China
+
+ Aishan Liu
+
+ Affiliation:  School of Computer Science and Engineering, Beihang University, China
+
+ Xianglong Liu
+
+ Affiliation:  School of Computer Science and Engineering, Beihang University, China
+
+ Yang Liu
+
+ Affiliation:  Zhejiang Lab, China
+
+ Affiliation:  Nanyang Technological University, Singapore
+
+ Abstract 
+
+ Improving GPU kernel efficiency is crucial for advancing AI systems. Recent work has explored leveraging large language models (LLMs) for GPU kernel generation and optimization.
+However, existing LLM-based kernel optimization pipelines typically rely on opaque, implicitly learned heuristics within the LLMs to determine optimization strategies.
+This leads to inefficient trial-and-error and weakly interpretable optimizations.
+Our key insight is to replace implicit heuristics with expert optimization skills that are knowledge-driven and aware of task trajectories.
+Specifically, we present KernelSkill, a multi-agent framework with a dual-level memory architecture.
+KernelSkill operates by coordinating agents with long-term memory of reusable expert skills and short-term memory to prevent repetitive backtracking.
+On KernelBench Levels 1–3, KernelSkill achieves a 100% success rate and average speedups of 5.44×, 2.82×, and 1.92× over Torch Eager on Levels 1, 2, and 3, respectively, outperforming prior baselines. Code is available at https://github.com/0satan0/KernelMem/ . 
+
+ Keywords:  Machine Learning
+
+ 1 Introduction 
+
+ Efficient GPU kernels sit at the core of modern AI systems because they largely determine the throughput of fundamental operators such as GEMM, convolution, and data movement. This importance is amplified by today’s software stacks: mainstream frameworks and compilation toolchains are tightly coupled with GPU backends ( Paszke et al., 2019 ; Tay et al., 2022 ; Pandey et al., 2022 ; Ansel et al., 2024 ) , so using these frameworks effectively means inheriting—and depending on—the efficiency of the underlying kernels. Achieving high performance, however, remains highly expert-driven and architecture-aware, requiring careful coordination of memory access patterns, parallel decomposition, synchronization, and numerics-sensitive instruction choices. As a result, expert-driven kernel optimization typically involves long, profiling-guided iteration cycles, bottleneck diagnosis, targeted edits, and repeated validation, making development costly and slow. 
+
+ Against this backdrop, recent advances in large language models (LLMs) have opened a promising avenue for automated GPU kernel generation and optimization.
+Existing LLM-based approaches typically follow two paradigms: (i) training-based adaptation to encode kernel-related priors ( Li et al., 2025b ; Baronio et al., 2025 ) , and (ii) inference-time, closed-loop refinement where the model iteratively revises kernels using compilation/correctness checks and profiling feedback ( Zhang et al., 2025 ; Wei et al., 2025 ; Lei et al., 2025 ; Dong et al., 2025a ) . However, important gaps remain before such systems meet the needs of real kernel development. First, training-based adaptation is not fully aligned with how kernel engineers iterate in practice, which is driven by a profiling-to-edit feedback loop as bottlenecks shift.
+Additionally, training requires substantial data curation and training compute, resulting in high cost and long training time.
+Second, multi-round refinement often suffers from imprecise optimization-method selection: the system may pick mismatched strategies for the kernel’s true bottleneck or fail to update method choices as profiling signals evolve, leading to inefficient exploration and wasted iterations. Moreover, optimization decisions are frequently weakly interpretable, making it difficult to justify why a strategy was selected and to reuse that experience across kernels. 
+
+ Our key insight is to replace implicit, model-internal heuristics with kernel optimization skills that are both knowledge-driven and trajectory-aware. These skills encode reusable expert optimization expertise accumulated across kernels (e.g., recurring bottleneck–method correspondences).
+Based on this, we propose KernelSkill , a memory-augmented multi-agent framework that (i) externalizes expert optimization know-how to support traceable, audit-friendly decisions, which selects targeted kernel optimization skills tailored to the context of each task, and (ii) maintains explicit optimization state across rounds to stabilize refinement under profiling feedback. It couples structured long-term optimization knowledge with task-specific short-term trajectory memory. This design enables interpretable method selection and robust, feedback-driven iterative improvement across heterogeneous kernels. Our main contributions are as follows: 
+
+ • 
+
+ KernelSkill: a memory-augmented multi-agent optimizer. We present a closed-loop agent architecture that coordinates generation, verification, profiling, planning, and repair for iterative kernel optimization. 
+
+ • 
+
+ Two-level memory for stability and interpretability. We distill a substantial corpus of expert-level GPU optimization skills into a structured, retrievable long-term knowledge memory to support reusable and explainable method selection, and complement it with a short-term trajectory memory that tracks per-task optimization and repair history to stabilize multi-round refinement. 
+
+ • 
+
+ Strong empirical validation on KernelBench. Through extensive experiments on KernelBench Levels 1–3, we demonstrate the effectiveness and robustness of KernelSkill; with ChatGPT-5.1, it achieves a 100% success rate and average speedups of 5.44 × \times , 2.82 × \times , and 1.92 × \times over Torch Eager. 
+
+ 2 Related Works 
+
+ 2.1 Compilers and Autotuning 
+
+ To reduce the cost of expert kernel tuning, prior work has pursued automated GPU kernel optimization via compilers/DSLs and search-based autotuning ( Tillet et al., 2019 ; Chen et al., 2018b ) . In practice, two paradigms dominate: (i) expert-maintained vendor libraries (e.g., cuDNN ( Chetlur et al., 2014 ) ) and (ii) compiler/DSL ecosystems that expose transformations and scheduling primitives (e.g., TVM ( Chen et al., 2018a ) , Triton ( Tillet et al., 2019 ) , ThunderKittens ( Spector et al., 2024 ) ). While effective, both require substantial engineering effort and continual upkeep as hardware and workloads evolve. 
+
+ 2.2 Training-Based LLM Methods 
+
+ Recent progress in large language models (LLMs) has made them a viable tool for GPU kernel synthesis and optimization, leveraging their strong ability in code generation and transformation ( Dong et al., 2025b ; Jiang et al., 2026 ) . Existing LLM-based approaches broadly fall into two lines. The first line focuses on training or adapting specialized models, often via reinforcement learning to improve kernels through iterative optimization signals, exemplified by CUDA-L1 and Kevin ( Li et al., 2025b ; Baronio et al., 2025 ) . MTMC further learns hierarchical policy guidance that can be executed step-by-step by general-purpose LLMs ( Zhu et al., 2025 ) . Related efforts learn optimization behaviors across the stack, from Triton-level synthesis to low-level scheduling ( Li et al., 2025a ; Woo et al., 2025 ; He and Yoneki, 2025 ) . While promising, training-centric pipelines are costly and can struggle to generalize in an enormous search space ( Zhai et al., 2024 ) ; moreover, they are typically driven by offline supervision or learned priors, making it harder to incorporate per-kernel runtime feedback (e.g., profiling shifts) to close the profiling–diagnosis–edit loop for targeted online strategy revision. 
+
+ 2.3 Agentic Optimization 
+
+ A second line of studies inference-time, closed-loop optimization, where LLMs iteratively refine kernels through compilation checks, correctness tests, and, when available, profiling feedback.
+This line spans kernel-level multi-agent refinement ( Wei et al., 2025 ; Lei et al., 2025 ; Zhang et al., 2025 ; Dong et al., 2025a ) , DSL-oriented synthesis and tuning ( Wang et al., 2025 ) , evolutionary improvement under timing-only feedback ( Andrews and Witteveen, 2025 ) , and end-to-end PyTorch inference optimization ( Nagaitsev et al., 2025 ) .
+At the kernel level, several systems follow a shared profiling-grounded refinement paradigm: they use profiling signals (e.g., GPU specifications and NCU metrics) to diagnose bottlenecks and then trigger targeted edits in a multi-round loop ( Zhang et al., 2025 ; Wei et al., 2025 ; Lei et al., 2025 ) .
+CudaForge instantiates this loop with a lightweight Coder–Judge workflow ( Zhang et al., 2025 ) , while Astra generalizes it into a multi-agent pipeline with specialized roles (e.g., generation, testing, profiling, and planning) ( Wei et al., 2025 ) ; PRAGMA further strengthens the bottleneck-to-action mapping by explicitly associating profiling evidence with concrete optimization steps ( Lei et al., 2025 ) .
+STARK complements closed-loop refinement with grounded instruction, dynamic context management, and strategic search for more systematic exploration ( Dong et al., 2025a ) .
+Despite strong empirical gains, existing closed-loop optimizers often provide limited support for stabilizing refinement across rounds and for making method choices traceable, and they typically lack mechanisms to persist optimization state and reuse experience across kernels.
+For example, STARK introduces within-task memory to reduce repeated attempts ( Dong et al., 2025a ) ; in contrast, KernelSkill separates cross-task reusable knowledge from per-task trajectory state, enabling more traceable method selection and more stable iterative refinement under profiling feedback. 
+
+ 3 Motivation 
+
+ Figure 1 : 
+Overview of KernelSkill.
+
+ As reviewed in Section   2 , both training-based and agentic LLM optimizers often leave optimization-method selection to implicit, model-internal heuristics rather than explicit, reusable expertise. In real kernel development, however, profiling signals can be noisy and high-dimensional, bottlenecks may shift across rounds, and many optimization actions have strong preconditions that depend jointly on runtime evidence and code structure. These factors make method selection particularly error-prone: without an explicit mechanism to encode reusable optimization expertise and to track per-task refinement history, an optimizer can easily spend its limited budget on low-yield directions and produce decisions that are difficult to justify or reuse. We next illustrate this failure mode with a concrete KernelBench example. 
+
+ Motivating example: imprecise method selection. 
+
+ Consider the KernelBench task in Appendix  D , which applies a large linear projection ( 1024 × 8192 1024\times 8192 by 8192 × 8192 8192\times 8192 ) followed by lightweight elementwise operators. Without explicit optimization knowledge and state tracking, the optimizer first pursued operator fusion and generated a kernel that fuses Linear (GEMM), scaling, residual add, and clamping into a single CUDA kernel, while leaving logsumexp and mish unfused. However, this kernel implements GEMM as a naive global-memory dot-product loop without shared-memory tiling, vectorized loads, or tensor-core utilization, so the dominant GEMM bottleneck remains under-optimized. As a result, the achieved speedup is only 0.032 × \times , and subsequent refinements keep allocating iterations to further fusion attempts rather than addressing the primary GEMM efficiency issue. This example highlights that the key challenge is not merely “more refinement rounds,” but accurate and traceable optimization-method selection: the optimizer must identify which bottleneck matters most, choose high-leverage methods accordingly, and preserve the refinement state to avoid repeatedly spending the budget on low-yield directions. 
+
+ Design principles and KernelSkill. 
+
+ These observations motivate two principles:
+(i) externalize expert optimization knowledge into a retrievable and auditable form that grounds method selection in profiling evidence and makes bottleneck-to-action decisions traceable, empowering the system with the ability to apply kernel optimization skills across tasks; (ii) maintain explicit per-task optimization state to stabilize multi-round refinement and support multi-step coupled improvements.
+KernelSkill instantiates these principles via a two-level memory design within a multi-agent closed loop. 
+
+ A structured long-term knowledge memory enables evidence-grounded and auditable method selection, while a short-term trajectory memory preserves per-task optimization state to reduce oscillations and support multi-step coupled edits.
+Together, the two memories improve both decision quality and refinement stability, allowing KernelSkill to achieve larger speedups with fewer refinement rounds under profiling feedback. 
+
+ 4 KernelSkill 
+
+ We now present KernelSkill, a memory-augmented multi-agent framework for reliable GPU kernel optimization under profiling feedback. We first introduce KernelSkill’s multi-agent refinement pipeline and the responsibilities of each agent.
+We then detail the two-level memory mechanism that is integrated into this pipeline: the long-term memory integrates a library of targeted kernel-optimization skills distilled from prior GPU optimization literature ( Hijma et al., 2023 ) and accumulated kernel engineering experience, thereby grounding kernel optimization in expert knowledge and guiding optimization-method selection; meanwhile, the short-term memory records per-task trajectories to condition planning and repair, including what is stored, how retrieval is performed, and how memory is updated across rounds. 
+
+ 4.1 Multi-Agent Optimization 
+
+ 4.1.1 Framework Overview 
+
+ An overview of KernelSkill is shown in Figure   1 . Algorithm   1 in Appendix  A summarizes the execution loop of KernelSkill. 
+
+ KernelSkill consists of key components, including the Generator, Reviewer, Feature Extractor, Long-term Memory (expert optimization knowledge base), Retrieval (method retrieval over long-term memory), Planner, Optimizer, Short-term Memory (per-task optimization/repair trajectories), Diagnoser, and Repairer. 
+
+ Starting from a PyTorch reference implementation, KernelSkill first uses the Generator to produce a small set of seed kernels, which are then evaluated by the Reviewer; the best-performing seed is selected as the initial solution. KernelSkill then iterates a closed-loop refinement process.
+At each round, the Reviewer produces three types of feedback: compilation, correctness, and (if applicable) profiling signals.
+Here, compilation means the generated kernel can be successfully built/compiled, and correctness means the kernel’s output matches the PyTorch reference under the same inputs within the benchmark’s validation criteria. 
+
+ At each round, KernelSkill follows a two-branch control flow. If compilation or correctness fails, the Diagnoser uses the failure signals and short-term repair memory to produce a repair plan, which the Repairer applies to generate a revised kernel. Otherwise, KernelSkill enters the optimization branch: the Feature Extractor derives static code features, Retrieval queries the long-term memory with code features and profiling feedback to obtain candidate methods, and the Planner uses these methods together with short-term optimization memory to produce an optimization plan executed by the Optimizer. 
+
+ The loop runs for at most N N rounds, and returns the best-performing kernel. We then introduce the key components of KernelSkill in detail. 
+
+ 4.1.2 Generator 
+
+ The Generator agent translates a given PyTorch reference program into an equivalent implementation augmented with custom CUDA kernels. At this stage, its goal is correctness, including successful compilation and output equivalence to the PyTorch reference. To provide diverse starting points for later refinement, the agent attempts to materialize as many operator-level kernels as possible, covering most compute steps in the original program and yielding a broad set of seed kernels.
+Notably, the Generator agent does not optimize for speed; performance improvements are deferred to the subsequent profiling-driven refinement loop. 
+
+ 4.1.3 Feature Extractor 
+
+ The Feature Extractor derives a set of static code features from the kernel source, i.e., signals obtained purely by source inspection without executing the kernel or collecting runtime profiles.
+We introduce static features because optimization-method selection is not solely determined by profiling evidence: many strategies depend on structural properties of the code (e.g., memory-access patterns and precision/intrinsic usage), which are either weakly reflected or ambiguous in profiling metrics. For instance, an optimizer may reorder loops/accumulation to increase data reuse and reduce redundant global loads, or switch to TensorCore-/intrinsic-friendly math paths when the code structure and precision constraints allow.
+Therefore, static features complement profiling feedback by capturing what the kernel is (and what edits are feasible), while profiling indicates where it is slow. 
+
+ These features serve as retrieval keys for selecting candidate optimization methods from the long-term memory.
+We currently define 18 feature types that characterize optimization opportunities at a fine granularity; this set is not exhaustive and can be expanded as we observe new kernel patterns and optimization needs. 
+
+ Feature extraction follows a hybrid design with two mechanisms: ❶ rule-based pattern matching over the source code, and ❷ LLM-based inference for features that are difficult to capture reliably with syntax patterns alone.
+Rule-based extraction is used for features with stable lexical/syntactic signatures (e.g., explicit API/intrinsic usage, fixed idioms, or unambiguous code patterns), providing deterministic outputs and strong controllability.
+LLM-based extraction is used for features whose surface forms vary substantially across implementations (e.g., semantically equivalent but syntactically diverse indexing logic, tiling schemes expressed in different styles, or implicit assumptions about layout and reuse), where rigid patterns would be brittle and lead to low recall.
+In the LLM mode, the model is prompted with the feature definition, the allowed value range, and the raw kernel code, and then outputs the corresponding feature value.
+This division improves robustness across diverse kernel styles while retaining stability for well-structured patterns, enabling more reliable method retrieval and planning. 
+
+ 4.1.4 Reviewer 
+
+ KernelSkill relies on a Reviewer module to produce the execution feedback that drives both repair and profiling-guided optimization; the Reviewer consists of a Compiler, a Verifier, and a Profiler.
+The Compiler builds the generated kernel and returns compilation status together with warnings and error messages.
+The Verifier checks functional correctness by comparing kernel outputs against the PyTorch reference under a numerical tolerance.
+The Profiler collects runtime performance signals via profiling tools (e.g., nsys and ncu ), including execution time and resource usage (e.g., register usage and shared-memory footprint) to characterize performance bottlenecks. These signals are consumed by downstream agents to decide the next refinement action. 
+
+ 4.1.5 Diagnoser 
+
+ The Diagnoser agent is triggered when compilation fails or the generated kernel violates output consistency. Given the diagnostic messages from the Compiler and the Verifier, it infers likely root causes and proposes candidate fixes. Kernel repair is typically multi-step: fixing one error often exposes new ones or reintroduces past regressions. Accordingly, KernelSkill treats repair as an iterative process that progressively searches for a correct variant under compiler and verifier feedback. A recurring failure mode in this process is cyclic repair. Because each repair step is conditioned on the latest feedback, the agent may alternate between a small set of faulty variants (e.g., fixing one error while reintroducing another), leading to oscillation rather than convergence.
+To mitigate such patterns, we maintain a short-term repair memory that records recent repair attempts and their outcomes, and conditions the Diagnoser on this history to discourage repeated revisits of known-failing edits.
+We detail this short-term memory mechanism in Section   4.2.2 . 
+
+ 4.1.6 Planner 
+
+ Once a kernel passes compilation and correctness verification, KernelSkill uses its static code features and profiling feedback to retrieve a small set of candidate optimization methods from the long-term memory. The Planner receives the retrieved methods together with their rationale and implementation patterns, and then selects a method and produces a concrete, stepwise optimization plan for the current base kernel.
+To stabilize multi-round refinement, the Planner maintains a task-specific short-term memory that records previously attempted methods and their observed outcomes. This memory discourages repeating unproductive strategies, helps prioritize more promising directions, and supports coordinated application of coupled optimizations while keeping the refinement process method-by-method. 
+
+ 4.1.7 Optimizer and Repairer 
+
+ The Optimizer and the Repairer execute the plans produced by upstream agents. Given the current kernel, they translate the selected optimization or repair steps into concrete code edits, aiming to faithfully implement the prescribed strategy while preserving correctness. They also enforce environment-specific constraints (e.g., kernel signatures, code structure, and formatting) to ensure that the resulting kernels are directly compilable and executable in our evaluation pipeline. 
+
+ 4.2 Memory Bank 
+
+ Figure 2 : 
+The short-term memory for the current repair round.
+
+ Figure 3 : 
+The short-term memory for the current optimization round.
+
+ We find that a multi-agent optimizer without explicit memory—i.e., relying only on the current kernel and raw runtime feedback—exhibits systematic failure modes that undermine both stability and traceability. First, optimization method selection becomes biased: when profiling outputs are verbose, the model may over-attend to noisy or tool-suggested signals (e.g., heuristic hints in NCU) and miss more suitable expert strategies. Second, the refinement process tends to be myopic, focusing on locally simple edits and overlooking coupled transformations such as fusion or coordinated memory-access restructuring. Third, without a historical state, multi-round refinement can oscillate—reverting and reapplying ineffective changes—or fragment coupled strategies into isolated steps that lose effectiveness.
+These issues motivate an explicit memory design that ❶ externalizes reusable expert knowledge for traceable method selection and ❷ preserves task-specific trajectory state to stabilize refinement and achieve larger speedups with fewer rounds under profiling feedback. 
+
+ 4.2.1 Long-term Memory 
+
+ Expert knowledge sources. 
+
+ The long-term memory is built from expert kernel-optimization knowledge distilled by us. Concretely, we start from a large-scale GPU optimization survey ( Hijma et al., 2023 ) and translate its taxonomy into operational decision knowledge by following a three-step curation procedure.
+(1) Scenario abstraction: we group optimization techniques into recurring, task-agnostic scenarios (e.g., memory-bound access patterns, underutilized parallelism), and for each scenario we identify the observable decision factors that practitioners use in bottleneck identification.
+(2) Evidence formalization: we specify how each decision factor is measured from our available signals, i.e., normalized profiling metrics (via field_mapping ), runtime features, and static code features, and we define deterministic composite indicators ( derived_fields ) so that the same concept can be evaluated consistently across kernels and tool versions.
+(3) Rule materialization: we encode scenario-to-method criteria into an auditable deterministic decision policy (predicates, priority rules, and global veto rules) and a decision table that maps matched evidence patterns to a candidate method set ( allowed_methods ); the companion llm_assist store provides method-level rationales and implementation cues. 
+
+ This design makes the knowledge reusable because it is expressed as task-independent scenarios and standardized evidence predicates that can be instantiated for different kernels using the same feature/profiling interface.
+It is auditable because method selection proceeds through deterministic gating: for any recommendation, we can record which normalized fields and predicates were satisfied, which rule/case in the decision table was matched, and which global constraints (if any) vetoed alternatives.
+As a result, KernelSkill performs traceable method selection—the selected method set is justified by explicit evidence-to-rule matches and accompanied by method-specific rationales—rather than ad-hoc trial-and-error driven by implicit prompt preferences. 
+
+ Concretely, long-term memory consists of two complementary parts:
+ Deterministic Decision Policy , which performs rule-based gating, prioritization, and method candidate selection from profiling/code evidence; and
+ Method Knowledge , which provides method-specific rationales and implementation cues to make the selected actions interpretable and easy to execute.
+A full schema of the long-term memory fields is provided in Appendix  B . 
+
+ Given profiling feedback and code features, KernelSkill first applies the Deterministic Decision Policy to filter and prioritize feasible method candidates, and then consults Method Knowledge to provide rationales and concrete implementation cues for planning and execution. 
+
+ Optimization-Method Retrieval. 
+
+ KernelSkill implements a structured retrieval pipeline to select appropriate kernel optimization methods from long-term memory. The workflow takes as input the kernel’s profiling signals and structural characteristics, including static code features, NCU metrics, and runtime features. To ensure robustness and consistency across kernels and profiling environments, the retrieval procedure proceeds through a sequence of deterministic normalization, feature derivation, and rule-based matching steps, followed by method interpretation for planning. The complete long-term memory decision workflow is provided in Appendix  C . 
+
+ Overall, this design separates deterministic method screening (Deterministic Decision Policy) from method explanation and implementation cues (Method Knowledge). Such separation improves the rationality, stability, and interpretability of optimization-method selection, while still leveraging LLM flexibility for plan synthesis. 
+
+ 4.2.2 Short-term Memory 
+
+ Table 1 : Success and Speedup Results. Success is the percentage of tasks for which a method generates a kernel that compiles and passes correctness verification. Speedup is the average runtime speedup over Torch Eager. KernelSkill achieves the best overall performance, matching the highest success rate while delivering the largest speedup across all levels among all compared baselines. 
+
+ Method | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ | 
+ ↑ \uparrow Success ↑ \uparrow | 
+ ↑ \uparrow Speedup ↑ \uparrow | 
+ ↑ \uparrow Success ↑ \uparrow | 
+ ↑ \uparrow Speedup ↑ \uparrow | 
+ ↑ \uparrow Success ↑ \uparrow | 
+ ↑ \uparrow Speedup ↑ \uparrow | 
+
+ Kevin-32B | 
+ 0.83 | 
+ 1.18 | 
+ 0.92 | 
+ 1.74 | 
+ 0.46 | 
+ 0.32 | 
+
+ Astra | 
+ 0.95 | 
+ 1.48 | 
+ 0.98 | 
+ 0.99 | 
+ 0.93 | 
+ 0.90 | 
+
+ PRAGMA | 
+ 0.95 | 
+ 1.49 | 
+ 0.98 | 
+ 1.02 | 
+ 0.94 | 
+ 0.92 | 
+
+ CudaForge | 
+ 0.96 | 
+ 1.45 | 
+ 1.00 | 
+ 2.10 | 
+ 0.96 | 
+ 1.28 | 
+
+ QiMeng | 
+ 1.00 | 
+ 2.20 | 
+ 0.99 | 
+ 1.22 | 
+ 0.70 | 
+ 0.73 | 
+
+ STARK | 
+ 1.00 | 
+ 3.03 | 
+ 1.00 | 
+ 2.69 | 
+ 1.00 | 
+ 1.58 | 
+
+ KernelSkill | 
+ 1.00 | 
+ 5.44 | 
+ 1.00 | 
+ 2.82 | 
+ 1.00 | 
+ 1.92 | 
+
+ Short-term memory maintains an explicit per-task refinement trace, which enables consistent diagnosis and plan revision across rounds. It coordinates multi-agent iteration by conditioning the Diagnoser/Planner on past plans, edits, and outcomes. After each round, the short-term memory records: (i) the Planner’s optimization plan and the Diagnoser’s repair plan, (ii) the Compiler/Verifier’s outcomes (compilation status and correctness check against the PyTorch reference), and (iii) the Profiler’s performance feedback (e.g., latency and selected NCU/NSYS signals), together with the resulting kernel version. This trace is injected into the prompts of the Planner and the Diagnoser in subsequent rounds, so they can condition the next plan on what has already been tried and what feedback it produced. 
+
+ Kernel optimization is a multi-round process: improvements typically emerge through successive, evidence-guided edits rather than a single modification. Without an explicit per-task trace, the Planner and Diagnoser may lose track of prior decisions and outcomes, leading to repeated ineffective attempts or reverting progress during later fixes. Short-term memory prevents this by maintaining a clear plan → \rightarrow result history, enabling more consistent plan revision across rounds and steadier refinement under profiling feedback. 
+
+ Repair Stage. 
+
+ During the repair stage, the Diagnoser utilizes short-term memory to generate repair plans. At this stage, the short-term memory may consist of multiple chained memory segments. Each chain begins with a kernel that first fails compilation or correctness verification. As illustrated in Figure   2 , the chain starts from kernel #2, and in each subsequent iteration, the most recently generated kernel is used as the base kernel for the next repair step. 
+
+ Importantly, although each repair iteration operates on the latest kernel version, the repair plan itself is generated based on the entire history of repair attempts and their corresponding outcomes within the chain. For example, kernel #5 is generated by the Repairer based on a repair plan produced by the Diagnoser, which in turn is derived from the accumulated feedback spanning from kernel #2 to kernel #4. Thus, the repair process is guided jointly by historical repair knowledge and the most recent execution feedback, enabling more informed and stable error correction. 
+
+ Optimization Stage. 
+
+ The use of short-term memory in the optimization stage differs from that in the repair stage, particularly in how the base kernel is selected. During repair, the base kernel is always the most recent kernel in the chain. In contrast, during optimization, the base kernel must first pass compilation and correctness verification. 
+
+ Whether the base kernel should be updated is determined by two hyperparameters: a relative speedup threshold and an absolute speedup threshold. The relative speedup measures the percentage improvement of the newly generated kernel over the current base kernel, while the absolute speedup measures the absolute difference in execution performance. If either threshold is exceeded, the base kernel is updated accordingly. 
+
+ As illustrated in Figure   3 , all optimization methods previously applied to the same base kernel, along with their execution results, are stored in the short-term memory and incorporated into the context for generating the next optimization plan. Based on this plan, the Optimizer produces a new kernel by iterating on the current base kernel, which is then evaluated in the next optimization round. 
+
+ 5 Experiments 
+
+ Table 2 : Ablation Results. We ablate memory components: Long-term memory stores retrievable kernel optimization knowledge for reusable and explainable method selection, while Short-term memory records per-task optimization/repair trajectories to stabilize multi-round refinement. Removing either memory reduces Fast 1 and Speedup, confirming both components are critical to KernelSkill ’s improvements. 
+
+ Method | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ | 
+ Success ↑ \uparrow | 
+ Fast 1 ↑ \uparrow | 
+ Speedup ↑ \uparrow | 
+ Success ↑ \uparrow | 
+ Fast 1 ↑ \uparrow | 
+ Speedup ↑ \uparrow | 
+ Success ↑ \uparrow | 
+ Fast 1 ↑ \uparrow | 
+ Speedup ↑ \uparrow | 
+
+ w/o memory | 
+ 0.96 | 
+ 0.46 | 
+ 1.52 | 
+ 0.98 | 
+ 0.75 | 
+ 1.05 | 
+ 0.94 | 
+ 0.36 | 
+ 0.95 | 
+
+ w/o Short_term memory | 
+ 0.96 | 
+ 0.51 | 
+ 3.53 | 
+ 0.98 | 
+ 0.85 | 
+ 2.42 | 
+ 0.94 | 
+ 0.70 | 
+ 1.78 | 
+
+ w/o Long_term memory | 
+ 1.00 | 
+ 0.55 | 
+ 1.77 | 
+ 1.00 | 
+ 1.00 | 
+ 1.18 | 
+ 1.00 | 
+ 0.79 | 
+ 1.04 | 
+
+ KernelSkill | 
+ 1.00 | 
+ 0.62 | 
+ 5.44 | 
+ 1.00 | 
+ 1.00 | 
+ 2.82 | 
+ 1.00 | 
+ 0.82 | 
+ 1.92 | 
+
+ 5.1 Benchmark and Metrics 
+
+ Table 3 : Fast 1 Results. Fast 1 is the percentage of tasks whose generated kernel is at least as fast as the Torch baseline. 
+
+ Method | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ Kevin-32B | 
+ 0.16 | 
+ 0.61 | 
+ 0.02 | 
+
+ Astra | 
+ 0.43 | 
+ 0.73 | 
+ 0.35 | 
+
+ PRAGMA | 
+ 0.45 | 
+ 0.74 | 
+ 0.36 | 
+
+ CudaForge | 
+ 0.54 | 
+ 0.89 | 
+ 0.68 | 
+
+ QiMeng | 
+ 0.59 | 
+ 0.66 | 
+ 0.40 | 
+
+ STARK | 
+ 0.71 | 
+ 1.00 | 
+ 0.87 | 
+
+ KernelSkill | 
+ 0.62 | 
+ 1.00 | 
+ 0.82 | 
+
+ KernelBench is an open-source benchmark for evaluating whether LLMs can generate correct and efficient GPU kernels for PyTorch workloads ( Ouyang et al., 2025 ) . It organizes tasks into four difficulty levels: Level 1 contains single-kernel operators (100 tasks), Level 2 contains multi-operator workloads that require implementing and coordinating multiple operators/kernels (100 tasks), Level 3 includes full model architectures (50 tasks), and Level 4 targets end-to-end optimization of Hugging Face model architectures. Since prior LLM-based kernel generation and optimization methods are primarily evaluated on Levels 1–3, we follow prior work and report results on the 250 tasks from Levels 1–3. 
+
+ KernelBench additionally provides metrics (e.g., fast p ) that quantify the fraction of generated kernels that are both functionally correct and faster than a baseline by a specified threshold. In this work, we evaluate KernelSkill and compare against prior approaches using the following metrics: 
+
+ ❶ Success: the percentage of tasks for which the method generates a kernel that compiles and passes correctness verification. 
+
+ ❷ Speedup (vs. Torch Eager): the average execution speedup across tasks, measured as the runtime ratio relative to Torch Eager (the unoptimized PyTorch implementation). 
+
+ ❸ Fast 1 : the percentage of tasks for which the generated kernel is at least as fast as the Torch baseline. 
+
+ 5.2 Baselines 
+
+ We compare KernelSkill against representative training-based and agentic baselines that have been widely evaluated (or can be reproduced) on KernelBench Levels 1–3. 
+
+ Training-based kernels. Kevin trains an LLM with a multi-turn RL recipe that explicitly models iterative refinement during kernel generation ( Baronio et al., 2025 ) .
+QiMeng proposes a macro-to-micro hierarchical paradigm: it learns optimization-policy guidance at a high level (“macro thinking”) and executes it via stepwise low-level code realization (“micro coding”) to improve correctness and efficiency ( Zhu et al., 2025 ) . 
+
+ Agentic optimization with feedback. CudaForge is a training-free Coder–Judge workflow that iteratively generates and refines CUDA kernels, where the Judge leverages hardware feedback (e.g., NCU metrics / GPU specs) to diagnose bottlenecks and guide targeted edits ( Zhang et al., 2025 ) .
+Astra builds a multi-agent pipeline with specialized roles to optimize existing CUDA kernels through iterative collaboration ( Wei et al., 2025 ) .
+PRAGMA further strengthens feedback-driven optimization by integrating richer profiling signals and a bottleneck-aware reasoning module that links profiling evidence to concrete optimization strategies across iterative refinement ( Lei et al., 2025 ) .
+STARK introduces a multi-agent refinement framework with grounded instruction, dynamic context management, and strategic search, and incorporates within-task memory to organize past attempts and reduce redundant exploration ( Dong et al., 2025a ) . 
+
+ 5.3 Experiments Setting 
+
+ All experiments are conducted on an NVIDIA A100 GPU (80GB). We use Python 3.11.13 and PyTorch 2.6.0+cu124 (CUDA 12.4). The CUDA runtime stack includes cuDNN 9.1.0 and cuBLAS 12.9. We use the official KernelBench benchmarking framework to measure runtime. For stable timing, we follow the evaluation procedure in prior work ( Zhang et al., 2025 ) by warming up with fixed input shapes before using CUDA events for timing; we use 25 warm-up iterations and 100 timed iterations and report the mean latency. Profiling signals used by KernelSkill are collected with NVIDIA Nsight Compute (ncu) and Nsight Systems (nsys). 
+
+ KernelSkill starts from seed kernels sampled by the Generator agent. For each task, we sample 3 candidate seeds and pick the best one (compiles, passes verification, and has the lowest mean latency) to start refinement. We run up to 15 refinement rounds per task, with temperature set to 1.0. All agent calls use ChatGPT-5.1 ( OpenAI, 2025 ) as the base model. Following Algorithm  1 , we promote a new base kernel only if it achieves at least 30% relative speedup over the current base (rt=0.3) or an absolute speedup gain of at least 0.3 (at=0.3), to avoid unstable base updates from small fluctuations. 
+
+ Result sources and reproducibility. 
+Since Astra, PRAGMA, QiMeng, and STARK are not open-sourced, we cannot run all baselines under an identical codebase. We thus report STARK and QiMeng using the best KernelBench results reported in their original papers. For Astra and PRAGMA, whose papers do not report KernelBench numbers, we implement the pipelines following their descriptions and evaluate them in our experimental setup. These distinctions are noted to clarify result provenance and comparability. 
+
+ 5.4 Experimental Results and Analysis 
+
+ Table  1 reports results on KernelBench Levels 1–3. Overall, KernelSkill achieves a 100% success rate across all three levels , indicating reliable end-to-end kernel synthesis under our closed-loop refinement. Among the compared baselines, STARK is the only method that matches 100% success on all levels ; other approaches exhibit non-trivial failure rates, especially on harder tasks (e.g., Level 3 success: Kevin-32B 0.46, QiMeng 0.70, Astra 0.93, PRAGMA 0.94, CudaForge 0.96). 
+
+ In terms of performance, KernelSkill delivers the best average speedup on every level : 5.44 × \times , 2.82 × \times , and 1.92 × \times over Torch Eager on Levels 1, 2, and 3, respectively. Compared with the strongest baseline in speedup (STARK), KernelSkill improves average speedup by +79.5% on Level 1 (5.44 vs. 3.03, +2.41 × \times absolute), +4.8% on Level 2 (2.82 vs. 2.69, +0.13 × \times absolute), and +21.5% on Level 3 (1.92 vs. 1.58, +0.34 × \times absolute). This shows that KernelSkill not only preserves perfect correctness, but also consistently pushes kernels further toward higher efficiency, with the most pronounced gains on the easiest and hardest regimes. 
+
+ KernelSkill also substantially outperforms prior profiling-grounded multi-agent baselines (Astra, PRAGMA, CudaForge). On Level 1, these systems remain around ∼ \sim 1.45–1.49 × \times speedup with < < 1.0 success, whereas KernelSkill reaches 5.44 × \times ( 3.65 × \times higher than PRAGMA in average speedup). On Level 2 and Level 3, KernelSkill improves over the strongest among them (CudaForge) from 2.10 × \times to 2.82 × \times ( 1.34 × \times higher) and from 1.28 × \times to 1.92 × \times ( 1.50 × \times higher), respectively, indicating stronger optimization effectiveness under the same closed-loop setting. 
+
+ Finally, training-centric baselines show clear brittleness on harder tasks. For example, QiMeng achieves competitive performance on Level 1 (1.00 success, 2.20 × \times speedup) but degrades markedly on Level 3 (0.70 success, 0.73 × \times speedup). Kevin-32B exhibits an even sharper drop (Level 3: 0.46 success, 0.32 × \times speedup). In contrast, KernelSkill maintains uniformly perfect success while achieving the highest speedups across all levels, suggesting that the proposed memory-augmented, profiling-feedback-driven multi-agent refinement provides both robustness and stronger optimization capability, especially when task difficulty increases. 
+
+ As reported in Tables   3 and  1 , while STARK achieves a higher Fast 1 rate on Levels 1 and 3, KernelSkill attains consistently larger average speedups across all three levels. Notably, KernelSkill reaches these gains with only 15 refinement rounds, surpassing the average speedups obtained by STARK after 30 rounds. Beyond the final speedups, KernelSkill is also markedly more refinement-efficient: when measured by mean speedup divided by the number of refinement rounds, STARK’s per-round gains are 0.10/0.09/0.05 on Levels 1/2/3, whereas KernelSkill achieves 0.36/0.19/0.13, respectively. This contrast is notable because STARK already employs a sophisticated tree-structured memory to record and reuse within-task search trajectories; in comparison, KernelSkill’s two-level memory design (cross-task long-term memory plus per-task short-term trajectory state) yields more decisive method selection and more stable multi-round refinement, thereby improving the average speedup per refinement round—largely due to cross-task long-term memory—and lifting the overall mean speedup. 
+
+ 5.5 Ablation 
+
+ Table  2 evaluates three variants to isolate the impact of memory: (i) w/o memory, (ii) w/o long-term memory, and (iii) w/o short-term memory. Removing both memories leads to degraded reliability and weaker optimization, as the system lacks (a) cross-task reusable guidance for method selection and (b) per-task state to avoid ineffective oscillations. 
+
+ Without short-term memory, kernel repair and refinement can become unstable: even after 15 rounds, some tasks fail to reach correctness, yielding success rates of 96%, 98%, and 94% on Levels 1–3. Enabling short-term memory eliminates these failure cases within the same round budget, achieving 100% success across all levels and improving Fast 1 , consistent with its role in tracking per-task attempts, preventing repeated failures, and supporting coupled multi-step fixes. 
+
+ Long-term memory provides cross-task reusable optimization knowledge that narrows the method search space and reduces trial-and-error. Consequently, introducing long-term memory yields a substantial gain in average speedup over the memory-free baseline, whereas removing long-term memory results in only limited performance improvement. This confirms that long-term memory is critical for selecting higher-impact optimization strategies and achieving larger speedups. 
+
+ 6 Conclusion 
+
+ We propose KernelSkill, a memory-augmented multi-agent framework for GPU kernel optimization. On KernelBench, it achieves a 100% success rate and average speedups of 5.44×, 2.82×, and 1.92× over Torch Eager on Levels 1, 2, and 3, respectively, outperforming prior methods. However, the performance depends on the coverage of the long-term memory; when no matching case is retrieved, KernelSkill may fall back to LLM-only evidence-based method selection. 
+
+ Impact Statement 
+
+ This paper presents work whose goal is to advance the field of Machine
+Learning. There are many potential societal consequences of our work, none
+which we feel must be specifically highlighted here. 
+
+ References 
+
+ Andrews and Witteveen (2025) 
+ M. Andrews and S. Witteveen 
+
+ GPU kernel scientist: an llm-driven framework for iterative kernel optimization .
+
+ External Links: 2506.20807 ,
+ Link 
+
+ Cited by: §2.3 .
+
+ Ansel et al. (2024) 
+ J. Ansel, E. Yang, H. He, N. Gimelshein, A. Jain, M. Voznesensky, B. Bao, P. Bell, D. Berard, E. Burovski, et al. 
+
+ Pytorch 2: faster machine learning through dynamic python bytecode transformation and graph compilation .
+
+ In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 ,
+
+ pp. 929–947 .
+
+ Cited by: §1 .
+
+ Baronio et al. (2025) 
+ C. Baronio, P. Marsella, B. Pan, S. Guo, and S. Alberti 
+
+ Kevin: multi-turn rl for generating cuda kernels .
+
+ External Links: 2507.11948 ,
+ Link 
+
+ Cited by: §1 ,
+ §2.2 ,
+ §5.2 .
+
+ Chen et al. (2018a) 
+ T. Chen, T. Moreau, Z. Jiang, L. Zheng, E. Yan, H. Shen, M. Cowan, L. Wang, Y. Hu, L. Ceze, et al. 
+
+ { \{ tvm } \} : An automated { \{ end-to-end } \} optimizing compiler for deep learning .
+
+ In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18) ,
+
+ pp. 578–594 .
+
+ Cited by: §2.1 .
+
+ Chen et al. (2018b) 
+ T. Chen, L. Zheng, E. Yan, Z. Jiang, T. Moreau, L. Ceze, C. Guestrin, and A. Krishnamurthy 
+
+ Learning to optimize tensor programs .
+
+ Advances in Neural Information Processing Systems 31 .
+
+ Cited by: §2.1 .
+
+ Chetlur et al. (2014) 
+ S. Chetlur, C. Woolley, P. Vandermersch, J. Cohen, J. Tran, B. Catanzaro, and E. Shelhamer 
+
+ CuDNN: efficient primitives for deep learning .
+
+ External Links: 1410.0759 ,
+ Link 
+
+ Cited by: §2.1 .
+
+ Dong et al. (2025a) 
+ J. Dong, Y. Yang, T. Liu, Y. Wang, F. Qi, V. Tarokh, K. Rangadurai, and S. Yang 
+
+ STARK: strategic team of agents for refining kernels .
+
+ External Links: 2510.16996 ,
+ Link 
+
+ Cited by: §1 ,
+ §2.3 ,
+ §5.2 .
+
+ Dong et al. (2025b) 
+ Y. Dong, X. Jiang, J. Qian, T. Wang, K. Zhang, Z. Jin, and G. Li 
+
+ A survey on code generation with llm-based agents .
+
+ External Links: 2508.00083 ,
+ Link 
+
+ Cited by: §2.2 .
+
+ He and Yoneki (2025) 
+ G. He and E. Yoneki 
+
+ CuAsmRL: optimizing gpu sass schedules via deep reinforcement learning .
+
+ External Links: 2501.08071 ,
+ Link 
+
+ Cited by: §2.2 .
+
+ Hijma et al. (2023) 
+ P. Hijma, S. Heldens, A. Sclocco, B. Van Werkhoven, and H. E. Bal 
+
+ Optimization techniques for gpu programming .
+
+ ACM Computing Surveys 55 ( 11 ), pp. 1–81 .
+
+ Cited by: §4.2.1 ,
+ §4 .
+
+ Jiang et al. (2026) 
+ J. Jiang, F. Wang, J. Shen, S. Kim, and S. Kim 
+
+ A survey on large language models for code generation .
+
+ ACM Transactions on Software Engineering and Methodology 35 ( 2 ), pp. 1–72 .
+
+ External Links: ISSN 1557-7392 ,
+ Link ,
+ Document 
+
+ Cited by: §2.2 .
+
+ Lei et al. (2025) 
+ K. Lei, H. Yang, H. Zhang, X. You, K. Zhang, Z. Luan, Y. Liu, and D. Qian 
+
+ PRAGMA: a profiling-reasoned multi-agent framework for automatic kernel optimization .
+
+ External Links: 2511.06345 ,
+ Link 
+
+ Cited by: §1 ,
+ §2.3 ,
+ §5.2 .
+
+ Li et al. (2025a) 
+ S. Li, Z. Wang, Y. He, Y. Li, Q. Shi, J. Li, Y. Hu, W. Che, X. Han, Z. Liu, and M. Sun 
+
+ AutoTriton: automatic triton programming with reinforcement learning in llms .
+
+ External Links: 2507.05687 ,
+ Link 
+
+ Cited by: §2.2 .
+
+ Li et al. (2025b) 
+ X. Li, X. Sun, A. Wang, J. Li, and C. Shum 
+
+ CUDA-l1: improving cuda optimization via contrastive reinforcement learning .
+
+ External Links: 2507.14111 ,
+ Link 
+
+ Cited by: §1 ,
+ §2.2 .
+
+ Nagaitsev et al. (2025) 
+ K. Nagaitsev, L. Grbcic, S. Williams, and C. Iancu 
+
+ Optimizing pytorch inference with llm-based multi-agent systems .
+
+ External Links: 2511.16964 ,
+ Link 
+
+ Cited by: §2.3 .
+
+ OpenAI (2025) 
+ OpenAI 
+
+ GPT-5.1: a smarter, more conversational chatgpt .
+
+ Note: https://openai.com/index/gpt-5-1/ Accessed: 2025-11-12 
+
+ Cited by: §5.3 .
+
+ Ouyang et al. (2025) 
+ A. Ouyang, S. Guo, S. Arora, A. L. Zhang, W. Hu, C. Ré, and A. Mirhoseini 
+
+ KernelBench: can llms write efficient gpu kernels? .
+
+ External Links: 2502.10517 ,
+ Link 
+
+ Cited by: §5.1 .
+
+ Pandey et al. (2022) 
+ M. Pandey, M. Fernandez, F. Gentile, O. Isayev, A. Tropsha, A. C. Stern, and A. Cherkasov 
+
+ The transformational role of gpu computing and deep learning in drug discovery .
+
+ Nature Machine Intelligence 4 ( 3 ), pp. 211–221 .
+
+ Cited by: §1 .
+
+ Paszke et al. (2019) 
+ A. Paszke, S. Gross, F. Massa, A. Lerer, J. Bradbury, G. Chanan, T. Killeen, Z. Lin, N. Gimelshein, L. Antiga, et al. 
+
+ Pytorch: an imperative style, high-performance deep learning library .
+
+ Advances in neural information processing systems 32 .
+
+ Cited by: §1 .
+
+ Spector et al. (2024) 
+ B. F. Spector, S. Arora, A. Singhal, D. Y. Fu, and C. Ré 
+
+ ThunderKittens: simple, fast, and adorable ai kernels .
+
+ External Links: 2410.20399 ,
+ Link 
+
+ Cited by: §2.1 .
+
+ Tay et al. (2022) 
+ Y. Tay, M. Dehghani, D. Bahri, and D. Metzler 
+
+ Efficient transformers: a survey .
+
+ External Links: 2009.06732 ,
+ Link 
+
+ Cited by: §1 .
+
+ Tillet et al. (2019) 
+ P. Tillet, H. Kung, and D. Cox 
+
+ Triton: an intermediate language and compiler for tiled neural network computations .
+
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages ,
+
+ pp. 10–19 .
+
+ Cited by: §2.1 .
+
+ Wang et al. (2025) 
+ J. Wang, V. Joshi, S. Majumder, X. Chao, B. Ding, Z. Liu, P. P. Brahma, D. Li, Z. Liu, and E. Barsoum 
+
+ Geak: introducing triton kernel ai agent & evaluation benchmarks .
+
+ External Links: 2507.23194 ,
+ Link 
+
+ Cited by: §2.3 .
+
+ Wei et al. (2025) 
+ A. Wei, T. Sun, Y. Seenichamy, H. Song, A. Ouyang, A. Mirhoseini, K. Wang, and A. Aiken 
+
+ Astra: a multi-agent system for gpu kernel performance optimization .
+
+ External Links: 2509.07506 ,
+ Link 
+
+ Cited by: §1 ,
+ §2.3 ,
+ §5.2 .
+
+ Woo et al. (2025) 
+ J. Woo, S. Zhu, A. Nie, Z. Jia, Y. Wang, and Y. Park 
+
+ TritonRL: training llms to think and code triton without cheating .
+
+ External Links: 2510.17891 ,
+ Link 
+
+ Cited by: §2.2 .
+
+ Zhai et al. (2024) 
+ Y. Zhai, S. Yang, K. Pan, R. Zhang, S. Liu, C. Liu, Z. Ye, J. Ji, J. Zhao, Y. Zhang, et al. 
+
+ Enabling tensor language model to assist in generating { \{ high-performance } \} tensor programs for deep learning .
+
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) ,
+
+ pp. 289–305 .
+
+ Cited by: §2.2 .
+
+ Zhang et al. (2025) 
+ Z. Zhang, R. Wang, S. Li, Y. Luo, M. Hong, and C. Ding 
+
+ CudaForge: an agent framework with hardware feedback for cuda kernel optimization .
+
+ External Links: 2511.01884 ,
+ Link 
+
+ Cited by: §1 ,
+ §2.3 ,
+ §5.2 ,
+ §5.3 .
+
+ Zhu et al. (2025) 
+ X. Zhu, S. Peng, J. Guo, Y. Chen, Q. Guo, Y. Wen, H. Qin, R. Chen, Q. Zhou, K. Gao, Y. Wu, C. Zhao, and L. Li 
+
+ QiMeng-kernel: macro-thinking micro-coding paradigm for llm-based high-performance gpu kernel generation .
+
+ External Links: 2511.20100 ,
+ Link 
+
+ Cited by: §2.2 ,
+ §5.2 .
+
+ Appendix A Algorithm 
+
+ We provide the pseudocode of KernelSkill in Algorithm  1 . 
+
+ Algorithm 1 Multi-Agent Kernel Optimization with Memory 
+
+   Input: PyTorch reference P P , Relative threshold r ​ t rt , Absolute threshold a ​ t at , max rounds N N 
+
+   Output: Best optimized kernel K n K_{n} 
+
+   K 0 ← Generator ​ ( P ) K_{0}\leftarrow\textsc{Generator}(P) 
+
+   ( b ​ o ​ o ​ l ​ c 0 , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ c 0 ) ← Compiler ​ ( K 0 ) (boolc_{0},feedbackc_{0})\leftarrow\textsc{Compiler}(K_{0}) 
+
+   ( b ​ o ​ o ​ l ​ v 0 , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ v 0 ) ← Verifier ​ ( K 0 ) (boolv_{0},feedbackv_{0})\leftarrow\textsc{Verifier}(K_{0}) 
+
+   ( s ​ p ​ e ​ e ​ d ​ u ​ p 0 , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ p 0 ) ← Profiler ​ ( K 0 ) (speedup_{0},feedbackp_{0})\leftarrow\textsc{Profiler}(K_{0}) 
+
+  Set b ​ a ​ s ​ e ​ _ ​ k ​ e ​ r ​ n ​ e ​ l ← K 0 base\_kernel\leftarrow K_{0} 
+
+  Set b ​ e ​ s ​ t ​ _ ​ k ​ e ​ r ​ n ​ e ​ l ← K 0 best\_kernel\leftarrow K_{0} 
+
+  Set b ​ a ​ s ​ e ← 0 base\leftarrow 0 
+
+   for i = 1 i=1 to N N do 
+
+    if not ( b ​ o ​ o ​ l ​ c i boolc_{i} and b ​ o ​ o ​ l ​ v i boolv_{i} ) then 
+
+     R ​ e ​ p ​ a ​ i ​ r ​ _ ​ p ​ l ​ a ​ n ← Diagnoser ​ ( f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ c i − 1 , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ v i − 1 , R ​ e ​ p ​ a ​ i ​ r ​ _ ​ m ​ e ​ m ​ o ​ r ​ y ) Repair\_plan\leftarrow\textsc{Diagnoser}(feedbackc_{i-1},feedbackv_{i-1},Repair\_memory) 
+
+     K i ← Repairer ​ ( R ​ e ​ p ​ a ​ i ​ r ​ _ ​ p ​ l ​ a ​ n , K i − 1 ) K_{i}\leftarrow\textsc{Repairer}(Repair\_plan,K_{i-1}) 
+
+    else 
+
+     C ​ o ​ d ​ e ​ _ ​ f ​ e ​ a ​ t ​ u ​ r ​ e b ​ a ​ s ​ e ← FeatureExtractor ​ ( b ​ a ​ s ​ e ​ _ ​ k ​ e ​ r ​ n ​ e ​ l ) Code\_feature_{base}\leftarrow\textsc{FeatureExtractor}(base\_kernel) 
+
+     M ​ e ​ t ​ h ​ o ​ d ​ s ← Retrieval ​ ( C ​ o ​ d ​ e ​ _ ​ f ​ e ​ a ​ t ​ u ​ r ​ e b ​ a ​ s ​ e , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ p b ​ a ​ s ​ e ) Methods\leftarrow\textsc{Retrieval}(Code\_feature_{base},feedbackp_{base}) 
+
+     O ​ p ​ t ​ i ​ m ​ i ​ z ​ a ​ t ​ i ​ o ​ n ​ _ ​ p ​ l ​ a ​ n ← Planner ​ ( M ​ e ​ t ​ h ​ o ​ d ​ s , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ p b ​ a ​ s ​ e , O ​ p ​ t ​ i ​ m ​ i ​ z ​ a ​ t ​ i ​ o ​ n ​ _ ​ m ​ e ​ m ​ o ​ r ​ y ) Optimization\_plan\leftarrow\textsc{Planner}(Methods,feedbackp_{base},Optimization\_memory) 
+
+     K i ← Optimizer ​ ( O ​ p ​ t ​ i ​ m ​ i ​ z ​ a ​ t ​ i ​ o ​ n ​ _ ​ p ​ l ​ a ​ n , b ​ a ​ s ​ e ​ _ ​ k ​ e ​ r ​ n ​ e ​ l ) K_{i}\leftarrow\textsc{Optimizer}(Optimization\_plan,base\_kernel) 
+
+     ( b ​ o ​ o ​ l ​ c i , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ c i ) ← Compiler ​ ( K i ) (boolc_{i},feedbackc_{i})\leftarrow\textsc{Compiler}(K_{i}) 
+
+     ( b ​ o ​ o ​ l ​ v i , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ v i ) ← Verifier ​ ( K i ) (boolv_{i},feedbackv_{i})\leftarrow\textsc{Verifier}(K_{i}) 
+
+     ( s ​ p ​ e ​ e ​ d ​ u ​ p i , f ​ e ​ e ​ d ​ b ​ a ​ c ​ k ​ p i ) ← Profiler ​ ( K i ) (speedup_{i},feedbackp_{i})\leftarrow\textsc{Profiler}(K_{i}) 
+
+    Update R ​ e ​ p ​ a ​ i ​ r ​ _ ​ m ​ e ​ m ​ o ​ r ​ y Repair\_memory 
+
+    Update O ​ p ​ t ​ i ​ m ​ i ​ z ​ a ​ t ​ i ​ o ​ n ​ _ ​ m ​ e ​ m ​ o ​ r ​ y Optimization\_memory 
+
+     if s ​ p ​ e ​ e ​ d ​ u ​ p i > s ​ p ​ e ​ e ​ d ​ u ​ p b ​ a ​ s ​ e speedup_{i}>speedup_{base} then 
+
+      b ​ e ​ s ​ t ​ _ ​ k ​ e ​ r ​ n ​ e ​ l ← K i best\_kernel\leftarrow K_{i} 
+
+      if ( ( s ​ p ​ e ​ e ​ d ​ u ​ p i / s ​ p ​ e ​ e ​ d ​ u ​ p b ​ a ​ s ​ e ) > ( 1 + r ​ t ) ) ​ o ​ r ​ ( ( s ​ p ​ e ​ e ​ d ​ u ​ p i − s ​ p ​ e ​ e ​ d ​ u ​ p b ​ a ​ s ​ e ) > a ​ t ) ((speedup_{i}/speedup_{base})>(1+rt))or((speedup_{i}-speedup_{base})>at) then 
+
+       b ​ a ​ s ​ e ​ _ ​ k ​ e ​ r ​ n ​ e ​ l ← K i base\_kernel\leftarrow K_{i} 
+
+       b ​ a ​ s ​ e ← i base\leftarrow i 
+
+      end if 
+
+     end if 
+
+    end if 
+
+   end for 
+
+   Return b ​ e ​ s ​ t ​ _ ​ k ​ e ​ r ​ n ​ e ​ l best\_kernel 
+
+ Appendix B Long-Term Memory Schema. 
+
+ The long-term memory mainly includes the following fields: 
+
+ ❶ field_mapping : maps raw NCU metrics to standardized fields for consistent downstream processing. 
+
+ ❷ run_features_schema : defines runtime features extracted from Nsight Systems (e.g., kernel_launch_count ). 
+
+ ❸ code_features : kernel-structure features extracted via deterministic scanning or LLM-assisted classification. 
+
+ ❹ derived_fields : deterministic fields derived from field_mapping , code_features , and run_features . 
+
+ ❺ headroom_tiers : discretizes optimization headroom (e.g., High/Medium/Low) based on performance indicators. 
+
+ ❻ bottleneck_priority_rules : resolves conflicts when multiple bottlenecks are detected. 
+
+ ❼ ncu_predicates : a library of reusable Boolean predicates over standardized NCU fields. 
+
+ ❽ global_forbidden_rules : global veto rules that prevent unsafe or invalid optimizations. 
+
+ ❾ decision_table : maps bottleneck types, headroom tiers, and kernel characteristics to candidate optimization methods. 
+
+ ❿ llm_assist (Method Knowledge): Provides method-specific rationales and implementation cues for the candidate methods selected by the deterministic policy, enabling traceable decisions and faithful code-level execution. 
+
+ Appendix C Long-Term Memory Decision Workflow. 
+
+ Specifically, the workflow is as follows: 
+
+ ❶ Input aggregation. Collect NCU metrics, runtime features, and code features for the current kernel. 
+
+ ❷ Metric normalization. Map raw NCU metric keys to standardized field names via field_mapping , making downstream decisions robust to tool-version-specific naming. 
+
+ ❸ Derived-field computation. 
+Composite indicators are deterministically computed via derived_fields , producing higher-level features that are more directly aligned with optimization decisions. 
+
+ ❹ Headroom tier assignment. 
+The optimization headroom is categorized into discrete tiers (e.g., High/Medium/Low) using headroom_tiers , which quantify the remaining optimization potential based on performance indicators. 
+
+ ❺ Bottleneck identification. 
+The bottleneck type is identified by matching the kernel’s profiling signature against the ncu_signature patterns defined in the decision_table . 
+
+ ❻ Case matching. 
+Given the bottleneck type and headroom tier, the system matches a specific decision case using conditions such as headroom tier, kernel structural properties, and additional gating predicates ( gate_when ). 
+
+ ❼ Global rule enforcement. 
+Before finalizing the recommendation, the system applies global_forbidden_rules as global veto constraints to prevent unsafe or invalid optimizations, regardless of local decision matches. 
+
+ ❽ Method set retrieval. 
+The pipeline returns the final list of permitted optimization methods, i.e., the allowed_methods associated with the matched decision case after global filtering. 
+
+ ❾ LLM-assisted planning. 
+After deterministic gating, the system consults the llm_assist knowledge base to provide non-binding explanations, implementation guidance, and expected benefits. This information helps the LLM interpret the selected methods and generate a concrete optimization plan. 
+
+ Appendix D Case 
+
+ We provide the code of task in Algorithm  2 . 
+
+ Algorithm 2 The code of task. 
+
+import torch
+import torch.nn as nn
+
+class Model(nn.Module):
+ """
+ Model that performs a matrix multiplication, scales the result, adds a residual connection, clamps the output,
+ applies LogSumExp, and finally applies the Mish activation function.
+ """
+ def __init__(self, input_size, hidden_size, scale_factor, clamp_min, clamp_max):
+ super(Model, self).__init__()
+ self.matmul = nn.Linear(input_size, hidden_size)
+ self.scale_factor = scale_factor
+ self.clamp_min = clamp_min
+ self.clamp_max = clamp_max
+
+ def forward(self, x):
+ """
+ Args:
+ x: Input tensor of shape (batch_size, input_size).
+
+ Returns:
+ Output tensor of shape (batch_size, hidden_size).
+ """
+ x = self.matmul(x)
+ x = x * self.scale_factor
+ x = x + x
+ x = torch.clamp(x, self.clamp_min, self.clamp_max)
+ x = torch.logsumexp(x, dim=1, keepdim=True)
+ x = x * torch.nn.functional.mish(x) # Mish activation
+ return x
+
+ We provide the optimized code (without KernelSkill) of task in Algorithm  3 . 
+
+ Algorithm 3 The optimized code (without KernelSkill) of task. 
+
+ __global__ void fused_matmul_scale_clamp_kernel( const float* __restrict__ X, const float* __restrict__ W, const float* __restrict__ B, float* __restrict__ Out, int batch, int in_features, int out_features, float scale_factor, float clamp_min, float clamp_max ){ int row = blockIdx.x * blockDim.x + threadIdx.x; int col = blockIdx.y * blockDim.y + threadIdx.y; if(row < batch && col < out_features){ float acc = 0.0f; for(int k = 0; k < in_features; k++){ acc += X[row * in_features + k] * W[col * in_features + k]; } acc += B[col]; acc = acc * scale_factor * 2.0f; acc = fminf(fmaxf(acc, clamp_min), clamp_max); Out[row * out_features + col] = acc; } } torch::Tensor fused_matmul_scale_clamp( torch::Tensor X, torch::Tensor W, torch::Tensor B, float scale_factor, float clamp_min, float clamp_max ){ const int batch = X.size(0); const int in_features = X.size(1); const int out_features = W.size(0); auto Out = torch::empty({batch, out_features}, X.options()); dim3 block(16,16); dim3 grid((batch + block.x -1)/block.x, (out_features + block.y -1)/block.y); fused_matmul_scale_clamp_kernel<<<grid, block>>>( X.data_ptr<float>(), W.data_ptr<float>(), B.data_ptr<float>(), Out.data_ptr<float>(), batch, in_features, out_features, scale_factor, clamp_min, clamp_max ); return Out; } 
+
+ Appendix E Retrieval method and generate optimization plan. 
+
+ Figure 4 : Retrieval method and generate plan.

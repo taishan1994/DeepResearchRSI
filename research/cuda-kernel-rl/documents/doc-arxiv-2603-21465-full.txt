@@ -1,0 +1,477 @@
+DRTriton: Large-Scale Synthetic Data Reinforcement Learning 
+ for Triton Kernel Generation 
+
+ Siqi Guo
+
+ Affiliation:  Texas A&M University
+
+ Ming Lin
+
+ Affiliation:  Oracle
+
+ Tianbao Yang
+
+ Affiliation:  Texas A&M University
+
+ Correspondence to: tianbao-yang@tamu.edu 
+
+ Abstract 
+
+ Developing efficient CUDA kernels is a fundamental yet challenging task in the generative AI industry. Recent researches leverage Large Language Models (LLMs) to automatically convert PyTorch reference implementations to CUDA kernels, significantly reducing the engineering efforts.
+State-of-the-art LLMs, such as GPT-5.2 and Claude-Sonnet-4.5, still struggle in this specific task.
+To address this challenge, we propose DRTriton , a scalable learning framework for training LLMs to convert PyTorch codes into highly optimized Triton kernels, which are then compiled to CUDA kernels at runtime. DRTriton consists of three key components: (i) a data synthetic algorithm CSP-DAG that guarantees full coverage and unbiased uniform sampling over the operator space with controlled difficulty; (ii) a curriculum reinforcement learning with decoupled reward efficiently optimizes conversion success rate and inference speed simultaneously; and (iii) a test-time search algorithm that further improves the inference speed of the generated Triton kernels.
+Notably, despite being trained exclusively on synthetic data, DRTriton generalizes effectively to real-world CUDA kernels that are challenging even for human experts.
+Experimental results show that DRTriton-7B achieves speedup on 92% of the KernelBench Level 2, compared to 23% for GPT-5.2 and 19% for Claude-Sonnet-4.5. 
+
+ Keywords:  Machine Learning, ICML
+
+ 1 Introduction 
+
+ The rapid growth of generative AI has driven the industry to seek highly optimized CUDA kernels to reduce inference costs. However, developing efficient CUDA kernels remains a significant challenge even for human experts. For instance, the widely used FlashAttention  ( Dao et al., 2022 ) library requires years of development effort. As new algorithms and models continue to emerge, it is increasingly impractical to manually create optimized CUDA kernels for each one. Simplifying the development of CUDA kernels has become a critical challenge in the generative AI industry. 
+
+ To simplify CUDA kernel development, practitioners often turn to more user-friendly domain-specific languages (DSLs) such as Triton   ( Tillet et al., 2019 ) . Triton offers an alternative API to CUDA with a PyTorch-like interface, achieving a good balance between development and runtime efficiency. Despite this advantage, writing efficient Triton kernels still requires substantial expertise in GPU programming and involves extensive trial and error. An automated tool capable of converting PyTorch reference implementations into optimized Triton kernels would therefore greatly alleviate this burden. 
+
+ Thanks to the remarkable code generation capabilities of recent large language models (LLMs)  ( Chen et al., 2021 ; Roziere et al., 2023 ; Huang et al., 2025 ) , it is promising to leverage LLMs to do the above conversion. While being powerful in various aspects, modern open-source and commercial LLMs still fall short in translating PyTorch implementations into efficient Triton kernels and/or CUDA kernels, even on relatively simple tasks  ( Ouyang et al., 2025 ; Li et al., 2025c ) . 
+
+ In this work, we focus on converting PyTorch programs to Triton kernels using generative AI technologies. Specifically, we aim to train a large language model (LLM) for this task. Several recent works  ( Li et al., 2025d ; Woo et al., 2025 ) try to address this challenge by learning on PyTorch programs and their corresponding Triton kernels collected from public code repositories. While showing promising improvements over baseline models, the capacities of these approaches are inherently limited by the following factors: 
+
+ Limited scale of training data. For example, Li et al. (2025d) uses 14k samples and Woo et al. (2025) uses 11k samples, which is insufficient for learning complex Triton or CUDA kernels. 
+
+ Uncontrolled complexity and quality. When training with sparse rewards, it is crucial to carefully control the order and difficulty of samples presented to the model. If challenging samples are introduced too early, the model may consistently receive zero rewards, leading to poor gradient signals, wasted training tokens, and potentially misleading updates. 
+
+ To address these challenges, we introduce a novel approach that leverages synthetic datasets. Instead of relying on limited real-world PyTorch code, we systematically generate PyTorch programs with varying difficulty and employ curriculum reinforcement learning, allowing the model to progress from simple to complex tasks. Our approach begins by collecting a representative subset of 53 widely used PyTorch operators, including those used in the KernelBench benchmark  ( Ouyang et al., 2025 ) . We then formulate PyTorch program generation as a constraint satisfaction problem over directed acyclic graphs (CSP-DAG), thereby enabling efficient and uniform sampling of valid programs composed of these operators. Based on this synthetic data generation strategy, we present DRTriton , a scalable framework that trains PyTorch-to-Triton LLMs exclusively on synthetic data. DRTriton consists of three key components, which constitute our main contributions: 
+
+ • 
+
+ CSP-DAG sampling algorithm for PyTorch code generation. We propose an efficient algorithm for synthesizing valid PyTorch programs. We formulate the PyTorch program generation as a constraint satisfaction problem (CSP) on direct acyclic graphs (DAGs). which can be solved using CP-SAT solvers  ( Perron and Didier, 2025 ) . This approach allows us to sample valid PyTorch programs in our code space, ensuring comprehensive coverage and validity. 
+
+ • 
+
+ Large-scale curriculum reinforcement learning with decoupled rewards. We introduce a curriculum learning scheme and decouple rewards into the conventional reinforcement learning framework. It stabilizes our learning process under sparse reward and improves our learning efficiency, especially in the early stage. 
+
+ • 
+
+ Test-time search for compositional kernels. We introduce an effective test-time search strategy that decomposes complex PyTorch programs into several smaller kernels and searches for optimal compositions of kernels. This test-time search strategy substantially improves both conversion success rate and inference speed when the PyTorch program cannot be translated to a single kernel. 
+
+ Leveraging the above techniques, we supervise fine-tune a DRTriton-7B model initialized from Qwen-2.5-Coder-7B-Instruct, using 2,026 single-operator PyTorch-Triton pairs curated by DeepSeek-R1 and GPT-5.2, followed by curriculum RL on 100,000 synthetic PyTorch programs. The resulting model demonstrates strong performance: (i) On our synthetic benchmark with 20 operators, it achieves 99% accuracy, with 86% of generated Triton kernels outperforming the original PyTorch implementations. (ii) On KernelBench Level 3, the model attains 76% accuracy, with 54% of generated Triton kernels faster than the original PyTorch code and 34% faster than kernels produced by torch.compile . Notably, our results show that DRTriton, although trained exclusively on synthetic data, can surpass previous models trained on real-world datasets. 
+
+ 2 Related Work 
+
+ Kernel Compilers    
+Conventional kernel optimization relies on human-crafted optimization algorithms. TVM  ( Chen et al., 2018 ) and Ansor  ( Zheng et al., 2020 ) utilize machine learning to search for optimized schedules with manual specified patterns. TorchInductor  ( Ansel et al., 2024 ) has emerged as the default compiler (used by torch.compile ) since PyTorch 2.0. It maps PyTorch models to Triton kernels through pattern matching and loop fusion. While effective, these compilers are bounded by predefined heuristics and templates. Our approach learns from uniformly sampled PyTorch code, avoiding reliance on pre-defined heuristics. 
+
+ GPU Kernel Generation with LLMs    
+To overcome the rigidity of conventional compilers, recent works explored LLMs for direct kernel generation. Fisches et al. (2025) curated a dataset of 25k paired examples of PyTorch modules with their equivalent Triton kernel implementations, and then trained a model named KernelLLM by SFT. However, their model suffers from hallucination and “fake” kernels . To improve KernelLLM, two recent works leveraged RL to fine-tune LLMs based on hand-curated data  ( Li et al., 2025d ; Woo et al., 2025 ) . These approaches require curation of training samples from public datasets, which limits their scalability. 
+
+ Multi-agent systems    
+Multi-agent systems have been proposed to coordinate planning, generation and verification  ( Hong et al., 2025 ; Wang et al., 2025a ; Wei et al., 2025 ; Zhang et al., 2025 ; Liao et al., 2025 ; Li et al., 2025b ) . Their capacity upper bound is restricted by the foundational large language models. Robust benchmarking  ( Lange et al., 2025 ) revealed that many such systems exploit testing loopholes such as eliminating redundant operators, hard-coding for specific input patterns, etc. Our work focuses on training LLMs directly without introducing multi-turn agents, therefore is complementary to these works. 
+
+ Synthetic Code Generation    
+In the broader code generation landscape, methods like Magicoder  ( Wei et al., 2023 ) and WizardCoder  ( Luo et al., 2023 ) prompt LLMs to generate synthetic code for a given code snippet. This approach cannot guarantee the correctness and the coverage of the generated code due to the sampling nature of LLMs. Unlike prior work that relies on expensive LLM-based synthesis for generating kernel data  ( Paliskara and Saroufim, 2025 ; Liao et al., 2025 ) , our framework use CSP-DAG algorithm to generate valid PyTorch programs with guaranteed correctness and uniform coverage, which aligns with classical program synthesis  ( Gulwani et al., 2017 ; Ellis et al., 2021 ) . 
+
+ Reinforcement Learning with Verifiable Rewards    
+
+ RLVR does not rely on human supervision, and has been shown to enable the emergence of new abilities or the discovery of knowledge beyond the original training data  ( Guo et al., 2025 ) .
+In our work, we observe similar phenomena: although our training pipeline does not explicitly instruct the model on how to write Triton kernels, the model learns to map PyTorch code to Triton kernel code on its own—a new skill that naturally emerges through RLVR. 
+
+ One problem in RLVR for code generation is sparse reward in the early stage of the training. AutoTriton  ( Li et al., 2025d ) and TritonRL  ( Woo et al., 2025 ) use compiler feedback plus correctness of the generated kernels as a single verifiable reward. This does not address the sparsity of the reward. To tackle this challenge, we introduce curriculum learning with decoupled rewards. The idea of decoupled rewards is first proposed in DRPO  ( Li et al., 2025a ) . We show that the decoupled rewards greatly helps us stabilize the training in early stage where reward is sparse, accelerating the convergence speed of our training. 
+
+ 3 CSP-DAG for PyTorch Program Generation 
+
+ Synthesizing Pytorch program presents two challenges: (i) PyTorch programs must be both syntactically valid, and (ii) they must satisfy tensor shape constraints across operators. For example, it is invalid to multiply two matrices if their dimensions do not match. To address these challenges, we propose our CSP-DAG algorithm for synthesizing PyTorch programs with an arbitrary number of operators. The algorithm consists of two stages: (1) randomly generating N N operators and randomly linking them as a directed acyclic graph (DAG), and (2) finding the shapes of each operator’s input tensors and output tensors via a CSP solver. 
+
+ 3.1 Generating DAGs 
+
+ We represent a PyTorch program as a DAG where edges represent tensors with initialwly unknown shapes, and nodes represent operators that consume input edges and produce output edges. We assume each node might have multiple inputs but only produce one output. 1 1 
+ 1 
+
+ If there was an op with two outputs, such as a , b = f ⁡ ( x ) a,b=f(x) , we can always decompose this op into two op: a = f 1 ​ ( x ) , b = f 2 ​ ( x ) a=f_{1}(x),b=f_{2}(x) . 
+
+ Operators are categorized into two sets: 
+
+ • 
+
+ OpCompute : The set of operators that take tensor inputs and produce tensor outputs, such as torch.add , torch.sub , torch.matmul , torch.relu , and torch.conv2d . These operators consume existing tensors in the computation graph. 
+
+ • 
+
+ OpCreate : The set of operators that produce tensor outputs without tensor inputs, such as torch.randn , torch.rand , torch.ones , and torch.zeros . 
+
+ We list the full set of operators in Table  3 in Appendix  A . 
+
+ To generate a DAG, we maintain a list of candidate tensors, termed the candidate-tensor list, which is initialized to be an empty list. We iteratively add n n nodes (operators) into the graph. At each iteration, we first randomly select an operator type op ∈ OpCompute \texttt{op}\in\text{OpCompute} . Let m m be the number of required inputs of op . Then, we randomly draw m m operators without replacement from the candidate-tensor list to create edges attached to the node op . If the list has less than m m operators, we randomly select op ′ ∈ OpCreate \texttt{op}^{\prime}\in\text{OpCreate} and create a tensor with a line of code out = op’ ​ ( shape ) \texttt{out}=\texttt{op'}(\texttt{shape}) and insert the resulting tensor into the candidate-tensor list, whose the shape will be determined later. We repeat this step until the list has m m tensors. After the node op and its m m edges in 1 , in 2 ​ … , in m \text{in}_{1},\text{in}_{2}\dots,\text{in}_{m} are created, we will create a line of code out = op ​ ( in 1 , in 2 ​ … , in m ) \texttt{out}=\texttt{op}(\text{in}_{1},\text{in}_{2}\dots,\text{in}_{m}) and insert out into the candidate-tensor list. 
+
+ We show an example of a DAG for a generated PyTorch program in Figure  1 . 
+
+ Figure 1 : Left: A DAG with 5 nodes and 10 edges. Each node represents an operator, and each edge represents a tensor. Right: The synthesized PyTorch program. Blue part indicates the tensors and the red part indicates the operators. 
+
+ 3.2 Constraint Programming 
+
+ The above process generates valid computation graphs, but does not guarantee that tensor shapes are compatible across operators. For instance, matrix multiplication requires that the inner dimensions match. To generate valid PyTorch code, we must ensure all tensors satisfy the shape constraints imposed by the operators. The shape compatibility problem can be formulated as a constraint satisfaction problem (CSP) and solved using constraint programming tools like OR-Tools. 
+
+ To see this, for each tensor edge e e , we denote the order of this tensor by n n and the i i -order has s i s_{i} dimensions. Hence, each tensor edge has n n variables s 1 , … , s n s_{1},\ldots,s_{n} to be solved. We restrict each dimension size to be an integer between 1 1 and 2 15 2^{15} . We let e . s i e.s_{i} denote the variable s i s_{i} attached to the tensor e e . 
+
+ For each operator in the DAG, its order and dimension size are constrained by its neighborhoods in the DAG. Different operators impose different constraints, reflecting their underlying computational characteristics. It is tedious to describe the constraints of all operators here, and hence we defer them to Appendix  B . 
+
+ In addition to operator-specific constraints, we further constrain on the minimum and maximum FLOPs of the generated PyTorch module, the maximum number of elements of all tensors in the DAG, and the minimum size for each tensor: 
+
+ | 
+ | 
+ MIN_FLOPS ≤ ∑ op ∈ nodes flops ​ ( op ) ≤ MAX_FLOPS \displaystyle\text{MIN\_FLOPS}\leq\sum_{\text{op}\in\text{nodes}}\text{flops}(\text{op})\leq\text{MAX\_FLOPS} | 
+ | 
+ (1) | 
+
+ | 
+ | 
+ ∑ e ∈ edges numel ​ ( e ) ≤ MAX_SIZE \displaystyle\sum_{e\in\text{edges}}\text{numel}(e)\leq\text{MAX\_SIZE} | 
+ | 
+ (2) | 
+
+ | 
+ | 
+ MIN_SIZE_TENSOR ≤ numel ​ ( e ) , ∀ e ∈ edges \displaystyle\text{MIN\_SIZE\_TENSOR}\leq\text{numel}(e),\quad\forall e\in\text{edges} | 
+ | 
+ (3) | 
+
+ where numel ​ ( e ) = ∏ i = 1 e . n e . s i \text{numel}(e)=\prod_{i=1}^{e.n}e.s_{i} is the total number of elements in the tensor e e . 
+
+ The above inequalities form a typical constraint satisfaction problem (CSP). We use CP-SAT solver  ( Perron and Didier, 2025 ) to find a feasible solution. If there are multiple feasible solutions, CP-SAT solver will randomly converge to one integer solution. An example of a synthesized PyTorch program is shown in Figure  1 (right) and its DAG is in Figure  1 (left). 
+
+ Notably, the above procedure covers any possible PyTorch program that can be composed by the given operators. Therefore, our CSP-DAG algorithm is able to sample from a comprehensive pool of PyTorch programs. Solving constraints of a DAG with no more than 20 operators costs 1–2 seconds on a single CPU core, which can be ignored in the whole training pipeline. 
+
+ Difficult Level    In this work, we say that a PyTorch program is of difficult level k k if it has k k operators. Although there are many alternative definitions of “difficulty”, we find that this simple one works well in our curriculum reinforcement learning. 
+
+ 4 Training Pipeline 
+
+ In this section, we present our training pipeline based on the synthetic PyTorch programs. It consists of four components: (i) SFT on a small set of Pytorch-Triton pairs on difficult level 1; (ii) RL with decoupled rewards to optimize the correctness and the inference speed of the Triton kernel; (iii) curriculum RL from level 1 to a target level L L ; (iv) test-time search for optimal compositional kernels. 
+
+ 4.1 Triton Verifier 
+
+ We consider a Triton translation of a PyTorch program to be “correct” if (i) it is syntactically valid, (ii) it passes the faithfulness validation and (iii) it produces the same output as the PyTorch implementation. 
+
+ Syntactic validation    We use a rule-based linter to verify the presence of Triton kernels annotated with @triton.jit. Then, we compile the code to ensure syntactic correctness. 
+
+ Faithfulness validation    Sometimes the LLM may simplify copy the PyTorch implementation which of course generates the same outputs. To prevent this, we employ monkey-patch testing to verify that all operators are genuinely utilized. The monkey-patch testing replaces each kernel with an empty kernel containing only pass, and then confirm that this modification produces different outputs. If yes, the Triton kernels are indeed used to compute the output tensors. To ensure all computations occur within Triton functions rather than PyTorch, we prohibit the use of computational operators from torch in the generated code. 
+
+ Correctness validation    We construct 5 random test cases with input-output pairs from the corresponding PyTorch program. We execute the Triton code on these inputs and compare its outputs with those produced by the PyTorch implementation using the same inputs. The test is passed only when all outputs of PyTorch against Triton are matched precisely. 
+
+ 4.2 Supervised Fine-Tuning 
+
+ We employ SFT to provide a cold start for RL. Since the base model may not possess sufficient knowledge of Triton language, directly applying RL would lead to extremely sparse and uninformative rewards, as most generated programs would fail to compile. 
+
+ We construct our SFT dataset using the synthetic PyTorch programs as described in Section  3 . While we are aware that some existing datasets such as KernelBook  ( Fisches et al., 2025 ) provide a few real-world PyTorch-Triton pairs, we would like to demonstrate the power of reinforcement learning on synthetic dataset. Therefore, we exclude these datasets in our training on purpose. To this end, we generate level 1 synthetic PyTorch programs. For each synthetic PyTorch program, we prompt DeepSeek-R1 or GPT-5.2 to generate the corresponding Triton kernel implementation. The Triton kernel is then verified, and we keep the Triton kernel codes that pass all verifications described in Subsection  3.2 . Ultimately, this procedure yields a dataset of 2,026 PyTorch–Triton pairs covering 36 fundamental operators commonly used in PyTorch. The distribution of operators used in these PyTorch programs is shown in Figure  2 . Detailed information about the dataset construction process is provided in Appendix  C . 
+
+ Figure 2 : Frequency of collected SFT PyTorch operators. 
+
+ We denote these Pytron-Triton pairs as 𝒟 = { 𝐱 i , 𝐲 i } i = 1 2026 \mathcal{D}=\{\mathbf{x}_{i},\mathbf{y}_{i}\}_{i=1}^{2026} , we fine-tune a pretrained model by minimizing the SFT loss given below: 
+
+ | 
+ min θ − 1 | 𝒟 | ​ ∑ ( 𝐱 , 𝐲 ) ∈ 𝒟 log ⁡ π θ ​ ( 𝐲 | 𝐱 ) , \min_{\theta}-\frac{1}{|\mathcal{D}|}\sum_{(\mathbf{x},\mathbf{y})\in\mathcal{D}}\log\pi_{\theta}(\mathbf{y}|\mathbf{x}), | 
+ | 
+ (4) | 
+
+ where π θ \pi_{\theta} denote the LLM with parameters θ \theta . 
+
+ 4.3 RLVR with Decoupled Rewards 
+
+ To further enhance the capability of the model, we conduct RL after SFT. While most existing studies adopt GRPO as the workhorse, we employ DRPO  ( Li et al., 2025a ) which is better at handling two reward signals: a correctness reward and a speed reward. 
+
+ The key idea of DRPO is to decouple the accuracy reward from the speed reward in the learning process. Let q q denote an input query, that is a PyTorch program to be translated. And let o o denote an output Triton implementation. Let s θ ​ ( o , q ) s_{\theta}(o,q) denote the average log-likelihood score of the model: s θ ​ ( o , q ) = 1 | o | ​ ∑ t = 1 | o | log ⁡ π θ ​ ( o t | q , o < t ) s_{\theta}(o,q)=\frac{1}{|o|}\sum_{t=1}^{|o|}\log\pi_{\theta}(o_{t}|q,o_{<t}) , where o t o_{t} is the t t -th token of o o . The goal of our RL is to improve the log-likelihood of correct and faster Triton implementations while decreasing that of incorrect or slow ones. 
+
+ Let π old ​ ( ⋅ ) \pi_{\text{old}}(\cdot) denote the old model to be improved. Let 𝒬 = { q 1 , … , q n } \mathcal{Q}=\{q_{1},\ldots,q_{n}\} denote a set of input queries. For each q i q_{i} , we let the model π old ​ ( ⋅ ) \pi_{\text{old}}(\cdot) generate m m answers { o i , 1 , … , o i , m } \{o_{i,1},\ldots,o_{i,m}\} . We split these outputs into a correct set 𝒮 + ​ ( q i ) \mathcal{S}_{+}(q_{i}) and an incorrect set 𝒮 − ​ ( q i ) \mathcal{S}_{-}(q_{i}) . For each output o o , we denote its speed reward by r s ​ ( o | q ) r_{s}(o|q) . With these notations, the policy optimization of DRPO is formulated as: 
+
+ | 
+ min θ − 1 n ∑ i = 1 n ∑ o ∈ 𝒮 + ​ ( q i ) ω ( o | q ) s θ ( o , q ) + τ log ( 1 | 𝒮 − ​ ( q i ) | ∑ o ′ ∈ 𝒮 − ​ ( q i ) exp ( s θ ​ ( o ′ , q ) τ ) ) ] + β [ 𝔻 KL ( π old | | π θ ) − δ ] + 2 , \begin{split}\min_{\theta}&-\frac{1}{n}\sum_{i=1}^{n}\sum_{o\in\mathcal{S}_{+}(q_{i})}\omega(o|q)s_{\theta}(o,q)\\
+&+\tau\log\Big(\frac{1}{|\mathcal{S}_{-}(q_{i})|}\sum_{o^{\prime}\in\mathcal{S}_{-}(q_{i})}\exp\big(\frac{s_{\theta}(o^{\prime},q)}{\tau}\big)\Big)\Bigg]\\
+&+\beta\left[\mathbb{D}_{\text{KL}}(\pi_{\text{old}}||\pi_{\theta})-\delta\right]_{+}^{2},\end{split} | 
+ | 
+ (5) | 
+
+ where ω ⁡ ( o | q ) \omega(o|q) is a speed-induced weight for a correct output defined by 
+
+ | 
+ ω ⁡ ( o | q ) = exp ⁡ ( r s ​ ( o | q ) / λ ) ∑ o ∈ 𝒮 + ​ ( q ) exp ⁡ ( r s ​ ( o | q ) / λ ) , \omega(o|q)=\frac{\exp(r_{s}(o|q)/\lambda)}{\sum_{o\in\mathcal{S}_{+}(q)}\exp(r_{s}(o|q)/\lambda)}, | 
+ | 
+
+ τ , λ , δ , β > 0 \tau,\lambda,\delta,\beta>0 are hyper-parameters. 
+
+ The three terms in the above objective have clear meanings. The first term is to increase the log-likelihood of correct outputs, with each correct output weighted using their speed rewards. Hence, an accurate output with a high speed reward will get a higher weight ω ⁡ ( o | q ) \omega(o|q) for their log-likelihood. The second term is to decrease the log-likelihood of incorrect outputs. Using the log-sum-exp function will also weight each wrong outputs differently for the gradient calculation, i.e., a wrong output with a larger log-likelihood will get a higher weight for penalization. The last term is an adaptive regularization term, regularizing the change from the old model. It is motivated from the trust-region constraint 𝔻 KL ( π old | | π θ ) ≤ δ \mathbb{D}_{\text{KL}}(\pi_{\text{old}}||\pi_{\theta})\leq\delta using a squared-hinge penalty function β ​ [ ⋅ ] + 2 = β ​ ( 0 , ⋅ ) 2 \beta[\cdot]_{+}^{2}=\beta(0,\cdot)^{2} . 
+
+ Speed Reward    We define the speed reward as a function of the ratio between the execution time of the PyTorch program and that of the corresponding Triton program: 
+
+ | 
+ r s ​ ( o | q ) = f ⁡ ( t torch t triton ) r_{s}(o|q)=f\left(\frac{t_{\text{torch}}}{t_{\text{triton}}}\right) | 
+ | 
+ (6) | 
+
+ where t torch t_{\text{torch}} and t triton t_{\text{triton}} are the execution time of the PyTorch and Triton implementations, respectively. In the experiments, we have evaluated different functions f f including the logarithmic function f ⁡ ( s ) = log ⁡ s f(s)=\log s and the power function f ⁡ ( s ) = s α f(s)=s^{\alpha} with α > 0 \alpha>0 . The best choice is the logarithmic function. We present the ablation studies of speed reward functions in Section  5.4 . 
+
+ 4.4 Curriculum Reinforcement Learning 
+
+ Curriculum learning has been widely adopted in reinforcement learning  ( Narvekar et al., 2020 ; Parashar et al., 2025 ; Wang et al., 2025b ) , as it improves learning efficiency and stability by gradually increasing task difficulty. We leverage a three-stage curriculum in our experiments: 
+
+ • 
+
+ Stage 1: RL on single-operator programs (Level 1). The first stage conducts RL on level 1 synthetic programs with only one PyTorch operator. In the experiment, we use 20,000 randomly generated level 1 programs. 
+
+ • 
+
+ Stage 2: RL on two-operator programs (Level 2). In the second stage, we use level 2 synthetic programs containing two sequential operators. In the experiment, we use 60,000 randomly generated level 2 programs. 
+
+ • 
+
+ Stage 3: RL on five-operator programs (Level 5). After the second stage, we observe that our model has gained some capabilities to translate complex Pytorch programs with five operators. Hence, in the third stage, we further enhance this capability by RL on five-operator programs. In the experiment, we use 20,000 level 5 programs with five sequential operators. 
+
+ 4.5 Test-time Search for Optimal Compositional Kernels 
+
+ To further improve the performance of the model, we propose an effective test-time search for optimal compositional kernels when PyTorch program is too complex to be fit in a single Triton kernel.
+To achieve this, we employ a systematic search procedure over different fusion strategies. Given a PyTorch program with n n sequential operators, our approach proceeds in three stages: 
+
+ Fragment Extraction    We decompose the program into all possible contiguous subsequences of operators with length l ∈ { 1 , 2 , … , min ⁡ ( 5 , n ) } l\in\{1,2,\ldots,\min(5,n)\} , where n n is the number of operators of the program. Fragments are extracted in order of increasing length – first all single-operator fragments, then all two-operator fragments, and so on up to length 5. This generates up to m = ∑ l = 1 min ⁡ ( 5 , n ) ( n − l + 1 ) m=\sum_{l=1}^{\min(5,n)}(n-l+1) candidate fragments. For very long programs where this number exceeds 1,024, we limit the extraction to 1,024 fragments following the length-increasing order. 
+
+ Kernel Generation and Verification    For each extracted fragment, we prompt our trained model to generate a corresponding Triton kernel implementation. We then verify the functional correctness of each generated kernel using the verification procedure described in Section  4.1 . Let m ′ ≤ m m^{\prime}\leq m denote the number of kernels that pass verification. 
+
+ Code Reconstruction    For each of the m ′ m^{\prime} verified kernels, we construct a candidate hybrid implementation by replacing the corresponding PyTorch fragment with the Triton kernel while keeping all other operators unchanged. This yields m ′ m^{\prime} distinct hybrid implementations. We benchmark each candidate by measuring its execution time and select the fastest implementation as our final output. This ensures we obtain the optimal fusion strategy among all verified options while maintaining correctness guarantees. 
+
+ 5 Experiments 
+
+ Table 1 : Main results on synthetic benchmark. Pass@1 accuracy breakdown by difficulty level. Faster1: percentage of correct kernels achieving > 1 × >1\times speedup. Avg. speedup: geometric mean speedup over PyTorch computed across all correct kernels. 
+
+ Model | 
+ Level 1 | 
+ Level 2 | 
+ Level 5 | 
+ Level 20 | 
+
+ Avg. speedup 
+ | 
+
+ Acc | 
+ Faster1 | 
+ Acc | 
+ Faster1 | 
+ Acc | 
+ Faster1 | 
+ Acc | 
+ Faster1 | 
+
+ AutoTriton | 
+ 35.9 | 
+ 6.6 | 
+ 15.0 | 
+ 8.0 | 
+ 2.0 | 
+ 1.0 | 
+ 0 | 
+ 0 | 
+ 1.08 | 
+
+ GPT-5.2 | 
+ 53.8 | 
+ 17.0 | 
+ 43.0 | 
+ 35.0 | 
+ 5.0 | 
+ 5.0 | 
+ 0 | 
+ 0 | 
+ 1.34 | 
+
+ Claude-Sonnet-4.5 | 
+ 67.9 | 
+ 14.2 | 
+ 49.0 | 
+ 29.0 | 
+ 7.0 | 
+ 3.0 | 
+ 0 | 
+ 0 | 
+ 0.68 | 
+
+ DeepSeek-R1 | 
+ 33.0 | 
+ 13.2 | 
+ 24.0 | 
+ 16.0 | 
+ 9.0 | 
+ 3.0 | 
+ 0 | 
+ 0 | 
+ 0.91 | 
+
+ Qwen-3-Coder-480B | 
+ 48.1 | 
+ 5.7 | 
+ 30.0 | 
+ 23.0 | 
+ 1.0 | 
+ 1.0 | 
+ 0 | 
+ 0 | 
+ 0.97 | 
+
+ DRTriton | 
+ 86.8 | 
+ 32.1 | 
+ 75.0 | 
+ 54.0 | 
+ 15.0 | 
+ 10.0 | 
+ 0 | 
+ 0 | 
+ 1.20 | 
+
+    + test-time search | 
+ 86.8 | 
+ 32.1 | 
+ 96.0 | 
+ 78.0 | 
+ 99.0 | 
+ 89.0 | 
+ 99.0 | 
+ 86.0 | 
+ 1.57 | 
+
+ Figure 3 : Speedup distribution across difficulty levels for DRTriton, DRTriton (with test-time search), and other baselines, on synthetic benchmarks. Each curve shows speedups of generated Triton kernels over PyTorch programs across the percentages of testing data. The red dashed flat line is the reference line for 1x speedup, and the orange dashed flat line is the reference line for 2x speedup. 
+
+ Table 2 : Results on KernelBench real-world benchmark. We report accuracy (Acc) and Faster1 scores (percentage of correct kernels achieving > 1 × >1\times speedup) against two baselines: Torch Eager (TE) and torch.compile (TC). 
+
+ Model | 
+ Level 1 | 
+ Level 2 | 
+ Level 3 | 
+
+ Acc | 
+ TE | 
+ TC | 
+ Acc | 
+ TE | 
+ TC | 
+ Acc | 
+ TE | 
+ TC | 
+
+ AutoTriton | 
+ 44 | 
+ 12 | 
+ 6 | 
+ 45 | 
+ 14 | 
+ 12 | 
+ 32 | 
+ 14 | 
+ 6 | 
+
+ GPT-5.2 | 
+ 40 | 
+ 23 | 
+ 23 | 
+ 32 | 
+ 23 | 
+ 11 | 
+ 30 | 
+ 18 | 
+ 10 | 
+
+ Claude-Sonnet-4.5 | 
+ 46 | 
+ 8 | 
+ 8 | 
+ 36 | 
+ 19 | 
+ 12 | 
+ 36 | 
+ 12 | 
+ 12 | 
+
+ DeepSeek-R1 | 
+ 25 | 
+ 8 | 
+ 7 | 
+ 22 | 
+ 15 | 
+ 8 | 
+ 8 | 
+ 2 | 
+ 2 | 
+
+ Qwen-3-Coder-480B | 
+ 21 | 
+ 5 | 
+ 1 | 
+ 18 | 
+ 14 | 
+ 1 | 
+ 24 | 
+ 0 | 
+ 0 | 
+
+ DRTriton (test-time search) | 
+ 69 | 
+ 17 | 
+ 12 | 
+ 96 | 
+ 92 | 
+ 56 | 
+ 76 | 
+ 54 | 
+ 34 | 
+
+ Figure 4 : Performance progression across training stages on three difficulty levels. We show Acc and Faster1 metrics for the base model, after SFT, and across three DRPO training stages. 
+
+ Figure 5 : Comparison of DRPO and GRPO performance when trained on Stage 1 data (20k samples) from the same SFT checkpoint. 
+
+ 5.1 Experimental Setup 
+
+ We employ Qwen-2.5-Coder-7B-Instruct as our base model. Our training pipeline proceeds in two stages. First, SFT operates on 2,026 single-operator PyTorch-Triton pairs covering 32 fundamental operators (detailed in Section  4 ), with ground-truth Triton implementations generated using DeepSeek-R1 or GPT-5.2. We train for 10 epochs with a learning rate 2 × 10 − 6 2\times 10^{-6} , a batch size 64. Second, we apply DRPO in three sequential curriculum stages. Each stage lasts for 1 epoch with a learning rate 1 × 10 − 6 1\times 10^{-6} with hyper-parameters ( β 0 , τ , λ ) = ( 100 , 5 , 0.1 ) (\beta_{0},\tau,\lambda)=(100,5,0.1) , and KL constraint upper bound δ = 0.001 \delta=0.001 . We generate 8 rollouts per prompt. 
+
+ Benchmarks    Our evaluation uses two complementary benchmarks. The synthetic benchmark contains 406 held-out PyToch programs with no overlap with training data, spanning four difficulty levels: 106 single-operator programs (Level 1) covering 53 operators with 2 programs each, 100 two-operator programs (Level 2), 100 five-operator programs (Level 5), and 100 twenty-operator programs (Level 20). This benchmark systematically evaluates the model’s ability to scale from simple single-operator translation to complex multi-operator kernel fusion. The KernelBench benchmark comprises 250 PyTorch programs for neural network operations across three difficulty levels: Level 1 (100 tasks) contains single-kernel operators like convolution, matrix multiplications, and activations; Level 2 (100 tasks) includes fusion patterns such as convolution with bias and ReLU; and Level 3 (50 tasks) features complete ML architectures including MobileNet, VGG, and MiniGPT. 
+
+ Evaluations    We employ the same verification protocol described in Section  4.1 to verify the generated Triton kernels. We report three metrics: (1) Acc as the percentage of kernels that pass verification, (2) Faster1 as the percentage of kernels that are both correct and achieve more than 1x speedup over the PyTorch execution, and (3) Average speedup across all verified kernels, computed using the geometric mean. 
+
+ Baselines    We compare against several baselines spanning commercial LLMs (GPT-5.2, Claude Sonnet 4.5), open-source models (DeepSeek-R1, Qwen-3-Coder-480B), and a specialized model (AutoTriton). The prompt template is given in the appendix  F . 
+
+ 5.2 Results on Synthetic Benchmarks 
+
+ Table  1 and Figure  3 present our main results on the synthetic benchmark, demonstrating that DRTriton substantially outperforms all baselines across all difficulty levels in both functional correctness and speed optimization. 
+
+ DRTriton outperforms all other baselines on accuracy. On single-operator kernels (Level 1), DRTriton achieves 86.8% accuracy, significantly exceeding Claude Sonnet 4.5 (67.9%). On Level 2, DRTriton reaches 75.0% accuracy versus 49.0% for Claude. Notably, DRTriton achieves non-trivial accuracy (15.0%) on highly complex Level 5 programs, while most baselines fail almost completely, with accuracies ranging from 1% to 9%. 
+
+ DRTriton generates substantially faster kernels. On Level 1 tasks, 32.1% of DRTriton’s correct kernels achieve more than 1x speedup (Faster1 metric), compared to 17.0% for GPT-5.2 and 14.2% for Claude. This advantage amplifies on harder tasks: on Level 2, DRTriton achieves 54.0% for Faster1, far exceeding all baselines. This demonstrates that DRPO’s speed-based reward weighting ω ⁡ ( o | q ) \omega(o|q) successfully guides the model toward generating optimized, not merely correct, kernel implementations. 
+
+ Effectiveness of curriculum RL. Figure  4 shows the performance progression across our curriculum-based training. DRPO training demonstrates substantial improvements over the SFT baseline. For level 1 and level 2, peak performance is achieved at DRPO stage 2 for most metrics before a slight regression in stage 3. For level 5, we observe steady improvement in performance. 
+
+ Effectiveness of test-time search. Test-time search dramatically improves performance on complex programs. Counterintuitively, longer and harder programs achieve higher accuracy and better speedup after test-time search. This occurs because longer programs contain more code segments with optimization potential, making it easier for DRTriton to identify and improve inefficient fragments. Test-time search improves average speedup from 1.20× to 1.57×, demonstrating that fragment-based kernel composition preserves and enhances optimization quality. 
+
+ 5.3 Results on KernelBench 
+
+ While our synthesis framework generates programs in functional format, the object-oriented PyTorch code in KernelBench presents a significant distribution shift from our training data. 
+
+ To evaluate on KernelBench’s real-world models, we developed an automatic tool that rewrites PyTorch code into a functional format. Similar to Figure  1 (right), the functional format contains an entry point function fused_operator , where each line follows the pattern out = op ​ ( in 1 , in 2 ​ … , in m ) \texttt{out}=\texttt{op}(\text{in}_{1},\text{in}_{2}\dots,\text{in}_{m}) , aligning with our training data distribution. The tool instruments PyTorch’s execution by patching core operators (including torch.nn.Parameter , torch.nn.functional , torch.* , tensor methods, and arithmetic operators) to capture the complete computational graph during model initialization and forward pass. It then generates functionally equivalent code. An example is provided in Appendix  E . 
+
+ Given the functional code, we then apply test-time search to identify the optimal kernel, and measure execution speed against both the original PyTorch implementation and the torch.compile baseline. Table  2 and Figure  6 present the results. With code rewriting and test-time search, our model can generalize to real-world kernels, achieving substantially higher accuracy and faster execution speed across all difficulty levels comparing to baseline methods. At Level 1 (single operators), DRTriton achieves 69% accuracy with modest speedups over Torch Eager (TE: 17%) and torch.compile (TC: 12%), as these operators are already well-optimized in PyTorch. At Level 2, performance improves dramatically: 96% accuracy with 92% faster than TE and 56% faster than TC, demonstrating DRTriton’s strength in multi-operator fusion. At Level 3 (complete architectures), DRTriton maintains 76% accuracy with 54% outperforming TE and 34% outperforming TC, significantly exceeding all baseline LLMs on these challenging real-world implementations. We provide a detailed example of a Level 3 kernel generation in Appendix  G . 
+
+ 5.4 Ablation Studies 
+
+ We conduct two ablation studies to validate key design choices. 
+
+ Ablation on RL algorithm. Figure  5 compares DRPO with GRPO on identical Stage 1 training data from the same SFT checkpoint. For GRPO, we design the reward as: 
+
+ | 
+ r ⁡ ( o ) = { 1 + f ⁡ ( t torch t triton ) if correct kernel 0 otherwise r(o)=\begin{cases}1+f\left(\frac{t_{\text{torch}}}{t_{\text{triton}}}\right)&\text{if correct kernel}\\
+0&\text{otherwise}\end{cases} | 
+ | 
+
+ The GRPO objective is detailed in Appendix  H . We can see that DRPO consistently outperforms GRPO across all metrics. 
+
+ Ablation on reward design. Table  4 in Appendix  D.2 examines different reward function designs for the speed component r s ​ ( o ) r_{s}(o) in DRPO. We compare the logarithmic form r s ​ ( o ) = log ⁡ ( t torch / t triton ) r_{s}(o)=\log(t_{\text{torch}}/t_{\text{triton}}) against power forms r s ​ ( o ) = ( t torch / t triton ) α r_{s}(o)=(t_{\text{torch}}/t_{\text{triton}})^{\alpha} for α ∈ { 0.25 , 0.5 , 0.75 , 1.0 } \alpha\in\{0.25,0.5,0.75,1.0\} . 
+
+ 6 Conclusion 
+
+ We have presented a novel framework DRTriton for training a PyTorch-to-Triton LLM exclusively on synthetic data using reinforcement learning. DRTriton achieves performance that surpasses state-of-the-art commercial AI systems and is competitive with leading compiler technologies. We hope this work will inspire future research in LLM-based GPU kernel optimization. 
+
+ Impact Statement 
+
+ This paper presents work whose goal is to advance the field of Machine
+Learning. There are many potential societal consequences of our work, none
+which we feel must be specifically highlighted here.

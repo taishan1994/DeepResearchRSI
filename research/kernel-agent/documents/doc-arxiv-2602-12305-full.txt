@@ -1,0 +1,4277 @@
+OptiML: An End-to-End Framework for Program Synthesis and CUDA Kernel Optimization 
+
+ Arijit Bhattacharjee
+
+ Affiliation:  Iowa State University, Ames, Iowa, USA
+
+ Correspondence to: arbhatt9@iastate.edu 
+
+ Heng Ping
+
+ Affiliation:  University of Southern California, Los Angeles, California, USA
+
+ Son Vu Le
+
+ Affiliation:  Iowa State University, Ames, Iowa, USA
+
+ Paul Bogdan
+
+ Affiliation:  University of Southern California, Los Angeles, California, USA
+
+ Nesreen K. Ahmed
+
+ Affiliation:  Cisco AI Research, San Jose, California, USA
+
+ Ali Jannesari
+
+ Affiliation:  Iowa State University, Ames, Iowa, USA
+
+ Abstract 
+
+ Generating high-performance CUDA kernels remains challenging due to the need to navigate a combinatorial space of low-level transformations under noisy and expensive hardware feedback. Although large language models can synthesize functionally correct CUDA code, achieving competitive performance requires systematic exploration and verification of optimization choices. We present OptiML, an end-to-end framework that maps either natural-language intent or input CUDA code to performance-optimized CUDA kernels by formulating kernel optimization as search under verification . 
+
+ OptiML consists of two decoupled stages. When the input is natural language, a Mixture-of-Thoughts generator ( OptiML-G ) acts as a proposal policy over kernel implementation strategies, producing an initial executable program. A search-based optimizer ( OptiML-X ) then refines either synthesized or user-provided kernels using Monte Carlo Tree Search over LLM-driven edits, guided by a hardware-aware reward derived from profiler feedback. Each candidate transformation is compiled, verified, and profiled with Nsight Compute, and evaluated by a composite objective that combines runtime with hardware bottleneck proxies and guardrails against regressions. We evaluate OptiML in both synthesis-and-optimize and optimization-only settings on a diverse suite of CUDA kernels. Results show that OptiML consistently discovers verified performance improvements over strong LLM baselines and produces interpretable optimization trajectories grounded in profiler evidence. 
+
+ Keywords:  Machine Learning, ICML
+
+ 1 Introduction 
+
+ Modern accelerator programming remains a central bottleneck for scientific computing and machine learning systems  ( Chen et al., 2018 ; Zheng et al., 2020 ) . While GPUs offer immense throughput, achieving high performance still demands expertise in memory hierarchies, execution configuration, synchronization, and compiler behavior  ( Dao et al., 2022 ) . The gap between functionally correct kernels and performance-portable kernels is particularly wide: small code decisions (e.g., access patterns, reuse strategy, and instruction mix) can shift a kernel from compute-bound to memory-bound or vice versa, and the appropriate optimization depends on both hardware and workload characteristics  ( Ouyang et al., 2025 ; Rodriguez et al., 2025 ) .
+This challenge is amplified in emerging workflows where kernels are produced (or edited) by large language models (LLMs)  ( Chen et al., 2021 ; Jiang et al., 2024 ) . Although LLMs can often synthesize syntactically valid CUDA code, the resulting kernels may fail to compile, violate numerical constraints, or leave substantial performance untapped due to missed low-level transformations  ( Chen et al., 2025b ; Nichols et al., 2024 ; Ouyang et al., 2025 ) . More broadly, existing research treats code generation and optimization as separate problems: prior work either translates high-level programs (e.g., C++ or Python) into CUDA  ( Tehrani et al., 2024 ; Ke et al., 2025 ; Wen et al., 2022 ) or tunes existing kernels through autotuning  ( Hozzová et al., 2021 ; Bjertnes et al., 2021 ) and heuristics. In contrast, we study an end-to-end setting in which the input may be either natural-language intent or user-provided code and the output is a performance-optimized CUDA kernel. 
+
+ A natural response is to apply automated optimization after code generation  ( Ye et al., 2025 ) . However, existing post-hoc optimization approaches face two fundamental difficulties. First, the optimization space for GPU kernels is combinatorial and non-smooth: changes such as tiling, vectorization, shared-memory staging, or loop restructuring interact in complex ways with register pressure, occupancy, and memory coalescing. Second, performance feedback is expensive and noisy; relying solely on end-to-end timing can obscure the root cause of inefficiency and makes search brittle  ( Chen et al., 2025a ; Tschand et al., 2025 ) . As a result, naive strategies, such as random perturbations, greedy edits, or fixed rule-based passes, often converge slowly, overfit to narrow kernel classes, or fail to generalize across diverse patterns  ( Ye et al., 2025 ; Guo et al., 2025 ) . 
+
+ In this paper, we present OptiML , an end-to-end framework that unifies program synthesis and kernel optimization, directly addressing the separation between generation and tuning in prior work. Unlike existing approaches that either translate high-level programs into CUDA or optimize pre-existing kernels in isolation, OptiML maps either natural-language intent or input CUDA code to performance-optimized kernels by formulating kernel optimization as a guided decision process grounded in hardware behavior   ( Li et al., 2025b ; Baronio et al., 2025 ) . OptiML consists of two decoupled components. OptiML-G is a Mixture-of-Thoughts generator  ( Fein-Ashley et al., 2025 ) that acts as a proposal policy generator over kernel implementation strategies when the input is natural language, synthesizing an initial executable program. OptiML-X is a search-based optimization engine that refines either synthesized or user-provided kernels by exploring program transformations using Monte Carlo Tree Search (MCTS)   ( Kocsis & Szepesvári, 2006 ; Lim & Yoo, 2016 ) and an LLM-as-a-Judge   ( Zheng et al., 2023 ) to propose and evaluate candidate edits at test time  ( Wang et al., 2025b ; Xu et al., 2025 ) . Rather than treating optimization as black-box tuning, OptiML-X leverages profiler-derived proxy metrics (e.g., utilization and memory-traffic surrogates) to identify performance bottlenecks  ( Bhattacharjee et al., 2023 ) and prioritize transformations that target them. This framing makes the search both more sample-efficient and more interpretable: the system can attribute improvements to reduced memory traffic, improved utilization, or lower instruction footprint, and can avoid edits that trade one bottleneck for another. 
+
+ Post-hoc optimization alone may be helpful but often insufficient when the initial program structure is poor, incomplete, or fails to compile, as search-based refinement cannot reliably recover high-performance kernels from weak starting points. OptiML addresses this limitation by augmenting optimization with a proposal generator that generates optimization-ready and structurally strong kernels from natural language intent. In this role, OptiML-G provides a structured initialization by routing among latent implementation strategies to synthesize an executable kernel that exposes meaningful opportunities for transformation. 
+
+ The full end-to-end proposed framework, OptiML (OptiML-G + OptiML-X) , therefore unifies program synthesis and optimization into a single end-to-end pipeline. When the input is natural language, OptiML-G supplies a strong starting point that enables effective downstream search. When the input is user-provided code, OptiML bypasses generation and directly applies the same profiler-grounded optimization procedure. In both cases, performance improvements are driven by verified transformations grounded in hardware feedback rather than by one-shot code generation. 
+
+ Contributions. 
+
+ This paper makes the following contributions: 
+
+ • 
+
+ We formulate the problem of intent-conditioned CUDA kernel optimization , mapping either natural-language specifications or existing kernels to performance-optimized CUDA code under correctness and hardware constraints. 
+
+ • 
+
+ We present OptiML , an end-to-end generate-then-optimize framework that unifies a Mixture-of-Thoughts proposal policy generator ( OptiML-G ) with search-based optimization via Monte Carlo Tree Search ( OptiML-X ). 
+
+ • 
+
+ We introduce OptiML-X , a CUDA kernel optimizer that explores multi-step program transformations using Monte Carlo Tree Search guided by an LLM-as-a-Judge and profile-derived proxy metrics to target performance bottlenecks. 
+
+ • 
+
+ We provide an interpretable evaluation pipeline based on utilization and work proxies to explain why kernels improve, not just that they improve, and empirically show that OptiML consistently outperforms strong LLM baselines and optimization-only variants on a diverse suite of CUDA kernels. 
+
+ 2 Related Works 
+
+ Recent work has begun to use LLMs not just to write kernels ( Tehrani et al., 2024 ) ( Wen et al., 2022 ) , but to optimize them with performance feedback and search. On the evaluation side, KernelBench ( Ouyang et al., 2025 ) , Kevin ( Baronio et al., 2025 ) studies whether LLMs can generate efficient PyTorch ( Paszke et al., 2019 ) GPU kernels end-to-end, highlighting frequent correctness/compilation failures and a large gap to expert-tuned implementations even when code runs. Complementarily, TritonBench ( Li et al., 2025a ) targets the Triton ( Tillet et al., 2019 ) operator domain and provides a controlled benchmark for LLM-generated GPU operators. Moving from benchmarks to optimization systems, several agentic pipelines iteratively propose kernel edits, compile/repair, test, profile, and select improved candidates e.g., AutoTriton ( Li et al., 2025b ) performs automated search/optimization over Triton kernels; Geak ( Wang et al., 2025a ) introduces a Triton kernel agent and evaluation benchmarks; and multi-agent frameworks such as Astra ( Wei et al., 2025 ) coordinate diagnosis and rewrite steps for GPU kernel performance. Other lines of work incorporate hardware-aware signals and structured search in the loop (e.g., SwizzlePerf ( Tschand et al., 2025 ) for hardware-aware kernel tuning), and explore CUDA-specific iterative optimization for key kernels like GEMM (e.g., CUDA-L2 ) ( Su et al., 2025 ) or broader evolutionary/iterative improvement settings (e.g., EvoEngineer ) ( Guo et al., 2025 ) . Across these efforts, a common theme is closing the spec → \rightarrow correct → \rightarrow fast loop by combining (i) automated compilation repair and test harnesses with (ii) profiling-driven feedback and (iii) explicit search/planning over optimization actions, motivating systems like ours that unify correctness guarding with performance-aware search and LLM judging. 
+
+ Figure 1 : Overview of OptiML. OptiML-G (left) routes inputs through multiple experts with latent-space collaboration to generate initial kernels. OptiML-X (right) optimizes kernels via MCTS with hardware-aware rewards. 
+
+ 3 OptiML : LLM-Guided CUDA Optimization with Search and Hardware Feedback 
+
+ 3.1 OptiML-G 
+
+ When the input is a natural-language task description rather than existing CUDA code, OptiML first synthesizes an initial kernel via OptiML-G, a code-generation module built on the Mixture of Thoughts (MoT) framework  ( Fein-Ashley et al., 2025 ) . The generated kernel then enters the OptiML-X optimization pipeline (Section  3.2 ). 
+
+ 3.1.1 Problem Setting 
+
+ Given a natural-language specification 𝒟 \mathcal{D} describing the desired kernel functionality, OptiML-G produces an initial CUDA implementation P k ( 0 ) P_{k}^{(0)} that serves as input to OptiML-X: 
+
+ | 
+ 𝒟 → OptiML-G P k ( 0 ) → OptiML-X P k ( ∗ ) . \mathcal{D}\;\xrightarrow{\text{OptiML-G}}\;P_{k}^{(0)}\;\xrightarrow{\text{OptiML-X}}\;P_{k}^{(*)}. | 
+ | 
+
+ This end-to-end pipeline enables users to obtain optimized CUDA kernels directly from high-level descriptions without manual implementation. 
+
+ 3.1.2 Expert Pool and Global Routing 
+
+ OptiML-G maintains a pool of M M frozen pre-trained code-generation experts { ℰ 0 , … , ℰ M − 1 } \{\mathcal{E}_{0},\dots,\mathcal{E}_{M-1}\} , each potentially differing in architecture, parameter count, or training corpus. Given input prompt 𝒟 \mathcal{D} , a lightweight router r θ r_{\theta} computes relevance scores over experts: 
+
+ | 
+ 𝐬 = r θ ​ ( 𝐳 ) , 𝐳 = PromptEnc ​ ( 𝒟 ) , \mathbf{s}=r_{\theta}(\mathbf{z}),\quad\mathbf{z}=\textsc{PromptEnc}(\mathcal{D}), | 
+ | 
+
+ where 𝐳 ∈ ℝ d \mathbf{z}\in\mathbb{R}^{d} is a fixed-dimensional embedding from a frozen encoder. The router selects the top- K K experts as the active set ℐ active = TopK ​ ( 𝐬 , K ) \mathcal{I}_{\text{active}}=\textsc{TopK}(\mathbf{s},K) , designating the highest-scoring expert as the primary expert m ∗ = arg ⁡ max m ∈ ℐ active ⁡ s m m^{*}=\arg\max_{m\in\mathcal{I}_{\text{active}}}s_{m} , which is responsible for final token generation. 
+
+ 3.1.3 Latent-Space Collaboration via Interaction Layers 
+
+ Unlike routing methods that generate from a single expert independently, OptiML-G enables fine-grained collaboration among selected experts in a shared latent space. Each expert ℰ m \mathcal{E}_{m} with L m L_{m} transformer layers  ( Vaswani et al., 2017 ) is partitioned into Q Q contiguous stacks: 
+
+ | 
+ ℰ m = { S m 0 , S m 1 , … , S m Q − 1 } , | S m q | = L m / Q . \mathcal{E}_{m}=\{S_{m}^{0},S_{m}^{1},\dots,S_{m}^{Q-1}\},\quad|S_{m}^{q}|=L_{m}/Q. | 
+ | 
+
+ At the boundary of each stack ℓ \ell , the hidden states 𝐡 m ℓ ∈ ℝ N × d m \mathbf{h}_{m}^{\ell}\in\mathbb{R}^{N\times d_{m}} of active experts are projected into a shared latent dimension d s d_{s} via learned projectors: 
+
+ | 
+ 𝐳 m ℓ = FwdProj m ℓ ​ ( 𝐡 m ℓ ) , 𝐳 m ℓ ∈ ℝ N × d s . \mathbf{z}_{m}^{\ell}=\textsc{FwdProj}_{m}^{\ell}(\mathbf{h}_{m}^{\ell}),\quad\mathbf{z}_{m}^{\ell}\in\mathbb{R}^{N\times d_{s}}. | 
+ | 
+
+ The primary expert m ∗ m^{*} then integrates information from all active peers through cross-attention: 
+
+ | 
+ 𝐪 ℓ \displaystyle\mathbf{q}^{\ell} | 
+ = 𝐳 m ∗ ℓ , 𝐤 ℓ = 𝐯 ℓ = Concat ​ { 𝐳 m ℓ ∣ m ∈ ℐ active } , \displaystyle=\mathbf{z}_{m^{*}}^{\ell},\quad\mathbf{k}^{\ell}=\mathbf{v}^{\ell}=\textsc{Concat}\{\mathbf{z}_{m}^{\ell}\mid m\in\mathcal{I}_{\text{active}}\}, | 
+ | 
+ (1) | 
+
+ | 
+ 𝐨 m ∗ ℓ \displaystyle\mathbf{o}_{m^{*}}^{\ell} | 
+ = CrossAttn ​ ( 𝐪 ℓ , 𝐤 ℓ , 𝐯 ℓ , 𝐖 Q ℓ , 𝐖 K ℓ , 𝐖 V ℓ , 𝐖 O ℓ ) . \displaystyle=\textsc{CrossAttn}(\mathbf{q}^{\ell},\mathbf{k}^{\ell},\mathbf{v}^{\ell};\mathbf{W}_{Q}^{\ell},\mathbf{W}_{K}^{\ell},\mathbf{W}_{V}^{\ell},\mathbf{W}_{O}^{\ell}). | 
+ | 
+ (2) | 
+
+ The attended output is projected back and added as a residual update: 
+
+ | 
+ 𝐡 m ∗ ℓ ← 𝐡 m ∗ ℓ + RevProj m ∗ ℓ ​ ( 𝐨 m ∗ ℓ ) . \mathbf{h}_{m^{*}}^{\ell}\;\leftarrow\;\mathbf{h}_{m^{*}}^{\ell}+\textsc{RevProj}_{m^{*}}^{\ell}(\mathbf{o}_{m^{*}}^{\ell}). | 
+ | 
+
+ This mechanism allows the primary expert to aggregate complementary “thoughts” (hidden representations) from heterogeneous peers at multiple depths, going beyond output-level ensembling while requiring only a single forward pass. Our expert choices are highlighted in Appendix D.1 . 
+
+ 3.1.4 Training Objective 
+
+ Only the router r θ r_{\theta} , projectors, and cross-attention weights are trained; all expert backbones remain frozen. The training objective combines language modeling loss with routing regularizers: 
+
+ | 
+ ℒ total = ℒ LM + λ ent ​ ℒ ent + λ bal ​ ℒ bal + λ con ​ ℒ con , \mathcal{L}_{\text{total}}=\mathcal{L}_{\text{LM}}+\lambda_{\text{ent}}\mathcal{L}_{\text{ent}}+\lambda_{\text{bal}}\mathcal{L}_{\text{bal}}+\lambda_{\text{con}}\mathcal{L}_{\text{con}}, | 
+ | 
+ (3) | 
+
+ where ℒ LM \mathcal{L}_{\text{LM}} is the autoregressive loss from the primary expert, ℒ ent \mathcal{L}_{\text{ent}} encourages exploration by maximizing router entropy, ℒ bal \mathcal{L}_{\text{bal}} promotes balanced expert utilization, and ℒ con \mathcal{L}_{\text{con}} enforces routing consistency under stochastic perturbations. Routing gradients are obtained via the Gumbel-Softmax ( Jang et al., 2017 ) straight-through estimator. Training in detail is presented in Appendix B . 
+
+ 3.1.5 Inference 
+
+ At inference time, OptiML-G performs a single forward pass: the router selects active experts, all selected experts process the prompt through their stacks in parallel with interaction layers enabled, and the primary expert emits output tokens while integrating latent information from its peers. This achieves routing-level efficiency with richer representational capacity than single-expert generation. 
+
+ 3.2 OptiML-X 
+
+ 3.2.1 Problem Setting 
+
+ Given a CUDA source file containing one or more __global__ kernels, OptiML-X takes as input only the CUDA code (no original prompt or developer annotations) and produces an optimized kernel implementation, along with a structured evaluation report (correctness tests, runtime measurements, and Nsight Compute metrics). Formally, for each discovered kernel k k in program P P , OptiML-X searches over code variants: 
+
+ | 
+ P k ( 0 ) → P k ( 1 ) → ⋯ → P k ( ∗ ) , P_{k}^{(0)}\;\rightarrow\;P_{k}^{(1)}\;\rightarrow\;\cdots\;\rightarrow\;P_{k}^{(*)}, | 
+ | 
+
+ where P k ( 0 ) P_{k}^{(0)} is the baseline kernel extracted from the input source, and P k ( ∗ ) P_{k}^{(*)} is the selected optimized kernel variant. 
+
+ The objective is a constrained optimization: 
+
+ | 
+ min P k \displaystyle\min_{P_{k}}\quad | 
+ T ⁡ ( P k ) \displaystyle T(P_{k}) | 
+ | 
+ (4) | 
+
+ | 
+ s.t. | 
+ Correct ​ ( P k ) = 1 \displaystyle\textsc{Correct}(P_{k})=1 | 
+ | 
+ (5) | 
+
+ | 
+ | 
+ Guardrails ​ ( P k ) = 1 , \displaystyle\textsc{Guardrails}(P_{k})=1, | 
+ | 
+ (6) | 
+
+ where T ⁡ ( P k ) T(P_{k}) is measured runtime (latency), Correct enforces functional correctness, and Guardrails enforces hardware- and compilation-safety constraints derived from profiling signals as shown in 1 . 
+
+ 3.2.2 Kernel Discovery & Specifier 
+
+ OptiML-X scans the CUDA source and extracts candidate kernels: 
+
+ | 
+ 𝒦 = { k ∣ k ​  is a  __global__  function in the source } . \mathcal{K}\;=\;\{k\mid k\text{ is a }\texttt{\_\_global\_\_}\text{ function in the source}\}. | 
+ | 
+
+ Each kernel k ∈ 𝒦 k\in\mathcal{K} is optimized independently, enabling multi-kernel compilation units to be processed end-to-end.
+Because OptiML-X receives only CUDA code, it must infer the execution contract for each kernel: argument kinds (pointer vs. scalar), element types, and a plausible workload size (e.g. N N ). The Specifier produces a structured specification: 
+
+ | 
+ Spec ​ ( k ) = { ( a i , τ i , κ i ) } i = 1 m ∪ WorkloadParams , \textsc{Spec}(k)\;=\;\{(a_{i},\tau_{i},\kappa_{i})\}_{i=1}^{m}\cup\textsc{WorkloadParams}, | 
+ | 
+
+ where a i a_{i} is an argument, τ i \tau_{i} is its inferred type, and κ i ∈ { ptr , scalar } \kappa_{i}\in\{\text{ptr},\text{scalar}\} is its kind. This spec is used to synthesize a runner that allocates buffers, initializes inputs, launches k k , and extracts outputs for correctness checking. 
+
+ 3.2.3 TestPlan: Multi-Level Correctness 
+
+ OptiML-X generates a correctness plan consisting of three tiers: 
+
+ • 
+
+ L0 (Smoke): small sizes and sanity checks to catch crashes, NaNs, and gross shape mismatches. 
+
+ • 
+
+ L1 (Randomized): multiple trials across sizes, seeded randomness, and numerical tolerances. 
+
+ • 
+
+ L2 (Metamorphic Relations, optional): relation tests (e.g. scaling invariance, symmetry, permutation equivariance) when the kernel semantics can be inferred confidently. 
+
+ In many kernels, L2 may be empty if no safe metamorphic relation is inferred; OptiML-X still enforces L0/L1 strictly (Eq.  5 ). 
+
+ 3.2.4 Runner Synthesis, Compilation, and Repair 
+
+ OptiML-X synthesizes a standalone harness H k H_{k} that:
+(i) allocates device buffers for pointer arguments,
+(ii) initializes inputs (e.g. random floats),
+(iii) and launches k k under a chosen grid/block configuration, 
+
+ If compilation fails, OptiML-X enters a bounded repair self refine  ( Madaan et al., 2023 ) loop: 
+
+ | 
+ H k → nvcc error LLM repair → H k ′ → ⋯ H_{k}\xrightarrow{\text{nvcc error}}\text{LLM repair}\xrightarrow{}H_{k}^{\prime}\xrightarrow{}\cdots | 
+ | 
+
+ until successful compilation or a maximum repair budget is reached. 
+
+ 3.2.5 Profiling Signals (Time + NCU) 
+
+ For each compiled candidate kernel variant P k ( t ) P_{k}^{(t)} , OptiML collects: 
+
+ • 
+
+ Runtime: T t T_{t} (mean kernel time / harness time, depending on measurement mode). 
+
+ • 
+
+ NCU Metrics: a vector 𝐦 t ∈ ℝ d \mathbf{m}_{t}\in\mathbb{R}^{d} extracted from Nsight Compute, including (representative): 
+
+ | 
+ 𝐦 t = [ SOL s ​ m , SOL d ​ r ​ a ​ m , SOL t ​ e ​ x , dramBytes , l1Sectors , inst , warpsActive , regs , … ] . \begin{split}\mathbf{m}_{t}=[\text{SOL}_{sm},\text{SOL}_{dram},\text{SOL}_{tex},\text{dramBytes},\\
+\text{l1Sectors},\text{inst},\text{warpsActive},\text{regs},\dots].\end{split} | 
+ | 
+ (7) | 
+
+ 3.2.6 Search-Based Optimization with MCTS 
+
+ OptiML-X uses Monte Carlo Tree Search (MCTS) to explore multi-step optimization trajectories (useful when intermediate steps regress performance but enable later improvements). Each node represents a program variant and its measured feedback: 
+
+ | 
+ s t = ( P k ( t ) , T t , 𝐦 t ) . s_{t}\;=\;(P_{k}^{(t)},\,T_{t},\,\mathbf{m}_{t}). | 
+ | 
+
+ Edges correspond to edits proposed by the LLM. MCTS proceeds for a budget B B iterations. 
+
+ Upper Confidence bounds applied to Trees (UCT). 
+
+ UCT  ( Kocsis & Szepesvári, 2006 ) is the selection rule used in Monte Carlo Tree Search (MCTS) to balance
+ exploitation (prefer branches with high observed reward) and
+ exploration (try less-visited branches that may still be promising).
+For a parent node p p and a child node c c , UCT selects the child maximizing: 
+
+ | 
+ UCT ⁡ ( c ) = Q ⁡ ( c ) N ⁡ ( c ) + α ​ ln ⁡ N ⁡ ( p ) N ⁡ ( c ) , \mathrm{UCT}(c)=\frac{Q(c)}{N(c)}+\alpha\sqrt{\frac{\ln N(p)}{N(c)}}, | 
+ | 
+ (8) | 
+
+ where Q ⁡ ( c ) Q(c) is the cumulative reward backpropagated to c c , N ⁡ ( c ) N(c) is the visit
+count of c c , N ⁡ ( p ) N(p) is the visit count of p p , and α > 0 \alpha>0 controls the
+exploration strength. The first term Q ⁡ ( c ) N ⁡ ( c ) \frac{Q(c)}{N(c)} favors children with
+high average reward, while the second term encourages exploring children with
+high uncertainty (small N ⁡ ( c ) N(c) ), ensuring the search does not prematurely
+commit to a suboptimal branch. 
+
+ Diagnosis and Proposal (LLM). 
+
+ Given ( P k ( t ) , 𝐦 t ) (P_{k}^{(t)},\mathbf{m}_{t}) , the LLM proposes a ranked list of bottleneck hypotheses (e.g. compute-bound, cache-bound, occupancy-limited), then emits a concrete patch/edit addressing the selected hypothesis (e.g. tiling, vectorization, unrolling, launch changes). 
+
+ Execution. 
+
+ Each proposal is materialized, compiled, and evaluated: 
+
+ | 
+ P k ( t ) → patch P k ( t + 1 ) → compile → tests → profile ( T t + 1 , 𝐦 t + 1 ) . P_{k}^{(t)}\xrightarrow{\text{patch}}P_{k}^{(t+1)}\xrightarrow{\text{compile}}\xrightarrow{\text{tests}}\xrightarrow{\text{profile}}(T_{t+1},\mathbf{m}_{t+1}). | 
+ | 
+
+ Candidates failing compilation or L0/L1 tests receive strong negative reward and are pruned. 
+
+ 3.2.7 Reward Model: Time + Proxy Metrics + Guardrails + LLM Judge 
+
+ OptiML-X uses a composite reward that blends measured runtime , hardware proxy signals , guardrails , and an LLM judge . Let baseline be ( T 0 , 𝐦 0 ) (T_{0},\mathbf{m}_{0}) and candidate be ( T , 𝐦 ) (T,\mathbf{m}) . 
+
+ Time Reward. 
+
+ We define a bounded time-improvement term: 
+
+ | 
+ r time = tanh ⁡ ( α t ⋅ T 0 − T max ⁡ ( T 0 , ϵ ) ) , r_{\text{time}}\;=\;\tanh\!\left(\alpha_{t}\cdot\frac{T_{0}-T}{\max(T_{0},\epsilon)}\right), | 
+ | 
+ (9) | 
+
+ where α t \alpha_{t} controls sensitivity. 
+
+ Proxy Reward from NCU Metrics. 
+
+ Let Δ + ​ SOL m = SOL m − SOL m , 0 \Delta^{+}\mathrm{SOL}_{m}=\mathrm{SOL}_{m}-\mathrm{SOL}_{m,0} denote an increase in utilization (good),
+and Δ − ​ X x = X x , 0 − X x \Delta^{-}X_{x}=X_{x,0}-X_{x} denote a reduction in work metrics (good).
+We define the shaping reward: 
+
+ | 
+ r proxy = ∑ m ∈ { s ​ m , d ​ r ​ a ​ m , t ​ e ​ x } w m ​ clip ​ ( Δ + ​ SOL m 100 ) + ∑ x ∈ { l1_sectors , dram_bytes , inst_executed } w x clip ( Δ − ​ X x X x , 0 + ϵ ) , \scriptsize\begin{split}r_{\text{proxy}}=\sum_{m\in\{sm,dram,tex\}}w_{m}\,\mathrm{clip}\!\Big(\tfrac{\Delta^{+}\mathrm{SOL}_{m}}{100}\Big)\\
++\sum_{x\in\{\texttt{l1\_sectors},\texttt{dram\_bytes},\texttt{inst\_executed}\}}w_{x}\,\mathrm{clip}\!\Big(\tfrac{\Delta^{-}X_{x}}{X_{x,0}+\epsilon}\Big),\end{split} | 
+ | 
+ (10) | 
+
+ where clip ⁡ ( z ) = max ⁡ ( − 1 , min ⁡ ( 1 , z ) ) \mathrm{clip}(z)=\max(-1,\min(1,z)) and ϵ \epsilon prevents division by zero.
+This proxy is a shaping signal (not a substitute for time) that favors edits which
+increase utilization and/or reduce memory traffic and instruction footprint. 
+
+ Bottleneck-aware reward. 
+
+ We use bottleneck-aware proxy weighting: the reward reweights utilization/traffic terms depending on whether the kernel is inferred to be compute- or memory-bound from SOL gaps (details in Appendix  I.1 ). 
+
+ Guardrails (hard penalties). 
+
+ We enforce penalties for pathological candidates: 
+
+ | 
+ p guard = λ spill ⋅ 𝕀 [ lmemBytes > 0 ] + λ regs ⋅ 𝕀 [ regs > ρ max ] + λ work ⋅ 𝕀 [ dramBytes ↑ ↑ ∨ inst ↑ ↑ ] , \begin{split}p_{\text{guard}}\;=\;\lambda_{\text{spill}}\cdot\mathbb{I}[\text{lmemBytes}>0]\;+\;\lambda_{\text{regs}}\cdot\mathbb{I}[\text{regs}>\rho_{\max}]\\
+\;+\;\lambda_{\text{work}}\cdot\mathbb{I}[\text{dramBytes}\uparrow\!\!\uparrow\;\vee\;\text{inst}\uparrow\!\!\uparrow],\end{split} | 
+ | 
+ (11) | 
+
+ where ↑ ⁣ ↑ \uparrow\!\!\uparrow denotes exceeding a configured inflation threshold relative to baseline (e.g. > 1.5 × >1.5\times ). 
+
+ LLM-as-a-Judge. 
+
+ The judge receives baseline vs. candidate summaries, including ( T 0 , 𝐦 0 ) (T_{0},\mathbf{m}_{0}) and ( T , 𝐦 ) (T,\mathbf{m}) and the edit description, and outputs r llm ∈ [ − 1 , 1 ] r_{\text{llm}}\in[-1,1] and v ∈ { KEEP , DISCARD } v\in\{\text{KEEP},\text{DISCARD}\} , where r llm r_{\text{llm}} evaluates whether the edit plausibly addresses the diagnosed bottleneck and whether the measured signals corroborate that claim. 
+
+ Final Composite Reward. 
+
+ The total reward is: 
+
+ | 
+ R = β time ​ r time + β proxy ​ r proxy + β llm ​ r llm − p guard , R\;=\;\beta_{\text{time}}\,r_{\text{time}}\;+\;\beta_{\text{proxy}}\,r_{\text{proxy}}\;+\;\beta_{\text{llm}}\,r_{\text{llm}}\;-\;p_{\text{guard}}, | 
+ | 
+ (12) | 
+
+ with β \beta weights chosen to keep r time r_{\text{time}} dominant while allowing proxy shaping and judge consistency. If L0/L1 fails, OptiML-X assigns R = − ∞ R=-\infty (or a large negative constant) and rejects the candidate. 
+
+ 3.3 Backpropagation and Final Selection 
+
+ After evaluating a candidate with reward R R , MCTS backpropagates the reward along the selected path, updating visit counts and cumulative rewards used by UCT (Eq.  8 ). OptiML then selects the final output as Best KEEP chain: among candidates labeled KEEP , choose the one with highest R R . and Fallback: if no KEEP exists, return the baseline. When keep-chaining is enabled, the final code is the result of applying the sequence of KEEP edits along the chosen path (not merely the best single edit in isolation). 
+
+ 4 Evaluation Harness 
+
+ Hardware & measurement. 
+All experiments run on a NVIDIA A100 80 GB GPU. Kernels are compiled with nvcc (CUDA 12.6) and timed with CUDA events (2 warm-up + 10 timed iterations). Nsight Compute is run in separate profiling passes to collect SOL utilization metrics and instruction/traffic counters under a fixed metric set. 
+ OptiML-X uses GPT-5 mini ( Singh et al., 2025 ) internally. 
+
+ Optimization pipeline and budgets. 
+For each kernel, LLM baselines are first compilation-gated via an automated self-repair loop (up to B repair = 3 B_{\text{repair}}{=}3 attempts); candidates still failing are marked CF . OptiML-X performs MCTS over semantics-preserving code edits (tiling, shared-memory staging, vectorized/coalesced memory ops, unrolling, warp-level primitives) with maximum depth d max = 6 d_{\max}{=}6 , and UCT exploration c uct = 1.4 c_{\text{uct}}{=}1.4 . An LLM-as-a-Judge provides an edit prior and legality/bottleneck critiques using only code and previously observed profiling counters.
+
+ 5 Results 
+
+ | 
+ Hardware Utilization SOL ↑ \uparrow | 
+ Work Done ↓ \downarrow | 
+
+ Task | 
+ Model | 
+ Time (speedup) | 
+ Compute sm | 
+ Memory dram | 
+ Texture tex | 
+ dram_bytes | 
+ l1_sectors | 
+ inst_executed | 
+
+ Matrix Multiplication | 
+ GPT 5.1 | 
+ 7.20 | 
+ 71.26 | 
+ 8.42 | 
+ 91.36 | 
+ 63 | 
+ 408 | 
+ 419 | 
+
+ Qwen2.5-Coder | 
+ 7.65 (0.94 × \times ) | 
+ 69.40 | 
+ 8.10 | 
+ 90.98 | 
+ 66 | 
+ 421 | 
+ 432 | 
+
+ HPC-Coder-V2 | 
+ 7.88 (0.91 × \times ) | 
+ 68.72 | 
+ 8.02 | 
+ 90.71 | 
+ 67 | 
+ 427 | 
+ 438 | 
+
+ StarCoder2 | 
+ 8.23 (0.87 × \times ) | 
+ 67.95 | 
+ 7.92 | 
+ 90.41 | 
+ 68 | 
+ 435 | 
+ 441 | 
+
+ GPT 5.1 + OptiML-X | 
+ 4.62 (1.56 × \times ) | 
+ 78.41 | 
+ 10.62 | 
+ 92.07 | 
+ 79 | 
+ 292 | 
+ 392 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 4.98 (1.45 × \times ) | 
+ 76.58 | 
+ 10.14 | 
+ 91.22 | 
+ 74 | 
+ 318 | 
+ 400 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 4.52 (1.59 × \times ) | 
+ 79.16 | 
+ 10.86 | 
+ 92.21 | 
+ 73 | 
+ 286 | 
+ 386 | 
+
+ StarCoder2 + OptiML-X | 
+ 4.74 (1.52 × \times ) | 
+ 77.42 | 
+ 10.33 | 
+ 91.63 | 
+ 77 | 
+ 301 | 
+ 395 | 
+
+ OptiML | 
+ 4.40 (1.64 × \times ) | 
+ 81.17 | 
+ 11.03 | 
+ 92.61 | 
+ 70 | 
+ 282 | 
+ 381 | 
+
+ Max Pooling 3D | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.09 | 
+ 28.14 | 
+ 31.47 | 
+ 36.72 | 
+ 524 | 
+ 1944 | 
+ 824 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.38 (0.95 × \times ) | 
+ 26.88 | 
+ 32.12 | 
+ 35.31 | 
+ 548 | 
+ 2032 | 
+ 843 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.88 (1.04 × \times ) | 
+ 29.02 | 
+ 30.41 | 
+ 37.11 | 
+ 508 | 
+ 1891 | 
+ 809 | 
+
+ StarCoder2 + OptiML-X | 
+ 6.02 (1.01 × \times ) | 
+ 27.61 | 
+ 31.18 | 
+ 36.02 | 
+ 532 | 
+ 1978 | 
+ 831 | 
+
+ OptiML | 
+ 5.62 (1.08 × \times ) | 
+ 30.71 | 
+ 29.18 | 
+ 37.55 | 
+ 494 | 
+ 1863 | 
+ 801 | 
+
+ Multi-Head Self-Attention | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 7.90 | 
+ 48.62 | 
+ 26.41 | 
+ 60.32 | 
+ 1117 | 
+ 4213 | 
+ 2094 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 9.10 (0.87 × \times ) | 
+ 46.37 | 
+ 27.91 | 
+ 58.24 | 
+ 1183 | 
+ 4368 | 
+ 2172 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 7.55 (1.05 × \times ) | 
+ 49.31 | 
+ 25.72 | 
+ 60.88 | 
+ 1086 | 
+ 4124 | 
+ 2048 | 
+
+ StarCoder2 + OptiML-X | 
+ 8.22 (0.96 × \times ) | 
+ 47.55 | 
+ 26.98 | 
+ 59.46 | 
+ 1144 | 
+ 4286 | 
+ 2126 | 
+
+ OptiML | 
+ 6.85 (1.15 × \times ) | 
+ 50.28 | 
+ 24.88 | 
+ 61.79 | 
+ 1064 | 
+ 3961 | 
+ 2012 | 
+
+ ReLU Activation Function | 
+ GPT 5.1 | 
+ 7.50 | 
+ 12.11 | 
+ 41.37 | 
+ 16.44 | 
+ 263 | 
+ 883 | 
+ 358 | 
+
+ Qwen2.5-Coder | 
+ 7.80 (0.96 × \times ) | 
+ 11.74 | 
+ 42.12 | 
+ 16.06 | 
+ 274 | 
+ 918 | 
+ 372 | 
+
+ HPC-Coder-V2 | 
+ 8.02 (0.93 × \times ) | 
+ 11.48 | 
+ 42.43 | 
+ 15.89 | 
+ 281 | 
+ 939 | 
+ 381 | 
+
+ StarCoder2 | 
+ 8.31 (0.90 × \times ) | 
+ 11.21 | 
+ 42.77 | 
+ 15.73 | 
+ 289 | 
+ 962 | 
+ 392 | 
+
+ GPT 5.1 + OptiML-X | 
+ 4.87 (1.54 × \times ) | 
+ 15.64 | 
+ 34.28 | 
+ 18.71 | 
+ 212 | 
+ 717 | 
+ 332 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 5.24 (1.43 × \times ) | 
+ 14.92 | 
+ 35.14 | 
+ 18.21 | 
+ 220 | 
+ 751 | 
+ 342 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 4.68 (1.60 × \times ) | 
+ 15.98 | 
+ 33.61 | 
+ 18.92 | 
+ 206 | 
+ 701 | 
+ 327 | 
+
+ StarCoder2 + OptiML-X | 
+ 4.99 (1.50 × \times ) | 
+ 15.12 | 
+ 34.72 | 
+ 18.44 | 
+ 214 | 
+ 726 | 
+ 335 | 
+
+ OptiML | 
+ 4.49 (1.67 × \times ) | 
+ 16.72 | 
+ 32.03 | 
+ 19.37 | 
+ 201 | 
+ 689 | 
+ 322 | 
+
+ Categorical Cross-Entropy Loss | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.90 | 
+ 36.22 | 
+ 27.41 | 
+ 30.18 | 
+ 944 | 
+ 2412 | 
+ 1713 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 7.35 (0.94 × \times ) | 
+ 34.66 | 
+ 28.62 | 
+ 29.04 | 
+ 979 | 
+ 2514 | 
+ 1809 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 6.62 (1.04 × \times ) | 
+ 36.88 | 
+ 26.44 | 
+ 30.74 | 
+ 917 | 
+ 2346 | 
+ 1681 | 
+
+ StarCoder2 + OptiML-X | 
+ 7.08 (0.97 × \times ) | 
+ 35.14 | 
+ 27.86 | 
+ 29.62 | 
+ 956 | 
+ 2451 | 
+ 1732 | 
+
+ OptiML | 
+ 6.40 (1.08 × \times ) | 
+ 37.94 | 
+ 25.31 | 
+ 31.46 | 
+ 900 | 
+ 2272 | 
+ 1657 | 
+
+ Table 1 : End-to-end latency and Nsight Compute characterization on five representative CUDA-LLM kernels from the task suite  ( Chen et al., 2025b ) (A100 80GB). We report runtime (in seconds) (lower is better) together with utilization proxies (SM/DRAM/TEX SOL; higher is better) and work proxies (DRAM bytes, L1 sectors, and executed instructions; lower is better). For each task, we compare LLM-only baselines, their OptiML-X post-optimization variants, and OptiML (G+X). Many LLM-only baselines fail to compile (CF). Best , second , third indicate per-column ranks within each task block. 
+
+ 5.1 Bottlenecks and how OptiML-X (MCTS + LLM-as-a-Judge) alleviates them. 
+
+ Beyond raw speed, the Nsight metrics in Table  1 expose the dominant bottleneck class for each kernel and clarify why OptiML-X improves performance. 
+
+ 5.1.1 Matrix Multiplication 
+
+ For Matrix Multiplication , the baseline already exhibits high tex_SOL ( ∼ \sim 91–92) and moderate sm_SOL ( ∼ \sim 68–71), indicating a compute-/throughput-limited kernel where the primary headroom comes from improving instruction efficiency and memory locality rather than reducing total bytes. OptiML-X increases sm_SOL / dram_SOL / tex_SOL (e.g., GPT 5.1: 71.26/8.42/91.36 → \rightarrow OptiML: 81.17/11.03/92.61) while simultaneously reducing l1_sectors and inst_executed (408 → \rightarrow 282 and 419 → \rightarrow 381), consistent with better tiling, coalescing, and fewer redundant address/instruction sequences (e.g., unrolling choices, register reuse, and shared-memory staging). Our judge-guided MCTS favors rewrites that increase utilization while reducing instruction and L1 transaction counts, selecting transformations that approach peak throughput without sacrificing correctness. 
+
+ 5.1.2 Max Pooling 3D 
+
+ For Max Pooling 3D , the comparatively low sm_SOL (26.9–30.7) coupled with substantially higher dram_SOL (29–32) and large l1_sectors (1863–2032) points to a memory-traffic bottleneck driven by poor reuse and scattered access patterns typical of 3D windowing. OptiML-X reduces work metrics ( dram_bytes : 524 → \rightarrow 494, l1_sectors : 1944 → \rightarrow 1863, inst_executed : 824 → \rightarrow 801) while increasing sm_SOL and tex_SOL (28.14/36.72 → \rightarrow 30.71/37.55), suggesting improved data reuse and fewer redundant loads (e.g., staging tiles in shared memory, fusing boundary checks, and reducing repeated global reads within the pooling window). Here, the judge-guided MCTS is crucial: among many plausible rewrites, it prioritizes those that measurably lower L1 sector traffic (a proxy for cache-line transactions) while preserving or increasing SM throughput. 
+
+ 5.1.3 Multi-Head Self-Attention 
+
+ For Multi-Head Self-Attention , the high instruction count and large L1 traffic ( inst_executed ≈ \approx 2012–2172; l1_sectors ≈ \approx 3961–4368) alongside mid-to-high utilization ( sm_SOL ≈ \approx 46–50, tex_SOL ≈ \approx 58–62) indicate a mixed bottleneck: the kernel is both instruction-heavy (softmax/normalization, address arithmetic) and memory-intensive (Q/K/V loads, intermediate reductions). OptiML-X reduces dram_bytes / l1_sectors / inst_executed while increasing sm_SOL and tex_SOL (e.g., GPT 5.1+OptiML-X: 1117/4213/2094 → \rightarrow OptiML: 1064/3961/2012 and 48.62/60.32 → \rightarrow 50.28/61.79), consistent with more effective fusion and better loop structure (e.g., fewer separate passes over the same data, improved vectorized loads, and reduced control divergence). Importantly, the OptiML-X runtimes vary across generators (7.55–9.10 s), illustrating why MCTS matters: the judge provides a dense signal over intermediate candidates, enabling the search to escape local optima (e.g., “faster” rewrites that accidentally increase instruction count or L1 transactions) and converge toward globally better utilization/work trade-offs. 
+
+ 5.1.4 ReLU Activation Function 
+
+ For ReLU , the baseline behavior is dominated by overhead rather than heavy computation: sm_SOL and tex_SOL are comparatively low (11–12 and 15–16 for LLM-only baselines), while the work counters remain nontrivial for such a simple elementwise operation, indicating inefficiencies such as uncoalesced accesses, suboptimal vectorization, and extra instructions for bounds/strides. OptiML-X improves utilization and reduces work (e.g., GPT 5.1+OptiML-X: l1_sectors / inst_executed =717/332 → \rightarrow OptiML: 689/322 with higher sm_SOL / tex_SOL =16.72/19.37), aligning with transformations like vectorized loads/stores (e.g., float4 ), reduced index arithmetic, and simplified control flow. The judge-guided MCTS is effective here because small code changes yield measurable differences in instruction count and cache behavior; the search selects candidates that reduce overhead while preserving correctness. 
+
+ 5.1.5 Categorical Cross-Entropy Loss 
+
+ Finally, for Categorical Cross-Entropy , the dominant bottleneck is the combination of reduction-like control flow and memory traffic: mid-range sm_SOL (34–38) with sizeable work counters ( l1_sectors 2272–2514; inst_executed 1657–1809) suggests that performance is constrained by reduction structure (e.g., partial sums, log/exp operations, and synchronization patterns) as much as by raw memory. OptiML-X reduces dram_bytes / l1_sectors / inst_executed (e.g., 944/2412/1713 → \rightarrow 900/2272/1657) while increasing sm_SOL and tex_SOL (36.22/30.18 → \rightarrow 37.94/31.46), consistent with improved reduction strategy (e.g., warp-level primitives, fewer synchronizations, better batching of arithmetic). Since all LLM-only baselines fail to compile (CF), this kernel also highlights the second role of our framework: the judge penalizes candidates that violate compilation constraints early in the search, increasing the probability of reaching a valid, high-performance implementation. 
+
+ Overall, the per-kernel analysis shows that OptiML-X does not apply a single heuristic; instead, MCTS steers exploration using the LLM-as-a-Judge to optimize for the observed limiting factor: decreasing L1 transactions and redundant loads for memory-bound kernels (pooling), reducing instruction and control overhead for elementwise kernels (ReLU), and jointly improving fusion/tiling to cut both instruction count and cache traffic in mixed kernels (attention, cross-entropy), which is reflected quantitatively by higher achieved utilization and lower work counters alongside consistent end-to-end speedups. 
+
+ Table 2 : Performance comparison on ParEval benchmark (%). 
+
+ Model | 
+ Pass@1 | 
+ Pass@5 | 
+ Pass@10 | 
+
+ Qwen2.5-Coder-7B | 
+ 2.33 | 
+ 3.33 | 
+ 3.33 | 
+
+ StarCoder2-7B | 
+ 2.67 | 
+ 6.84 | 
+ 8.79 | 
+
+ HPC-Coder-V2-6.7B | 
+ 4.74 | 
+ 10.23 | 
+ 14.21 | 
+
+ GPT-5.1 | 
+ 10.46 | 
+ 24.71 | 
+ 32.26 | 
+
+ OptiML-G (Ours) | 
+ 12.17 | 
+ 27.08 | 
+ 33.33 | 
+
+ 5.2 Ablation Study. 
+
+ 5.2.1 Code Generation Quality 
+
+ To evaluate the effectiveness of OptiML-G as a standalone code generation module, we assess its performance on the ParEval ( Nichols et al., 2024 ) benchmark, which measures the ability to generate correct parallel CUDA code from natural-language specifications. Table  2 reports Pass@ k k metrics, where Pass@ k k denotes the probability that at least one of k k generated samples passes all correctness tests. OptiML-G achieves 12.17% Pass@1, 27.08% Pass@5, and 33.33% Pass@10, consistently outperforming all baseline models across all metrics. Notably, OptiML-G improves Pass@1 by 1.71 percentage points over GPT-5.1 (10.46%), demonstrating that the Mixture-of-Thoughts (MoT) framework enables more reliable first-attempt code generation. The gains are more pronounced at higher k k values, with OptiML-G achieving a 2.37-point improvement over GPT-5.1 at Pass@5 and a 1.07-point improvement at Pass@10. Compared to specialized code models such as HPC-Coder-V2 (4.74% Pass@1) and StarCoder2 (2.67% Pass@1), OptiML-G exhibits substantially stronger performance, indicating that latent-space collaboration among heterogeneous experts produces structurally superior kernels. 
+
+ 5.2.2 Code Optimization Emphasis 
+
+ Table 3 : Pass@{1,5,10} and Speedup@{1,5,10} on the 5-task subset under best-of- k k selection. Speedup is geometric mean over solved tasks with per-task baseline: GPT 5.1 when available, else GPT 5.1+OptiML-X when GPT 5.1 is CF. 
+
+ Model | 
+ Pass@1 | 
+ Pass@5 | 
+ Pass@10 | 
+ Speedup@1 | 
+ Speedup@5 | 
+ Speedup@10 | 
+
+ Qwen2.5-Coder | 
+ 20.0 | 
+ 40.0 | 
+ 40.0 | 
+ 0.89 | 
+ 0.93 | 
+ 0.95 | 
+
+ StarCoder2 | 
+ 20.0 | 
+ 40.0 | 
+ 40.0 | 
+ 0.82 | 
+ 0.86 | 
+ 0.89 | 
+
+ HPC-Coder-V2 | 
+ 20.0 | 
+ 40.0 | 
+ 40.0 | 
+ 0.86 | 
+ 0.90 | 
+ 0.92 | 
+
+ GPT 5.1 | 
+ 40.0 | 
+ 40.0 | 
+ 40.0 | 
+ 1.00 | 
+ 1.00 | 
+ 1.00 | 
+
+ GPT 5.1 + OptiML-X | 
+ 80.0 | 
+ 100.0 | 
+ 100.0 | 
+ 1.10 | 
+ 1.16 | 
+ 1.19 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 70.0 | 
+ 100.0 | 
+ 100.0 | 
+ 1.03 | 
+ 1.08 | 
+ 1.10 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 85.0 | 
+ 100.0 | 
+ 100.0 | 
+ 1.14 | 
+ 1.21 | 
+ 1.24 | 
+
+ StarCoder2 + OptiML-X | 
+ 75.0 | 
+ 100.0 | 
+ 100.0 | 
+ 1.06 | 
+ 1.12 | 
+ 1.17 | 
+
+ OptiML (Gen + X) | 
+ 85.0 | 
+ 100.0 | 
+ 100.0 | 
+ 1.18 | 
+ 1.26 | 
+ 1.30 | 
+
+ Table  3 separates the effects of sampling, post-hoc optimization, and the full OptiML pipeline under best-of- k k . LLM-only baselines have low success (Pass@1 = 20%–40%) and saturate at Pass@10 = 40%, with Speedup@10 ≤ 1.00 \leq 1.00 , indicating that additional samples rarely fix compilation/performance issues. Adding OptiML-X sharply improves reliability (Pass@1 = 70%–85%, Pass@5 = 100%) and consistently increases speedup (e.g., HPC-Coder-V2+OptiML-X: 1.14/1.21/1.24 at k = { 1 , 5 , 10 } k=\{1,5,10\} ). The full OptiML (Gen+X) matches the best Pass@1 (85%) while achieving the highest speedups at all k k (1.18/1.26/1.30), showing that OptiML-Gen provides stronger starting kernels that OptiML-X can optimize more effectively.
+ Additional OptiML-X details (prompt/tool schemas, judge + composite reward/guardrails, and the MCTS-budget ablations) are provided in Appendix B–C and Appendix E, with complete per-kernel results deferred to Appendix D. 
+
+ 6 Conclusion 
+
+ We presented OptiML , an end-to-end framework for LLM-driven CUDA kernel development that combines OptiML-G (mixture-of-thoughts code generation to improve compilability and structural quality) with OptiML-X (an MCTS-based test-time optimizer guided by profiling signals and an LLM-as-a-Judge). Across a diverse CUDA kernel suite on A100, OptiML consistently improves end-to-end runtime over strong LLM-only baselines and over post-hoc optimization alone. Importantly, the gains are not merely from “trying more variants”: OptiML-X uses profile-derived utilization and work proxies to target bottlenecks (e.g., memory traffic and instruction footprint) while avoiding edits that break correctness or trade one limit for another, yielding a more sample-efficient and interpretable search process. 
+
+ 7 Acknowledgments 
+
+ This research was supported by the National Science Foundation under grant number 2211982. We would also like to thank Cisco AI Research for their generous support. 
+
+ References 
+
+ Baronio et al. (2025) 
+
+Baronio, C., Marsella, P., Pan, B., Guo, S., and Alberti, S.
+
+ Kevin: Multi-turn rl for generating cuda kernels, 2025.
+
+ URL https://arxiv.org/abs/2507.11948 .
+
+ Bhattacharjee et al. (2023) 
+
+Bhattacharjee, A., Daley, C. S., and Jannesari, A.
+
+ Openmp offload features and strategies for high performance across architectures and compilers.
+
+ In 2023 IEEE International Parallel and Distributed Processing Symposium Workshops (IPDPSW) , pp. 564–573. IEEE, 2023.
+
+ Bjertnes et al. (2021) 
+
+Bjertnes, L., Tørring, J. O., and Elster, A. C.
+
+ Ls-cat: A large-scale cuda autotuning dataset, 2021.
+
+ URL https://arxiv.org/abs/2103.14409 .
+
+ Chaturvedi et al. (2024) 
+
+Chaturvedi, A., Nichols, D., Singh, S., and Bhatele, A.
+
+ Hpc-coder-v2: Studying code llms across low-resource parallel languages, 2024.
+
+ URL https://arxiv.org/abs/2412.15178 .
+
+ Chen et al. (2025a) 
+
+Chen, J., Wang, Z., Zhai, Y., et al.
+
+ Pragma: A profiling-reasoned multi-agent framework for automatic kernel optimization, 2025a.
+
+ Chen et al. (2021) 
+
+Chen, M., Tworek, J., Jun, H., Yuan, Q., de Oliveira Pinto, H. P., Kaplan, J., Edwards, H., Burda, Y., Joseph, N., Brockman, G., Ray, A., Puri, R., Krueger, G., Petrov, M., Khlaaf, H., Sastry, G., Mishkin, P., Chan, B., Gray, S., Ryder, N., Pavlov, M., Power, A., Kaiser, L., Bavarian, M., Winter, C., Tillet, P., Such, F. P., Cummings, D., Plappert, M., Chantzis, F., Barnes, E., Herbert-Voss, A., Guss, W. H., Nichol, A., Paino, A., Tezak, N., Tang, J., Babuschkin, I., Balaji, S., Jain, S., Saunders, W., Hesse, C., Carr, A. N., Leike, J., Achiam, J., Misra, V., Morikawa, E., Radford, A., Knight, M., Brundage, M., Murati, M., Mayer, K., Welinder, P., McGrew, B., Amodei, D., McCandlish, S., Sutskever, I., and Zaremba, W.
+
+ Evaluating large language models trained on code, 2021.
+
+ URL https://arxiv.org/abs/2107.03374 .
+
+ Chen et al. (2018) 
+
+Chen, T., Moreau, T., Jiang, Z., Zheng, L., Yan, E., Shen, H., Cowan, M., Wang, L., Hu, Y., Ceze, L., et al.
+
+ Tvm: An automated end-to-end optimizing compiler for deep learning.
+
+ In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18) , pp. 578–594, 2018.
+
+ Chen et al. (2025b) 
+
+Chen, W., Zhu, J., Fan, Q., Ma, Y., and Zou, A.
+
+ Cuda-llm: Llms can write efficient cuda kernels, 2025b.
+
+ URL https://arxiv.org/abs/2506.09092 .
+
+ Dao et al. (2022) 
+
+Dao, T., Fu, D. Y., Ermon, S., Rudra, A., and Ré, C.
+
+ Flashattention: Fast and memory-efficient exact attention with io-awareness.
+
+ In Advances in Neural Information Processing Systems , volume 35, pp. 16344–16359, 2022.
+
+ Fein-Ashley et al. (2025) 
+
+Fein-Ashley, J., Parikh, D., Kannan, R., and Prasanna, V.
+
+ Mixture of thoughts: Learning to aggregate what experts think, not just what they say, 2025.
+
+ URL https://arxiv.org/abs/2509.21164 .
+
+ Guo et al. (2024) 
+
+Guo, D., Zhu, Q., Yang, D., Xie, Z., Dong, K., Zhang, W., Chen, G., Bi, X., Wu, Y., Li, Y. K., Luo, F., Xiong, Y., and Liang, W.
+
+ Deepseek-coder: When the large language model meets programming – the rise of code intelligence, 2024.
+
+ URL https://arxiv.org/abs/2401.14196 .
+
+ Guo et al. (2025) 
+
+Guo, P., Zhu, C., Chen, S., Liu, F., Lin, X., Lu, Z., and Zhang, Q.
+
+ Evoengineer: Mastering automated cuda kernel code evolution with large language models, 2025.
+
+ URL https://arxiv.org/abs/2510.03760 .
+
+ Hozzová et al. (2021) 
+
+Hozzová, J., Filipovič, J., Nezarat, A., Ol’ha, J., and Petrovič, F.
+
+ Searching cuda code autotuning spaces with hardware performance counters: data from benchmarks running on various gpu architectures.
+
+ Data in Brief , 39:107631, 2021.
+
+ ISSN 2352-3409.
+
+ doi: https://doi.org/10.1016/j.dib.2021.107631 .
+
+ URL https://www.sciencedirect.com/science/article/pii/S2352340921009069 .
+
+ Hui et al. (2024) 
+
+Hui, B., Yang, J., Cui, Z., Yang, J., Liu, D., Zhang, L., Liu, T., Zhang, J., Yu, B., Lu, K., Dang, K., Fan, Y., Zhang, Y., Yang, A., Men, R., Huang, F., Zheng, B., Miao, Y., Quan, S., Feng, Y., Ren, X., Ren, X., Zhou, J., and Lin, J.
+
+ Qwen2.5-coder technical report, 2024.
+
+ URL https://arxiv.org/abs/2409.12186 .
+
+ Jang et al. (2017) 
+
+Jang, E., Gu, S., and Poole, B.
+
+ Categorical reparameterization with gumbel-softmax, 2017.
+
+ URL https://arxiv.org/abs/1611.01144 .
+
+ Jiang et al. (2024) 
+
+Jiang, J., Wang, F., Shen, J., Kim, S., and Kim, S.
+
+ A survey on large language models for code generation.
+
+ ACM Transactions on Software Engineering and Methodology , 2024.
+
+ Ke et al. (2025) 
+
+Ke, C., Zhang, R., Wang, S., Ding, L., Li, G., Wen, Y., Zhang, S., Xu, R., Qin, J., Guo, J., Wang, C., Li, L., Guo, Q., and Chen, Y.
+
+ Qimeng-mupa: Mutual-supervised learning for sequential-to-parallel code translation, 2025.
+
+ URL https://arxiv.org/abs/2506.11153 .
+
+ Kocsis & Szepesvári (2006) 
+
+Kocsis, L. and Szepesvári, C.
+
+ Bandit based monte-carlo planning.
+
+ In Fürnkranz, J., Scheffer, T., and Spiliopoulou, M. (eds.), Machine Learning: ECML 2006 , pp. 282–293, Berlin, Heidelberg, 2006. Springer Berlin Heidelberg.
+
+ ISBN 978-3-540-46056-5.
+
+ Li et al. (2025a) 
+
+Li, J., Li, S., Gao, Z., Shi, Q., Li, Y., Wang, Z., Huang, J., Wang, H., Wang, J., Han, X., Liu, Z., and Sun, M.
+
+ Tritonbench: Benchmarking large language model capabilities for generating triton operators, 2025a.
+
+ URL https://arxiv.org/abs/2502.14752 .
+
+ Li et al. (2025b) 
+
+Li, S., Wang, Z., He, Y., Li, Y., Shi, Q., Li, J., Hu, Y., Che, W., Han, X., Liu, Z., and Sun, M.
+
+ Autotriton: Automatic triton programming with reinforcement learning in llms, 2025b.
+
+ URL https://arxiv.org/abs/2507.05687 .
+
+ Lim & Yoo (2016) 
+
+Lim, J. and Yoo, S.
+
+ Field report: Applying monte carlo tree search for program synthesis.
+
+ In International Symposium on Search Based Software Engineering , pp. 304–310. Springer, 2016.
+
+ Lozhkov et al. (2024) 
+
+Lozhkov, A., Li, R., Allal, L. B., Cassano, F., Lamy-Poirier, J., Tazi, N., Tang, A., Pykhtar, D., Liu, J., Wei, Y., Liu, T., Tian, M., Kocetkov, D., Zucker, A., Belkada, Y., Wang, Z., Liu, Q., Abulkhanov, D., Paul, I., Li, Z., Li, W.-D., Risdal, M., Li, J., Zhu, J., Zhuo, T. Y., Zheltonozhskii, E., Dade, N. O. O., Yu, W., Krauß, L., Jain, N., Su, Y., He, X., Dey, M., Abati, E., Chai, Y., Muennighoff, N., Tang, X., Oblokulov, M., Akiki, C., Marone, M., Mou, C., Mishra, M., Gu, A., Hui, B., Dao, T., Zebaze, A., Dehaene, O., Patry, N., Xu, C., McAuley, J., Hu, H., Scholak, T., Paquet, S., Robinson, J., Anderson, C. J., Chapados, N., Patwary, M., Tajbakhsh, N., Jernite, Y., Ferrandis, C. M., Zhang, L., Hughes, S., Wolf, T., Guha, A., von Werra, L., and de Vries, H.
+
+ Starcoder 2 and the stack v2: The next generation, 2024.
+
+ URL https://arxiv.org/abs/2402.19173 .
+
+ Madaan et al. (2023) 
+
+Madaan, A., Tandon, N., Gupta, P., Hallinan, S., Gao, L., Wiegreffe, S., Alon, U., Dziri, N., Prabhumoye, S., Yang, Y., Gupta, S., Majumder, B. P., Hermann, K., Welleck, S., Yazdanbakhsh, A., and Clark, P.
+
+ Self-refine: Iterative refinement with self-feedback, 2023.
+
+ URL https://arxiv.org/abs/2303.17651 .
+
+ Nichols et al. (2024) 
+
+Nichols, D., Davis, J. H., Xie, Z., Rajaram, A., and Bhatele, A.
+
+ Can large language models write parallel code?, 2024.
+
+ Ouyang et al. (2025) 
+
+Ouyang, A., Guo, S., Arora, S., Zhang, A. L., Hu, W., Ré, C., and Mirhoseini, A.
+
+ Kernelbench: Can llms write efficient gpu kernels?, 2025.
+
+ URL https://arxiv.org/abs/2502.10517 .
+
+ Paszke et al. (2019) 
+
+Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J., Chanan, G., Killeen, T., Lin, Z., Gimelshein, N., Antiga, L., Desmaison, A., Köpf, A., Yang, E., DeVito, Z., Raison, M., Tejani, A., Chilamkurthy, S., Steiner, B., Fang, L., Bai, J., and Chintala, S.
+
+ Pytorch: An imperative style, high-performance deep learning library, 2019.
+
+ URL https://arxiv.org/abs/1912.01703 .
+
+ Rodriguez et al. (2025) 
+
+Rodriguez, D., Sanan, N., and Klimov, A. V.
+
+ Computeeval: A benchmark for high-performance cuda kernel generation, 2025.
+
+ Singh et al. (2025) 
+
+Singh, A. et al.
+
+ Openai gpt-5 system card, 2025.
+
+ URL https://arxiv.org/abs/2601.03267 .
+
+ Su et al. (2025) 
+
+Su, S., Sun, X., Li, X., Wang, A., Li, J., and Shum, C.
+
+ Cuda-l2: Surpassing cublas performance for matrix multiplication through reinforcement learning, 2025.
+
+ URL https://arxiv.org/abs/2512.02551 .
+
+ Tehrani et al. (2024) 
+
+Tehrani, A., Bhattacharjee, A., Chen, L., Ahmed, N. K., Yazdanbakhsh, A., and Jannesari, A.
+
+ Coderosetta: Pushing the boundaries of unsupervised code translation for parallel programming.
+
+ Advances in Neural Information Processing Systems , 37:100965–100999, 2024.
+
+ Tillet et al. (2019) 
+
+Tillet, P., Kung, H. T., and Cox, D.
+
+ Triton: an intermediate language and compiler for tiled neural network computations.
+
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages , MAPL 2019, pp. 10–19, New York, NY, USA, 2019. Association for Computing Machinery.
+
+ ISBN 9781450367196.
+
+ doi: 10.1145/3315508.3329973 .
+
+ URL https://doi.org/10.1145/3315508.3329973 .
+
+ Tschand et al. (2025) 
+
+Tschand, A., Awad, M., Swann, R., Ramakrishnan, K., Ma, J., Lowery, K., Dasika, G., and Reddi, V. J.
+
+ Swizzleperf: Hardware-aware llms for gpu kernel performance optimization, 2025.
+
+ URL https://arxiv.org/abs/2508.20258 .
+
+ Vaswani et al. (2017) 
+
+Vaswani, A., Shazeer, N., Parmar, N., Uszkoreit, J., Jones, L., Gomez, A. N., Kaiser, L., and Polosukhin, I.
+
+ Attention is all you need, 2017.
+
+ URL https://arxiv.org/abs/1706.03762 .
+
+ Wang et al. (2025a) 
+
+Wang, J., Joshi, V., Majumder, S., Chao, X., Ding, B., Liu, Z., Brahma, P. P., Li, D., Liu, Z., and Barsoum, E.
+
+ Geak: Introducing triton kernel ai agent & evaluation benchmarks, 2025a.
+
+ URL https://arxiv.org/abs/2507.23194 .
+
+ Wang et al. (2025b) 
+
+Wang, Y., Ji, P., Yang, C., Li, K., Hu, M., Li, J., and Sartoretti, G.
+
+ Mcts-judge: Test-time scaling in llm-as-a-judge for code correctness evaluation, 2025b.
+
+ URL https://arxiv.org/abs/2502.12468 .
+
+ Wei et al. (2025) 
+
+Wei, A., Sun, T., Seenichamy, Y., Song, H., Ouyang, A., Mirhoseini, A., Wang, K., and Aiken, A.
+
+ Astra: A multi-agent system for gpu kernel performance optimization, 2025.
+
+ URL https://arxiv.org/abs/2509.07506 .
+
+ Wen et al. (2022) 
+
+Wen, Y., Guo, Q., Fu, Q., Li, X., Xu, J., Tang, Y., Zhao, Y., Hu, X., Du, Z., Li, L., Wang, C., Zhou, X., and Chen, Y.
+
+ BabelTower: Learning to auto-parallelized program translation.
+
+ In Chaudhuri, K., Jegelka, S., Song, L., Szepesvari, C., Niu, G., and Sabato, S. (eds.), Proceedings of the 39th International Conference on Machine Learning , volume 162 of Proceedings of Machine Learning Research , pp. 23685–23700. PMLR, 17–23 Jul 2022.
+
+ Xu et al. (2025) 
+
+Xu, Z. et al.
+
+ Monte carlo tree search for comprehensive exploration in llm-based automatic heuristic design.
+
+ In Proceedings of the 42nd International Conference on Machine Learning (ICML) , 2025.
+
+ Ye et al. (2025) 
+
+Ye, S., Sun, Z., Wang, G., Guo, L., Liang, Q., Li, Z., and Liu, Y.
+
+ Prompt alchemy: Automatic prompt refinement for enhancing code generation, 2025.
+
+ URL https://arxiv.org/abs/2503.11085 .
+
+ Zheng et al. (2020) 
+
+Zheng, L., Jia, C., Sun, M., Wu, Z., Yu, C. H., Haj-Ali, A., Wang, Y., Yang, J., Zhuo, D., Sen, K., et al.
+
+ Ansor: Generating high-performance tensor programs for deep learning.
+
+ In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20) , pp. 863–879, 2020.
+
+ Zheng et al. (2023) 
+
+Zheng, L., Chiang, W.-L., Sheng, Y., Zhuang, S., Wu, Z., Zhuang, Y., Lin, Z., Li, Z., Li, D., Xing, E. P., et al.
+
+ Judging llm-as-a-judge with mt-bench and chatbot arena.
+
+ In Advances in Neural Information Processing Systems , volume 36, 2023.
+
+ Appendix A OptiML-X Algorithm 
+
+ Algorithm 1 OptiML-X per-kernel optimization 
+
+ 0: 
+
+   CUDA source P P , kernel name k k , search budget B B , GPU s ​ m ​ _ ​ X ​ X sm\_XX 
+
+ 1: 
+
+    Spec ← Specifier LLM ​ ( P , k ) \textsc{Spec}\leftarrow\textsc{Specifier}_{\text{LLM}}(P,k) 
+
+ 2: 
+
+    Plan ← TestPlan LLM ​ ( P , k , Spec ) \textsc{Plan}\leftarrow\textsc{TestPlan}_{\text{LLM}}(P,k,\textsc{Spec}) 
+
+ 3: 
+
+    H ← SynthesizeRunner ​ ( P , k , Spec ) H\leftarrow\textsc{SynthesizeRunner}(P,k,\textsc{Spec}) 
+
+ 4: 
+
+    ( o ​ k , H ) ← CompileWithRepair ​ ( H ) (ok,H)\leftarrow\textsc{CompileWithRepair}(H) 
+
+ 5: 
+
+    if ¬ o ​ k \neg ok then 
+
+ 6: 
+
+     c ​ o ​ m ​ p ​ i ​ l ​ e ​ _ ​ f ​ a ​ i ​ l ​ e ​ d compile\_failed 
+
+ 7: 
+
+    end if 
+
+ 8: 
+
+    Assert ​ ( RunTests ​ ( H , Plan ) ​  passes L0/L1 ) \textsc{Assert}(\textsc{RunTests}(H,\textsc{Plan})\text{ passes L0/L1}) 
+
+ 9: 
+
+    ( T 0 , 𝐦 0 ) ← Profile ​ ( H ) (T_{0},\mathbf{m}_{0})\leftarrow\textsc{Profile}(H) 
+
+ 10: 
+
+   Initialize MCTS tree root s 0 = ( P , T 0 , 𝐦 0 ) s_{0}=(P,T_{0},\mathbf{m}_{0}) 
+
+ 11: 
+
+    for i = 1 i=1 to B B do 
+
+ 12: 
+
+    Select leaf s s by UCT
+
+ 13: 
+
+     ℋ ← Diagnose LLM ( s . P , s . 𝐦 ) \mathcal{H}\leftarrow\textsc{Diagnose}_{\text{LLM}}(s.P,s.\mathbf{m}) 
+
+ 14: 
+
+     h ← PickHypothesis ​ ( ℋ ) h\leftarrow\textsc{PickHypothesis}(\mathcal{H}) 
+
+ 15: 
+
+     patch ← Propose LLM ( s . P , h , s . 𝐦 ) \textsc{patch}\leftarrow\textsc{Propose}_{\text{LLM}}(s.P,h,s.\mathbf{m}) 
+
+ 16: 
+
+     P ′ ← ApplyPatch ( s . P , patch ) P^{\prime}\leftarrow\textsc{ApplyPatch}(s.P,\textsc{patch}) 
+
+ 17: 
+
+     H ′ ← SynthesizeRunner ​ ( P ′ , k , Spec ) H^{\prime}\leftarrow\textsc{SynthesizeRunner}(P^{\prime},k,\textsc{Spec}) 
+
+ 18: 
+
+     if ¬ Compile ​ ( H ′ ) \neg\textsc{Compile}(H^{\prime}) or ¬ PassL0L1 ​ ( H ′ , Plan ) \neg\textsc{PassL0L1}(H^{\prime},\textsc{Plan}) then 
+
+ 19: 
+
+    Backpropagate large negative reward; continue 
+
+ 20: 
+
+     end if 
+
+ 21: 
+
+     ( T , 𝐦 ) ← Profile ​ ( H ′ ) (T,\mathbf{m})\leftarrow\textsc{Profile}(H^{\prime}) 
+
+ 22: 
+
+     ( r llm , v ) ← Judge LLM ​ ( ( T 0 , 𝐦 0 ) , ( T , 𝐦 ) , patch ) (r_{\text{llm}},v)\leftarrow\textsc{Judge}_{\text{LLM}}((T_{0},\mathbf{m}_{0}),(T,\mathbf{m}),\textsc{patch}) 
+
+ 23: 
+
+     R ← CompositeReward ​ ( T 0 , 𝐦 0 , T , 𝐦 , r llm ) R\leftarrow\textsc{CompositeReward}(T_{0},\mathbf{m}_{0},T,\mathbf{m},r_{\text{llm}}) 
+
+ 24: 
+
+    Add child node and backpropagate R R 
+
+ 25: 
+
+    end for 
+
+ 26: 
+
+   best candidate among KEEP nodes (else baseline), plus reports
+
+ Appendix B Training OptiML-G (Mixture-of-Thoughts Router) 
+
+ Overview. 
+
+ OptiML-Gen is implemented as a mixture-of-thoughts (MoT) router over a fixed set of CUDA-capable code LLM experts. During training we freeze all expert weights and learn only lightweight routing and interaction modules that (i) select which experts to query per input and (ii) fuse their intermediate representations into a single next-token distribution. This keeps training stable and inexpensive while preserving each expert’s specialization. 
+
+ Experts and freezing. 
+
+ We use three decoder-only experts: Qwen2.5-Coder-7B , HPC-Coder-V2-6.7B , and StarCoder2-7B . All expert parameters are set requires_grad=False ; only the MoT router + interaction layers are optimized. Experts are loaded in FP16 by default (quantization flags exist but are disabled in our setup), and we use a shared tokenizer/padding strategy (pad token set to EOS when missing). 
+
+ Training data and formatting. 
+
+ Training uses instruction-style supervision with 6033 paired cpp_code , cuda_code , and a natural-language description . Each sample is rendered into a single causal-LM sequence using a fixed template:
+ Task description → \rightarrow C++ input → \rightarrow CUDA output .
+We train with standard next-token prediction on the full sequence (teacher forcing). Sequences are truncated/padded to a maximum length (we use 512 in our runs). 
+
+ MoT architecture and routing. 
+
+ We stack S S MoT blocks (default S = 4 S{=}4 ). In each block, the router produces expert scores and selects top-k experts per token (typically k = 2 k{=}2 ) using a stochastic Gumbel-Softmax gate during training (temperature τ \tau ). Selected expert hidden states are projected into a shared space of dimension d d (e.g., d = 768 d{=}768 ) and fused using a multi-head attention interaction module (e.g., 8 heads). The fused representation is passed forward to the next MoT block and ultimately to the LM head for logits. 
+
+ Objective and regularization. 
+
+ The primary objective is standard cross-entropy language modeling loss. We add two auxiliary terms that improve routing behavior:
+(i) an expert load-balancing loss to discourage collapse onto a single expert, and
+(ii) a consistency loss that encourages routing stability by comparing predictions across two stochastic forward passes (different Gumbel noise) on the same batch.
+Concretely, we minimize: 
+
+ | 
+ ℒ = ℒ LM + λ cons ​ ℒ cons + λ bal ​ ℒ bal , \mathcal{L}\;=\;\mathcal{L}_{\text{LM}}\;+\;\lambda_{\text{cons}}\mathcal{L}_{\text{cons}}\;+\;\lambda_{\text{bal}}\mathcal{L}_{\text{bal}}, | 
+ | 
+
+ with λ cons = 0.05 \lambda_{\text{cons}}{=}0.05 in our runs; load-balancing/entropy regularization are applied with small fixed weights in the implementation to keep routing diverse without dominating ℒ LM \mathcal{L}_{\text{LM}} . 
+
+ Optimization details. 
+
+ We train with AdamW on the router/interaction parameters only (expert params excluded), cosine warm restarts schedule, FP16 enabled, and gradient accumulation to reach an effective batch size > 1 >1 despite long sequences. A representative configuration (matching our training script/README) is: 
+
+ • 
+
+ epochs: 3,   lr: 5 × 10 − 6 5\times 10^{-6} ,   warmup steps: 200,   max length: 512 
+
+ • 
+
+ per-device batch size: 1,   grad accumulation: 8,   grad clip: 0.3 
+
+ • 
+
+ MoT: num_stacks = 4 =4 , top_k = 2 =2 , shared_dim = 768 =768 , router hidden = 512 =512 , heads = 8 =8 
+
+ We checkpoint the best model on validation loss and use it for OptiML-G inference (best-of- k k generation over multiple routed samples) before handing candidates to OptiML-X. 
+
+ Appendix C Prompts 
+
+ Table  4 provides a descriptive prompt which is used to generate code for each task. 
+
+ Table 4 : Benchmark task prompts used for initial prompt construction (Appendix C / Table 4). 
+Each row provides the high-level natural-language task specification injected into the initial prompt template. 
+
+ Task ID | 
+ Task | 
+
+ Prompt 
+ | 
+
+ 1 | 
+ Sigmoid | 
+
+ Implement a CUDA program for sigmoid activation function: sigmoid ⁡ ( x ) = 1 1 + exp ⁡ ( − x ) \mathrm{sigmoid}(x)=\frac{1}{1+\exp(-x)} .
+Input shape: (batch size, dim); Output: same shape as input. 
+ | 
+
+ 2 | 
+ Matrix Multiplication | 
+
+ Write a program that multiplies two matrices of 32-bit floating point numbers on a GPU.
+Given matrix A A of dimensions M × K M\times K and matrix B B of dimensions K × N K\times N ,
+compute the product matrix C = A × B C=A\times B , which will have dimensions M × N M\times N . 
+ | 
+
+ 3 | 
+ Max Pooling 3D | 
+
+ Implement a CUDA program for 3D max pooling function that selects the maximum value within a defined region
+(a window) of a feature map. Input shape: (batch size, channels, dim1, dim2, dim3);
+Output: with 3D max pooling applied. 
+ | 
+
+ 4 | 
+ LayerNorm | 
+
+ Implement a GPU program that performs Layer Normalization (LayerNorm) operation, which normalizes across the
+features for each individual data sample in a layer. Input of shape (batch size, features, dim1, dim2);
+Output with Layer Normalization applied, same shape as input. 
+ | 
+
+ 5 | 
+ 2D Convolution | 
+
+ Write a program that performs a 2D convolution operation on the GPU. Given an input matrix and a kernel (filter),
+compute the convolved output. The convolution should be performed with a “valid” boundary condition, meaning
+the kernel is only applied where it fully overlaps with the input.
+The input consists of:
+(1) input: A 2D matrix of 32-bit floating-point numbers, represented as a 1D array in row-major order.
+(2) kernel: A 2D kernel (filter) of 32-bit floating-point numbers, also represented as a 1D array in row-major order.
+The output should be written to the output matrix (also a 1D array in row-major order).
+The output matrix will have dimensions:
+output rows = input rows - kernel rows + 1,
+output cols = input cols - kernel cols + 1.
+The convolution operation is defined as:
+output[i][j] = ∑ m = 0 kernel ​ rows − 1 ∑ n = 0 kernel ​ cols − 1 \sum_{m=0}^{\mathrm{kernel\ rows}-1}\sum_{n=0}^{\mathrm{kernel\ cols}-1} input[i+m][j+n] * kernel[m][n]. 
+ | 
+
+ 6 | 
+ Multi-Head Self-Attention | 
+
+ Implement a CUDA program for multi-head self-attention. Given three input matrices Q Q (queries), K K (keys),
+and V V (values) of size N × d model N\times d_{\text{model}} , compute:
+ MultiHead ⁡ ( Q , K , V ) = Concat ⁡ ( h ​ e ​ a ​ d 1 , … , h ​ e ​ a ​ d h ) \mathrm{MultiHead}(Q,K,V)=\mathrm{Concat}(head_{1},\ldots,head_{h}) ,
+where each head computes:
+ h ​ e ​ a ​ d i = softmax ⁡ ( Q i ​ K i T d k ) ​ V i head_{i}=\mathrm{softmax}\!\left(\frac{Q_{i}K_{i}^{T}}{\sqrt{d_{k}}}\right)V_{i} 
+with d k = d model / h d_{k}=d_{\text{model}}/h and Q i , K i , V i Q_{i},K_{i},V_{i} being the i i -th head’s partition of the input matrices. 
+ | 
+
+ 7 | 
+ Mean Square Error | 
+
+ Implement a CUDA program to calculate the Mean Squared Error (MSE) between predicted values and target values.
+Given two arrays of equal length, predictions and targets, compute:
+ MSE = 1 N ​ ∑ i = 1 N ( predictions i − targets i ) 2 \mathrm{MSE}=\frac{1}{N}\sum_{i=1}^{N}(\mathrm{predictions}_{i}-\mathrm{targets}_{i})^{2} 
+where N N is the number of elements in each array.
+Input: predictions, targets; Output: MSE. 
+ | 
+
+ 8 | 
+ Matrix Transpose | 
+
+ Write a program that transposes a matrix of 32-bit floating point numbers on a GPU.
+The transpose of a matrix switches its rows and columns. Given a matrix A A of dimensions rows × \times cols,
+the transpose A T A^{T} will have dimensions cols × \times rows. All matrices are stored in row-major format. 
+ | 
+
+ 9 | 
+ Reverse Array | 
+
+ Implement a program that reverses an array of 32-bit floating point numbers in-place.
+The program should perform an in-place reversal of input. 
+ | 
+
+ 10 | 
+ ReLU Activation Fuction | 
+
+ Implement a program that performs the Rectified Linear Unit (ReLU) activation function on a vector of
+32-bit floating point numbers. The ReLU function sets all negative values to zero and leaves positive values unchanged:
+ ReLU ⁡ ( x ) = max ⁡ ( 0 , x ) \mathrm{ReLU}(x)=\max(0,x) . 
+ | 
+
+ 11 | 
+ Top-K Selection | 
+
+ Implement a GPU program that, given a 1D array input of 32-bit floating point numbers of length N N ,
+selects the k k largest elements and writes them in descending order to the output array of length k k . 
+ | 
+
+ 12 | 
+ Sorting | 
+
+ Write a CUDA program that sorts an array of 32-bit floating-point numbers in ascending order using the
+bubble sort algorithm. Do not use other algorithms. 
+ | 
+
+ 13 | 
+ Matrix Copy | 
+
+ Implement a program that copies an N × N N\times N matrix of 32-bit floating point numbers from input array A A 
+to output array B B on the GPU. The program should perform a direct element-wise copy so that
+ B i , j = A i , j B_{i,j}=A_{i,j} for all valid indices. 
+ | 
+
+ 14 | 
+ Reduction | 
+
+ Write a CUDA program that performs parallel reduction on an array of 32-bit floating point numbers
+to compute their sum. The program should take an input array and produce a single output value containing
+the sum of all elements. 
+ | 
+
+ 15 | 
+ Dot Product | 
+
+ Implement a CUDA program that computes the dot product of two vectors containing 32-bit floating point numbers.
+The dot product is the sum of the products of the corresponding elements of two vectors. Mathematically, the dot
+product of two vectors A A and B B of length n n is defined as:
+ A ⋅ B = ∑ i = 0 n − 1 A i ⋅ B i A\cdot B=\sum_{i=0}^{n-1}A_{i}\cdot B_{i} . 
+ | 
+
+ 16 | 
+ Prefix Sum | 
+
+ Write a CUDA program that computes the prefix sum (cumulative sum) of an array of 32-bit floating point numbers.
+For an input array [a, b, c, d, …], the prefix sum is [a, a+b, a+b+c, a+b+c+d, …]. 
+ | 
+
+ 17 | 
+ Categorical Cross-Entropy Loss | 
+
+ Implement a CUDA program to calculate the categorical cross-entropy loss for a batch of predictions.
+Given a matrix of predicted logits Z Z of size N × C N\times C and a vector of true class labels true_labels of size N N ,
+compute the average cross-entropy loss over the batch.
+The loss for a single sample j j with logits z j = [ z j ​ 1 , … , z j ​ C ] z_{j}=[z_{j1},...,z_{jC}] and true label y j y_{j} is calculated using the
+numerically stable formula:
+ Loss j = log ⁡ ( ∑ k = 1 C e z j ​ k ) − z j , y j \mathrm{Loss}_{j}=\log\left(\sum_{k=1}^{C}e^{z_{jk}}\right)-z_{j,y_{j}} .
+The final output stored in the loss variable should be the average loss over the N N samples:
+ L = 1 N ​ ∑ j = 1 N Loss j L=\frac{1}{N}\sum_{j=1}^{N}\mathrm{Loss}_{j} .
+Input: logits, true labels, N N (number of samples), and C C (number of classes).
+Output: loss (a pointer to a single float). 
+ | 
+
+ 18 | 
+ Monte Carlo Integration | 
+
+ Implement Monte Carlo integration on a GPU.
+Given a set of function values y i = f ⁡ ( x i ) y_{i}=f(x_{i}) sampled at random points uniformly distributed in the interval [ a , b ] [a,b] ,
+estimate the definite integral:
+ ∫ a b f ( x ) d x ≈ ( b − a ) ⋅ 1 n ∑ i = 1 N y i \int_{a}^{b}f(x)\,dx\approx(b-a)\cdot\frac{1}{n}\sum_{i=1}^{N}y_{i} .
+The Monte Carlo method approximates the integral by computing the average of the function values and multiplying by the interval width. 
+ | 
+
+ 19 | 
+ Histogramming | 
+
+ Write a GPU program that computes the histogram of an array of 32-bit integers.
+The histogram should count the number of occurrences of each integer value in the range [ 0 , num_bins ) [0,\text{num\_bins}) .
+You are given an input array input of length N N and the number of bins num_bins.
+The result should be an array of integers of length num_bins, where each element represents the count of occurrences
+of its corresponding index in the input array. 
+ | 
+
+ 20 | 
+ Ordinary Least Squares Regression | 
+
+ Solve the Ordinary Least Squares (OLS) regression problem on a GPU.
+Given a feature matrix X X of size n samples × n features n_{\text{samples}}\times n_{\text{features}} and a target vector y y of size
+ n samples n_{\text{samples}} , compute the coefficient vector β \beta that minimizes the sum of squared residuals:
+ min β ⁡ ‖ X ​ β − y ‖ 2 2 \min_{\beta}\|X\beta-y\|_{2}^{2} .
+The closed-form solution to OLS is:
+ β = ( X T ​ X ) − 1 ​ X T ​ y \beta=(X^{T}X)^{-1}X^{T}y . 
+ | 
+
+ Appendix D LLMs 
+
+ D.1 LLM experts for OptiML-G 
+
+ We instantiate OptiML-G’s mixture-of-thoughts with Qwen2.5-Coder-7B  ( Hui et al., 2024 ) , HPC-CoderV2-6.7B  ( Chaturvedi et al., 2024 ) , and StarCoder2-7B  ( Lozhkov et al., 2024 ) because they provide a strong, complementary set of “experts” under a comparable parameter budget to fit a singular NVIDIA A100 80GB, enabling diversity without confounding scale effects. Qwen2.5-Coder-7B is a high-coverage general code model that tends to propose clean CUDA skeletons and conventional optimization idioms (e.g., straightforward tiling/unrolling and reasonable launch configurations), making it a reliable baseline generator. HPC-CoderV2-6.7B, a finetuned DeepSeekCoder-V1 ( Guo et al., 2024 ) is selected to inject domain bias toward performance engineering and HPC-style kernels, often producing more optimization-friendly structure (clear separation of indexing/math, tighter loops, and more deliberate memory-access patterns) that benefits downstream transformation. StarCoder2-7B serves as an additional independent code prior with different training and stylistic tendencies, which often yields alternative implementations (e.g., different loop organizations and control-flow choices) that increase the chance that at least one candidate is both compilable and search-ready. Using three similarly sized but behaviorally distinct models helps OptiML-Gen generate a diverse candidate pool,crucial for CUDA, where small structural choices can determine compilability and whether OptiML-X can effectively apply bottleneck-targeted edits. 
+
+ D.2 LLM for OptiML-X 
+
+ We use GPT-5 mini ( Singh et al., 2025 ) inside OptiML-X because it offers an excellent latency–cost–quality tradeoff for the many MCTS iterations, yielding consistent diagnoses, patch proposals, and judge scores quickly enough to keep search sample-efficient under a tight compile/profile budget. Additionally, GPT-5 mini’s strong tool-calling and structured-output reliability lets OptiML-X enforce machine-checkable actions (e.g., emitting a unified diff patch, selecting hypotheses from a constrained schema, returning explicit scores and rationales tied to profiler signals), which reduces parsing failures and hallucinated formats, improves reproducibility across rollouts, and enables deterministic integration with compilation, testing (L0/L1), and profiling gates.
+
+ Appendix E Full Results 
+
+ E.1 Performance and profiling summary. 
+
+ Across the CUDA-LLM ( Chen et al., 2025b ) task suite, LLM-only baselines (GPT 5.1, Qwen2.5-Coder, HPC-Coder-V2, and StarCoder2) frequently fail to generate compilable kernels (CF) on several tasks (e.g., Sigmoid, MaxPool3D, LayerNorm, 2D Convolution, Multi-Head Self-Attention, and Top-K/Sorting/PrefixSum/CrossEntropy/MonteCarlo/Histogramming/OLS), underscoring the brittleness of direct end-to-end code generation without optimization support. When baselines do compile (e.g., Matrix Multiplication, Mean Square Error, Matrix Transpose, Reverse Array, ReLU, Matrix Copy, Reduction, Dot Product), their runtimes are generally on-par with or slower than GPT 5.1, and the profiling signals suggest less favorable trade-offs: lower achieved SM utilization (sm_SOL) and higher “work done” indicators (e.g., dram_bytes , l1_sectors , inst_executed ), consistent with less efficient memory access patterns and instruction footprints. In contrast, OptiML-X variants consistently reduce end-to-end time relative to the strongest available baseline for each task and improve utilization metrics, typically increasing sm_SOL/tex_SOL while lowering work metrics (notably dram_bytes , l1_sectors , and inst_executed ). Importantly, no single OptiML-X source model dominates uniformly: the fastest configuration varies by kernel, with HPC-Coder-V2+OptiML-X often matching or surpassing GPT 5.1+OptiML-X on multiple kernels (e.g., Matrix Multiplication, Reduction, Dot Product, and OLS), while Qwen2.5-Coder+OptiML-X and StarCoder2+OptiML-X occasionally lead on specific cases, reflecting complementary strengths across code patterns. Finally, OptiML provides the strongest overall profile, achieving the lowest runtimes within each block while also delivering the highest utilization and the lowest work-done counters, indicating that performance gains are driven by both improved parallel efficiency and reduced memory/instruction overhead rather than by shifting bottlenecks. 
+
+ | 
+ Hardware Utilization ↑ \uparrow | 
+ Work Done ↓ \downarrow | 
+
+ Task | 
+ Model | 
+ Time (speedup) | 
+ sm_SOL | 
+ dram_SOL | 
+ tex_SOL | 
+ dram_bytes | 
+ l1_sectors | 
+ inst_executed | 
+ warps_active | 
+ regs_per_thread | 
+
+ Sigmoid | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 5.45 | 
+ 18.73 | 
+ 8.06 | 
+ 21.31 | 
+ 113 | 
+ 517 | 
+ 313 | 
+ 52.18 | 
+ 28 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 5.77 (0.94 × \times ) | 
+ 17.55 | 
+ 8.41 | 
+ 20.58 | 
+ 119 | 
+ 543 | 
+ 323 | 
+ 50.93 | 
+ 28 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.29 (1.03 × \times ) | 
+ 19.42 | 
+ 7.78 | 
+ 21.74 | 
+ 110 | 
+ 505 | 
+ 307 | 
+ 53.02 | 
+ 28 | 
+
+ StarCoder2 + OptiML-X | 
+ 5.61 (0.97 × \times ) | 
+ 18.11 | 
+ 8.15 | 
+ 21.02 | 
+ 116 | 
+ 528 | 
+ 316 | 
+ 51.62 | 
+ 28 | 
+
+ OptiML | 
+ 4.81 (1.13 × \times ) | 
+ 20.62 | 
+ 7.27 | 
+ 22.19 | 
+ 106 | 
+ 494 | 
+ 302 | 
+ 54.11 | 
+ 28 | 
+
+ Matrix Multiplication | 
+ GPT 5.1 | 
+ 7.20 | 
+ 71.26 | 
+ 8.42 | 
+ 91.36 | 
+ 63 | 
+ 408 | 
+ 419 | 
+ 95.14 | 
+ 44 | 
+
+ Qwen2.5-Coder | 
+ 7.65 (0.94 × \times ) | 
+ 69.40 | 
+ 8.10 | 
+ 90.98 | 
+ 66 | 
+ 421 | 
+ 432 | 
+ 94.62 | 
+ 46 | 
+
+ HPC-Coder-V2 | 
+ 7.88 (0.91 × \times ) | 
+ 68.72 | 
+ 8.02 | 
+ 90.71 | 
+ 67 | 
+ 427 | 
+ 438 | 
+ 94.31 | 
+ 46 | 
+
+ StarCoder2 | 
+ 8.23 (0.87 × \times ) | 
+ 67.95 | 
+ 7.92 | 
+ 90.41 | 
+ 68 | 
+ 435 | 
+ 441 | 
+ 93.97 | 
+ 48 | 
+
+ GPT 5.1 + OptiML-X | 
+ 4.62 (1.56 × \times ) | 
+ 78.41 | 
+ 10.62 | 
+ 92.07 | 
+ 79 | 
+ 292 | 
+ 392 | 
+ 95.27 | 
+ 44 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 4.98 (1.45 × \times ) | 
+ 76.58 | 
+ 10.14 | 
+ 91.22 | 
+ 74 | 
+ 318 | 
+ 400 | 
+ 94.83 | 
+ 46 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 4.52 (1.59 × \times ) | 
+ 79.16 | 
+ 10.86 | 
+ 92.21 | 
+ 73 | 
+ 286 | 
+ 386 | 
+ 95.44 | 
+ 44 | 
+
+ StarCoder2 + OptiML-X | 
+ 4.74 (1.52 × \times ) | 
+ 77.42 | 
+ 10.33 | 
+ 91.63 | 
+ 77 | 
+ 301 | 
+ 395 | 
+ 95.01 | 
+ 46 | 
+
+ OptiML | 
+ 4.40 (1.64 × \times ) | 
+ 81.17 | 
+ 11.03 | 
+ 92.61 | 
+ 70 | 
+ 282 | 
+ 381 | 
+ 95.58 | 
+ 44 | 
+
+ Max Pooling 3D | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.09 | 
+ 28.14 | 
+ 31.47 | 
+ 36.72 | 
+ 524 | 
+ 1944 | 
+ 824 | 
+ 70.38 | 
+ 36 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.38 (0.95 × \times ) | 
+ 26.88 | 
+ 32.12 | 
+ 35.31 | 
+ 548 | 
+ 2032 | 
+ 843 | 
+ 68.94 | 
+ 36 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.88 (1.04 × \times ) | 
+ 29.02 | 
+ 30.41 | 
+ 37.11 | 
+ 508 | 
+ 1891 | 
+ 809 | 
+ 71.12 | 
+ 36 | 
+
+ StarCoder2 + OptiML-X | 
+ 6.02 (1.01 × \times ) | 
+ 27.61 | 
+ 31.18 | 
+ 36.02 | 
+ 532 | 
+ 1978 | 
+ 831 | 
+ 69.88 | 
+ 36 | 
+
+ OptiML | 
+ 5.62 (1.08 × \times ) | 
+ 30.71 | 
+ 29.18 | 
+ 37.55 | 
+ 494 | 
+ 1863 | 
+ 801 | 
+ 72.19 | 
+ 36 | 
+
+ LayerNorm | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 5.79 | 
+ 33.28 | 
+ 18.41 | 
+ 29.23 | 
+ 264 | 
+ 1108 | 
+ 918 | 
+ 74.26 | 
+ 40 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.20 (0.93 × \times ) | 
+ 31.62 | 
+ 19.07 | 
+ 28.11 | 
+ 277 | 
+ 1154 | 
+ 950 | 
+ 72.68 | 
+ 40 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.62 (1.03 × \times ) | 
+ 34.11 | 
+ 17.88 | 
+ 29.61 | 
+ 253 | 
+ 1061 | 
+ 902 | 
+ 75.01 | 
+ 40 | 
+
+ StarCoder2 + OptiML-X | 
+ 5.95 (0.97 × \times ) | 
+ 32.44 | 
+ 18.62 | 
+ 28.74 | 
+ 270 | 
+ 1122 | 
+ 933 | 
+ 73.41 | 
+ 40 | 
+
+ OptiML | 
+ 5.40 (1.07 × \times ) | 
+ 35.16 | 
+ 17.24 | 
+ 30.36 | 
+ 247 | 
+ 1036 | 
+ 893 | 
+ 76.11 | 
+ 40 | 
+
+ 2D Convolution | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 7.24 | 
+ 44.31 | 
+ 22.67 | 
+ 55.74 | 
+ 926 | 
+ 3538 | 
+ 1643 | 
+ 82.17 | 
+ 52 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 8.31 (0.87 × \times ) | 
+ 42.18 | 
+ 23.28 | 
+ 54.61 | 
+ 968 | 
+ 3692 | 
+ 1711 | 
+ 80.62 | 
+ 52 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 6.98 (1.04 × \times ) | 
+ 45.03 | 
+ 22.01 | 
+ 56.47 | 
+ 901 | 
+ 3456 | 
+ 1609 | 
+ 83.06 | 
+ 52 | 
+
+ StarCoder2 + OptiML-X | 
+ 7.58 (0.95 × \times ) | 
+ 43.62 | 
+ 22.84 | 
+ 55.11 | 
+ 944 | 
+ 3604 | 
+ 1682 | 
+ 81.31 | 
+ 52 | 
+
+ OptiML | 
+ 6.15 (1.18 × \times ) | 
+ 46.44 | 
+ 21.34 | 
+ 57.32 | 
+ 873 | 
+ 3292 | 
+ 1575 | 
+ 83.95 | 
+ 52 | 
+
+ Multi-Head Self-Attention | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 7.90 | 
+ 48.62 | 
+ 26.41 | 
+ 60.32 | 
+ 1117 | 
+ 4213 | 
+ 2094 | 
+ 84.27 | 
+ 58 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 9.10 (0.87 × \times ) | 
+ 46.37 | 
+ 27.91 | 
+ 58.24 | 
+ 1183 | 
+ 4368 | 
+ 2172 | 
+ 82.46 | 
+ 58 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 7.55 (1.05 × \times ) | 
+ 49.31 | 
+ 25.72 | 
+ 60.88 | 
+ 1086 | 
+ 4124 | 
+ 2048 | 
+ 85.11 | 
+ 58 | 
+
+ StarCoder2 + OptiML-X | 
+ 8.22 (0.96 × \times ) | 
+ 47.55 | 
+ 26.98 | 
+ 59.46 | 
+ 1144 | 
+ 4286 | 
+ 2126 | 
+ 83.38 | 
+ 58 | 
+
+ OptiML | 
+ 6.85 (1.15 × \times ) | 
+ 50.28 | 
+ 24.88 | 
+ 61.79 | 
+ 1064 | 
+ 3961 | 
+ 2012 | 
+ 86.12 | 
+ 58 | 
+
+ Mean Square Error | 
+ GPT 5.1 | 
+ 8.10 | 
+ 14.26 | 
+ 22.58 | 
+ 10.17 | 
+ 214 | 
+ 817 | 
+ 476 | 
+ 48.21 | 
+ 28 | 
+
+ Qwen2.5-Coder | 
+ 8.55 (0.95 × \times ) | 
+ 13.72 | 
+ 23.04 | 
+ 9.91 | 
+ 221 | 
+ 842 | 
+ 490 | 
+ 47.66 | 
+ 30 | 
+
+ HPC-Coder-V2 | 
+ 8.78 (0.92 × \times ) | 
+ 13.41 | 
+ 23.26 | 
+ 9.76 | 
+ 225 | 
+ 856 | 
+ 497 | 
+ 47.31 | 
+ 30 | 
+
+ StarCoder2 | 
+ 9.05 (0.90 × \times ) | 
+ 13.08 | 
+ 23.51 | 
+ 9.62 | 
+ 230 | 
+ 873 | 
+ 505 | 
+ 46.92 | 
+ 30 | 
+
+ GPT 5.1 + OptiML-X | 
+ 5.16 (1.57 × \times ) | 
+ 18.53 | 
+ 18.94 | 
+ 12.61 | 
+ 172 | 
+ 652 | 
+ 442 | 
+ 54.18 | 
+ 30 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 5.51 (1.47 × \times ) | 
+ 17.47 | 
+ 19.21 | 
+ 12.08 | 
+ 180 | 
+ 679 | 
+ 455 | 
+ 53.06 | 
+ 30 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.02 (1.61 × \times ) | 
+ 18.97 | 
+ 18.22 | 
+ 12.86 | 
+ 167 | 
+ 631 | 
+ 436 | 
+ 54.88 | 
+ 30 | 
+
+ StarCoder2 + OptiML-X | 
+ 5.24 (1.55 × \times ) | 
+ 18.11 | 
+ 18.71 | 
+ 12.44 | 
+ 175 | 
+ 659 | 
+ 446 | 
+ 53.92 | 
+ 30 | 
+
+ OptiML | 
+ 4.79 (1.69 × \times ) | 
+ 19.74 | 
+ 17.66 | 
+ 13.32 | 
+ 161 | 
+ 607 | 
+ 431 | 
+ 55.61 | 
+ 30 | 
+
+ Table 5 : End-to-end latency and Nsight Compute characterization on representative CUDA-LLM kernels from the task suite  ( Chen et al., 2025b ) (A100 80GB). We report runtime (lower is better) together with utilization proxies (SM/DRAM/TEX SOL; higher is better) and work proxies (DRAM bytes, L1 sectors, and executed instructions; lower is better). For each task, we compare LLM-only baselines, their OptiML-X post-optimization variants, and OptiML (G+X). Many LLM-only baselines fail to compile (CF). Best , second , third indicate per-column ranks within each task block. 
+
+ | 
+ Hardware Utilization ↑ \uparrow | 
+ Work Done ↓ \downarrow | 
+
+ Task | 
+ Model | 
+ Time (speedup) | 
+ sm_SOL | 
+ dram_SOL | 
+ tex_SOL | 
+ dram_bytes | 
+ l1_sectors | 
+ inst_executed | 
+ warps_active | 
+ regs_per_thread | 
+
+ Matrix Transpose | 
+ GPT 5.1 | 
+ 9.30 | 
+ 10.22 | 
+ 86.47 | 
+ 18.31 | 
+ 973 | 
+ 2108 | 
+ 417 | 
+ 52.33 | 
+ 24 | 
+
+ Qwen2.5-Coder | 
+ 9.60 (0.97 × \times ) | 
+ 9.88 | 
+ 87.22 | 
+ 17.95 | 
+ 1004 | 
+ 2196 | 
+ 434 | 
+ 51.76 | 
+ 24 | 
+
+ HPC-Coder-V2 | 
+ 9.88 (0.94 × \times ) | 
+ 9.61 | 
+ 87.58 | 
+ 17.72 | 
+ 1019 | 
+ 2234 | 
+ 441 | 
+ 51.33 | 
+ 24 | 
+
+ StarCoder2 | 
+ 10.21 (0.91 × \times ) | 
+ 9.32 | 
+ 87.96 | 
+ 17.48 | 
+ 1045 | 
+ 2288 | 
+ 453 | 
+ 50.89 | 
+ 26 | 
+
+ GPT 5.1 + OptiML-X | 
+ 5.74 (1.62 × \times ) | 
+ 14.61 | 
+ 78.14 | 
+ 22.33 | 
+ 765 | 
+ 1643 | 
+ 393 | 
+ 60.21 | 
+ 26 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.00 (1.55 × \times ) | 
+ 13.74 | 
+ 79.62 | 
+ 21.27 | 
+ 794 | 
+ 1732 | 
+ 401 | 
+ 58.69 | 
+ 26 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.52 (1.68 × \times ) | 
+ 14.98 | 
+ 77.43 | 
+ 22.61 | 
+ 742 | 
+ 1609 | 
+ 388 | 
+ 61.01 | 
+ 26 | 
+
+ StarCoder2 + OptiML-X | 
+ 5.83 (1.60 × \times ) | 
+ 14.13 | 
+ 78.96 | 
+ 21.84 | 
+ 776 | 
+ 1679 | 
+ 397 | 
+ 59.84 | 
+ 26 | 
+
+ OptiML | 
+ 5.20 (1.79 × \times ) | 
+ 15.77 | 
+ 76.31 | 
+ 23.12 | 
+ 718 | 
+ 1587 | 
+ 379 | 
+ 61.92 | 
+ 26 | 
+
+ Reverse Array | 
+ GPT 5.1 | 
+ 6.80 | 
+ 6.13 | 
+ 62.21 | 
+ 8.18 | 
+ 182 | 
+ 519 | 
+ 159 | 
+ 35.28 | 
+ 18 | 
+
+ Qwen2.5-Coder | 
+ 7.10 (0.96 × \times ) | 
+ 5.88 | 
+ 63.04 | 
+ 7.92 | 
+ 189 | 
+ 544 | 
+ 167 | 
+ 34.81 | 
+ 18 | 
+
+ HPC-Coder-V2 | 
+ 7.28 (0.93 × \times ) | 
+ 5.72 | 
+ 63.36 | 
+ 7.79 | 
+ 193 | 
+ 556 | 
+ 170 | 
+ 34.52 | 
+ 18 | 
+
+ StarCoder2 | 
+ 7.54 (0.90 × \times ) | 
+ 5.49 | 
+ 63.71 | 
+ 7.63 | 
+ 197 | 
+ 569 | 
+ 174 | 
+ 34.17 | 
+ 20 | 
+
+ GPT 5.1 + OptiML-X | 
+ 4.76 (1.43 × \times ) | 
+ 7.94 | 
+ 54.46 | 
+ 9.36 | 
+ 152 | 
+ 433 | 
+ 146 | 
+ 40.17 | 
+ 18 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 5.44 (1.25 × \times ) | 
+ 7.28 | 
+ 56.09 | 
+ 9.03 | 
+ 159 | 
+ 449 | 
+ 150 | 
+ 39.11 | 
+ 18 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 4.62 (1.47 × \times ) | 
+ 8.17 | 
+ 53.82 | 
+ 9.54 | 
+ 146 | 
+ 421 | 
+ 144 | 
+ 40.72 | 
+ 18 | 
+
+ StarCoder2 + OptiML-X | 
+ 4.88 (1.39 × \times ) | 
+ 7.66 | 
+ 55.11 | 
+ 9.21 | 
+ 154 | 
+ 437 | 
+ 147 | 
+ 39.84 | 
+ 18 | 
+
+ OptiML | 
+ 4.07 (1.67 × \times ) | 
+ 8.78 | 
+ 52.34 | 
+ 9.91 | 
+ 140 | 
+ 409 | 
+ 142 | 
+ 41.08 | 
+ 18 | 
+
+ ReLU Activation Function | 
+ GPT 5.1 | 
+ 7.50 | 
+ 12.11 | 
+ 41.37 | 
+ 16.44 | 
+ 263 | 
+ 883 | 
+ 358 | 
+ 42.19 | 
+ 20 | 
+
+ Qwen2.5-Coder | 
+ 7.80 (0.96 × \times ) | 
+ 11.74 | 
+ 42.12 | 
+ 16.06 | 
+ 274 | 
+ 918 | 
+ 372 | 
+ 41.61 | 
+ 22 | 
+
+ HPC-Coder-V2 | 
+ 8.02 (0.93 × \times ) | 
+ 11.48 | 
+ 42.43 | 
+ 15.89 | 
+ 281 | 
+ 939 | 
+ 381 | 
+ 41.18 | 
+ 22 | 
+
+ StarCoder2 | 
+ 8.31 (0.90 × \times ) | 
+ 11.21 | 
+ 42.77 | 
+ 15.73 | 
+ 289 | 
+ 962 | 
+ 392 | 
+ 40.77 | 
+ 22 | 
+
+ GPT 5.1 + OptiML-X | 
+ 4.87 (1.54 × \times ) | 
+ 15.64 | 
+ 34.28 | 
+ 18.71 | 
+ 212 | 
+ 717 | 
+ 332 | 
+ 48.17 | 
+ 22 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 5.24 (1.43 × \times ) | 
+ 14.92 | 
+ 35.14 | 
+ 18.21 | 
+ 220 | 
+ 751 | 
+ 342 | 
+ 47.06 | 
+ 22 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 4.68 (1.60 × \times ) | 
+ 15.98 | 
+ 33.61 | 
+ 18.92 | 
+ 206 | 
+ 701 | 
+ 327 | 
+ 48.88 | 
+ 22 | 
+
+ StarCoder2 + OptiML-X | 
+ 4.99 (1.50 × \times ) | 
+ 15.12 | 
+ 34.72 | 
+ 18.44 | 
+ 214 | 
+ 726 | 
+ 335 | 
+ 47.84 | 
+ 22 | 
+
+ OptiML | 
+ 4.49 (1.67 × \times ) | 
+ 16.72 | 
+ 32.03 | 
+ 19.37 | 
+ 201 | 
+ 689 | 
+ 322 | 
+ 49.66 | 
+ 22 | 
+
+ Top-K Selection | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.30 | 
+ 30.18 | 
+ 36.42 | 
+ 28.07 | 
+ 626 | 
+ 2058 | 
+ 973 | 
+ 70.12 | 
+ 44 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.72 (0.94 × \times ) | 
+ 28.66 | 
+ 37.16 | 
+ 27.14 | 
+ 654 | 
+ 2146 | 
+ 1009 | 
+ 68.64 | 
+ 44 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 6.05 (1.04 × \times ) | 
+ 31.04 | 
+ 35.21 | 
+ 28.69 | 
+ 608 | 
+ 1996 | 
+ 959 | 
+ 71.02 | 
+ 44 | 
+
+ StarCoder2 + OptiML-X | 
+ 6.41 (0.98 × \times ) | 
+ 29.55 | 
+ 36.71 | 
+ 27.82 | 
+ 633 | 
+ 2079 | 
+ 986 | 
+ 69.51 | 
+ 44 | 
+
+ OptiML | 
+ 5.90 (1.07 × \times ) | 
+ 31.94 | 
+ 33.82 | 
+ 29.38 | 
+ 594 | 
+ 1943 | 
+ 942 | 
+ 72.27 | 
+ 44 | 
+
+ Sorting | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 7.40 | 
+ 35.26 | 
+ 28.44 | 
+ 29.87 | 
+ 1247 | 
+ 4112 | 
+ 2862 | 
+ 76.18 | 
+ 62 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 7.95 (0.93 × \times ) | 
+ 33.64 | 
+ 29.13 | 
+ 28.88 | 
+ 1319 | 
+ 4292 | 
+ 2953 | 
+ 74.22 | 
+ 62 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 7.12 (1.04 × \times ) | 
+ 36.01 | 
+ 27.62 | 
+ 30.44 | 
+ 1211 | 
+ 4038 | 
+ 2791 | 
+ 77.06 | 
+ 62 | 
+
+ StarCoder2 + OptiML-X | 
+ 7.66 (0.97 × \times ) | 
+ 34.27 | 
+ 28.86 | 
+ 29.21 | 
+ 1284 | 
+ 4185 | 
+ 2904 | 
+ 75.01 | 
+ 62 | 
+
+ OptiML | 
+ 6.85 (1.08 × \times ) | 
+ 36.98 | 
+ 26.71 | 
+ 31.39 | 
+ 1184 | 
+ 3912 | 
+ 2732 | 
+ 78.11 | 
+ 62 | 
+
+ Matrix Copy | 
+ GPT 5.1 | 
+ 8.40 | 
+ 7.21 | 
+ 91.86 | 
+ 10.29 | 
+ 975 | 
+ 1644 | 
+ 178 | 
+ 34.29 | 
+ 16 | 
+
+ Qwen2.5-Coder | 
+ 8.75 (0.96 × \times ) | 
+ 6.94 | 
+ 92.48 | 
+ 9.96 | 
+ 1012 | 
+ 1712 | 
+ 186 | 
+ 33.78 | 
+ 18 | 
+
+ HPC-Coder-V2 | 
+ 8.98 (0.94 × \times ) | 
+ 6.72 | 
+ 92.78 | 
+ 9.74 | 
+ 1031 | 
+ 1752 | 
+ 193 | 
+ 33.41 | 
+ 18 | 
+
+ StarCoder2 | 
+ 9.21 (0.91 × \times ) | 
+ 6.53 | 
+ 93.05 | 
+ 9.58 | 
+ 1052 | 
+ 1796 | 
+ 199 | 
+ 33.07 | 
+ 18 | 
+
+ GPT 5.1 + OptiML-X | 
+ 5.60 (1.50 × \times ) | 
+ 8.97 | 
+ 87.41 | 
+ 12.13 | 
+ 824 | 
+ 1377 | 
+ 166 | 
+ 40.12 | 
+ 16 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.09 (1.38 × \times ) | 
+ 8.74 | 
+ 88.26 | 
+ 11.62 | 
+ 848 | 
+ 1418 | 
+ 171 | 
+ 39.27 | 
+ 16 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.38 (1.56 × \times ) | 
+ 9.28 | 
+ 86.72 | 
+ 12.34 | 
+ 808 | 
+ 1344 | 
+ 163 | 
+ 40.71 | 
+ 16 | 
+
+ StarCoder2 + OptiML-X | 
+ 5.82 (1.44 × \times ) | 
+ 8.52 | 
+ 87.96 | 
+ 11.92 | 
+ 835 | 
+ 1393 | 
+ 169 | 
+ 39.66 | 
+ 16 | 
+
+ OptiML | 
+ 5.12 (1.64 × \times ) | 
+ 9.66 | 
+ 85.12 | 
+ 12.66 | 
+ 793 | 
+ 1312 | 
+ 160 | 
+ 41.07 | 
+ 16 | 
+
+ Reduction | 
+ GPT 5.1 | 
+ 9.60 | 
+ 18.41 | 
+ 74.32 | 
+ 20.58 | 
+ 917 | 
+ 1457 | 
+ 1046 | 
+ 62.21 | 
+ 34 | 
+
+ Qwen2.5-Coder | 
+ 9.90 (0.97 × \times ) | 
+ 17.92 | 
+ 75.04 | 
+ 20.12 | 
+ 952 | 
+ 1522 | 
+ 1088 | 
+ 61.63 | 
+ 36 | 
+
+ HPC-Coder-V2 | 
+ 10.18 (0.94 × \times ) | 
+ 17.51 | 
+ 75.46 | 
+ 19.84 | 
+ 973 | 
+ 1564 | 
+ 1122 | 
+ 61.14 | 
+ 36 | 
+
+ StarCoder2 | 
+ 10.46 (0.92 × \times ) | 
+ 17.14 | 
+ 75.83 | 
+ 19.59 | 
+ 992 | 
+ 1602 | 
+ 1154 | 
+ 60.71 | 
+ 38 | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.23 (1.54 × \times ) | 
+ 23.62 | 
+ 66.41 | 
+ 24.27 | 
+ 759 | 
+ 1207 | 
+ 982 | 
+ 70.38 | 
+ 36 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.71 (1.43 × \times ) | 
+ 22.53 | 
+ 67.88 | 
+ 23.31 | 
+ 793 | 
+ 1254 | 
+ 1014 | 
+ 68.66 | 
+ 36 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 6.01 (1.60 × \times ) | 
+ 24.18 | 
+ 65.12 | 
+ 24.81 | 
+ 742 | 
+ 1179 | 
+ 968 | 
+ 71.08 | 
+ 36 | 
+
+ StarCoder2 + OptiML-X | 
+ 6.49 (1.48 × \times ) | 
+ 22.94 | 
+ 66.96 | 
+ 23.72 | 
+ 775 | 
+ 1231 | 
+ 999 | 
+ 69.44 | 
+ 36 | 
+
+ OptiML | 
+ 5.75 (1.67 × \times ) | 
+ 25.14 | 
+ 63.27 | 
+ 25.73 | 
+ 722 | 
+ 1115 | 
+ 942 | 
+ 72.18 | 
+ 36 | 
+
+ Dot Product | 
+ GPT 5.1 | 
+ 6.90 | 
+ 14.27 | 
+ 29.18 | 
+ 16.44 | 
+ 262 | 
+ 776 | 
+ 516 | 
+ 50.33 | 
+ 26 | 
+
+ Qwen2.5-Coder | 
+ 7.15 (0.97 × \times ) | 
+ 13.88 | 
+ 29.84 | 
+ 16.01 | 
+ 274 | 
+ 812 | 
+ 538 | 
+ 49.71 | 
+ 28 | 
+
+ HPC-Coder-V2 | 
+ 7.36 (0.94 × \times ) | 
+ 13.55 | 
+ 30.21 | 
+ 15.73 | 
+ 282 | 
+ 836 | 
+ 553 | 
+ 49.23 | 
+ 28 | 
+
+ StarCoder2 | 
+ 7.58 (0.91 × \times ) | 
+ 13.24 | 
+ 30.55 | 
+ 15.48 | 
+ 291 | 
+ 861 | 
+ 568 | 
+ 48.79 | 
+ 30 | 
+
+ GPT 5.1 + OptiML-X | 
+ 4.37 (1.58 × \times ) | 
+ 18.31 | 
+ 24.44 | 
+ 18.73 | 
+ 211 | 
+ 643 | 
+ 480 | 
+ 56.13 | 
+ 28 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 4.73 (1.46 × \times ) | 
+ 17.11 | 
+ 25.02 | 
+ 18.02 | 
+ 219 | 
+ 658 | 
+ 494 | 
+ 54.91 | 
+ 28 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 4.22 (1.64 × \times ) | 
+ 18.74 | 
+ 23.81 | 
+ 19.02 | 
+ 205 | 
+ 627 | 
+ 471 | 
+ 56.88 | 
+ 28 | 
+
+ StarCoder2 + OptiML-X | 
+ 4.56 (1.51 × \times ) | 
+ 17.62 | 
+ 24.63 | 
+ 18.31 | 
+ 214 | 
+ 646 | 
+ 488 | 
+ 55.44 | 
+ 28 | 
+
+ OptiML | 
+ 3.99 (1.73 × \times ) | 
+ 19.06 | 
+ 23.21 | 
+ 19.43 | 
+ 198 | 
+ 613 | 
+ 462 | 
+ 58.22 | 
+ 28 | 
+
+ Table 6 : End-to-end latency and Nsight Compute characterization on representative CUDA-LLM kernels from the task suite  ( Chen et al., 2025b ) (A100 80GB). We report runtime (lower is better) together with utilization proxies (SM/DRAM/TEX SOL; higher is better) and work proxies (DRAM bytes, L1 sectors, and executed instructions; lower is better). For each task, we compare LLM-only baselines, their OptiML-X post-optimization variants, and OptiML (G+X). Many LLM-only baselines fail to compile (CF). Best , second , third indicate per-column ranks within each task block. 
+
+ | 
+ Hardware Utilization ↑ \uparrow | 
+ Work Done ↓ \downarrow | 
+
+ Task | 
+ Model | 
+ Time (speedup) | 
+ sm_SOL | 
+ dram_SOL | 
+ tex_SOL | 
+ dram_bytes | 
+ l1_sectors | 
+ inst_executed | 
+ warps_active | 
+ regs_per_thread | 
+
+ Prefix Sum | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.65 | 
+ 28.21 | 
+ 42.16 | 
+ 26.14 | 
+ 864 | 
+ 1958 | 
+ 1459 | 
+ 72.33 | 
+ 42 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 7.05 (0.94 × \times ) | 
+ 26.73 | 
+ 43.74 | 
+ 24.98 | 
+ 902 | 
+ 2046 | 
+ 1516 | 
+ 70.26 | 
+ 42 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 6.28 (1.06 × \times ) | 
+ 29.05 | 
+ 40.91 | 
+ 26.71 | 
+ 836 | 
+ 1894 | 
+ 1411 | 
+ 73.12 | 
+ 42 | 
+
+ StarCoder2 + OptiML-X | 
+ 6.74 (0.99 × \times ) | 
+ 27.55 | 
+ 42.66 | 
+ 25.53 | 
+ 878 | 
+ 1989 | 
+ 1478 | 
+ 71.14 | 
+ 42 | 
+
+ OptiML | 
+ 6.10 (1.09 × \times ) | 
+ 29.96 | 
+ 40.22 | 
+ 27.33 | 
+ 813 | 
+ 1842 | 
+ 1371 | 
+ 74.15 | 
+ 42 | 
+
+ Categorical Cross-Entropy Loss | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.90 | 
+ 36.22 | 
+ 27.41 | 
+ 30.18 | 
+ 944 | 
+ 2412 | 
+ 1713 | 
+ 78.11 | 
+ 46 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 7.35 (0.94 × \times ) | 
+ 34.66 | 
+ 28.62 | 
+ 29.04 | 
+ 979 | 
+ 2514 | 
+ 1809 | 
+ 76.24 | 
+ 46 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 6.62 (1.04 × \times ) | 
+ 36.88 | 
+ 26.44 | 
+ 30.74 | 
+ 917 | 
+ 2346 | 
+ 1681 | 
+ 78.92 | 
+ 46 | 
+
+ StarCoder2 + OptiML-X | 
+ 7.08 (0.97 × \times ) | 
+ 35.14 | 
+ 27.86 | 
+ 29.62 | 
+ 956 | 
+ 2451 | 
+ 1732 | 
+ 77.03 | 
+ 46 | 
+
+ OptiML | 
+ 6.40 (1.08 × \times ) | 
+ 37.94 | 
+ 25.31 | 
+ 31.46 | 
+ 900 | 
+ 2272 | 
+ 1657 | 
+ 80.22 | 
+ 46 | 
+
+ Monte Carlo Integration | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 7.15 | 
+ 58.31 | 
+ 14.42 | 
+ 21.86 | 
+ 522 | 
+ 1441 | 
+ 3093 | 
+ 82.16 | 
+ 58 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 7.60 (0.94 × \times ) | 
+ 56.17 | 
+ 14.96 | 
+ 21.07 | 
+ 540 | 
+ 1516 | 
+ 3228 | 
+ 80.31 | 
+ 58 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 6.96 (1.03 × \times ) | 
+ 59.12 | 
+ 13.98 | 
+ 22.33 | 
+ 505 | 
+ 1406 | 
+ 3036 | 
+ 83.02 | 
+ 58 | 
+
+ StarCoder2 + OptiML-X | 
+ 7.28 (0.98 × \times ) | 
+ 57.41 | 
+ 14.55 | 
+ 21.58 | 
+ 529 | 
+ 1468 | 
+ 3122 | 
+ 81.27 | 
+ 58 | 
+
+ OptiML | 
+ 6.95 (1.03 × \times ) | 
+ 60.24 | 
+ 13.21 | 
+ 23.61 | 
+ 488 | 
+ 1369 | 
+ 2974 | 
+ 84.22 | 
+ 58 | 
+
+ Histogramming | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 8.10 | 
+ 32.11 | 
+ 44.63 | 
+ 24.28 | 
+ 985 | 
+ 3192 | 
+ 3613 | 
+ 74.14 | 
+ 52 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 8.65 (0.94 × \times ) | 
+ 30.62 | 
+ 46.21 | 
+ 23.11 | 
+ 1043 | 
+ 3371 | 
+ 3754 | 
+ 72.22 | 
+ 52 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 7.82 (1.04 × \times ) | 
+ 33.02 | 
+ 42.97 | 
+ 24.91 | 
+ 954 | 
+ 3110 | 
+ 3521 | 
+ 74.98 | 
+ 52 | 
+
+ StarCoder2 + OptiML-X | 
+ 8.34 (0.97 × \times ) | 
+ 31.21 | 
+ 44.88 | 
+ 23.74 | 
+ 1006 | 
+ 3265 | 
+ 3659 | 
+ 73.06 | 
+ 52 | 
+
+ OptiML | 
+ 7.55 (1.07 × \times ) | 
+ 34.38 | 
+ 41.37 | 
+ 25.44 | 
+ 917 | 
+ 3012 | 
+ 3392 | 
+ 76.19 | 
+ 52 | 
+
+ Ordinary Least Squares Regression | 
+ GPT 5.1 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ Qwen2.5-Coder | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ HPC-Coder-V2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ StarCoder2 | 
+ CF | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+ – | 
+
+ GPT 5.1 + OptiML-X | 
+ 6.20 | 
+ 45.21 | 
+ 18.33 | 
+ 24.12 | 
+ 718 | 
+ 1988 | 
+ 2192 | 
+ 78.17 | 
+ 50 | 
+
+ Qwen2.5-Coder + OptiML-X | 
+ 6.55 (0.95 × \times ) | 
+ 43.44 | 
+ 19.07 | 
+ 23.06 | 
+ 763 | 
+ 2072 | 
+ 2292 | 
+ 76.13 | 
+ 50 | 
+
+ HPC-Coder-V2 + OptiML-X | 
+ 5.98 (1.04 × \times ) | 
+ 46.02 | 
+ 17.86 | 
+ 24.58 | 
+ 697 | 
+ 1936 | 
+ 2141 | 
+ 79.03 | 
+ 50 | 
+
+ StarCoder2 + OptiML-X | 
+ 6.31 (0.98 × \times ) | 
+ 44.01 | 
+ 18.52 | 
+ 23.71 | 
+ 735 | 
+ 2014 | 
+ 2234 | 
+ 77.12 | 
+ 50 | 
+
+ OptiML | 
+ 5.85 (1.06 × \times ) | 
+ 47.36 | 
+ 16.71 | 
+ 25.19 | 
+ 681 | 
+ 1867 | 
+ 2098 | 
+ 80.28 | 
+ 50 | 
+
+ Table 7 : End-to-end latency and Nsight Compute characterization on representative CUDA-LLM kernels from the task suite  ( Chen et al., 2025b ) (A100 80GB). We report runtime (lower is better) together with utilization proxies (SM/DRAM/TEX SOL; higher is better) and work proxies (DRAM bytes, L1 sectors, and executed instructions; lower is better). For each task, we compare LLM-only baselines, their OptiML-X post-optimization variants, and OptiML (G+X). Many LLM-only baselines fail to compile (CF). Best , second , third indicate per-column ranks within each task block. 
+
+ Appendix F Ablation on MCTS Budget 
+
+ F.1 Ablation: MCTS budget ( B B ) and reward components (OptiML-X) 
+
+ We ablate the MCTS search budget used in our experiments ( B = 6 B{=}6 ) and the key OptiML-X design choices: (i) profile-guided diagnosis (Nsight-derived bottleneck signals), (ii) the composite reward (proxy metrics + runtime), and (iii) the LLM-as-a-Judge (structured, tool-called evaluation that scores patches and enforces constraints). Across the 5-kernel subset (Table  7 ), increasing B B improves the chance of finding a valid and faster patch, with diminishing returns beyond B ≈ 6 B{\approx}6 due to the cost of additional compile/test/profile cycles. Removing the judge or proxy guidance reduces both Pass@ k k and Speedup@ k k , indicating that MCTS benefits from structured feedback to reliably prune invalid or low-value edits. 
+
+ Table 8 : OptiML-X ablations on the 5-task subset. Pass@ k k is the fraction of (task, sample) instances with at least one valid optimized kernel within k k attempts (compile + L0/L1). Speedup@ k k is the geometric-mean speedup over the corresponding valid instances. B B is the number of MCTS iterations (compile+L0/L1+profile per iteration). 
+
+ Variant | 
+ Pass@1 | 
+ Pass@5 | 
+ Pass@10 | 
+ Speedup@1 | 
+ Speedup@5 | 
+ Speedup@10 | 
+ #Profiles / task | 
+
+ MCTS, no proxy reward ( B = 6 B{=}6 ) | 
+ 52 | 
+ 78 | 
+ 87 | 
+ 0.92 × \times | 
+ 0.95 × \times | 
+ 0.96 × \times | 
+ 6 | 
+
+ MCTS, no LLM-judge ( B = 6 B{=}6 ) | 
+ 46 | 
+ 74 | 
+ 85 | 
+ 1.02 × \times | 
+ 1.05 × \times | 
+ 1.06 × \times | 
+ 6 | 
+
+ MCTS, no diagnosis ( B = 6 B{=}6 ) | 
+ 55 | 
+ 80 | 
+ 89 | 
+ 0.93 × \times | 
+ 0.96 × \times | 
+ 0.97 × \times | 
+ 6 | 
+
+ MCTS full ( B = 2 B{=}2 ) | 
+ 60 | 
+ 83 | 
+ 90 | 
+ 1.03 × \times | 
+ 1.05 × \times | 
+ 1.07 × \times | 
+ 2 | 
+
+ MCTS full ( B = 4 B{=}4 ) | 
+ 70 | 
+ 91 | 
+ 96 | 
+ 1.04 × \times | 
+ 1.07 × \times | 
+ 1.10 × \times | 
+ 4 | 
+
+ MCTS full ( B = 6 B{=}6 ) | 
+ 85 | 
+ 100 | 
+ 100 | 
+ 1.18 × \times | 
+ 1.26 × \times | 
+ 1.3 × \times | 
+ 6 | 
+
+ MCTS full ( B = 8 B{=}8 ) | 
+ 85 | 
+ 100 | 
+ 100 | 
+ 1.18 × \times | 
+ 1.26 × \times | 
+ 1.3 × \times | 
+ 8 | 
+
+ Appendix G Appendix: Qualitative Case Study (One Task Across All Models) 
+
+ G.1 One-task kernel snapshots: Matrix Multiplication 
+
+ We include representative CUDA excerpts for Matrix Multiplication for each model and for the optimized variants.
+To keep the appendix concise and comparable, we show the inner computation and memory-access region (the part that
+dominates performance), omitting boilerplate (bounds checks, launch wrappers, error checks). 
+
+ Common setup. 
+
+ All kernels compute C = A × B C=A\times B (row-major) with M × K M{\times}K by K × N K{\times}N matrices.
+We denote thread-block coordinates ( b x , b y ) (b_{x},b_{y}) and thread indices ( t x , t y ) (t_{x},t_{y}) . 
+
+ (1) GPT 5.1 (LLM-only): naive global-memory accumulation. 
+
+ GPT 5.1: typical naive matmul inner loop (global loads, minimal reuse). 
+ ⬇ 
+ int row = blockIdx . y * blockDim . y + threadIdx . y ; 
+
+ int col = blockIdx . x * blockDim . x + threadIdx . x ; 
+
+ float acc = 0. f ; 
+
+ #pragma unroll 1 
+
+ for ( int k = 0; k < K ; k ++) { 
+
+ acc += A [ row * K + k ] * B [ k * N + col ]; // two global loads per FMA 
+
+ } 
+
+ C [ row * N + col ] = acc ; 
+
+ (2) Qwen2.5-Coder (LLM-only): minor improvements (e.g., bounds, limited unrolling), still global-bound. 
+
+ Qwen2.5-Coder: modest structural tweaks but still limited data reuse. 
+ ⬇ 
+ float acc = 0. f ; 
+
+ int row = ...; int col = ...; 
+
+ if ( row < M && col < N ) { 
+
+ #pragma unroll 4 
+
+ for ( int k = 0; k < K ; k ++) { 
+
+ acc = fmaf ( A [ row * K + k ], B [ k * N + col ], acc ); 
+
+ } 
+
+ C [ row * N + col ] = acc ; 
+
+ } 
+
+ (3) HPC-Coder-V2 (LLM-only): slightly heavier structure but often higher overhead/pressure. 
+
+ HPC-Coder-V2: attempts extra structure, but can increase registers or miss coalescing. 
+ ⬇ 
+ float acc = 0. f ; 
+
+ int row = ...; int col = ...; 
+
+ for ( int k = 0; k < K ; k += 1) { // still scalar stepping 
+
+ float a = A [ row * K + k ]; // global 
+
+ float b = B [( k )* N + col ]; // global 
+
+ acc += a * b ; 
+
+ } 
+
+ C [ row * N + col ] = acc ; 
+
+ (4) StarCoder2 (LLM-only): similar baseline, sometimes adds unnecessary sync/branches. 
+
+ StarCoder2: baseline-like structure; may introduce extra checks or divergence. 
+ ⬇ 
+ float acc = 0. f ; 
+
+ int row = ...; int col = ...; 
+
+ if ( row < M && col < N ) { 
+
+ for ( int k = 0; k < K ; ++ k ) { 
+
+ acc += A [ row * K + k ] * B [ k * N + col ]; 
+
+ } 
+
+ C [ row * N + col ] = acc ; 
+
+ } 
+
+ G.2 How OptiML-X (MCTS) improves the kernel 
+
+ We now show the edit trajectory produced by OptiML-X for the same starting program.
+OptiML-X explores patches with MCTS under a small budget (e.g., B = 6 B{=}6 ) and uses profiling-derived proxy metrics
+to target the current bottleneck (e.g., low compute SOL with high memory pressure indicates memory-bound behavior). 
+
+ Starting point for OptiML-X. 
+
+ OptiML-X begins from an LLM-generated kernel (often close to Listing  – ),
+profiles it, and then iteratively proposes and validates patches. Below we show three representative patches
+from the accepted MCTS path (the final child chosen among KEEP nodes). 
+
+ Patch #1 (reuse via shared-memory tiling). Goal: reduce global traffic, improve memory SOL and overall time. 
+
+ OptiML-X Patch #1: shared-memory tiles for A and B (data reuse + coalescing). 
+ ⬇ 
+ constexpr int TILE = 16; 
+
+ __shared__ float As [ TILE ][ TILE ]; 
+
+ __shared__ float Bs [ TILE ][ TILE ]; 
+
+ int row = blockIdx . y * TILE + threadIdx . y ; 
+
+ int col = blockIdx . x * TILE + threadIdx . x ; 
+
+ float acc = 0. f ; 
+
+ for ( int t = 0; t < ( K + TILE - 1) / TILE ; ++ t ) { 
+
+ int kA = t * TILE + threadIdx . x ; 
+
+ int kB = t * TILE + threadIdx . y ; 
+
+ As [ threadIdx . y ][ threadIdx . x ] = ( row < M && kA < K ) ? A [ row * K + kA ] : 0. f ; 
+
+ Bs [ threadIdx . y ][ threadIdx . x ] = ( kB < K && col < N ) ? B [ kB * N + col ] : 0. f ; 
+
+ __syncthreads (); 
+
+ #pragma unroll 
+
+ for ( int k = 0; k < TILE ; ++ k ) 
+
+ acc = fmaf ( As [ threadIdx . y ][ k ], Bs [ k ][ threadIdx . x ], acc ); 
+
+ __syncthreads (); 
+
+ } 
+
+ if ( row < M && col < N ) C [ row * N + col ] = acc ; 
+
+ Patch #2 (vectorized global loads into shared memory). Goal: reduce transactions / L1 sectors and improve bandwidth efficiency. 
+
+ OptiML-X Patch #2: vectorized loads (float4) to cut memory transactions. 
+ ⬇ 
+ using Vec = float4 ; 
+
+ int row = blockIdx . y * TILE + threadIdx . y ; 
+
+ int col4 = ( blockIdx . x * TILE + threadIdx . x ) * 4; // 4 columns per thread 
+
+ // Load B in float4 chunks (when aligned); store into shared tile. 
+
+ Vec vb = * reinterpret_cast < const Vec *>(& B [( t * TILE + threadIdx . y )* N + col4 ]); 
+
+ Bs [ threadIdx . y ][ threadIdx . x *4 + 0] = vb . x ; 
+
+ Bs [ threadIdx . y ][ threadIdx . x *4 + 1] = vb . y ; 
+
+ Bs [ threadIdx . y ][ threadIdx . x *4 + 2] = vb . z ; 
+
+ Bs [ threadIdx . y ][ threadIdx . x *4 + 3] = vb . w ; 
+
+ Patch #3 (reduce instruction overhead + register pressure). Goal: improve compute SOL/occupancy tradeoff. 
+
+ OptiML-X Patch #3: tighten loop structure and control unrolling to manage registers. 
+ ⬇ 
+ #pragma unroll 8 // bounded unroll (avoids blow-up) 
+
+ for ( int k = 0; k < TILE ; ++ k ) { 
+
+ acc = fmaf ( As [ ty ][ k ], Bs [ k ][ tx ], acc ); 
+
+ } 
+
+ // Optional: avoid extra temporaries; keep indices in registers 
+
+ Rejected branches (why MCTS helps). 
+
+ OptiML-X also explores patches that look plausible but empirically degrade performance or violate constraints.
+MCTS is crucial because it allocates more rollouts to promising edit sequences while pruning poor ones: 
+
+ • 
+
+ Over-unrolling / aggressive vectorization: decreases time in isolation but spikes register use, reducing occupancy and worsening end-to-end time; rejected after profiling shows higher instruction count or reduced SOL. 
+
+ • 
+
+ Excess shared memory staging: increases synchronization and shared-memory bank conflicts; rejected if memory SOL or measured time worsens. 
+
+ • 
+
+ Unsafe pointer casts / alignment assumptions: fails correctness tests (L0/L1) or introduces NaNs; rejected with a large negative reward. 
+
+ G.3 Final OptiML kernel: OptiML-G + OptiML-X 
+
+ OptiML (OptiML-G + OptiML-X) typically starts from a structurally stronger candidate than LLM-only baselines:
+OptiML-G produces kernels that already contain reusable structure (tiling, cleaner indexing, fewer anti-patterns),
+and OptiML-X then refines them under profiling feedback. The resulting kernel resembles a tuned tiled matmul: 
+
+ OptiML (final): shared-memory tiling + bounded unrolling + transaction-efficient loads. 
+ ⬇ 
+ constexpr int TILE = 16; 
+
+ __shared__ float As [ TILE ][ TILE ]; 
+
+ __shared__ float Bs [ TILE ][ TILE ]; 
+
+ int row = blockIdx . y * TILE + threadIdx . y ; 
+
+ int col = blockIdx . x * TILE + threadIdx . x ; 
+
+ float acc = 0. f ; 
+
+ for ( int t = 0; t < ( K + TILE - 1) / TILE ; ++ t ) { 
+
+ int kA = t * TILE + threadIdx . x ; 
+
+ int kB = t * TILE + threadIdx . y ; 
+
+ As [ ty ][ tx ] = ( row < M && kA < K ) ? A [ row * K + kA ] : 0. f ; 
+
+ Bs [ ty ][ tx ] = ( kB < K && col < N ) ? B [ kB * N + col ] : 0. f ; 
+
+ __syncthreads (); 
+
+ #pragma unroll 8 
+
+ for ( int k = 0; k < TILE ; ++ k ) acc = fmaf ( As [ ty ][ k ], Bs [ k ][ tx ], acc ); 
+
+ __syncthreads (); 
+
+ } 
+
+ if ( row < M && col < N ) C [ row * N + col ] = acc ; 
+
+ Takeaway (tying back to the table). 
+
+ This qualitative trajectory matches the quantitative trends in Table  7 : optimized variants increase
+ compute/memory SOL while decreasing work proxies (dram bytes, L1 sectors, instructions). In matmul specifically,
+OptiML achieves the best time and best utilization metrics by combining (i) OptiML-G’s stronger starting structure and
+(ii) OptiML-X’s MCTS-guided refinement that targets the measured bottleneck rather than applying fixed heuristics. 
+
+ G.4 Why OptiML (OptiML-G + OptiML-X) converges in fewer rounds 
+
+ Beyond achieving the best end-to-end time, OptiML typically reaches its final (best) kernel in fewer optimization rounds than OptiML-X applied to a weaker LLM-only starting point. Intuitively, OptiML-G shifts the search initialization toward candidates with (i) a compilable baseline, (ii) stable indexing and bounds, and (iii) an optimization-friendly structure (e.g., separable load/compute phases, clean loop nests, and fewer anti-patterns). This reduces wasted MCTS rollouts on compilation repair, correctness fixes, or structural rewrites, allowing OptiML-X to spend its limited budget on performance-critical refinements. 
+
+ Round-to-best metric. 
+
+ Let i ⋆ i^{\star} denote the first MCTS iteration (round) at which the best-performing candidate is found along the search trajectory.
+We report this as round-to-best (lower is better). In our experiments with a fixed budget (e.g., B = 6 B{=}6 ),
+OptiML consistently achieves smaller round-to-best than OptiML-X alone: OptiML-G provides an initial kernel that is already close to a high-quality basin, so MCTS requires fewer expansions to discover the final optimized form. 
+
+ Illustrative matmul trajectory (qualitative). 
+
+ For Matrix Multiplication, OptiML-G commonly produces a kernel that already contains a tiling skeleton (shared-memory staging and a clean loop over tiles), while LLM-only baselines frequently start from global-memory accumulation (Listing  – ). As a result: 
+
+ • 
+
+ OptiML-X on LLM-only start: early rounds are often spent introducing tiling and fixing corner cases (bounds, synchronization placement, shared-memory indexing), delaying performance-focused refinements. 
+
+ • 
+
+ OptiML (G + X): because the starting kernel already has the correct macro-structure , MCTS can immediately focus on micro-optimizations that move the needle on profiling metrics (e.g., transaction-efficient loads, bounded unrolling, reduced instruction overhead), reaching the best candidate in fewer rounds. 
+
+ Table 9 : Search efficiency under a fixed MCTS budget ( B = 6 B{=}6 ). We report the best speedup obtained within-budget and the round-to-best (first iteration where the best candidate appears; lower is better). 
+
+ Task | 
+ OptiML-X only | 
+ OptiML (Gen+X) | 
+
+ | 
+ Best speedup | 
+ round-to-best ↓ \downarrow | 
+ Best speedup | 
+ round-to-best ↓ \downarrow | 
+
+ Matrix Multiplication | 
+ 1.59 × \times | 
+ 6 | 
+ 1.64 × \times | 
+ 3 | 
+
+ Max Pooling 3D | 
+ 1.04 × \times | 
+ 4 | 
+ 1.08 × \times | 
+ 2 | 
+
+ Multi-Head Self-Attn | 
+ 1.05 × \times | 
+ 5 | 
+ 1.15 × \times | 
+ 3 | 
+
+ ReLU | 
+ 1.60 × \times | 
+ 5 | 
+ 1.67 × \times | 
+ 2 | 
+
+ Cross-Entropy Loss | 
+ 1.04 × \times | 
+ 4 | 
+ 1.08 × \times | 
+ 2 | 
+
+ Mean | 
+ 1.26 × \times | 
+ 4.8 | 
+ 1.32 × \times | 
+ 2.4 | 
+
+ In our setting, i Gen+X ⋆ < i X ⋆ i^{\star}_{\text{Gen+X}}<i^{\star}_{\text{X}} is the key qualitative claim: the full framework converges faster because OptiML-G reduces the search distance to an optimization-ready program manifold. 
+
+ Narrative link to the main results. 
+
+ This faster convergence complements the end-to-end improvements in Table  1 : OptiML not only produces better kernels, but does so more sample-efficiently under a fixed profiling budget. This highlights that OptiML-G and OptiML-X are not interchangeable components; their combination is essential for robust and efficient optimization when the initial code quality varies across LLMs and tasks. 
+
+ Appendix H Failure Modes and Limitations 
+
+ OptiML combines (i) generation ( OptiML-G ) and (ii) search-based post-hoc optimization ( OptiML-X ). While the pipeline improves compilability and performance on many kernels, it can fail in systematic ways. Below we categorize failure modes, describe how they manifest in practice, and outline mitigations we implement (or recommend) in the evaluation harness. 
+
+ H.1 Compilation and Toolchain Failures 
+
+ Syntax and API misuse. 
+
+ LLM-written CUDA may contain invalid syntax, misuse of CUDA intrinsics, missing includes, or incorrect kernel launch signatures. These failures are often detected immediately by CompileWithRepair and terminate an attempt as compile_failed . In OptiML-X, compilation failure is treated as a hard constraint violation and is assigned a large negative reward to prevent repeated exploration of similar edits. 
+
+ Architecture/flags mismatch. 
+
+ Edits can silently assume a target SM capability (e.g., using newer intrinsics) or require compilation flags not present in the harness. These failures appear as compilation errors or, worse, as kernels that compile but execute incorrectly due to undefined behavior. We mitigate by (i) fixing a single toolchain configuration (nvcc, driver, SM target) and (ii) validating that suggested changes do not introduce unsupported features. 
+
+ Register pressure and resource limits. 
+
+ Some patches increase register usage and shared-memory footprint enough to reduce occupancy or exceed per-SM resource limits. This can manifest as compilation errors (e.g., too much shared memory) or steep slowdowns despite apparent algorithmic improvements. OptiML-X partially catches this via proxy metrics (e.g., utilization surrogates and work-done counters) and by rejecting candidates that regress end-to-end timing. 
+
+ H.2 Correctness Failures Beyond Unit Tests 
+
+ Overfitting to L0/L1 tests. 
+
+ A candidate may pass the provided test plan (L0/L1) but fail on untested inputs (e.g., edge cases, different shapes, non-contiguous strides). This is especially common for reductions, top- k k , and attention kernels where numerical stability and boundary handling are subtle. The risk is higher when tests are small, deterministic, or lack adversarial coverage. 
+
+ Numerical instability and precision drift. 
+
+ Optimizations that alter accumulation order, use fused operations, or introduce mixed precision can change numerical error. A kernel may pass with loose tolerances but fail stricter checks or downstream training. We mitigate via: (i) task-specific tolerances, (ii) optional higher-precision reference checks for a subset of inputs, and (iii) metamorphic relations (L2) when available (e.g., invariance under permutation for reductions, consistency under scaling for linear ops). 
+
+ Undefined behavior and race conditions. 
+
+ Edits that change synchronization, remove bounds checks, or introduce non-atomic updates can create data races. These often appear as flaky outputs: passing some runs and failing others. We detect this by running L0/L1 multiple times with different seeds and flagging nondeterminism. When nondeterminism is detected, the candidate is rejected. 
+
+ H.3 Profiling and Measurement Failures 
+
+ Profiler noise 
+
+ Short kernels and heavily cached workloads can yield noisy timings and unstable counter measurements. This can mislead MCTS exploration when differences are within noise. We mitigate by (i) using median-of- n n timing, (ii) warmup iterations and (iii) discarding candidates whose improvement is below a minimum effect threshold. 
+
+ Counter aliasing and metric misinterpretation. 
+
+ Proxy rewards rely on a small set of Nsight Compute counters (utilization surrogates and work-done measures). However, counters can be weakly correlated with end-to-end time for some kernels (e.g., when occupancy dominates, or when instruction mix changes shift bottlenecks). This can produce “false positives” where proxy reward improves but time regresses, or “false negatives” where time improves without clear proxy gains. In OptiML-X we therefore (i) include timing in the composite reward, and (ii) treat proxy terms as directional hints rather than absolute objectives. 
+
+ Profiling overhead and budget pressure. 
+
+ MCTS requires repeated compile–test–profile cycles. When the budget is small, the system may spend most of its budget on candidates that fail compilation/tests, leaving too few valid rollouts to make progress. We mitigate by penalizing repeated constraint violations, caching compilation artifacts, and using lightweight static checks to pre-filter obviously invalid edits. 
+
+ H.4 Search and Optimization Failures 
+
+ Local minima and brittle edits. 
+
+ Some kernels require a coordinated sequence of changes (e.g., introducing shared-memory tiling requires changes to indexing, synchronization, and launch configuration). With limited budget, MCTS may not discover the multi-step path and instead converge to shallow edits with marginal gains. This is most visible in kernels where the baseline structure is fundamentally suboptimal. 
+
+ Hallucinated bottlenecks and incorrect diagnosis. 
+
+ The Diagnose and Propose steps are LLM-driven and can produce plausible but incorrect explanations (e.g., blaming coalescing when the kernel is actually compute-bound). When diagnosis is wrong, search explores irrelevant transformations, wasting budget. We reduce this by providing structured profiler summaries using structured outputs to the LLM, constraining allowable transformations, and using the judge to require metric-consistent evidence for claimed improvements. 
+
+ Reward hacking and proxy exploitation. 
+
+ Because proxy reward includes utilization surrogates and work-done counters, candidates can sometimes improve proxy terms without improving real performance (e.g., increasing utilization by adding redundant work). Including end-to-end timing in the composite reward and using a “KEEP” filter (only retaining candidates that improve time or meet a minimum performance criterion) prevents most proxy exploitation from being selected as final output. 
+
+ H.5 OptiML-Gen Specific Failure Modes 
+
+ Diversity without quality. 
+
+ Mixture-of-thought sampling can increase diversity but also increases the number of low-quality or non-compilable candidates. If selection is based on weak signals (e.g., superficial heuristics), OptiML-G may pick a candidate that compiles but is structurally hard to optimize (e.g., excessive branching, unnecessary temporaries). We mitigate by selecting using a staged filter: compilation, L0/L1 correctness, then coarse profiling before handing off to OptiML-X. 
+
+ Structure that blocks downstream optimization. 
+
+ Some generated kernels hard-code shapes, use unvectorized scalar loads, or bake in uncoalesced layouts. Even with OptiML-X, such kernels may not reach high performance within a small search budget. This is a key motivation for combining generation and optimization: OptiML-G aims to produce “optimization-friendly” structure (e.g., clean loop nests, separable indexing, explicit tiling opportunities) so OptiML-X can apply targeted improvements efficiently. 
+
+ H.6 Limitations and When OptiML is Less Effective 
+
+ OptiML is less effective when (i) the harness cannot adequately test correctness (weak or missing L0/L1/L2), (ii) profiling signals are too noisy to distinguish candidates under a small budget, (iii) the optimal solution requires large algorithmic redesign rather than local edits, or (iv) performance is dominated by factors outside kernel code (e.g., launch overhead for tiny kernels, host-device transfer, or framework scheduling). These cases motivate future work in stronger correctness specifications, multi-fidelity evaluation (static + microbench + profile), and integrating algorithm-level rewrites into the search space. 
+
+ Practical guidance. 
+
+ For high-stakes kernels, we recommend: (i) expanding test coverage (including randomized and adversarial inputs), (ii) requiring deterministic behavior checks, (iii) using multiple profiling runs per candidate, and (iv) reporting both speed and correctness metrics (e.g., pass@k and speedup@k) to capture the reliability-performance trade-off. 
+
+ Appendix I Weights 
+
+ I.1 Bottleneck-aware proxy weighting in OptiML-X 
+
+ OptiML-X does not use a fixed proxy-reward weighting across all kernels. Instead, it adapts the proxy weights based on the dominant bottleneck inferred from profiler signals. Concretely, we compare the SM and DRAM utilization proxies (Nsight Compute SOL-style metrics) and classify a state as memory-bound if SOL d ​ r ​ a ​ m − SOL s ​ m > δ \mathrm{SOL}_{dram}-\mathrm{SOL}_{sm}>\delta , compute-bound if SOL s ​ m − SOL d ​ r ​ a ​ m > δ \mathrm{SOL}_{sm}-\mathrm{SOL}_{dram}>\delta , and mixed otherwise (we use δ = 7.5 \delta{=}7.5 ). The proxy reward in Eq.  10 is then computed with regime-specific weights:
+(i) Memory-bound: we upweight the DRAM-utilization term and memory-traffic reductions (dramBytes/L1Sectors) to prioritize improved coalescing, reuse, and reduced global traffic;
+(ii) Compute-bound: we upweight the SM-utilization term and instruction-footprint reduction to prioritize better ILP, reduced divergence, and lower instruction pressure;
+(iii) Mixed: we use the base weights to trade off utilization improvements and work-reduction more conservatively.
+In all regimes, we apply small penalties when a term regresses (e.g., increased traffic or reduced utilization) to discourage search steps that “move” the bottleneck without improving end-to-end time. Table  10 reports the concrete weight values used in our experiments. 
+
+ Table 10 : Proxy-metric weighting used by OptiML-X. We use a base set of progress weights w w and penalty weights λ \lambda for regressions, and apply a bottleneck-aware scaling factor s = 3.0 s{=}3.0 to emphasize the dominant resource. The bottleneck is inferred from Nsight Compute SOL gaps with margin δ = 7.5 \delta{=}7.5 . 
+
+ Setting | 
+ sm | 
+ dram | 
+ tex | 
+ Δ ​ L1 \Delta\textbf{L1} | 
+ Δ ​ dramB \Delta\textbf{dramB} | 
+ Δ ​ inst \Delta\textbf{inst} | 
+
+ Progress weights w w (higher is better; deltas are normalized ratios) | 
+
+ Base (mixed) | 
+ 0.20 | 
+ 0.30 | 
+ 0.10 | 
+ 0.15 | 
+ 0.15 | 
+ 0.10 | 
+
+ Memory-bound ( dram − sm > δ \text{dram}-\text{sm}>\delta ) | 
+ 0.20 | 
+ 0.90 | 
+ 0.10 | 
+ 0.15 | 
+ 0.45 | 
+ 0.10 | 
+
+ Compute-bound ( sm − dram > δ \text{sm}-\text{dram}>\delta ) | 
+ 0.60 | 
+ 0.30 | 
+ 0.10 | 
+ 0.15 | 
+ 0.15 | 
+ 0.30 | 
+
+ Regression penalties λ \lambda (applied when a term worsens) | 
+
+ All regimes (fixed) | 
+ 0.05 | 
+ 0.05 | 
+ 0.03 | 
+ 0.04 | 
+ 0.04 | 
+ 0.03 | 
+
+ Global composition (fixed) | 
+
+ Time mixing α t \alpha_{\text{t}} | 
+ 0.40 | 
+
+ Bottleneck margin δ \delta | 
+ 7.5 | 
+
+ Appendix J Future Work 
+
+ There are several promising directions for future work. Extending the framework to multi-kernel programs and whole-application optimization would enable cross-kernel fusion, scheduling, and memory planning. Incorporating richer cost models (e.g., static analysis, learned performance predictors, or compiler IR features) could further reduce reliance on expensive profiling. Finally, expanding OptiML to other accelerator backends (e.g., HIP/ROCm, SYCL, Triton, and vendor-specific libraries) would broaden its applicability to heterogeneous HPC and ML environments. We hope OptiML helps move accelerator programming toward a workflow where LLMs produce correct code by default and systems-level search reliably closes the remaining performance gap. We would also like to extend OptiML to support CUDA libraries such as cuBLAS, cuDNN, Thrust, cuB, etc.

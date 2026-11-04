@@ -1,0 +1,1139 @@
+KernelArc : A Multi-Agent Framework for GPU Kernel Optimization 
+ CCS:  Software and its engineering Automatic programming CCS:  Computer systems organization Parallel architectures 
+
+ Joyjit Kundu *  Ben Stoffelen  Kaili Wang  Peter Vrancx  Ludovic Denoyer
+
+ Affiliation:  AILabs, Interuniversity Microelectronics Centre (IMEC) 
+
+ Abstract. 
+
+ We present KernelArc , a multi-agent framework for autonomous GPU kernel optimization across heterogeneous workloads. Strategy-specialized agents run in parallel and coordinate through conclusions-only shared memory, a deterministic benchmark guard, and read-only cross-agent state with plateau-triggered drafting. We evaluate KernelArc on NVIDIA H100 and B200 GPUs using category-representative SOL-ExecBench workloads. The resulting implementations span custom BF16 GEMM, static cuBLASLt Expert-API configuration tables, fused mixture-of-experts backward, shape-gated decoder-layer fusion, native NVFP4 grouped-query attention, and paged prefill attention. At the public SOL-ExecBench leaderboard snapshot recorded on July 30, 2026, these submissions ranked first on representative L1, L2, Quantization, and FlashInfer tasks. The trajectories support the paper’s central motivation: shared multi-agent search can broaden exploration and reach stronger incumbents within a fixed candidate budget, while the value of individual coordination features depends on the kernel and optimization stage. 
+
+ Keywords:  GPU kernel optimization, multi-agent optimization, LLM agents, autoresearch
+ 1 1 footnotetext: Email: joyjit.kundu@imec.be 
+
+ 1. Introduction 
+
+ Extracting peak performance from modern GPU accelerators is increasingly difficult. Hopper and Blackwell expose high-throughput primitives—including Warp Group Matrix Multiply Accumulate ( wgmma.mma_async ), Tensor Memory Accelerator (TMA) transfers, asynchronous barriers, SM100 instructions, and NVFP4 formats—but useful speedups require these mechanisms to be coordinated across layouts, the memory hierarchy, register pressure, synchronization, and launch overheads. 
+
+ LLM agents offer a programmable alternative to manual performance engineering. They can profile kernels, propose structural transformations, edit CUDA/PTX or domain-specific language code, select and autotune libraries such as cuBLASLt, cuDNN, and CUTLASS, choose precision and quantization formats, and close the loop with correctness tests and benchmarks. Existing single-agent systems such as AutoKernel   ( 1 ) show that this loop can work. Their success, however, depends on a focused human-designed playbook and enough sequential budget to traverse it. Even when a single agent pivots at a plateau, it advances one incumbent under one local history, so a fixed budget covers fewer algorithm families and may over-refine a design before moving on. 
+
+ We introduce KernelArc , a multi-agent architecture for this fragmented-search regime. Strategy-specialized agents explore different optimization families concurrently. They exchange only validated conclusions through shared memory whose retention horizon is configurable, while a deterministic guard owns correctness, benchmarking, and keep/revert decisions. Read-only cross-agent state exposes stronger sibling solutions for inspection, and a plateau trigger asks the agent to try a different algorithm, DSL family, or data layout instead of continuing local refinements. The observed trajectories are consistent with the intended role of sharing: the configured system moves beyond a single-agent plateau, and fixed-budget ablations favor shared-memory multi-agent configurations. We report this as a system-level pattern because the value of each coordination feature can depend on the kernel and on whether search is in early exploration, plateau escape, or late local refinement. The division assigns generative reasoning to LLMs and stateful evaluation and coordination to deterministic code. 
+
+ With an eight-hour wall-clock budget and a detailed Hopper-specific general matrix multiplication (GEMM) optimization playbook, a single-agent automated research loop reaches 766 TFLOPS (BF16) on one fixed shape, 3.2% above the matched cuBLAS baseline measured during the campaign. This demonstrates depth along one narrow playbook-guided path; it does not establish a generally faster GEMM kernel than cuBLAS or the ability to optimize a score aggregated across many shapes. Reaching 766 TFLOPS requires a correct sequence of low-level Hopper optimizations, including WGMMA/TMA pipelining, synchronization, register-pressure management, and epilogue staging. To study the broader regime, we use the Speed-of-Light Execution Benchmark (SOL-ExecBench)  ( 2 ) , whose SOL score aggregates performance across input shapes (higher is better). On L1-030—an attention output projection with residual addition evaluated across 16 shapes—the sequential run plateaus at SOL 0.441, while the configured KernelArc system reaches SOL 0.481. 1 1 
+ 1 
+
+ After this snapshot, the latest L1-030 run recorded on Aug. 8 ranked third and reached SOL 0.490500 with latency 0.036174 ms. This motivates the full shared multi-agent design without requiring every coordination feature to help at every point in the search. 
+
+ We evaluate the KernelArc architecture on tasks spanning all four workload categories of SOL-ExecBench  ( 2 ) , covering common neural-network operators.
+Together with the one-agent GEMM configuration, the resulting implementations span a PTX-assisted custom BF16 GEMM implementation benchmarked against a matched cuBLAS baseline, static cuBLASLt configuration tables, fused mixture-of-experts (MoE) backward, shape-gated decoder-layer fusion, native NVFP4 attention, and paged prefill attention, showing transfer across optimization axes rather than a single encoded kernel family. Detailed kernels and public-ranking outcomes appear in Appendix  A . 
+
+ Contributions. 
+
+ (1) 
+
+ The KernelArc architecture: strategy-specialized parallel agents coordinated by conclusions-only memory with configurable retention, a deterministic benchmark guard, plateau-triggered drafting, and read-only cross-agent state; reusable conclusions remain LLM-visible, while attempt counts, stop thresholds, relaunch logic, and internal-leaderboard publication stay in deterministic code. 
+
+ (2) 
+
+ Evidence for shared multi-agent search: the observed trajectories support the paper’s central motivation that sharing validated conclusions can broaden search beyond isolated local trajectories, while leaving open which coordination features matter most in which kernel regimes. 
+
+ (3) 
+
+ Efficient kernels across distinct optimization axes: KernelArc produces implementations ranging from PTX-assisted BF16 GEMM and static cuBLASLt configuration tables to fused MoE backward, shape-gated decoder-layer fusion, native NVFP4 attention, and paged prefill attention; the submitted SOL-ExecBench kernels attained first-place ranks in the public leaderboard snapshot. 2 2 
+ 2 
+
+ Public leaderboard rank recorded on July 30, 2026. 
+
+ 2. Related Work 
+
+ LLM-based kernel generation. 
+
+ Several systems use LLMs for one-shot or iterative kernel generation. KernelBench  ( 3 ) provides more than 250 GPU kernels for evaluating LLM-generated code. AutoComp  ( 4 ) targets portable LLM-driven kernel optimization across tensor accelerators, pairing hardware-specific optimization agents with evaluation backends for targets such as NVIDIA GPUs, TPUs, AWS Trainium, Gemmini, RISC-V vector processors, and Apple Silicon. AutoKernel   ( 1 ) introduced an autonomous agent loop: profiling a complete workload to identify bottlenecks, ranking them by Amdahl’s law, and iteratively refining Triton or CUDA C++ kernels through a five-stage correctness harness and six-tier optimization playbook. In its H100 FP16 kernel benchmarks, AutoKernel reports up to 5.29 × \times over PyTorch eager on RMSNorm and 2.82 × \times on softmax. KernelArc studies a structurally similar observe–edit–evaluate–retain loop as its single-agent boundary case, then adds Hopper-specific guidance for the GEMM study and shared multi-agent search orchestration for broader workloads. 
+
+ Search-based code optimization. 
+
+ Weco first introduced AIDE as a system that frames ML engineering as code optimization and formulates trial-and-error as a tree search over candidate solutions, branching from promising nodes and pruning failures  ( 5 ) . Weco’s second report extends this line to recursive self-improvement by using an outer autoresearch loop to rewrite and evaluate the inner-loop agent harness itself  ( 6 ) . KernelArc is complementary: it keeps the agent harness, guard, and launcher fixed, and studies how shared state and strategy specialization affect GPU-kernel search under strict correctness and benchmarking constraints. 
+
+ Multi-agent optimization architectures. 
+
+ Existing systems span flat role specialization, hierarchical archives, beam search, and generic orchestration. Astra  ( 7 ) uses five role-specialized agents without persistent memory; AKO4X  ( 8 ) uses cross-session archives and dead-end catalogs; AccelOpt  ( 9 ) combines width-4 beam search with experience distillation; and CORAL  ( 10 ) provides worktree isolation, shared state, and heartbeat-triggered pivots. Their reported speedups are not directly comparable across tasks, hardware, or budgets. KernelArc combines strategy specialization, conclusions-only memory with a configurable horizon, an external deterministic guard, and draft-on-plateau. 
+
+ Auto-tuning and compiler optimization. 
+
+ Traditional auto-tuners and compiler stacks, such as TVM  ( 11 ) and its Ansor auto-scheduler  ( 12 ) , optimize within compiler-defined schedule or IR spaces, including choices such as tiling, unrolling, vectorization, tensorization, and operator fusion. These spaces are powerful but typically do not expose arbitrary source-level rewrites, hardware-specific control-flow restructuring, or low-level CUDA/PTX idioms such as manual warp specialization. KernelArc instead searches kernel source code directly. 
+
+ 3. Methodology 
+
+ 3.1. Measurement-Gated Kernel Optimization 
+
+ Autonomous kernel optimization starts from a seed implementation k 0 k_{0} , a workload set W W , a target hardware/software environment H H , and a deterministic evaluator. The search objective is 
+
+ (1) | 
+ | 
+ k ⋆ = arg ⁡ max k ∈ 𝒦 ⁡ S ⁡ ( k , W , H ) s.t. C ⁡ ( k , w ) = 1 ​ ∀ w ∈ W , k^{\star}=\arg\max_{k\in\mathcal{K}}S(k;W,H)\quad\text{s.t.}\quad C(k,w)=1\;\;\forall w\in W, | 
+ | 
+
+ where 𝒦 \mathcal{K} is the space of source-level implementations, C C is the correctness predicate, and S S is a benchmark score, such as the inverse of the geometric mean latency across all workloads of a given problem. The constraint C ⁡ ( k , w ) = 1 C(k,w){=}1 requires candidate k k to pass the evaluator’s correctness check on workload case w w ; candidates that fail any w ∈ W w\in W are infeasible regardless of speed. Here, 𝒦 \mathcal{K} includes structural changes—for example, replacing a framework operator with a vendor-library call, changing the kernel DSL, fusing an epilogue, or introducing warp specialization—in addition to parameters from a fixed schedule template. 
+
+ An agent observes the current implementation and measurements, forms a bottleneck hypothesis, edits the kernel, and submits the candidate to the evaluator. Correct candidates that improve the incumbent are retained as the accepted best; non-improving candidates do not ratchet that best, although KernelArc can temporarily keep near-best lateral candidates as working points. The evaluator must run in the target environment because compiler versions, library heuristics, clocks, cache state, and workload aggregation all affect candidate ordering. 
+
+ 3.2. Guarded Single-Agent Optimization Loop 
+
+ The single-agent boundary case of KernelArc follows a measurement-gated loop, structurally similar to prior autonomous kernel-optimization systems such as AutoKernel   ( 1 ) : observe the incumbent, form a bottleneck hypothesis, edit one kernel, run correctness and timing checks, then ratchet the accepted best only on measured improvements. This loop is useful for studying depth: it refines one incumbent under one local history and exposes how far a focused trajectory can go. Its conclusions are therefore tied to the workload, shape, call pattern, model backbone, and budget. Broader coverage across shapes, operators, and search directions motivates KernelArc ’s shared multi-agent design. 
+
+ 3.3. From Sequential Plateaus to Design Requirements 
+
+ Sequential search may become a search-process bottleneck when the target is no longer one fixed-shape operator but a multi-shape SOL-ExecBench task. For L1-030, an attention output projection with residual addition on Blackwell B200, the submission is scored over 16 input shapes ; a good search must therefore combine per-shape configuration selection, fusion, precision choices, and faithful cold-cache measurement. 
+
+ Why one trajectory plateaus. 
+
+ Different L1-030 shapes can favor different library configurations, precision modes, and fusion strategies. A sequential agent can investigate only one active direction at a time and may spend part of its budget revisiting nearby configurations after saturation. Its local history can therefore mistake a search-trajectory ceiling for a hardware ceiling, especially when other implementation families remain unexplored. 
+
+ This failure yields four system requirements: diversify optimization directions, transfer validated lessons without transferring entire histories, keep evaluation and coordination state deterministic, and provide explicit escape routes from local plateaus. 
+
+ 3.4. KernelArc Architecture 
+
+ KernelArc maps the requirements to configurable mechanisms: specialized agents diversify the search; memory distills transferable conclusions with an adjustable retention horizon; the cascade gate and guard own validation, evaluation, and keep/revert state; and plateau drafting can optionally use read-only cross-agent state derived from guard archives. Figure  1 shows the evaluated architecture. Section  4.3 evaluates complete configurations rather than marginal contributions of individual mechanisms. 
+
+ Strategy skills seed a portfolio of agents. Agents exchange wins and traps through shared memory, submit candidates to a cascade gate and guard, receive REJECT, KEEP, ACCEPT, REVERT, or STOP feedback, and use SOL-ExecBench measurements for validation. The guard may publish an internal campaign leaderboard for read-only cross-agent inspection. 
+ Figure 1. KernelArc architecture. Strategy skills seed the agent portfolio; agents recall and record validated conclusions through shared memory, then submit candidates to a deterministic cascade gate and guard. The guard benchmarks candidates on SOL-ExecBench, returns REJECT/KEEP/ACCEPT/REVERT actions and STOP feedback, archives kept best variants, and exposes guard bests through an internal campaign leaderboard for read-only cross-agent inspection. This campaign leaderboard is distinct from the public NVIDIA SOL-ExecBench leaderboard used for external rankings. Strategy skills seed a portfolio of agents. Agents exchange wins and traps through shared memory, submit candidates to a cascade gate and guard, receive REJECT, KEEP, ACCEPT, REVERT, or STOP feedback, and use SOL-ExecBench measurements for validation. The guard may publish an internal campaign leaderboard for read-only cross-agent inspection. 
+
+ Strategy-specialized parallel search. 
+
+ KernelArc exposes eight strategy skills: overlapping search lenses that emphasize different parts of the optimization space rather than mutually exclusive directions. Each skill is a lightweight seed document with YAML frontmatter (name, description, eligible kernel types) and representative optimization patterns. Different skills are intended to keep concurrent agents from collapsing onto the first plausible family. Skills seed directions rather than prescribe solutions: agents derive implementations, parameters, and cross-strategy combinations. A meta-skill ( playbook-index ) records eligibility constraints. Table  1 summarizes the skill set used to seed search; meta-skills specify how strategies are selected, remembered, and benchmarked. 
+
+ Table 1. KernelArc skills and meta-skills. 
+
+ Skill | 
+ Role | 
+
+ strat-library | 
+ cuBLASLt/cuDNN paths | 
+
+ strat-memory | 
+ coalescing, cache reuse | 
+
+ strat-compute | 
+ tensor-core use | 
+
+ strat-fusion | 
+ epilogue fusion | 
+
+ strat-precision | 
+ FP8/BF16 choices | 
+
+ strat-reduction | 
+ softmax, normalization | 
+
+ strat-scheduling | 
+ persistent kernels, split-K | 
+
+ strat-custom-b200 | 
+ SM100-native kernels | 
+
+ playbook-index | 
+ strategy eligibility | 
+
+ memory | 
+ shared wins and traps | 
+
+ sol-benchmark | 
+ benchmark protocol | 
+
+ An eligibility map prevents agents from applying irrelevant strategies; for example, library and memory strategies apply broadly, while SM100-native custom kernels are enabled only for GEMM-like tasks. 
+
+ Conclusions-only memory as a retention knob. 
+
+ When shared memory is enabled, agents read from and write to a common memory store under advisory locking to avoid write races. The memory contains: 
+
+ • 
+
+ Wins : Successful optimizations with speedup, shape context, and a reflect field (“WHY it worked + before → \to after pseudocode”). The default configuration retains 16 per kernel type, sorted by speedup descending. 
+
+ • 
+
+ Traps : Dead ends with an error description and reflect field (“WHY it failed”). The default configuration retains 16 per kernel type in first-in, first-out (FIFO) order. 
+
+ The store excludes iteration counters, heartbeats, and progress logs. Thus shared memory carries reusable conclusions, while counters, accepted archives, stop conditions, restarts, and campaign-leaderboard publication remain in deterministic code. Operational traces show accumulated traps progressively narrowing the active strategy set. For long runs, a finite retention horizon may keep recall compact and reduce context pollution from stale or low-value entries; the horizon remains a configuration knob, and the present experiments do not prove that bounded retention is better than full history. Field limits (e.g., 160 characters for strategy and 1200 for reflection) prevent verbose entries from dominating recall. 
+
+ External deterministic guard. 
+
+ A deterministic process mediates all kernel changes, so the agent proposes code but never decides whether its own edit is an improvement: 
+
+ (1) 
+
+ Cascade gate : Cheap pre-benchmark validation (syntax, run() entry point, portability—no ctypes / subprocess / cpp_extension for Python kernels). 
+
+ (2) 
+
+ Benchmark : Execute via the SOL-ExecBench bridge under a GPU lock; measure the configured aggregate latency across workloads. 
+
+ (3) 
+
+ Keep condition : mark a candidate as KEEP only if it passes every workload and improves the incumbent by the configured fractional margin. 
+
+ (4) 
+
+ Stop conditions : guard STOP is emitted on plateau, target reached, time budget exhausted, or a configured candidate cap. 
+
+ On KEEP, the kernel is snapshotted to the guard’s best and accepted archives. Near-best lateral candidates may be left in the working directory for exploration without ratcheting the best score, but still count as non-improvements for plateau tracking; on REVERT, the previous best is restored.
+The cascade gate rejects malformed or prohibited Python submissions before invoking the GPU benchmark, avoiding unnecessary SOL-ExecBench runs; we use this as a validation safeguard rather than treating it as an isolated mechanism estimate. 
+
+ Iteration protocol and plateau escape. 
+
+ Each agent follows the loop in Algorithm  1 , while Algorithm  2 starts the agent portfolio and maintains shared state. In each iteration, an agent recalls relevant wins and traps, optionally inspects faster sibling archives read-only, chooses an eligible strategy, edits its own solution directory, and submits the candidate to the guard. The guard returns one of four outcomes: REJECT for cheap pre-benchmark failures, KEEP for a measured improvement, ACCEPT for a correct near-best candidate that remains as the working point while the best score is unchanged, and REVERT for a regression or benched failure. The plateau counter r r resets on KEEP, advances only on benched non-improvements (ACCEPT or REVERT), and ignores cheap REJECTs. Once r r reaches the drafting threshold r draft r_{\mathrm{draft}} , the agent stops making local tweaks and instead requests a different algorithm, DSL family, or data layout. 
+
+ Algorithm 1 KernelArc Agent Optimization Loop 
+
+ 0: 
+
+  Problem P P , solution dir d d , starting DSL, strategy set S S , memory M M , guard G G 
+
+ 1: 
+
+  Bootstrap d d from P P ; initialize G G with a baseline benchmark and archive
+
+ 2: 
+
+  Determine kernel type and eligible strategies S S 
+
+ 3: 
+
+   r ← 0 r\leftarrow 0 {consecutive benched non-improvements}
+
+ 4: 
+
+   repeat 
+
+ 5: 
+
+    Recall : read wins/traps for the kernel type and inspect own archive of kept bests
+
+ 6: 
+
+     If enabled, read internal campaign leaderboard L L and inspect only listed sibling archives (read-only)
+
+ 7: 
+
+    if r ≥ r draft r\geq r_{\mathrm{draft}} and drafting is enabled then 
+
+ 8: 
+
+     Draft : request a fundamentally different DSL, algorithm, or data layout
+
+ 9: 
+
+    else 
+
+ 10: 
+
+     Plan : choose an eligible strategy s ∈ S s\in S and form a concrete hypothesis
+
+ 11: 
+
+    end if 
+
+ 12: 
+
+   Generate candidate edits in d d that write into benchmark-provided output tensors
+
+ 13: 
+
+    for each candidate do 
+
+ 14: 
+
+     Verify : ( 𝑎𝑐𝑡𝑖𝑜𝑛 , m ~ ) ← G . check ​ ( d ) (\mathit{action},\tilde{m})\leftarrow G.\text{check}(d) {REJECT, KEEP, ACCEPT, or REVERT}
+
+ 15: 
+
+     if 𝑎𝑐𝑡𝑖𝑜𝑛 = KEEP \mathit{action}=\text{KEEP} then 
+
+ 16: 
+
+      r ← 0 r\leftarrow 0 ; M . record_win ​ ( type , s , speedup , reflect ) M.\text{record\_win}(\text{type},s,\text{speedup},\text{reflect}) 
+
+ 17: 
+
+     else if 𝑎𝑐𝑡𝑖𝑜𝑛 = ACCEPT \mathit{action}=\text{ACCEPT} then 
+
+ 18: 
+
+      r ← r + 1 r\leftarrow r+1 ; keep the lateral candidate as working code; best archive unchanged
+
+ 19: 
+
+     else if 𝑎𝑐𝑡𝑖𝑜𝑛 = REVERT \mathit{action}=\text{REVERT} then 
+
+ 20: 
+
+      r ← r + 1 r\leftarrow r+1 ; restore the best archive; record trap or repair/pivot when fundamental
+
+ 21: 
+
+     else 
+
+ 22: 
+
+     Record cheap rejection/trap as appropriate; r r unchanged {REJECT}
+
+ 23: 
+
+     end if 
+
+ 24: 
+
+    end for 
+
+ 25: 
+
+   until G G emits STOP or the configured round/strategy budget is exhausted
+
+ 26: 
+
+  If producing a submission, pack the best accepted kernel via G . pack ​ ( d ) G.\text{pack}(d) 
+
+ Algorithm 2 KernelArc Launcher Loop 
+
+ 0: 
+
+  Problem P P , solution-dir base d 0 d_{0} , starting DSL, strategies S S , memory mode, campaign-leaderboard flag
+
+ 1: 
+
+  Split S S into one or more agent strategy groups (or assign all strategies to one agent)
+
+ 2: 
+
+  Configure shared or private memory paths; allocate one solution dir d i d_{i} per agent
+
+ 3: 
+
+   for each agent group i i do 
+
+ 4: 
+
+   Spawn agent a i a_{i} with P P , d i d_{i} , starting DSL, assigned strategies, memory path, and guard-only GPU access
+
+ 5: 
+
+   end for 
+
+ 6: 
+
+   if campaign leaderboard enabled then 
+
+ 7: 
+
+   Start one publisher that scans exactly { d i } \{d_{i}\} and atomically writes L L every Δ \Delta seconds
+
+ 8: 
+
+   end if 
+
+ 9: 
+
+   while keep-alive enabled and some guard status has not emitted STOP do 
+
+ 10: 
+
+    for each agent a i a_{i} do 
+
+ 11: 
+
+     if a i a_{i} exits before G i G_{i} reports STOP then 
+
+ 12: 
+
+     Reinvoke a i a_{i} on the same d i d_{i} ; the guard archive preserves the best accepted variant
+
+ 13: 
+
+     end if 
+
+ 14: 
+
+    end for 
+
+ 15: 
+
+   end while 
+
+ 16: 
+
+  Per-agent bests remain in guard archives; the campaign leaderboard and ledgers expose the internal frontier
+
+ 4. Experimental Results 
+
+ 4.1. Guided Sequential GEMM Boundary Study 
+
+ Role in the paper. 
+
+ This study is a deliberately favorable boundary case for the one-agent, private-memory limit of KernelArc , not a claim that generated kernels generally outperform vendor libraries. It asks how far one agent can go when a human-designed playbook already identifies the relevant optimization path. The result establishes achievable depth ; its shape specificity, call-pattern dependence, guidance burden, and sequential plateau illustrate the depth regime behind KernelArc ’s shared multi-agent emphasis on search breadth . 
+
+ GEMM campaign setup. 
+
+ We instantiate this setup with a 4096 × \times 4096 BF16 matrix multiplication on an NVIDIA H100 SXM (132 streaming multiprocessors (SMs), HBM3 at 3.35 TB/s, and approximately 989 TFLOPS BF16 Tensor Core peak). The agent begins from a textbook-naïve CUDA kernel and receives an eight-hour wall-clock budget. During that campaign, we compare each accepted candidate with the strongest cuBLAS baseline measured under the same end-to-end protocol using cublasGemmEx . Because cuBLAS throughput depends on library version, selected algorithm, preprocessing policy, and measurement protocol, the comparison is specific to this repeated-call environment. 
+
+ Playbook and kernel provenance. 
+
+ The one-agent KernelArc configuration is the framework’s private-memory boundary case, using a measurement-gated loop of the same general form as prior autonomous kernel optimizers such as AutoKernel   ( 1 ) . Following AutoKernel ’s playbook formulation, this campaign specializes the guidance to Hopper-specific mechanisms centered on WGMMA/TMA, warp specialization, explicit barriers, epilogue design, and cache policy. Table  2 summarizes the CUDA curriculum used in the campaign. The playbook is detailed rather than a short hint list: it specifies a dependency-ordered tier sequence, architectural prerequisites, profiler targets, and failure modes, but not the final kernel or exact schedule. The agent remains responsible for translating the curriculum into correct CUDA/PTX, selecting tile and pipeline parameters, debugging compiler and synchronization failures, composing techniques, and exploring campaign-specific refinements not prescribed verbatim—including descriptor caching, wait-depth relaxation, a chunked TMA epilogue, parallel issuance of A/B TMA loads, and zero-stack K-loop unrolling. No human edits are applied to candidate kernel code during the reported run; the 766 TFLOPS kernel is the direct output of the agent loop. 
+
+ Table 2. Condensed Hopper campaign curriculum. Rows follow the CUDA playbook dependency chain and summarize the campaign qualitatively, not as isolated ablations. 
+
+ Tier 
+ | 
+
+ Curriculum Stage 
+ | 
+
+ Role in Campaign 
+ | 
+
+ 1 
+ | 
+
+ Scalar warp-tiled CUDA baseline 
+ | 
+
+ Correct tiled starting point 
+ | 
+
+ 2 
+ | 
+
+ WGMMA/TMA tensor-core pipeline 
+ | 
+
+ Main compute transition 
+ | 
+
+ 3 
+ | 
+
+ Producer/consumer warp specialization 
+ | 
+
+ Overlap loads and compute 
+ | 
+
+ 4 
+ | 
+
+ Persistent CTAs and raw mbarrier 
+ | 
+
+ Control residency and phases 
+ | 
+
+ 5 
+ | 
+
+ Cluster-aware TMA multicast path 
+ | 
+
+ Shared-data reuse path 
+ | 
+
+ 6 
+ | 
+
+ Epilogue and wait-depth refinements 
+ | 
+
+ Clean up completion path 
+ | 
+
+ 7 
+ | 
+
+ Tile scheduling, L2 policy, and TMA issue order 
+ | 
+
+ Locality and final scheduling 
+ | 
+
+ Accepted trajectory. 
+
+ The accepted path is cumulative rather than a single final trick. Moving from scalar/data-reuse kernels to the tensor-core substrate raises throughput from 19.3 to 541 TFLOPS across WGMMA, asynchronous-copy, tile-scaling, and software-pipeline milestones. Producer–consumer warp specialization reaches 617 TFLOPS by dedicating one warp group to TMA loads and two to WGMMA consumers, coordinated through asynchronous mbarrier phase tracking. Epilogue and wait-depth changes reach 720 TFLOPS , and the final 46 TFLOPS comes from campaign-specific refinements: descriptor and transposed-matrix caching under the repeated-call harness, zero-stack K-loop unrolling, relaxed WGMMA wait depth, and L2 promotion with 256-byte sector hints. The resulting 766 TFLOPS is 3.2% above the strongest cuBLAS baseline measured under the same fixed-shape protocol during the eight-hour campaign (742 TFLOPS ) and reaches 77% of theoretical peak. These intervals describe one accepted path, not component ablations, and the data do not establish a faster standalone GEMM mainloop. Figure  2 summarizes the 17 accepted milestones. 
+
+ A line chart rises from 4.6 to 766 TFLOPS over 17 accepted kernel variants and crosses the 742-TFLOPS cuBLAS baseline near the end. 
+ Figure 2. Motivating eight-hour single-agent progression: 4.6 to 766 TFLOPS across 17 accepted techniques on Hopper. The dashed line marks the strongest cuBLAS end-to-end baseline measured under the same protocol during the campaign (742 TFLOPS ). A line chart rises from 4.6 to 766 TFLOPS over 17 accepted kernel variants and crosses the 742-TFLOPS cuBLAS baseline near the end. 
+
+ Backbone cost efficiency. 
+
+ Figure  3 adds a cost view from one trajectory per backbone. Claude Opus 5 reaches the campaign-best ∼ 766 ​ TFLOPS {\sim}766\,\text{TFLOPS} after substantial spend; within this run budget, Kimi K3 is the most cost-efficient observed trajectory, exceeding 700 TFLOPS after a few dollars before plateauing near 718 TFLOPS . Other backbones saturate lower. Thus the playbook defines a productive but narrow direction, while model choice controls its cost and depth. 
+
+ Seven best-so-far throughput curves versus cumulative dollar cost; Claude Opus 5 reaches the highest throughput, while Kimi K3 approaches cuBLAS at the lowest cost. 
+ Figure 3. Cost–performance frontier for seven model backbones in the motivating GEMM study (best-so-far throughput versus cumulative cost; logarithmic cost axis). Claude Opus 5 attains the highest throughput ( ∼ 766 ​ TFLOPS {\sim}766\,\text{TFLOPS} ) but at the largest cumulative cost, while Kimi K3 reaches the near-cuBLAS regime most cheaply; the remaining backbones saturate at lower throughput. Seven best-so-far throughput curves versus cumulative dollar cost; Claude Opus 5 reaches the highest throughput, while Kimi K3 approaches cuBLAS at the lowest cost. 
+
+ 4.2. Evaluation on SOL-ExecBench 
+
+ SOL-ExecBench  ( 2 ) organizes its 235 problems into four categories by complexity and precision  ( 2 ) : L1 single-operation building blocks such as GQA, RMSNorm, SwiGLU, and RoPE; L2 complete fused blocks, reported as 3–10 × \times more complex than L1; Quantization (Q) explicit FP8 blockwise and NVFP4 block-scaled computation; and FlashInfer-Bench (FI) standalone inference primitives such as fused attention, FP8 MoE, and RMSNorm. Each task is evaluated over multiple input shapes and summarized by a single SOL score (higher is better, with 1 representing the hardware limit), with SM clocks locked, L2 flushed, and CUDA Profiling Tools Interface (CUPTI) tracing on Blackwell B200. We evaluate one task from each category, not the full 235-task suite, primarily because of access and cost constraints. 
+
+ Case study: L1-030 optimization trajectory. 
+
+ A progression chart shows the single-agent score plateauing near 0.441 and the multi-agent score increasing through three submissions to 0.481. 
+ Figure 4. L1-030 SOL progression using Claude Opus 4.6. Single-agent search plateaus at ∼ 0.441 {\sim}0.441 ; multi-agent search reaches 0.481, which ranked first in the public leaderboard snapshot. 4 4 
+ 4 
+
+ Public leaderboard rank recorded on July 30, 2026. A progression chart shows the single-agent score plateauing near 0.441 and the multi-agent score increasing through three submissions to 0.481. 
+
+ The single-agent search reached SOL 0.441 and plateaued after consecutive reverts; the multi-agent search escaped this local minimum and improved to 0.457, then 0.472, and finally SOL 0.481.
+The performance improvement of L1-030 happens gradually through library-configuration, fusion, and measurement refinements rather than one large algorithmic substitution. 
+
+ The final kernel reflects this pattern: it aliases the output tensor onto the residual buffer so cuBLASLt folds residual addition into the GEMM epilogue, then uses a static per- M M table of validated cuBLASLt Expert-API settings with heuristic fallback. The artifact is library configuration plus residual aliasing, not a handwritten GEMM mainloop. 
+
+ Cross-category evaluation across L1, L2, Q, and FI. 
+
+ We deployed KernelArc on L1-030 (GEMM+residual; Claude Opus 4.6), L2-025 (MoE backward; Kimi K3), L2-053 (decoder layer; Kimi K3), Q-031 (NVFP4 grouped-query attention; Kimi K3), and FI-014 (paged attention; Kimi K3). Including the square-GEMM kernel discussed above, these studies span PTX-assisted custom kernel implementation, library selection, fusion, bandwidth optimization, quantized tensor-core throughput, and latency-sensitive attention; they are case studies, not a suite-wide win-rate estimate. Table  6 reports the corresponding public-leaderboard latency-ratio speedups for four representative problems. The guard, memory interface, launcher, and agent protocol remain fixed; only taxonomy-driven strategy eligibility changes. Appendix  A gives the cross-category comparison, public-ranking snapshot, and kernel details. 
+
+ Table 3. Latency-ratio speedups for this work on the public NVIDIA SOL-ExecBench leaderboard 6 6 
+ 6 
+
+ https://research.nvidia.com/benchmarks/sol-execbench/leaderboard . Values are computed as baseline latency divided by this work’s latency. 
+
+ Problem | 
+ vs. PyTorch reference | 
+ vs. optimized baseline | 
+
+ L1-030 | 
+ 1.31 × \times | 
+ 0.99 × \times | 
+
+ L2-025 | 
+ 291.44 × \times | 
+ 1.13 × \times | 
+
+ Q-031 | 
+ 1327.04 × \times | 
+ 43.79 × \times | 
+
+ FI-014 | 
+ 61972.57 × \times | 
+ 143.78 × \times | 
+
+ 4.3. Ablation Studies 
+
+ Scope and configurations. 
+
+ Repeated end-to-end ablations are expensive because every trajectory consumes both B200 time and model inference. We therefore study one representative workload, FI-014, the causal paged-GQA prefill task ( SOL-ExecBench kernel 223 ), using Kimi K3 throughout; among our representative tasks, FI-014 showed the largest observed headroom relative to both the reference implementation and scoring baseline. We compare three directory-defined configurations with five trajectories each: Single uses private memory and no cross-agent campaign leaderboard; Multi-bounded launches two agents with shared win/trap memory capped at 16 entries and read-only campaign-leaderboard access; and Multi-unbounded uses the same two-agent shared configuration without a memory cap. Each trajectory has a total budget of 100 candidate positions, split evenly across agents in the multi-agent configurations. We also ran pilot two- and four-agent variants. Under the fixed 100-candidate budget, increasing the portfolio width from two to four agents did not show a consistent additional gain on FI-014; we therefore report the two-agent shared-memory arms as the controlled comparison and treat agent-count scaling as a separate question. The task, B200 target, strategy roster, guard, and keep/revert rule are otherwise fixed. 
+
+ Fixed-budget analysis. 
+
+ Every attempted candidate consumes one position, including crashes and rejected candidates; only correct candidates retained by the guard can improve the incumbent. Five trajectories stop before position 100, so their last observed incumbent is carried forward by at most 23 positions. This avoids crediting unobserved improvements while comparing all runs at a common budget. Because speedups are positive ratios normalized to each trajectory’s starting seed, we report geometric means with trajectory-bootstrap confidence intervals. 
+
+ Two panels compare single, multi-agent bounded-memory, and multi-agent unbounded-memory optimization. Individual trajectories and geometric-mean confidence bands are shown through 100 candidate positions; endpoint distributions show the unbounded-memory configuration with the highest geometric mean and greatest dispersion. 
+ Figure 5. Fixed-budget optimization on FI-014 over five trajectories per configuration. (a) Faint step lines are individual incumbent-speedup trajectories; thick lines are category geometric means, and shaded regions are pointwise 95% trajectory-bootstrap intervals. (b) Candidate-100 outcomes, with individual trajectories overlaid on the geometric mean and 95% bootstrap interval (both panels use a log y-axis). Two panels compare single, multi-agent bounded-memory, and multi-agent unbounded-memory optimization. Individual trajectories and geometric-mean confidence bands are shown through 100 candidate positions; endpoint distributions show the unbounded-memory configuration with the highest geometric mean and greatest dispersion. 
+
+ Results. 
+
+ Table  4 summarizes the endpoint in Figure  5 over five trajectories per configuration. Speedups are normalized to each trajectory’s starting seed; across all ablation runs, the starting seeds have an average latency of 2.097 ms (reference PyTorch implementation: 345.868913 ms). At a roughly 100-candidate budget, Multi-unbounded is the strongest observed configuration: its geometric-mean speedup is 2.04 × \times Single and 1.59 × \times Multi-bounded, while Multi-bounded is 1.28 × \times Single. The trajectory view shows the same ordering, although configurations overlap early and individual runs plateau at different levels. 
+
+ Table 4. FI-014 ablation at a roughly 100-candidate budget. Speedups and latencies are geometric means with 95% trajectory-bootstrap intervals. 
+
+ Configuration | 
+ Speedup ( × \times ) | 
+ Latency (ms) | 
+
+ Single | 
+ 142.6 [107.6, 190.8] | 
+ 0.0132 [0.0116, 0.0153] | 
+
+ Multi-bounded | 
+ 182.7 [144.5, 231.0] | 
+ 0.0092 [0.0076, 0.0113] | 
+
+ Multi-unbounded | 
+ 290.8 [197.3, 434.2] | 
+ 0.0085 [0.0057, 0.0130] | 
+
+ Uncertainty and interpretation. 
+
+ The updated five-seed analysis strengthens the Multi-unbounded contrast, but inference remains exploratory. Its geometric standard-deviation factor is 1.67, compared with 1.35 for Multi-bounded and 1.44 for Single. This dispersion is expected in source-code search: early kept edits can steer later proposals toward different local regions of the implementation space, so a few trajectories may end with substantially different incumbents under the same budget. The exact permutation test on log speedup gives p = 0.0466 p{=}0.0466 in the primary grouping, but excluding the legacy non-conforming Single trajectory weakens it to p = 0.0906 p{=}0.0906 while preserving the qualitative ordering. The configurations also change several factors together—agent count, memory scope, campaign-leaderboard access, and retention horizon—so these data support a workload-specific trend toward stronger FI-014 incumbents under shared multi-agent search, not a universal effect size or a causal estimate for any single knob. 
+
+ 5. Analysis and Discussion 
+
+ Search phases and conclusions-only memory. 
+
+ Across campaigns, early exploration uses eligible skills as diverse optimization lenses; accepted changes then establish a few viable implementation families; and mature runs often revisit similar schedules—search-process fixed points—where improvements become local configuration, launch, or data-movement refinements. The FI-014 ablation follows this pattern: isolated extra trajectories add little over Single on average, whereas shared-memory multi-agent runs reach stronger incumbents at the same candidate budget. Shared traps can prevent repeated dead ends, and shared wins can redirect nearby search. KernelArc makes these conclusions reusable through field limits, configurable retention, and canonical validation. Compact retention may reduce context pollution in long runs; full history may preserve rare useful observations. The present experiments treat this retention horizon as a knob and do not establish which setting is generally preferable. Prior systems also persist experience  ( 8 , 9 , 10 ) , but cross-system comparisons confound memory with topology, model, budget, and benchmark. 
+
+ Playbook depth versus breadth. 
+
+ The one-agent Hopper configuration is deep and prescriptive for one GPU family; KernelArc ’s shared multi-agent strategies are broad, lightweight optimization axes. The results illustrate the corresponding regimes: detailed guidance takes one fixed GEMM to 766 TFLOPS , whereas multi-shape tasks require coverage across operator- and shape-dependent directions. Both playbooks guide search without supplying final implementations. 
+
+ Limitations. 
+
+ The case studies do not estimate a suite-wide win rate across all 235 problems, and rankings are time-specific. The Hopper–Blackwell contrast changes both workload and hardware. The ablation has few heterogeneous runs and uses evaluated candidates rather than wall time, tokens, or dollar cost. Isolating each coordination feature is difficult because the feature that helps may depend on both the kernel and the optimization regime—early diversification, plateau escape, or late-stage refinement. 
+
+ 6. Conclusion 
+
+ KernelArc studies GPU-kernel optimization as coordinated, measurement-gated search. Its strategy skills, deterministic guard, and reusable win/trap memory let agents explore different optimization lenses while sharing validated conclusions. Across the evaluated SOL-ExecBench tasks, the same framework supports library-backed kernels, fused operators, quantized attention, paged prefill attention, and custom GEMM development. The ablation study supports the coordination hypothesis: at a roughly 100-candidate budget, shared-memory multi-agent runs outperform Single on average, with Multi-unbounded reaching 2.04 × \times the Single geometric-mean speedup. The one-agent GEMM study shows the complementary depth regime, reaching 766 TFLOPS on one repeated-call shape when a clear hardware-specific playbook is available. Overall, the results suggest that measured coordination can help kernel search, while per-mechanism causal attribution and suite-wide effect sizes remain open for larger controlled studies. 
+
+ References 
+
+ (1) 
+
+Jaber Jaber and Osama Jaber.
+
+ AutoKernel: Autonomous GPU kernel optimization via iterative
+agent-driven search.
+
+ arXiv preprint arXiv:2603.21331 , 2026.
+
+ (2) 
+
+Edward Lin et al.
+
+ SOL-ExecBench: Speed-of-light benchmarking for real-world GPU
+kernels against hardware limits, 2026.
+
+ https://arxiv.org/abs/2603.19173 .
+
+ (3) 
+
+Anne Ouyang, Simon Zheng, and Rui Zhuang.
+
+ KernelBench: Can LLMs write efficient GPU kernels?
+
+ In Proceedings of the International Conference on Machine
+Learning (ICML) , 2025.
+
+ (4) 
+
+Charles Hong, Sahil Bhatia, Alvin Cheung, and Yakun Sophia Shao.
+
+ AutoComp: A powerful and portable code optimizer for tensor
+accelerators, 2025.
+
+ (5) 
+
+Zhengyao Jiang, Dominik Schmidt, Dhruv Srikanth, Dixing Xu, Ian Kaplan, Deniss
+Jacenko, and Yuxiang Wu.
+
+ AIDE: AI-driven exploration in the space of code.
+
+ arXiv preprint arXiv:2502.13138 , 2025.
+
+ https://arxiv.org/abs/2502.13138 .
+
+ (6) 
+
+Weco Team.
+
+ AIDE 2 : The first evidence of recursive self-improvement.
+
+ Weco AI: Blog , 2026.
+
+ https://www.weco.ai/blog/first-evidence-of-recursive-self-improvement .
+
+ (7) 
+
+Anjiang Wei, Tianran Sun, Yogesh Seenichamy, Hang Song, Anne Ouyang, Azalia
+Mirhoseini, Ke Wang, and Alex Aiken.
+
+ Astra: A multi-agent system for GPU kernel performance
+optimization.
+
+ arXiv preprint arXiv:2509.07506 , 2025.
+
+ (8) 
+
+Shuxiao Xie, Shuyang Xie, Dezhi Ran, Wei Yang, and Tao Xie.
+
+ AKO: Agentic kernel optimization.
+
+ https://tongminglaic.github.io/AKO , 2026.
+
+ Technical report.
+
+ (9) 
+
+Genghan Zhang, Shaowei Zhu, Anjiang Wei, Zhenyu Song, Allen Nie, Zhen Jia,
+Nandita Vijaykumar, Yida Wang, and Kunle Olukotun.
+
+ AccelOpt: A self-improving LLM agentic system for AI
+accelerator kernel optimization.
+
+ arXiv preprint arXiv:2511.15915 , 2025.
+
+ (10) 
+
+Ao Qu, Han Zheng, Zijian Zhou, Yihao Yan, Yihong Tang, Shao Yong Ong, Fenglu
+Hong, Kaichen Zhou, Chonghe Jiang, Minwei Kong, Jiacheng Zhu, Xuan Jiang,
+Sirui Li, Cathy Wu, Bryan Kian Hsiang Low, Jinhua Zhao, and Paul Pu Liang.
+
+ CORAL: Towards autonomous multi-agent evolution for open-ended
+discovery.
+
+ arXiv preprint arXiv:2604.01658 , 2026.
+
+ (11) 
+
+Tianqi Chen, Thierry Moreau, Ziheng Jiang, Lianmin Zheng, Eddie Yan, Meghan
+Cowan, Haichen Shen, Leyuan Wang, Yuwei Hu, Luis Ceze, Carlos Guestrin, and
+Arvind Krishnamurthy.
+
+ TVM: An automated end-to-end optimizing compiler for deep learning.
+
+ In Proceedings of the USENIX Symposium on Operating Systems
+Design and Implementation (OSDI) , 2018.
+
+ (12) 
+
+Lianmin Zheng, Chengfan Jia, Minmin Sun, Zhao Jiang, Tom Yu, Ameer Haj-Ali,
+Tianqi Wang, Joseph E Gonzalez, and Ion Stoica.
+
+ Ansor: Generating high-performance tensor programs for deep learning.
+
+ In Proceedings of the USENIX Symposium on Operating Systems
+Design and Implementation (OSDI) , 2020.
+
+ Appendix A Appendix: Cross-Category Kernel and Public-Ranking Details 
+
+ A grouped bar chart shows KernelArc above the NVIDIA baseline on selected L1, L2, Quantization, and FlashInfer tasks. 
+ Figure 6. Baseline-normalized public SOL scores for the selected L1, L2, Q, and FI tasks (task SOL divided by NVIDIA baseline SOL). Values above 1.0 outperform the optimized baseline. Each KernelArc submission ranked first in the public leaderboard snapshot. 8 8 
+ 8 
+
+ Public leaderboard rank recorded on July 30, 2026. Current public ranks as of Aug. 17, 2026 were: L1-030: 3rd; L2-025: 1st; L2-053: 1st; Q-031: 1st; FI-014: 1st. A grouped bar chart shows KernelArc above the NVIDIA baseline on selected L1, L2, Quantization, and FlashInfer tasks. 
+
+ Public-ranking snapshot. 
+
+ In the public leaderboard snapshot, L1-030, L2-025, L2-053, Q-031, and FI-014 ranked first † † footnotemark: 
+
+ on their respective tasks. Rankings are time-specific, and these tasks do not estimate a suite-wide win rate. 
+
+ L1-030: attention output projection with residual. 
+
+ The archived L1-030 solution is a CUDA extension that aliases the destination-passing output onto the residual tensor, making the cuBLASLt epilogue compute D = α ​ W ⊤ ​ A + β ​ C D=\alpha W^{\top}A+\beta C with C = D C{=}D and β = 1 \beta{=}1 . The implementation does not autotune during timed evaluation; it constructs a cached per- M M cuBLASLt plan from a validated Expert-API table, with one measured heuristic-rank override and a heuristic fallback if no checked table entry is usable. 
+
+ Algorithm 3 L1-030 static cuBLASLt residual epilogue 
+
+ 0: 
+
+  attention output A A , residual R R , projection weight W W , destination tensor O O 
+
+ 1: 
+
+   M ← M\leftarrow flattened token count of A A 
+
+ 2: 
+
+   P ← P\leftarrow lookup cached cuBLASLt plan for M M 
+
+ 3: 
+
+   if P P is not cached then 
+
+ 4: 
+
+    E ← E\leftarrow lookup static Expert-API table entry for M M 
+
+ 5: 
+
+    if M = 512 M{=}512 and the validated heuristic-rank-1 plan is available then 
+
+ 6: 
+
+     P ← P\leftarrow that heuristic cuBLASLt plan
+
+ 7: 
+
+    else if E E exists and AlgoCheck accepts the cuBLASLt algorithm-66 configuration specified by E E then 
+
+ 8: 
+
+     P ← P\leftarrow Expert-API plan from E E 
+
+ 9: 
+
+    else 
+
+ 10: 
+
+     P ← P\leftarrow heuristic-rank-0 cuBLASLt fallback plan
+
+ 11: 
+
+    end if 
+
+ 12: 
+
+   end if 
+
+ 13: 
+
+  alias O O to the storage of R R so that C C and D D are the same buffer
+
+ 14: 
+
+  run cuBLASLt matmul O ← W ⊤ ​ A + O O\leftarrow W^{\top}A+O with α = 1 , β = 1 \alpha{=}1,\beta{=}1 
+
+ 15: 
+
+   return 
+
+ L2-025: Mixture-of-experts (MoE) expert-parallel backward. 
+
+ This task computes the backward pass for a 256-expert top-8 MoE with hidden dimension H = 4096 H{=}4096 , intermediate dimension I = 2048 I{=}2048 , FP32 data, and 16 input shapes with token count T = 2048 T{=}2048 – 6144 6144 . The reference loops over experts sequentially. Four parallel agents independently converged on counting-sort + batched GEMM in a single round. Using the benchmark’s variable names, W g W_{g} , W u W_{u} , and W d W_{d} are expert projection weights; G G is the incoming output gradient; and dGate , dUp , dInter , and dX are intermediate or input gradients. Key optimizations: 
+
+ (1) 
+
+ Padded-capacity layout + TensorFloat-32 (TF32). Tokens are binned by expert via atomicAdd into [ 256 × M pad ] [256{\times}M_{\text{pad}}] ; all GEMMs run as cuBLAS TF32 strided-batched (4.5 × \times faster than IEEE FP32, within tolerance). 
+
+ (2) 
+
+ Algebraic gradient reuse. The product G × W d G{\times}W_{d} is computed once and reused for both the router gradient and dInter , saving ∼ {\sim} 8.6 GB of HBM traffic. 
+
+ (3) 
+
+ Fused SiLU–top- k k –SwiGLU backward. One CUDA kernel computes the intermediate activation, routing gradient (warp reduction and scatter), and SwiGLU backward, eliminating three DRAM round-trips. 
+
+ (4) 
+
+ SM100 dual-GEMM scatter-atomic. A single CUTLASS kernel with a K K -concatenated mainloop (four TMA descriptors) fuses 𝚍𝙶𝚊𝚝𝚎 × W g + 𝚍𝚄𝚙 × W u \mathtt{dGate}\times W_{g}+\mathtt{dUp}\times W_{u} and scatters into grad_hidden via FP32 vector atomics, eliminating the dX buffer. It reaches 7.05 TB/s and replaces the slower cuBLAS-bmm alternative for this subproblem in the accepted campaign. 
+
+ (5) 
+
+ Host-mapped max-count fast path. A fused histogram uses block-aggregated atomicMax ; when mapped memory is available, the last block publishes via __threadfence_system to a host-visible slot, with a pinned-copy fallback otherwise. 
+
+ Final SOL: 0.535 (1st † † footnotemark: 
+
+ , 16/16 shapes faster than baseline, 1.13 × \times baseline, 291 × \times reference). 
+
+ Algorithm 4 L2-025 fused MoE backward 
+
+ 0: 
+
+  hidden states X X , output gradient G G , top- k k experts and weights, expert weights W g , W u , W d W_{g},W_{u},W_{d} 
+
+ 1: 
+
+  flatten token–expert assignments; count rows per expert with a fused histogram/max kernel
+
+ 2: 
+
+  choose padded capacity M pad M_{\text{pad}} and place token–expert pairs into expert-contiguous rows
+
+ 3: 
+
+  gather X X and G G into padded expert-major buffers, zero-filling gap rows
+
+ 4: 
+
+  recompute gate and up activations with per-shape cuBLASLt TF32 batched GEMMs
+
+ 5: 
+
+  compute G d ← G ​ W d G_{d}\leftarrow GW_{d} once and reuse it for router and activation gradients
+
+ 6: 
+
+  run one fused CUDA kernel for SiLU, top- k k gradient, and SwiGLU backward
+
+ 7: 
+
+  compute gate/up/down weight gradients with batched GEMMs
+
+ 8: 
+
+   if M pad ≤ 128 M_{\text{pad}}\leq 128 then 
+
+ 9: 
+
+   run SM100 dual-GEMM CUTLASS kernel and scatter-atomic directly into grad_hidden 
+
+ 10: 
+
+   else 
+
+ 11: 
+
+   compute two input-gradient GEMMs and reduce/scatter with sum_hidden2 
+
+ 12: 
+
+   end if 
+
+ 13: 
+
+   return gradients
+
+ Q-031: NVFP4 grouped-query attention (GQA). 
+
+ The task implements GQA (40 Q heads, 8 KV heads, D = 128 D{=}128 ) using NVIDIA’s NVFP4 4-bit floating-point format with E2M1 1 × {\times} 16 block scaling on Blackwell’s fifth-generation Tensor Cores. The reference calls torch._scaled_mm per batch. 
+
+ (1) 
+
+ Gen 1 (SOL 0.971): BF16 dequantization + graphs. A fused Triton FP4-to-BF16 conversion feeds batched torch.bmm (FP4 × {\times} E4M3 products are exact in BF16). CUDA Graph replay eliminates launch gaps. 
+
+ (2) 
+
+ Gen 2 (SOL 0.980): tcgen05 NVFP4. Using CUTLASS 4.4.2’s persistent block-scaled GEMM kernel via CuTe DSL, Triton emits packed FP4 nibble pairs and scale factors in a 512-byte atom layout; tcgen05 GEMMs use TMA loads and remain bit-identical to the BF16 path. 
+
+ (3) 
+
+ Gen 3 (SOL 0.988): Fused softmax–W quantization. The causal mask forces softmax row 0 = [ 1 , 0 , … ] =[1,0,\ldots] , so amax ​ ( W ) = 1.0 \text{amax}(W){=}1.0 exactly . The scale chain and FP4 packing execute in registers inside the softmax kernel, eliminating the W-quantization DRAM pass (18–27% of the span). 
+
+ A failed tcgen05-epilogue fusion (per-element scalar loops) caused 8–18 × \times slowdowns—recorded as a trap. Final SOL: 0.988 (1st † † footnotemark: 
+
+ , 16/16 shapes faster than baseline, 43.8 × \times baseline, 1327 × \times reference). 
+
+ Algorithm 5 Q-031 native NVFP4 grouped-query attention 
+
+ 0: 
+
+  query Q Q , key K K , value V V , causal mask, output buffers for attention output and weights
+
+ 1: 
+
+  reshape heads into grouped-query batches
+
+ 2: 
+
+  compute fused amax values for Q , K , V Q,K,V 
+
+ 3: 
+
+  quantize and pack Q Q and K K into NVFP4 bytes with blocked scale factors
+
+ 4: 
+
+  quantize/pack V ⊤ V^{\top} ; for power-of-two sequence lengths, overlap this with Q / K Q/K packing
+
+ 5: 
+
+  run CuTe/CUTLASS SM100 block-scaled NVFP4 GEMM for raw scores S ← Q ​ K ⊤ S\leftarrow QK^{\top} 
+
+ 6: 
+
+  apply scale, causal mask, and softmax in Triton
+
+ 7: 
+
+   if sequence shape permits fused weight quantization then 
+
+ 8: 
+
+   pack softmax weights to NVFP4 inside the softmax kernel
+
+ 9: 
+
+   else 
+
+ 10: 
+
+   quantize softmax weights in a separate packing kernel
+
+ 11: 
+
+   end if 
+
+ 12: 
+
+  run second NVFP4 GEMM for O ← softmax ⁡ ( S ) ​ V O\leftarrow\mathrm{softmax}(S)V 
+
+ 13: 
+
+  optionally use CUDA graph replay for small launch-bound shapes
+
+ 14: 
+
+   return 
+
+ FI-014: Paged prefill causal GQA. 
+
+ The task performs causal paged-attention prefill with 32 Q heads, 4 KV heads, D = 128 D{=}128 , page size 1, and 30 variable-length workloads. The reference is a naïve Python loop. 
+
+ (1) 
+
+ Gen 1 (SOL 0.946): CUDA multi-Q. With BLOCK_Q = 2 {=}2 , two query tokens share K/V loads, halving traffic; online softmax remains in registers, with warp-shuffle reductions and binary-search batch lookup. 
+
+ (2) 
+
+ Gen 2 (SOL 0.966): Triton flash-attn. [ 16 × 128 ] [16{\times}128] tensor-core tiles; constexpr strides (shifts not multiplies), int32 indices, evict_first KV policy. Batch-specialized fast paths eliminate compressed-sparse-row (CSR) lookups. 
+
+ (3) 
+
+ Gen 3 (SOL 0.986): split-causal cuDNN path for WL11. For workload 11 (WL11; query length S q = 4062 S_{q}{=}4062 , key/value length S kv = 16386 S_{\text{kv}}{=}16386 ), the archived solution freshly gathers the first sequence’s paged K/V into contiguous buffers, runs two aten cuDNN SDPA calls—one non-causal prefix and one causal tail—and merges the outputs and LSE values with a Triton rescaling kernel. No graph, plan, or input-derived buffer is cached across calls in this path; remaining tail sequences use the lean Triton paged-attention kernel. 
+
+ Final SOL: 0.986 (1st † † footnotemark: 
+
+ , 30/30 shapes faster than baseline, 143.8 × \times baseline, 61,973 × \times reference). 
+
+ Algorithm 6 FI-014 paged prefill causal GQA 
+
+ 0: 
+
+  query rows, paged K/V cache, query and KV indptrs, page indices, scale, output and LSE buffers
+
+ 1: 
+
+   if there are no query rows then 
+
+ 2: 
+
+   fill LSE with − ∞ -\infty and return
+
+ 3: 
+
+   end if 
+
+ 4: 
+
+   if KV cache is small and the workload is not tiny then 
+
+ 5: 
+
+   run one lean Triton attention kernel over paged K/V rows
+
+ 6: 
+
+   else if KV cache is large then 
+
+ 7: 
+
+   gather the long first sequence’s paged K/V into contiguous buffers
+
+ 8: 
+
+   run cuDNN SDPA on non-causal prefix and causal tail
+
+ 9: 
+
+   merge the two outputs with LSE-rescaling in Triton
+
+ 10: 
+
+   run the lean Triton paged-attention kernel for the remaining tail sequences
+
+ 11: 
+
+   else 
+
+ 12: 
+
+   run the paged Triton BLOCK_Q=2 kernel with shape-selected BLOCK_N
+
+ 13: 
+
+   end if 
+
+ 14: 
+
+   return 
+
+ L2-053: text decoder layer with self-attention and MLP. 
+
+ L2-053 is a text-decoder-layer task combining self-attention and an MLP. The solution uses Triton RMSNorm/RoPE/attention kernels, shape-gated fused or fallback INT8 gate/up projections, and a BF16 fallback path for smaller shapes or unsupported INT8 execution. 
+
+ Algorithm 7 L2-053 shape-gated decoder-layer fusion 
+
+ 0: 
+
+  hidden states, attention weights, MLP weights, RMSNorm weights, RoPE parameters, destination output
+
+ 1: 
+
+   M ← M\leftarrow flattened batch–sequence token count
+
+ 2: 
+
+   if M < 1500 M<1500 then 
+
+ 3: 
+
+   run fused RMSNorm plus K/V-weight packing; compute merged K/V projection
+
+ 4: 
+
+   else 
+
+ 5: 
+
+   run RMSNorm; compute Q, K, and V projections separately
+
+ 6: 
+
+   end if 
+
+ 7: 
+
+  apply RoPE and split Q/K into attention layout
+
+ 8: 
+
+   if sequence length is 128 then 
+
+ 9: 
+
+   run custom single-tile Triton attention
+
+ 10: 
+
+   else 
+
+ 11: 
+
+   run PyTorch scaled-dot-product attention with GQA enabled
+
+ 12: 
+
+   end if 
+
+ 13: 
+
+  compute output projection and add first residual
+
+ 14: 
+
+   if INT8 is supported and M ≥ 1000 M\geq 1000 then 
+
+ 15: 
+
+   run fused add+RMSNorm+activation quantization
+
+ 16: 
+
+   quantize gate/up weights in one launch
+
+ 17: 
+
+    if warp-specialized fused INT8 SwiGLU GEMM is available then 
+
+ 18: 
+
+    compute gate/up GEMM with fused dequantization and SwiGLU epilogue
+
+ 19: 
+
+    else 
+
+ 20: 
+
+    use _int_mm followed by a separate dequantization/SwiGLU kernel
+
+ 21: 
+
+    end if 
+
+ 22: 
+
+   else 
+
+ 23: 
+
+   compute BF16 gate/up projections and a Triton SiLU-multiply kernel
+
+ 24: 
+
+   end if 
+
+ 25: 
+
+  compute down projection and add the final residual into the destination
+
+ 26: 
+
+   return
