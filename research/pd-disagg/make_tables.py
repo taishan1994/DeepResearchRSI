@@ -87,8 +87,8 @@ def main() -> int:
                 "分别做单阶段压测，比最优并行度与 batch"],
                ["2", "存在高带宽 KV 通路",
                 "同机 NVLink 或跨机 RDMA，而非共享存储"],
-               ["3", "负载足够重",
-                "资源利用率已高，配置优化能兑现"],
+               ["3", "负载落在窗口内",
+                "太轻不划算，太重则 decode 硬件闲置"],
                ["4", "KV 规模足够大",
                 "传输固定开销占比可忽略"]])
 
@@ -110,6 +110,13 @@ def main() -> int:
                 "caption": "KV 传输耗时随规模增长；三档互联相差一个数量级",
                 "source": "analysis.json:parameters.kv_transfer（e-011 两点定标）",
             },
+            {
+                "figure_id": "fig3",
+                "output": "fig3_benefit_window.png",
+                "caption": "分离收益随输入输出比是一个窗口，不是单调上升",
+                "source": "e-028 / e-029 / e-030（HeteroPanacea 跨 8 模型扫描）",
+                "cites": ["c-boundary"],
+            },
         ],
         "tables": [
             {"table_id": "tab1", "data": "tables/tab1_transport.csv",
@@ -130,7 +137,7 @@ def main() -> int:
             {"title": "KV cache 怎么搬", "cites": ["c-transfer"]},
             {"title": "怎么切分与调度", "cites": ["c-split"]},
             {"title": "不同模型的最佳实践", "cites": ["c-model"]},
-            {"title": "收益的边界", "cites": ["c-boundary"]},
+            {"title": "收益的边界", "cites": ["c-boundary", "c-window"]},
             {"title": "讨论", "cites": ["c-formula"]},
             {"title": "结论", "cites": ["c-formula"]},
         ],

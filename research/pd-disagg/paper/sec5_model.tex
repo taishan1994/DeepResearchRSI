@@ -1,85 +1,214 @@
 \section{不同模型的最佳实践}
 \label{sec:model}
 
-这是本问的核心。要回答「不同模型该怎么做」，先要说清差异从哪来。
+这是本问的核心。要回答「不同模型该怎么做」，先要区分两类差异：
+一类真的随模型变，另一类只是看起来随模型变。
 
-\subsection{差异的三个来源}
+\subsection{两个正交的轴，不是一个「模型类别」}
+
+\noindent 常有人把模型分成「MLA 系」「MoE 系」「稀疏注意力系」再分别
+给建议。这个分法有内在缺陷：它把两个**正交**的轴压成了一维。
+
+KV 占用随注意力变体而变——MHA、GQA、MLA 的每 token 大小可差一个
+数量级；而 MoE 的稀疏性完全落在 FFN 里，与 KV 无关。这一点有明确
+表述：KV footprint 确实高度依赖注意力变体，但\textbf{该轴与稀疏性
+正交}\texttt{[c-model]}。
+
+分开之后，做法才清楚：
+
+\begin{itemize}
+\item \textbf{注意力轴}（MHA $>$ GQA $>$ MLA）决定 KV 每 token 字节数，
+  因而决定\textbf{传输成本侧}——这一侧直接进收益公式的减项。
+\item \textbf{FFN 轴}（dense vs MoE）决定权重的访问模式，
+  因而决定\textbf{并行与放置策略}——它不改变传输字节数，
+  但改变「专家该放哪一侧」。
+\end{itemize}
+
+DeepSeek-V3 同时是 MLA 与 MoE，所以它同时受两个轴影响；
+把它的表现归因于「MoE 类模型」会掩盖真正的机制。
+
+\subsection{收益边界：一批可引用的测量}
+
+第二件要说清的事：分离的收益随负载形态如何变化。此前这只能定性
+说「负载轻时分离不划算」，现在有一个跨 8 个模型、扫 9 个输入输出比的
+测量可以引。
+
+HeteroPanacea 在 NPU 设计空间上比较了四种模式：ND（不分离）、
+PD（prefill 与 decode 分离）、AF（注意力与 FFN 分离）、
+PDAF（两者都分，四段独立配置）\texttt{[c-model]}。
+
+结果分三段：
+
+\noindent\textbf{低与均衡比例：不分离最强。} 在 $I/O = 0.01$ 与
+$I/O = 1$ 时，\textbf{ND 对每一个被测模型都是最强配置}，
+PD、AF、PDAF 全线低于 $1.00\times$，其中 PD 最接近
+（GPT-OSS 在 $I/O=1$ 时达 $0.89\times$）但从未越过平价。
+原文的判断是：当 prefill 的工作量相对 decode 很小时，
+分离的开销单纯地超过任何收益\texttt{[c-window]}。
+
+\noindent\textbf{高比例：翻转。} 在 $I/O = 100$ 时，
+两种分离策略几乎全面越过平价：PDAF 对全部 8 个模型超过 ND
+（$1.05$--$1.92\times$），PD 对 8 个中的 7 个超过；
+唯一仍在 ND 之下的是 DeepSeek-V4-Pro（$0.95\times$）
+\texttt{[c-boundary]}。
+
+\noindent\textbf{翻转是突变的，而且之后非单调。} 这是本轮最值得记的
+一条：扫过九个比例后，PDAF 在 $I/O=1$ 时仍是 $0.48\times$，
+到 $I/O=10$ 已经是 $2.10\times$——\textbf{翻转集中在一个数量级之内}。
+此后并不继续上升：在 $I/O$ 到 500 的区间平台化在 $1.5$--$1.8\times$，
+到 $I/O=1000$ 反而回落到 $1.27\times$。原文的解释是 prefill 大到
+成为系统瓶颈后，为 decode 单独配置的硬件开始空闲
+\texttt{[c-window]}。
+
+\noindent 这一段把第 \ref{sec:boundary} 节的判据第三条（负载足够重）
+从一个条件变成了一个有形状的函数：\textbf{不是「越重越好」，
+而是一个有上下界的窗口}。上界此前完全没有被讨论过。
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig3_benefit_window.png}
+\caption{分离收益随输入输出比的变化是一个窗口，不是单调上升。
+数据取自 HeteroPanacea 跨 8 个模型的扫描（e-028 至 e-030）：
+$I/O=1$ 时 $0.48\times$、$I/O=10$ 时 $2.10\times$、
+平台期 $1.5$--$1.8\times$、$I/O=1000$ 回落至 $1.27\times$。
+注：原作者只报了这几个离散点与区间，中间曲线为线性连接，
+不是拟合结果。}
+\label{fig:window}
+\end{figure}
+
+\subsection{按注意力结构的做法}
+
+\noindent\textbf{MLA 系（DeepSeek-V3/V4 等）。} KV 极小，传输成本低，
+故分离的门槛低、同机分离几乎白赚。但要注意一处反向效应：
+\textbf{正因为 KV 小，分离的收益也随之变小}——收益侧来自两阶段
+配置差异，而 KV 小意味着 decode 的带宽压力相对轻，两阶段的最优
+配置被拉近。所以 MLA 模型「容易分离成功」与「分离收益大」
+是两件事，不要混为一谈。
+
+\noindent\textbf{GQA 系（Llama、Qwen 等）。} 处在中间。KV 比 MLA 大，
+但又比 MHA 小得多，故传输成本可控而收益侧仍然明显。这一类的实测
+材料最多：
+
+\begin{itemize}
+\item Qwen3-32B 在 8K 上下文下 KV 状态已达 \textbf{GB 级}；
+  即便走 100\,Gbps 的 RDMA 网络，单次 post-prefill 传输也要
+  \textbf{数百毫秒}，与 prefill 本身相当\texttt{[c-transfer]}。
+  这个数字很关键：它说明「传输耗时」不能只按 250\,MB 的
+  DeepSeek-V3 去估——换一个模型、换一个上下文长度，
+  同一个耗时量级的结论会完全反过来。
+\item Llama2-7B 上的系统性评测报告了阶段依赖的性能不对称：
+  GPU 达成\textbf{低 $39\times$ 的延迟、高 $41\times$ 的吞吐}
+  \texttt{[c-model]}。这是「两阶段画像相反」最直接的量化。
+\item Llama 3.3 70B 在 $16\times$H100 集群上，分离方案在满足
+  TTFT/TPOT SLO 的同时把\textbf{prefill 能耗降 39\%、
+  decode 能耗降 48\%}\texttt{[c-model]}。能耗是常被忽略的一维，
+  且两阶段降幅不同，正好对应配置差异。
+\item Llama-13B 上，固定 prefill 长度 2048、把解码长度从 128 加到
+  1024，\textbf{最大边际收益所在的阶段会移动}\texttt{[c-model]}。
+  这直接说明「某模型的最佳配置」会随负载漂移。
+\end{itemize}
+
+\noindent\textbf{MHA 系。} KV 最大，传输成本最高。这一类在文献里
+反而少见——因为分离对它最不划算，很少有人把它作为主实验对象。
+这个\textbf{沉默本身就是证据}：把 MHA 模型放进分离框架，
+要先算清 250\,MB 这个数字在它身上会放大几倍。
+
+\subsection{按 FFN 结构的做法}
+
+\noindent\textbf{MoE 系。} 多一层专家并行的复杂度。ExpertPlex 报告，
+专家共享消除了超过 95\% 的重复模型权重，同时按需复用动态稀疏计算，
+而注意力分离降低了注意力的通信开销\texttt{[c-model]}。
+这说明 MoE 场景下的分离不只是 P/D 两分，还要考虑专家在两侧的放置。
+
+\noindent\textbf{更细的分法：四路。} 如果把 FFN 也拆出来，
+就得到四段（prefill-attention、prefill-FFN、decode-attention、
+decode-FFN）。跨 8 个模型的比较显示，\textbf{四路 PDAF 是跨模型
+最一致的做法}，在 8 个模型中的 6 个上是最佳模式，对 Llama-4
+Maverick 与 Scout 分别达 $1.81\times$ 与 $1.77\times$
+\texttt{[c-model]}。相比之下，只拆注意力与 FFN（AF）在所有测试
+比例上都是最弱的，从未超过 ND，$I/O=100$ 时也只在
+$0.20$--$0.65\times$\texttt{[c-boundary]}。
+
+这个对比有方法论价值：\textbf{「拆得更细」不等于「更好」}。
+AF 只拆一部分、且把两个阶段混在一起，结果最差；PDAF 拆得彻底，
+结果最好。关键不是拆分粒度，而是\textbf{是否让每个子阶段独立配置}。
+
+\subsection{按部署形态的做法}
+
+\noindent\textbf{稀疏注意力 + CXL。} SAC 在 DeepSeek-V3.2 上用 SGLang
+评测，相对 RDMA 基线取得 $2.1\times$ 吞吐、$9.7\times$ 更低的 TTFT、
+$1.8\times$ 更低的 TBT\texttt{[c-model]}。含义是：当注意力本身变稀疏，
+瓶颈转移到「\textbf{KV 放哪里}」而非「算得多快」，
+此时载体的选择（CXL vs RDMA）比分离本身更重要。
+
+\noindent\textbf{异构加速器。} HMA-Serve 在四块 Tenstorrent Blackhole
+p150b（prefill）与一块 A100 80\,GB（decode）上实现，
+经 100\,Gbps RDMA 互联\texttt{[c-transfer]}。这是把「两阶段画像不同」
+推到极致的做法：不只换配置，直接换硬件类型。
+
+\noindent\textbf{多模态：三段。} 唯一需要把分离从两段变三段的情形。
+EAServe 指出，静态 50/50 切分虽然优于不切分，但仍然浪费了本地
+prefill 容量\texttt{[c-model]}。原因是多模态多一个 Encode 阶段
+（视觉编码），其资源画像又不同于 prefill 与 decode，
+故 SGLang 提供 EPD（Encode-Prefill-Decode）三段分离。
+
+\noindent\textbf{长上下文与容量。} LoongServe 指出，上下文窗口在快速
+增长，导致资源使用的巨大方差，显存消耗随上下文线性上涨
+\texttt{[c-model]}。这类场景下 KV 不只是传输成本问题，
+还是\textbf{放不放得下}问题——分离顺带解决了容量，
+故即使传输不便宜也可能划算。
+
+\noindent\textbf{干扰而非带宽。} 一个容易忽略的失效模式：DeepSeek-V3.2
+在 $DP=16$ 时，单条 prefill 请求可以拖住所有其它 decode 批次，
+造成 \textbf{36.21\%--59.98\% 的空转率}\texttt{[c-model]}。
+这里的瓶颈不是带宽也不是算力，而是调度干扰。
+分离之所以有效，有一部分来自把这种干扰从架构上消除。
+
+\subsection{跨模型的通用手段：逐阶段量化}
+
+一个不依赖模型类型的做法：既然两阶段偏好不同，连量化精度也可以不同。
+代价不对称——在 prefill 密集型任务上，只对 prefill 量化所付出的
+精度损失，是只对 decode 量化的 $1.1$ 至 $4.1$ 倍（八个模型里
+七个如此）\texttt{[c-model]}。故「按阶段分别量化」不是免费的，
+prefill 侧对精度更敏感。
+
+另一个例子来自格式分离：在 NVFP4 下，prefill 侧获得
+$1.49\times$ 与 $1.67\times$ 相对 BF16 的加速，
+而长上下文（$>$16K）时卸载使 NVFP4 prefill 延迟仅增加
+不到 5\%（Qwen3）与 8\%（Gemma3）\texttt{[c-model]}。
+后一个数字说明：\textbf{长上下文下卸载的代价比预期低}，
+这与「长上下文必然传输昂贵」的直觉相反——因为卸载的是冷块。
 
 \begin{table}[t]
 \centering
-\caption{决定分离做法的三个模型侧变量。三者的乘积决定 KV 传输量与
-所需配比，故最佳实践必须按组合分别陈述。}
+\caption{决定分离做法的六个变量，只有前两个是模型属性。「轴」一列标出该变量影响的是传输成本侧还是并行策略侧——这是本文区分注意力轴与 FFN 轴的依据。}
 \label{tab:model-vars}
 \small
-\begin{tabular}{@{}p{1.35cm}p{2.5cm}p{2.35cm}@{}}
+\begin{tabular}{@{}p{1.55cm}p{0.85cm}p{2.35cm}p{1.55cm}@{}}
 \toprule
-变量 & 影响 & 后果 \\
+变量 & 轴 & 影响 & 是否模型属性 \\
 \midrule
-KV 每 token 大小 & MLA $<$ GQA $<$ MHA & 决定传输字节数 \\
-上下文长度 & 线性放大 KV & 决定是否放得下 \\
-负载形态 & 输入/输出长度比 & 决定 P:D 配比 \\
+KV 每 token 大小 & 注意力 & MLA $<$ GQA $<$ MHA，差一个量级 & 是 \\
+FFN 结构 & FFN & dense vs MoE，决定专家放置 & 是 \\
+上下文长度 & --- & 线性放大 KV，兼有容量问题 & 否（业务） \\
+输入输出比 & --- & 决定 P:D 配比，且收益有窗口 & 否（业务） \\
+互联拓扑 & 成本 & 决定传输带宽档位 & 否（部署） \\
+SLO & --- & 决定 goodput 定义与最优配比 & 否（业务） \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\noindent\textbf{① KV 每 token 大小。} 注意力结构直接决定每个 token 要存多少 KV。
-MLA（DeepSeek 系）把 KV 压到低秩潜向量，每 token 的 KV 极小；
-GQA（Llama、Qwen 系）用分组共享降到 1/4 至 1/8；MHA 最大。
-这个量的差异能达到一个数量级，直接改变传输成本的量级。
+\subsection{为什么仍然不存在统一配置}
 
-实测印证：DeepSeek-V3 的 KV cache 是 250\,MB 量级，经 NVLink 传输
-0.6\,ms\texttt{[c-transfer]}。相比之下，同样长度的 MHA 模型 KV 会大出
-数倍，传输耗时同步放大。
+把上面合起来：最优做法取决于 KV 大小（注意力轴）× FFN 结构（并行轴）
+× 上下文长度（业务）× 输入输出比（业务）× 互联拓扑（部署）×
+SLO（业务）。六个变量里只有前两个是模型属性。
 
-\noindent\textbf{② 上下文长度。} LoongServe 指出，LLM 的上下文窗口在快速
-增长，导致服务系统面临极大的方差，显存消耗随上下文线性上涨
-\texttt{[c-model]}。长上下文场景下，KV 不只是「传输成本」问题，
-还是「放不放得下」问题——此时分离可以顺带解决容量问题，
-而不只是吞吐问题。
+更关键的是，本轮新增的证据表明\textbf{收益随负载是窗口而非单调}，
+且翻转集中在一个数量级内。这意味着：即使模型固定，
+换一个业务负载就可能从 $2.10\times$ 掉到 $0.48\times$。
 
-\noindent\textbf{③ 负载形态。} 输入长、输出短（如文档问答、代码审查）
-意味着 prefill 占主导；输入短、输出长（如创作、推理链）意味着
-decode 占主导。前者需要更多 P 卡，后者需要更多 D 卡。
-这个比值不是模型属性，是业务属性——同一个模型在不同业务下配比不同。
-
-\subsection{按模型类型的差异化做法}
-
-\noindent\textbf{MLA 系（DeepSeek-V3 等）。} KV 极小，传输成本低，
-故分离的门槛低、同机分离几乎白赚。但要注意：正因为 KV 小，
-\textbf{分离的收益也随之变小}——收益侧来自配置差异，而 KV 小意味着
-decode 的带宽压力相对轻，两阶段配置差异被压缩。
-这是一处容易被忽略的反向效应。
-
-\noindent\textbf{MoE 系。} 多了一层专家并行的复杂度。ExpertPlex 报告，
-专家共享消除了超过 95\% 的重复模型权重，同时按需复用动态稀疏计算，
-而注意力分离则降低了注意力的通信开销\texttt{[c-model]}。
-这说明 MoE 场景下的分离不只是 P/D 两分，还要考虑专家在两侧的放置。
-
-\noindent\textbf{稀疏注意力系。} SAC 在 DeepSeek-V3.2 上用 SGLang 做了评测，
-报告相对 RDMA 基线取得 2.1× 吞吐、9.7× 更低的 TTFT、1.8× 更低的 TBT，
-并据此认为基于 CXL 的分离是稀疏注意力模型更优的基础设施
-\texttt{[c-model]}。这条结果的含义是：\textbf{当模型本身的注意力变稀疏，
-瓶颈会转移到「KV 放哪里」而非「算得多快」}，此时分离的载体选择
-（CXL vs RDMA）比分离本身更重要。
-
-\noindent\textbf{多模态系。} 这是唯一需要把分离从两段变三段的情形。
-EAServe 指出，静态 50/50 切分虽然优于不切分，但仍然浪费了本地
-prefill 容量\texttt{[c-model]}。原因是多模态有一个 Encode 阶段
-（视觉编码），它的资源画像又不同于 prefill 与 decode，
-故 SGLang 提供了 EPD（Encode-Prefill-Decode）三段分离。
-
-\noindent\textbf{逐阶段量化。} 一个跨模型通用的手段：既然两阶段偏好不同，
-连量化精度也可以不同。但要小心代价——有工作报告，在 prefill 密集型任务上，
-只对 prefill 做量化所付出的精度损失，是只对 decode 量化的
-1.1 至 4.1 倍（八个模型里有七个如此）\texttt{[c-model]}。
-这说明「按阶段分别量化」不是免费的，prefill 侧对精度更敏感。
-
-\subsection{为什么不存在统一配置}
-
-把上面几节合起来看：最优做法取决于 KV 大小（模型）× 上下文长度（业务）
-× 输入输出比（业务）× 互联拓扑（部署）× SLO（业务）。五个变量里
-只有第一个是模型属性。
-
-因此「某模型的最佳 PD 配置」这个提法本身是有问题的——它缺了四个自变量。
-可迁移的结论只能是\textbf{判据}：在给定这五个变量的取值下，用
-第 \ref{sec:boundary} 节的条件判断是否分离、按什么比例分离。
+因此「某模型的最佳 PD 配置」这个提法缺的不只是自变量的个数，
+还缺\textbf{适用区间}。可迁移的只能是判据：
+在给定这六个变量的取值下，用第 \ref{sec:boundary} 节的条件判断
+是否分离、按什么比例分离。

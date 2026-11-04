@@ -71,10 +71,25 @@ def main() -> int:
     masked = _re.sub(r"(?m)^\s*\d{1,2}\.\d{1,2}(?:\.\d{1,2})?\s", " ", masked)
     # 遮盖表格里的「1×」「∼0.1×」这类基准行（正文已说明其为基准）
     masked = _re.sub(r"[∼~]?\s*0?\.?\d+\s*×", " ", masked)
+    # 遮盖证据编号 e-028 / （e-028 至 e-030）——它们是引用标记不是数据
+    masked = _re.sub(r"e-\d{3}", " ", masked)
+    # 遮盖型号里的数字（p150b、H100、A100、V3.2 等）：
+    # 这类数字属于硬件/模型命名，不是测量结果
+    masked = _re.sub(r"\b[A-Za-z]{1,4}\d{2,4}[A-Za-z]?\b", " ", masked)
+    # 型号的另外几种形态，上面的正则抓不到：
+    #   Qwen3-235B-A22B -> 235B、A22B（带单位字母 B 的参数量）
+    #   GLM-4.6         -> 4.6（模型版本号，前面紧跟字母和连字符）
+    #   Llama-3.1-405B  -> 405B
+    # 判据：数字后面紧跟 B 且前面有字母/连字符，或「字母-数字.数字」。
+    masked = _re.sub(r"\b\d{2,4}B\b", " ", masked)
+    # 前面可能紧邻字母（Qwen3.5）或连字符（GLM-4.6），两种都要遮
+    masked = _re.sub(r"(?<=[A-Za-z\-])\d{1,2}\.\d(?=\b|、|，|\))", " ",
+                     masked)
+    masked = _re.sub(r"(?<=-)\d{3,4}(?=B|、|，|\))", " ", masked)
 
     nums = re.findall(r"\d+(?:\.\d+)?", masked)
     uniq = sorted(set(nums), key=lambda x: (-len(x), x))
-    print(f"（遮盖编号/日期/节号后，待核数字 {len(uniq)} 个）")
+    print(f"（遮盖编号/日期/节号/型号后，待核数字 {len(uniq)} 个）")
 
     claims = {r["claim_id"]: r["statement"]
               for r in csv.DictReader(

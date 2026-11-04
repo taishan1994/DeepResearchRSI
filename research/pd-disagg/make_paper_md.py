@@ -47,6 +47,7 @@ SECTIONS = ["sec1_intro.tex", "sec2_why.tex", "sec3_transfer.tex",
 _FIG_BY_CAPTION = {
     "收支": "fig1_cost_benefit.png",
     "增长": "fig2_transfer_scaling.png",
+    "窗口": "fig3_benefit_window.png",
 }
 _TAB_BY_CAPTION = {
     "三档": "tab1", "路线": "tab2", "变量": "tab3", "判据": "tab4",

@@ -108,6 +108,58 @@ def main() -> int:
     ]
     write("model.csv", ["metric", "value", "unit", "cite", "note"], rows)
 
+    # ---- 收益窗口：跨 8 个模型的 I/O 扫描（e-028 至 e-030）----
+    # cite 用 c-window——这一组数字的 statement 在 c-window 里，
+    # 不在 c-boundary。判据 C 要求 value 出现在**对应** claim 里。
+    write("window.csv",
+          ["metric", "value", "unit", "cite", "note"],
+          [
+              ["io_high_pdaf_low", "1.05", "x", "c-window",
+               "I/O=100 时 PDAF 相对 ND 的下界（e-029）"],
+              ["io_high_pdaf_high", "1.92", "x", "c-window",
+               "I/O=100 时 PDAF 相对 ND 的上界（e-029）"],
+              ["pd_best_low_io", "0.89", "x", "c-window",
+               "I/O=1 时 PD 最好的表现，仍未过平价（e-028）"],
+              ["crossover_low", "0.48", "x", "c-window",
+               "I/O=1 时 PDAF 相对 ND（e-030）"],
+              ["crossover_high", "2.10", "x", "c-window",
+               "I/O=10 时 PDAF 相对 ND（e-030）"],
+              ["plateau_low", "1.5", "x", "c-window",
+               "平台期下界，延续到 I/O=500（e-030）"],
+              ["plateau_high", "1.8", "x", "c-window",
+               "平台期上界（e-030）"],
+              ["falloff", "1.27", "x", "c-window",
+               "I/O=1000 时回落到 1.27x（e-030）"],
+              ["models_beaten_by_pdaf", "8", "个", "c-window",
+               "I/O=100 时 PDAF 超过 ND 的模型数，共 8 个（e-029）"],
+              # 「6 个」这句话在 c-model（跨模型最一致的做法），
+              # 不在 c-window。判据 C 要求 value 在**对应** claim 里。
+              ["models_best_is_pdaf", "6", "个", "c-model",
+               "PDAF 为最佳模式的模型数，共 8 个（e-038）"],
+              ["idle_ratio_low", "36.21", "%", "c-boundary",
+               "DeepSeek-V3.2 DP=16 时空转率下界（e-039）"],
+              ["idle_ratio_high", "59.98", "%", "c-boundary",
+               "空转率上界（e-039）"],
+              ["qwen32b_kv_scale", "8", "K", "c-model",
+               "Qwen3-32B 在该上下文长度下 KV 达 GB 级（e-032）"],
+              ["llama2_latency", "39", "x", "c-model",
+               "Llama2-7B 上 GPU 延迟更低倍数（e-033）"],
+              ["llama2_throughput", "41", "x", "c-model",
+               "Llama2-7B 上 GPU 吞吐更高倍数（e-033）"],
+              ["llama33_prefill_energy", "39", "%", "c-model",
+               "Llama 3.3 70B 分离后 prefill 能耗降幅（e-034）"],
+              ["llama33_decode_energy", "48", "%", "c-model",
+               "decode 能耗降幅（e-034）"],
+              ["dsv2lite_ttft", "81", "%", "c-model",
+               "DeepSeek-V2-Lite 的 P95 TTFT 降幅（e-035）"],
+              ["dsv2lite_slo", "79", "%", "c-model",
+               "SLO 达成率提升（e-035）"],
+              ["pdaf_llama4_mav", "1.81", "x", "c-model",
+               "PDAF 对 Llama-4 Maverick（e-037）"],
+              ["pdaf_llama4_scout", "1.77", "x", "c-model",
+               "PDAF 对 Llama-4 Scout（e-037）"],
+          ])
+
     # ---- 明确不入库的派生值（记录下来，避免以后有人以为漏了）----
     derived = HERE / "paper" / "data" / "DERIVED.md"
     derived.write_text(

@@ -2,7 +2,7 @@
 
 > 状态：完成
 > 信息截止：2026-11-04
-> 来源 63（46 篇论文 + 17 份官方文档）｜证据 27｜主张 6｜文档快照 61
+> 来源 63（46 篇论文 + 17 份官方文档）｜证据 40｜主张 7｜文档快照 61
 
 ## 1. 结论
 
@@ -15,6 +15,27 @@ PD 分离的收益**不是一个固定倍数，而是一个差的函数**：
 前项由「两阶段的资源画像差多远」决定，后项由「KV 多大、互联多快」决定。
 文献报告的加速倍数都是这个差在特定条件下的取值。
 
+**第 2 轮的关键修正**：这个差随负载是**有上下界的窗口，且非单调**，
+不是单调门槛。跨 8 个模型、扫 9 个输入输出比（e-028 至 e-030）：
+
+| I/O | 相对不分离 | 说明 |
+|---|---|---|
+| 0.01, 1 | < 1.00×（PD 最高 0.89×） | **8 个模型全部不分离最优** |
+| 10 | 2.10× | 翻转集中在一个数量级内 |
+| 100 | 1.05–1.92× | PDAF 对 8/8 模型超过不分离 |
+| 500 | 1.5–1.8× | 平台期 |
+| 1000 | **1.27×** | **回落：decode 硬件开始闲置** |
+
+第三行到第五行是本文最有价值的发现：**收益有上界**。此前讨论分离的
+文献几乎只谈下界（负载太轻不划算），没谈上界。实践含义直接——
+按「负载越重越该分离」判断，会在最重的工作负载上做分离，
+而那恰好是收益回落的区间。
+
+因此给出的不是配置表，而是四项判据（`paper/tables/tab4_criteria.csv`）：
+两阶段最优配置显著不同、存在高带宽 KV 通路、**负载落在窗口内**、
+KV 规模足够大。第三条的措辞在本轮被改过：原先是「负载足够重」。
+
+
 据此给出的不是配置表，而是四项判据（见 `paper/tables/tab4_criteria.csv`）：
 两阶段最优配置显著不同、存在高带宽 KV 通路、负载足够重、KV 规模足够大。
 四项全满足才建议分离。
@@ -23,9 +44,9 @@ PD 分离的收益**不是一个固定倍数，而是一个差的函数**：
 
 | 文件 | 内容 |
 |---|---|
-| `paper/latex/main.pdf` | **论文正文，7 页，28 条可点击引用** |
+| `paper/latex/main.pdf` | **论文正文，9 页，27 条可点击引用** |
 | `paper/PAPER.md` | 同一内容的事实源（由 LaTeX 反向生成） |
-| `paper/paper.json` | 论文规格：2 图 4 表的登记 |
+| `paper/paper.json` | 论文规格：3 图 4 表的登记 |
 | `analysis.json` | 从证据正则抽取的量化参数（6 组） |
 | `sources.csv` / `evidence.csv` / `claims.csv` | 来源 / 证据 / 主张 |
 | `documents/` | 61 份快照（44 篇论文全文 + 17 份工程文档） |
@@ -42,6 +63,11 @@ PD 分离的收益**不是一个固定倍数，而是一个差的函数**：
 | 两者比值 | **16.7×** | e-011 |
 | A100 节点内 NVLink 峰值 | 600 GB/s | e-006 |
 | 集群 InfiniBand 规格 | 800 Gbps（≈100 GB/s） | e-006 |
+| Qwen3-32B @ 8K 的 KV | **GB 级**，100 Gbps RDMA 上传输需数百毫秒 | e-032 |
+| Llama2-7B 上 GPU 的延迟/吞吐优势 | 39× / 41× | e-033 |
+| Llama 3.3 70B 分离后能耗降幅 | prefill 39%、decode 48% | e-034 |
+| DeepSeek-V2-Lite 的 P95 TTFT 降幅 | 81%，SLO 达成率升 79% | e-035 |
+| DeepSeek-V3.2 在 DP=16 的空转率 | 36.21%–59.98% | e-039 |
 | **反例**：聚合相对分离的 TTFT 降幅 | **13.2×** | e-025 |
 | SAC 在 DeepSeek-V3.2 上相对 RDMA | 吞吐 2.1×、TTFT 9.7×↓ | e-022 |
 | MoE 专家共享消除重复权重 | >95% | e-019 |
@@ -102,6 +128,22 @@ DistServe（2401.09670）等**奠基论文一篇都没进来**——它们的标
 与 Router 是 PD 页内的**锚点**而非独立页面；vLLM 的 NIXL 有独立的
 **设计文档**，比原计划的 features 页更权威。最终 17/17 全部可达。
 
+### 5.3 body.tex 是内联拼接，改节文件后不重建会静默失效
+
+`body.tex` 把 7 个 `.tex` **内联拼接**（不是 `\input` 各节）。
+本轮改完 `sec5_model.tex`（新增 PDAF、窗口、正交轴等内容）后直接编译：
+成功、页数仍是 7 页，但 PDF 字符数与改动前**一字不差**，
+`PDAF` 出现 0 次——PDF 里还是旧的 §5。
+
+这是最难发现的一类失效：**构建产物看起来成功，内容却不是源码**。
+没有任何错误信号，只有对比「预期出现的关键词」才能发现。
+
+修法：改用 `paper/build_body.py` 统一重建，并在重建后断言
+关键内容确实进来了（脚本会打印 `含 PDAF 8 次` 这样的核对行）。
+另外发现它之后，就不能再用手改 body.tex 的方式修 LaTeX——
+每次都会被下次重建覆盖。圈码包裹也因此改在源 `.tex` 上做
+（见 `paper/wrap_circled.py`）。
+
 ## 6. 脚本
 
 按执行顺序：
@@ -119,6 +161,13 @@ DistServe（2401.09670）等**奠基论文一篇都没进来**——它们的标
 | `fetch_readme.py` | GitHub 仓库改抓 raw README |
 | `grabber.py` | 引文抓取器（锚点扩窗） |
 | `build_pd.py` | 建 sources/evidence/claims/documents |
+| `mine_model_results.py` | **第 2 轮**：按模型名挖定量结果（扫 16816 句） |
+| `add_model_evidence.py` | **第 2 轮**：补 13 条证据（27 → 40） |
+| `add_window_claim.py` | **第 2 轮**：新增 c-window 主张（收益窗口） |
+| `paper/build_body.py` | **拼接 7 节成 body.tex 并断言内容确实进来** |
+| `paper/wrap_circled.py` | **给圈码包 `\sym{}`（否则静默丢字）** |
+| `paper/restore_tab3.py` | 恢复重写时误删的模型变量表 |
+| `paper/cite_window.py` | 给正文补 c-window 引用 |
 | `make_analysis.py` | 从证据抽量化参数 → analysis.json |
 | `make_figures.py` | 生成 2 张图 |
 | `make_tables.py` | 生成 4 张表 + paper.json |
@@ -141,7 +190,7 @@ DistServe（2401.09670）等**奠基论文一篇都没进来**——它们的标
 ## 8. 校验状态
 
 ```
-validate     [OK]  sources=63, evidence=27, claims=6, claims_high=5, claims_disputed=0, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0,
+validate     [OK]  sources=63, evidence=40, claims=7, claims_high=6, claims_disputed=0, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0,
                    claims_disputed=0, c3_violations=0, subquestions=5,
                    r2_violations=0, c1_violations=0, sku_unspecified=0,
                    s1_with_tz=63, d1_documents=61,
