@@ -1,0 +1,147 @@
+\section{同一技巧在不同 SLO 下方向相反}
+\label{sec:slo}
+
+前面三节换过两次切法：按成本链（四类）、按实现平面（三平面）。
+本节换第三次：按\textbf{SLO 的类型}。
+
+之所以还要再切一次，是因为它揭示的东西与前两次不同。四类与三平面
+回答「有哪些手段」，本节回答\textbf{「同一个手段什么时候是反的」}。
+
+\subsection{一个旋钮，两个 SLO}
+
+最干净的例子是 chunked prefill 的 token 预算。Sarathi-Serve 的原文
+把冲突写得很直接：token 预算由\textbf{两个相互竞争的因素}决定——
+TBT 的 SLO 要求，与 chunked prefill 自身的开销。\textbf{从压低 TBT
+的角度看，预算越小越好}，因为一迭代里 prefill token 越少延迟越低；
+但预算太小会导致 prefill 被过度切分，带来开销\texttt{[c-slo]}。
+
+\noindent 这个开销不是含糊的「固定成本」，有确切机制：一个 prompt 被切成
+$N$ 个 chunk 时，\textbf{第一个 chunk 的 KV cache 要被加载 $N-1$ 次，
+第二个 $N-2$ 次}，以此类推——计算量不变，但 HBM 的重复读取增加
+\texttt{[c-slo]}。
+
+\noindent 所以同一个旋钮的两端是这样的：
+
+\begin{center}
+\small
+\begin{tabular}{@{}p{2.3cm}p{2.2cm}p{2.2cm}@{}}
+\toprule
+token 预算 & TBT & 吞吐 \\
+\midrule
+调小 & 变好 & 变差（chunk 过碎，HBM 重复读） \\
+调大 & 变差 & 变好 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent 这不是「参数有权衡」这种泛泛之谈。它的含义更硬：
+\textbf{不存在一个「最优 token 预算」，只存在「对某个 TBT SLO 最优的
+预算」}。同一个数在另一个 SLO 下就是错的。
+
+\noindent 同一件事还有一句更直白的表述：优先 prefill 会让已经在跑的
+decode 停等，故延迟变高\texttt{[c-slo]}。反过来说，优先 decode
+就压住 prefill、抬高 TTFT。\textbf{调度的两端各自伤害一个 SLO}，
+没有中间地带能同时最优。
+
+\subsection{应用层：两个 SLO 的相对松紧才是变量}
+
+上面说的是机制。到了部署参数层，问题变成：给定一个应用，
+两个 SLO 该怎么配？
+
+DistServe 的三组配置给出了很说明问题的分布\texttt{[c-slo]}：
+
+\begin{table}[t]
+\centering
+\caption{三组应用的 SLO 配置。TTFT 跨约 120 倍而 TPOT 几乎不变，说明决定配置的是两个 SLO 的相对松紧。}
+\label{tab:slo}
+\small
+\begin{tabular}{@{}lrrl@{}}
+\toprule
+应用 & TTFT & TPOT & 特征 \\
+\midrule
+Chatbot OPT-175B & 4.0\,s & 0.2\,s & TTFT 宽松、TPOT 严 \\
+Code Completion OPT-66B & 0.125\,s & 0.2\,s & TTFT 极严 \\
+Summarization OPT-66B & 15\,s & 0.15\,s & TTFT 极宽松、TPOT 最严 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent 看这两个数字的跨度：TTFT 从 $0.125$\,s 到 $15$\,s，
+跨约 $120$ 倍；而 TPOT 几乎不变，都在 $0.1$ 到 $0.2$\,s 之间。
+
+\noindent 这个对比说明一件事：\textbf{决定配置的不是「SLO 严不严」，
+而是「两个 SLO 的相对松紧」}。代码补全与摘要在「总体严格程度」上
+难以比较，但它们的\textbf{偏好方向完全相反}——一个要第一个 token
+立刻出来，一个可以等 15 秒但要后续 token 稳定。
+
+\noindent 原文对摘要的判断印证了这一点：摘要任务强调低 TPOT
+以便更快生成整段摘要\texttt{[c-slo]}，而它同时容忍 15 秒的 TTFT。
+
+\noindent 这解释了一个实践中反复出现的困惑：为什么同一个分离方案，
+在 A 团队那里是 3 倍提升，在 B 团队那里几乎没变。\textbf{不是配置错，
+是 SLO 的形状不同。}
+
+\subsection{收益本身随应用变}
+
+DistServe 在同一套系统、同一批硬件上报告了两组差异明显的数字
+\texttt{[c-slo]}：
+
+\begin{itemize}[leftmargin=1.3em,itemsep=1.5pt,topsep=2pt]
+  \item 代码补全（OPT-66B）：支撑 $3.2\times$ 更高的请求率，
+        同时 SLO 更严 $1.5\times$。
+  \item 聊天（OPT-13B/66B/175B）：SLO 更严 $1.4\times$ 至 $1.8\times$。
+\end{itemize}
+
+\noindent 两者都算「显著提升」，但结构不同：前者主要体现在
+\textbf{能扛多少请求}，后者主要体现在\textbf{能扛多严的延迟}。
+
+\noindent 这带来一个方法论上的要求：\textbf{报告分离收益时必须同时
+报 SLO 形状}，否则数字不可比。一个「3.2 倍」若不说清是在什么
+TTFT/TPOT 组合下达成的，对读者没有决策价值。
+
+\subsection{由此得到的判据}
+
+把本节与前面几节合起来，可以给出一条比第 \ref{sec:boundary} 节
+更细的判据：\textbf{先定 SLO 的形状，再定技巧的方向}。
+
+\noindent 具体地，问三个问题：
+
+\begin{enumerate}[leftmargin=1.4em,itemsep=2pt,topsep=3pt]
+  \item \textbf{哪个 SLO 更紧？} TTFT 紧（代码补全、搜索）意味着
+        优先 prefill、增大 token 预算、倾向不分离或 P 侧多配；
+        TPOT 紧（摘要、长文生成）意味着优先 decode、减小预算、
+        倾向分离且 D 侧多配。
+  \item \textbf{两个 SLO 的比值是多少？} 单独看任何一个都不够。
+        摘要的 TTFT 是代码补全的 $120$ 倍，这个比值比绝对值更能
+        决定配置。
+  \item \textbf{目标达成率是多少？} goodput 的定义是「在 SLO 达成率
+        目标（如 $90\%$）下每 GPU 能服务的最大请求率」
+        \texttt{[c-slo]}。达成率从 $90\%$ 提到 $99\%$ 会显著改变
+        可行配置——尾部延迟的代价不是线性的。
+\end{enumerate}
+
+\noindent 这三问的次序不能换。先问「用什么技巧」会得到一堆
+互相冲突的建议——因为每个技巧的推荐方向都依赖于 SLO 的形状，
+而形状还没定。
+
+\subsection{这一节与前三节的关系}
+
+写到这里，四次切法的关系可以收拢了：
+
+\begin{itemize}[leftmargin=1.3em,itemsep=1.5pt,topsep=2pt]
+  \item \textbf{四类}（第 \ref{sec:technique} 节）：按成本链切，
+        回答「分离这笔账怎么省」。
+  \item \textbf{三平面}（第 \ref{sec:plane} 节）：按实现层切，
+        回答「整个栈有哪几层可以动」，保证不漏。
+  \item \textbf{SLO 类型}（本节）：按目标切，回答\textbf{「同一手段
+        什么时候是反的」}——这是唯一一个能让前面两节的结论
+        发生方向翻转的维度。
+\end{itemize}
+
+\noindent 三者的用法不同：三平面用来\textbf{完备}，四类用来\textbf{取舍}，
+SLO 用来\textbf{定方向}。顺序上，SLO 必须最先——方向错了，
+后面做得越细越糟。
+
+\noindent 若只能从本节记一句：\textbf{本文前面所有「某技巧提升 X\%」
+的说法，都隐含了一个 SLO 形状}。换一个形状，同一个技巧可能变成
+负收益。这不是给结论打折扣，而是把它放回成立的条件里。

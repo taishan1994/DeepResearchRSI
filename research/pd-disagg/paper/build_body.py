@@ -33,6 +33,7 @@ SECTIONS = [
     # （如「逐阶段量化的代价不对称」），放前面会断引用。
     "sec8_technique.tex",
     "sec9_plane.tex",
+    "sec10_slo.tex",
     "sec6_boundary.tex", "sec7_discuss.tex",
 ]
 

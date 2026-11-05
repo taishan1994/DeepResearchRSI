@@ -2,7 +2,7 @@
 
 > 状态：完成
 > 信息截止：2026-11-04
-> 来源 70（46 篇论文 + 24 份官方文档）｜证据 78｜主张 9｜文档快照 68
+> 来源 70（46 篇论文 + 24 份官方文档）｜证据 85｜主张 10｜文档快照 68
 
 ## 1. 结论
 
@@ -158,6 +158,67 @@ SiLU kernel、算子融合。
 - 四类按**成本链**切：能对应收益与代价，但看不到传输之外的层
 - 三平面按**实现层**切：完备，但不直接告诉你哪个划算
 - **两者正交，叠加使用**：用三平面保证不漏，用四类判断传输那一层
+
+## 1.7 第 5 轮：同一技巧在不同 SLO 下方向相反
+
+上一轮末尾提出「按 SLO 类型再切一次，看同一技巧是否反向」。
+答案是**确实反向**，且反向有三层证据。
+
+### 机制层：一个旋钮，两个 SLO
+
+Sarathi-Serve 的 token 预算由两个相互竞争的因素决定：TBT 的 SLO 要求
+与 chunk 切分自身的开销。原文：*"From a TBT minimization point of view,
+a smaller token budget is preferable... However, smaller token budget can
+result in excessive chunking."*
+
+| token 预算 | TBT | 吞吐 |
+|---|---|---|
+| 调小 | 变好 | 变差（chunk 过碎） |
+| 调大 | 变差 | 变好 |
+
+开销有确切机制，不是含糊的"固定成本"：prompt 切成 N 个 chunk 时，
+**第一个 chunk 的 KV cache 要被加载 N−1 次，第二个 N−2 次**——
+计算量不变，HBM 重复读取增加。
+
+### 陈述层：优先谁就伤害谁
+
+原文：*"prioritizing prefills leads to high latency because it pauses
+ongoing decodes"*。调度的两端各自伤害一个 SLO，没有中间地带能同时最优。
+
+### 参数层：TTFT 跨 120 倍，TPOT 几乎不变
+
+DistServe Table 1 的三组配置：
+
+| 应用 | TTFT | TPOT | 特征 |
+|---|---|---|---|
+| Chatbot OPT-175B | 4.0s | 0.2s | TTFT 宽松、TPOT 严 |
+| Code Completion OPT-66B | 0.125s | 0.2s | TTFT 极严 |
+| Summarization OPT-66B | 15s | 0.15s | TTFT 极宽松、TPOT 最严 |
+
+TTFT 从 0.125s 到 15s，跨约 120 倍；TPOT 都在 0.1–0.2s。
+**决定配置的不是「SLO 严不严」，是「两个 SLO 的相对松紧」。**
+
+这也解释了实践中的困惑：同一分离方案在 A 团队是 3 倍提升、
+在 B 团队几乎没变——不是配置错，是 SLO 形状不同。
+
+### 收益结构本身也随应用变
+
+同一套系统：代码补全支撑 3.2× 请求率 + SLO 更严 1.5×；
+聊天是 SLO 更严 1.4×–1.8×。都算显著，但结构不同——
+前者体现在**能扛多少请求**，后者体现在**能扛多严的延迟**。
+
+### 由此得到的顺序判据
+
+**先定 SLO 形状，再按平面查漏，最后按成本链取舍。**
+顺序不能颠倒：方向错了，后面做得越细越糟。
+
+### 一处自查发现
+
+写这节时我凭记忆引了一句"prioritizing prefills improves TTFT latency
+whereas prioritizing decodes has the opposite effect"——切片时锚点
+找不到。真实原文是"prioritizing prefills **leads to high latency**"。
+意思相近，但不是原话。**这就是必须切片而不手抄的原因**：记忆会把
+两处内容合并成一句通顺但不存在的引文。
 
 ## 2. 交付物
 
