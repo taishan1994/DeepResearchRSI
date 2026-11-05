@@ -90,6 +90,14 @@ def main() -> int:
     # 上面几条都要求前面紧邻字母，而这里前面是连字符，
     # 故单独补：连字符 + 至多 3 个字母 + 4 位数字，且到词边界。
     masked = _re.sub(r"(?<=-)[A-Za-z]{0,3}\d{4}(?=\b)", " ", masked)
+    # 参考文献里的 git commit hash：/blob/b069b6971faf6c47 这类，
+    # 断行后会出现 4 位片段（6971 / 069）。
+    masked = _re.sub(r"/blob/[0-9a-f]{7,}", " ", masked)
+    masked = _re.sub(r"\b[0-9a-f]{7,40}\b", " ", masked)
+    # arXiv 编号被断行拆开：arXiv:2610.\n06917 -> 069。
+    # ⚠️ 不能用后顾断言：`\s?` 宽度可变，re 会报
+    # 「look-behind requires fixed-width pattern」。改用捕获组。
+    masked = _re.sub(r"(arXiv:\s?\d{4}\.\s?)\d{2,5}", r"\1", masked)
 
     nums = re.findall(r"\d+(?:\.\d+)?", masked)
     uniq = sorted(set(nums), key=lambda x: (-len(x), x))
@@ -137,8 +145,12 @@ def main() -> int:
         "14": "参考文献日期片段（2026-06-14 被断行拆开）",
         "15": "参考文献日期片段（2024-04-15）",
         "18": "参考文献日期片段（2024-01-18）",
-        "62": "第 1 节方法说明里的自指计数（「62 条证据、62/62 全部"
+        "62": "第 1 节的旧自指计数（现已改为 78）",
+        "78": "第 1 节方法说明里的自指计数（「78 条证据、78/78 全部"
               "校验通过」），描述的是本归档自身的规模，不是研究数据",
+        "70": "同上：来源总数（70 个来源）",
+        "24": "同上：官方工程文档快照份数",
+        "9": "同上：主张条数（9 条主张）",
     }
     unexplained = [n for n in orphan if n not in EXPLAINED]
     if orphan:

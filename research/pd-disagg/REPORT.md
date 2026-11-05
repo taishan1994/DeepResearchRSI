@@ -2,7 +2,7 @@
 
 > 状态：完成
 > 信息截止：2026-11-04
-> 来源 67（46 篇论文 + 21 份官方文档）｜证据 62｜主张 8｜文档快照 65
+> 来源 70（46 篇论文 + 24 份官方文档）｜证据 78｜主张 9｜文档快照 68
 
 ## 1. 结论
 
@@ -101,6 +101,63 @@ all-reduce 才能拿到全局视图。这既是开销也是延迟。
 - DBO 在 token 数低于阈值时不拆分（拆完 GEMM 变窄反而慢）
 - DSpark 需要 ALWAYS 级 CUDA graph，不支持 `--enforce-eager` / LoRA / PP
 
+
+## 1.6 第 4 轮：四类之外还有三层
+
+用户问「除 ABCD 四类还有其它的吗」。查证结果是：**四类不完备，
+但也不错误**——它的维度是「作用于 KV 传输成本的哪个环节」，
+只覆盖分离引入的额外成本。
+
+vLLM 的大规模服务文档列出九项关键优化，把每 H200 吞吐从约
+1,500 提到 2,200 tok/s——**其中六项与 KV 传输无关**：异步调度、
+CUDA graph 的 `FULL_AND_PIECEWISE`、DeepGEMM、DeepEP kernel、
+SiLU kernel、算子融合。
+
+换成按**实现平面**看，有三层，其中五个维度不在四类里：
+
+| 平面 | 管什么 | 四类漏掉的 |
+|---|---|---|
+| 数据面 | KV 放哪、留多久 | KV 池分层、打包布局、session 感知保留 |
+| 执行面 | 单步算多快 | 并行策略选择、kernel 融合、CUDA graph、异步调度 |
+| 控制面 | 谁在何时被调度 | 长 prefill token 上限、prefill 节拍、路由策略 |
+
+### 三个幅度最大的，都不在四类里
+
+- **并行策略**：DeepSeek V4 在 32K prompt 上 PCP8 相对 TP8 有 2.65×
+  prefill 加速。这是「选哪种切法」，不是「均衡负载」。
+- **调度顺序**：给单条请求每步可调度的 token 数设上限（512），
+  在 B300 上跑 DeepSeek V4 Pro 使 TPGS 提升最多 93%、P90 交互性约 2.3×。
+  机制是**消除队头阻塞**——一条长 prefill 会占满整个 token 预算，
+  同 rank 上排队的短轮次在它结束前完全无法被调度。
+- **kernel 融合**：对称内存 + kernel 内融合替代 NCCL all-gather，
+  每层延迟降约 13%；latent-tail MoE 融合降端到端约 5%。
+
+对比一下：四类里的 C 类（均衡）是个位数百分比（0.84%–7.34%）。
+**四类里幅度最大的一条，不如四类外最小的一条。**
+
+### 三个反例界定了适用条件
+
+比正面技巧更有信息量：
+
+1. **流水线并行不适合热轮次**：前缀已缓存、每轮只新增几百到几千
+   token，没有足够新计算填满流水线，bubble 吃掉大部分收益。
+   故 PP 适合冷的、计算重的 prefill，不该是热轮次的默认。
+2. **上下文并行不必然迁移**：DeepSeek V4 的压缩稀疏注意力含
+   indexer、compressor 与主注意力三层，CP 要切分协调全部子层。
+   投入大量重叠与 kernel 优化后，DCP 只打平 DEP，未超过。
+   原文结论：并行必须跟随模型架构。
+3. **负载均衡可能有害**：按队列深度/KV 利用率均衡，全部劣于
+   session 粘性路由。迁移要取 KV，预取的块临时占目标 rank 的 KV
+   容量，导致**队列更均衡但并发更少**。
+
+第 3 条直接修正了我的 C 类假设：均衡本身有价值。实际是
+**均衡与局部性冲突，局部性常常更值钱**。
+
+### 两套划分的关系
+
+- 四类按**成本链**切：能对应收益与代价，但看不到传输之外的层
+- 三平面按**实现层**切：完备，但不直接告诉你哪个划算
+- **两者正交，叠加使用**：用三平面保证不漏，用四类判断传输那一层
 
 ## 2. 交付物
 
@@ -268,7 +325,7 @@ DistServe（2401.09670）等**奠基论文一篇都没进来**——它们的标
 ## 8. 校验状态
 
 ```
-validate     [OK]  sources=67, evidence=62, claims=8, claims_high=7, claims_disputed=0, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0,
+validate     [OK]  sources=70, evidence=78, claims=9, claims_high=8, claims_disputed=0, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0,
                    claims_disputed=0, c3_violations=0, subquestions=5,
                    r2_violations=0, c1_violations=0, sku_unspecified=0,
                    s1_with_tz=63, d1_documents=61,

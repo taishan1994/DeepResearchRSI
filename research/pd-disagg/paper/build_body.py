@@ -32,6 +32,7 @@ SECTIONS = [
     # 技巧层放在模型实践之后：它大量回指第 5 节的模型差异
     # （如「逐阶段量化的代价不对称」），放前面会断引用。
     "sec8_technique.tex",
+    "sec9_plane.tex",
     "sec6_boundary.tex", "sec7_discuss.tex",
 ]
 

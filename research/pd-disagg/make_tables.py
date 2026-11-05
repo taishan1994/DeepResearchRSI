@@ -92,6 +92,15 @@ def main() -> int:
                ["4", "KV 规模足够大",
                 "传输固定开销占比可忽略"]])
 
+    # tab6：三平面
+    write_csv("tab6_plane.csv",
+              ["平面", "管什么", "代表手段"],
+              [["数据面", "KV 放哪、留多久",
+                "KV 池分层、打包布局、session 感知保留、前缀缓存"],
+               ["执行面", "单步算多快",
+                "并行策略（DEP/DCP/PCP/Wide-EP）、kernel 融合、CUDA graph、异步调度"],
+               ["控制面", "谁在什么时候被调度",
+                "长 prefill token 上限、prefill 节拍、路由、准入、P/D 配比"]])
     # tab5：优化技巧四类
     write_csv("tab5_technique.csv",
               ["类别", "作用于", "代表技巧", "实测幅度"],
@@ -137,6 +146,9 @@ def main() -> int:
              "caption": "决定分离做法的变量"},
             {"table_id": "tab4", "data": "tables/tab4_criteria.csv",
              "caption": "分离的四项判据"},
+            {"table_id": "tab6", "data": "tables/tab6_plane.csv",
+             "caption": "三平面与各自的优化手段",
+             "cites": ["c-plane"]},
             {"table_id": "tab5", "data": "tables/tab5_technique.csv",
              "caption": "优化技巧按作用对象分四类",
              "cites": ["c-technique"]},
@@ -151,6 +163,7 @@ def main() -> int:
             {"title": "怎么切分与调度", "cites": ["c-split"]},
             {"title": "不同模型的最佳实践", "cites": ["c-model"]},
             {"title": "优化技巧", "cites": ["c-technique"]},
+            {"title": "四类之外", "cites": ["c-plane"]},
             {"title": "收益的边界", "cites": ["c-boundary", "c-window"]},
             {"title": "讨论", "cites": ["c-formula"]},
             {"title": "结论", "cites": ["c-formula"]},
