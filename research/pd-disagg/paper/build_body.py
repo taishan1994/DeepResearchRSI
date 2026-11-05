@@ -28,8 +28,11 @@ LATEX = HERE / "latex"
 
 SECTIONS = [
     "sec1_intro.tex", "sec2_why.tex", "sec3_transfer.tex",
-    "sec4_split.tex", "sec5_model.tex", "sec6_boundary.tex",
-    "sec7_discuss.tex",
+    "sec4_split.tex", "sec5_model.tex",
+    # 技巧层放在模型实践之后：它大量回指第 5 节的模型差异
+    # （如「逐阶段量化的代价不对称」），放前面会断引用。
+    "sec8_technique.tex",
+    "sec6_boundary.tex", "sec7_discuss.tex",
 ]
 
 

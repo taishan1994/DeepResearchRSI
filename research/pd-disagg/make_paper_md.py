@@ -31,8 +31,8 @@ HERE = Path(__file__).resolve().parent
 PAPER = HERE / "paper"
 LATEX = PAPER / "latex"
 SECTIONS = ["sec1_intro.tex", "sec2_why.tex", "sec3_transfer.tex",
-            "sec4_split.tex", "sec5_model.tex", "sec6_boundary.tex",
-            "sec7_discuss.tex"]
+            "sec4_split.tex", "sec5_model.tex", "sec8_technique.tex",
+            "sec6_boundary.tex", "sec7_discuss.tex"]
 
 
 
@@ -51,6 +51,10 @@ _FIG_BY_CAPTION = {
 }
 _TAB_BY_CAPTION = {
     "三档": "tab1", "路线": "tab2", "变量": "tab3", "判据": "tab4",
+    # tab5 的 caption 首句是「优化技巧按作用对象分四类」，
+    # 用「作用对象」作关键词；用「四类」会同时命中技巧节正文的
+    # 多处「四类」，映射不可靠。
+    "作用对象": "tab5",
 }
 
 

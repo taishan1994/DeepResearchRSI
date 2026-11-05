@@ -34,7 +34,7 @@ HERE = Path(__file__).resolve().parent
 SECTIONS = [
     "sec1_intro.tex", "sec2_why.tex", "sec3_transfer.tex",
     "sec4_split.tex", "sec5_model.tex", "sec6_boundary.tex",
-    "sec7_discuss.tex", "references.tex",
+    "sec7_discuss.tex", "sec8_technique.tex", "references.tex",
 ]
 
 

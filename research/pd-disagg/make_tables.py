@@ -92,6 +92,16 @@ def main() -> int:
                ["4", "KV 规模足够大",
                 "传输固定开销占比可忽略"]])
 
+    # tab5：优化技巧四类
+    write_csv("tab5_technique.csv",
+              ["类别", "作用于", "代表技巧", "实测幅度"],
+              [["A 省传输量", "KV 字节数", "逐层/chunk 级传输、压缩、前缀缓存",
+                "成比例"],
+               ["B 让传输不可见", "时序", "TBO、SBO、DBO、piggyback",
+                "隐藏传输"],
+               ["C 均衡负载", "rank 分配", "Waterfill、LPLB、EPLB",
+                "0.84-7.34%"],
+               ["D 省 decode 步", "步数", "DSpark 自适应验证", "随并发"]])
     # paper.json
     spec = {
         "_note": "论文规格。图/表在此声明，audit_paper.py 校验其产物真实存在。",
@@ -127,6 +137,9 @@ def main() -> int:
              "caption": "决定分离做法的变量"},
             {"table_id": "tab4", "data": "tables/tab4_criteria.csv",
              "caption": "分离的四项判据"},
+            {"table_id": "tab5", "data": "tables/tab5_technique.csv",
+             "caption": "优化技巧按作用对象分四类",
+             "cites": ["c-technique"]},
         ],
         # sections 必须是含 cites 的对象：audit_paper.py 会读 s.get("cites")
         # 并把它们并入「已声明主张」集合。写成纯字符串会抛
@@ -137,6 +150,7 @@ def main() -> int:
             {"title": "KV cache 怎么搬", "cites": ["c-transfer"]},
             {"title": "怎么切分与调度", "cites": ["c-split"]},
             {"title": "不同模型的最佳实践", "cites": ["c-model"]},
+            {"title": "优化技巧", "cites": ["c-technique"]},
             {"title": "收益的边界", "cites": ["c-boundary", "c-window"]},
             {"title": "讨论", "cites": ["c-formula"]},
             {"title": "结论", "cites": ["c-formula"]},

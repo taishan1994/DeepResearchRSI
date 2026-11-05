@@ -86,6 +86,10 @@ def main() -> int:
     masked = _re.sub(r"(?<=[A-Za-z\-])\d{1,2}\.\d(?=\b|、|，|\))", " ",
                      masked)
     masked = _re.sub(r"(?<=-)\d{3,4}(?=B|、|，|\))", " ", masked)
+    # 型号的日期式后缀：DeepSeek-V4-Pro-0813。
+    # 上面几条都要求前面紧邻字母，而这里前面是连字符，
+    # 故单独补：连字符 + 至多 3 个字母 + 4 位数字，且到词边界。
+    masked = _re.sub(r"(?<=-)[A-Za-z]{0,3}\d{4}(?=\b)", " ", masked)
 
     nums = re.findall(r"\d+(?:\.\d+)?", masked)
     uniq = sorted(set(nums), key=lambda x: (-len(x), x))
@@ -133,6 +137,8 @@ def main() -> int:
         "14": "参考文献日期片段（2026-06-14 被断行拆开）",
         "15": "参考文献日期片段（2024-04-15）",
         "18": "参考文献日期片段（2024-01-18）",
+        "62": "第 1 节方法说明里的自指计数（「62 条证据、62/62 全部"
+              "校验通过」），描述的是本归档自身的规模，不是研究数据",
     }
     unexplained = [n for n in orphan if n not in EXPLAINED]
     if orphan:
