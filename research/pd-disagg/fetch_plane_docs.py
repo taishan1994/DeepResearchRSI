@@ -48,6 +48,8 @@ HERE = Path(__file__).resolve().parent
 DOCS = HERE / "documents"
 
 TARGETS = {
+    "vllm-mooncake": (
+        "https://vllm.ai/blog/2026-05-06-mooncake-store"),
     "vllm-large-scale": (
         "https://vllm.ai/blog/2025-12-17-large-scale-serving"),
     "vllm-agentx": (

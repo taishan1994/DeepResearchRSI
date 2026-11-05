@@ -34,6 +34,7 @@ SECTIONS = [
     "sec8_technique.tex",
     "sec9_plane.tex",
     "sec10_slo.tex",
+    "sec11_load.tex",
     "sec6_boundary.tex", "sec7_discuss.tex",
 ]
 
