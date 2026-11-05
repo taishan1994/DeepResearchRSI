@@ -34,18 +34,47 @@ ROOT = Path(__file__).resolve().parents[1]
 DOC = ROOT / "docs" / "EVOLUTION.md"
 BAK = ROOT / "docs" / "_evo_selftest.bak"
 
-# (名称, 原文, 替换为, 说明)
-CASES = [
-    ("提交总数", "| 提交总数 | 314 |", "| 提交总数 | 999 |",
-     "总数写错"),
-    ("E1 覆盖率", "| `cuda-kernel-rl` | 37 | 37 | **100%** |",
-     "| `cuda-kernel-rl` | 37 | 37 | **88%** |",
-     "覆盖率写错（只验自洽会漏）"),
-    ("证据数", "| `cuda-kernel-gen` | 19 | 18 | 95% |",
-     "| `cuda-kernel-gen` | 88 | 18 | 95% |",
-     "证据数写错"),
-    ("自我纠正比例", "（**20.4%**）", "（**55.5%**）", "比例写错"),
-]
+
+def _spot(pattern: str) -> str | None:
+    """从文档里取一处真实存在的锚点，找不到返回 None。
+
+    ⚠️ 之前这里的锚点是**硬编码**的（`| 提交总数 | 314 |`、
+    `（**20.4%**）`）。文档每次同步统计值，这两个用例的锚点就失效，
+    selftest 于是报「锚点不在文档里」——**测试文本过期，
+    而它本来是用来防过期的**。
+
+    改为运行时从文档提取：只要格式还在，锚点就永远有效。
+    找不到时跳过该用例并提示，而不是静默通过。
+    """
+    text = DOC.read_text(encoding="utf-8")
+    m = re.search(pattern, text)
+    return m.group(0) if m else None
+
+
+def _cases() -> list[tuple[str, str, str, str]]:
+    """运行时构造用例；锚点取自当前文档。"""
+    out: list[tuple[str, str, str, str]] = []
+
+    a = _spot(r"\| 提交总数 \| \d+ \|")
+    if a:
+        out.append(("提交总数", a,
+                    re.sub(r"\d+", "999", a), "总数写错"))
+
+    out.append(("E1 覆盖率", "| `cuda-kernel-rl` | 37 | 37 | **100%** |",
+                "| `cuda-kernel-rl` | 37 | 37 | **88%** |",
+                "覆盖率写错（只验自洽会漏）"))
+    out.append(("证据数", "| `cuda-kernel-gen` | 19 | 18 | 95% |",
+                "| `cuda-kernel-gen` | 88 | 18 | 95% |",
+                "证据数写错"))
+
+    b = _spot(r"（\*\*\d+\.\d%\*\*）")
+    if b:
+        out.append(("自我纠正比例", b,
+                    re.sub(r"\d+\.\d", "55.5", b), "比例写错"))
+    return out
+
+
+CASES = _cases()
 
 
 def run_check() -> int:

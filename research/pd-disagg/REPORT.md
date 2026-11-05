@@ -236,6 +236,9 @@ DistServe（2401.09670）等**奠基论文一篇都没进来**——它们的标
 | `make_technique_data.py` | **第 3 轮**：技巧层数值 → paper/data |
 | `update_intro.py` | 同步引言计数与贡献项 |
 | `update_conclusion.py` | 结论从三层改为四层 |
+| `technique_advisor.py` | **按部署场景判定技巧取舍**（把 §8 判据做成可执行检查表） |
+| `update_lessons.py` / `update_evolution.py` | **把本轮教训写回框架文档** |
+| `sync_docs_stats.py` | 同步 docs 里引用的统计数（跳过历史案例 3069） |
 | `mine_model_results.py` | **第 2 轮**：按模型名挖定量结果（扫 16816 句） |
 | `add_model_evidence.py` | **第 2 轮**：补 13 条证据（27 → 40） |
 | `add_window_claim.py` | **第 2 轮**：新增 c-window 主张（收益窗口） |
