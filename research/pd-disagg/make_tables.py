@@ -146,6 +146,9 @@ def main() -> int:
              "caption": "决定分离做法的变量"},
             {"table_id": "tab4", "data": "tables/tab4_criteria.csv",
              "caption": "分离的四项判据"},
+            {"table_id": "tab9", "data": "tables/tab9_layers.csv",
+             "caption": "六次切法各自回答的问题",
+             "cites": []},
             {"table_id": "tab8", "data": "tables/tab8_load.csv",
              "caption": "缓存收益的三个来源与各自的基线",
              "cites": ["c-load"]},
@@ -163,6 +166,7 @@ def main() -> int:
         # 并把它们并入「已声明主张」集合。写成纯字符串会抛
         # AttributeError: 'str' object has no attribute 'get'。
         "sections": [
+            {"title": "一页判据", "cites": []},
             {"title": "引言", "cites": []},
             {"title": "两阶段为什么值得分开", "cites": ["c-profile"]},
             {"title": "KV cache 怎么搬", "cites": ["c-transfer"]},
