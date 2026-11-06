@@ -25,8 +25,21 @@ import re
 import sys
 from pathlib import Path
 
-ROOT = Path('research/rtx-pro-6000')
-PAPER = ROOT / 'paper' / 'PAPER.md'
+# ⚠️ 目标目录原先写死为 research/rtx-pro-6000。
+# 后果：新归档（如 rsi-model-training）跑 check_paper 时，校验的是**另一篇论文**，
+# 且会在那份论文上通过——一个看起来全绿的检查，查的根本不是它该查的东西。
+# 改为命令行参数，默认值保留旧行为以免破坏既有调用。
+# 参数可以是 research/<slug>/、research/<slug>/paper/ 或 PAPER.md 本身。
+_arg = Path(sys.argv[1]) if len(sys.argv) > 1 else Path('research/rtx-pro-6000')
+if _arg.name == 'PAPER.md':
+    PAPER = _arg
+    ROOT = _arg.parent.parent
+elif _arg.name == 'paper':
+    PAPER = _arg / 'PAPER.md'
+    ROOT = _arg.parent
+else:
+    ROOT = _arg
+    PAPER = _arg / 'paper' / 'PAPER.md'
 
 problems: list[tuple[str, str]] = []   # (等级, 描述)
 
@@ -105,7 +118,10 @@ def main() -> int:
     cl = {c['claim_id']: c for c in csv.DictReader(
         (ROOT / 'claims.csv').open(encoding='utf-8-sig'))}
     real_uns = sum(1 for c in set(re.findall(r'\[(c-[A-Za-z0-9_-]+)\]', text))
-                   if c in cl and cl[c]['sku'] == 'unspecified')
+                   if c in cl and (cl[c].get('sku') or '') == 'unspecified')
+    # ⚠️ 用 .get：不是所有归档都有 sku 列（sku 是 rtx-pro-6000 引入的字段，
+    # 主题换成 RSI 之后这个概念不适用）。直接用下标会 KeyError 整个脚本挂掉，
+    # 而这与「检查不通过」不是一回事——前者是检查器自己坏了。
     m5 = re.search(r'有 \*\*(\d+) 条是 `unspecified`\*\*', text)
     if m5 and int(m5.group(1)) != real_uns:
         fail('I5', f'正文说「{m5.group(1)} 条是 unspecified」，实际 {real_uns} 条')

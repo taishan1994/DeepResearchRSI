@@ -1,0 +1,1466 @@
+KernelBrain: Coarse-to-Fine, Budget-Aware Search for Agentic GPU Kernel Optimization 
+
+ Shuai Che
+
+ Affiliation:  Microsoft
+
+ Gang Peng
+
+ Affiliation:  Microsoft
+
+ Abstract 
+
+ Automating GPU kernel optimization remains difficult in practice: generated
+variants can violate correctness constraints, runtime measurements are noisy,
+and search often stalls early. We present a practical optimization agent that
+combines LLM-guided mutation, adaptive resource allocation, policy-gated
+evaluation, and profiler-informed diagnosis. The system screens many candidates
+with low-cost evaluation and allocates higher-fidelity budget only to promising
+survivors to optimize and evolve GPU kernels.
+On important Triton kernel generation tasks, this design improves both kernel quality
+and search efficiency, reaching 0.88x–6.72x speedup over PyTorch and
+up to 1.4x speedup over the state-of-the-art kernel agent, with up to 48%
+lower optimization time. 
+
+ 1 Introduction 
+
+ Efficient large-scale model deployment relies heavily on
+high-performance GPU kernels, exemplified by specialized attention mechanism and
+serving libraries such as TensorRT-LLM, vLLM, and SGLang [ 30 , 31 , 32 , 34 , 35 ] . However, the manual
+development of these kernels has become a significant bottleneck due to the
+expansive design space of algorithms, parallelism, memory layouts, and
+synchronization primitives. This complexity is compounded by the rapid pace of
+hardware innovation, where architectural shifts frequently invalidate established
+optimization strategies. While automated evolutionary frameworks
+ [ 36 ] have emerged to bridge this gap, they often lack the
+capabilities necessary for deep structural refactoring,
+as these methods typically prioritize immediate, incremental performance gains. 
+
+ Recent LLM-based systems can generate strong kernel variants, yet production
+deployment still faces three recurring issues: correctness regressions,
+unstable ranking under noisy measurements, and search stagnation. These
+problems are amplified by the “non-monotonic” nature of the optimization
+landscape, where small code changes can shift bottlenecks across compute,
+memory, and scheduling—producing large, hardware-dependent performance
+swings—and intermediate transformations may be neutral or even temporarily
+detrimental to performance. To address these concerns, diagnosis-driven, multi-agent approaches with
+hardware-in-the-loop feedback and memory-based reflection can achieve effective
+kernel generation [ 14 , 2 ] , but they often consume substantial resources
+on profiling and exploration. 
+
+ Our goal is therefore not only to find a fast kernel once, but to maintain a
+stable, budget-efficient optimization-evolving loop under noise, interruptions, and
+heterogeneous workloads. Our main contributions are: 
+
+ 1. 
+
+ Asymmetric resource allocation. Kernel
+performance can vary by orders of magnitude between the best and worst
+implementations. We allocate minimal resources to rapidly scan and prune
+underperforming candidates—gated by explicit policy and correctness
+checks with stability adjudication—and concentrate the majority of the
+evaluation budget on the most promising data points through a multi-fidelity
+regime; 
+
+ 2. 
+
+ Expert-guided coarse-to-fine search with hardware profiling. 
+Rather than relying solely on blind LLM-based evolutionary mutation, we employ
+expert-driven hints to cover the major optimization spaces broadly in early
+rounds and progressively narrow the search toward the best-performing
+regions, informed by GPU kernel profiling to provide traceable,
+bottleneck-aware mutation guidance; and 
+
+ 3. 
+
+ State-of-the-art Triton kernel performance. We evaluate
+the system on Triton-based workloads and demonstrate competitive results,
+achieving 0.88 × 0.88\times – 6.72 × 6.72\times speedup over PyTorch and
+up to 1.4x speedup over KernelAgent, with up to 48%
+geometric mean) across
+six important DNN benchmarks (Section  4 ). 
+
+ 2 Background and Related Work 
+
+ Kernel optimization has evolved from hand-tuned templates to learned
+autotuning and, more recently, LLM-assisted program search. Classical
+autotuners are effective when schedule parameters are fixed in advance, but
+they are less effective when improvements require structural code edits.
+LLM-based approaches expand the search space, but they also increase the need
+for disciplined orchestration: without strong gating and measurement controls,
+systems can overfit noise or drift toward low-performing programs. 
+
+ The broader background of auto-optimization falls into three lines. Compiler and autotuning systems
+such as TVM, AutoTVM, Ansor, and Halide learn or search over parameterized
+schedule spaces, while Triton provides a practical kernel language that exposes
+blocked GPU programs to both human experts and automated systems
+ [ 25 , 26 , 27 , 28 , 29 ] . Workload-specific systems (e.g., LLM) such as
+FlashAttention and FlashInfer show that large gains often come from
+hardware-conscious design rather than only parameter tuning
+ [ 34 , 35 ] . More generally, AlphaTensor,
+AlphaEvolve, OpenEvolve, motivate viewing optimization as evaluator-
+driven search [ 37 , 23 , 36 ] . 
+
+ Recent related work on automated kernel generation and optimization also falls
+into several categories. KernelEvolve, K-Search, AVO, and KernelFoundry
+emphasize planning, autonomous variation, or quality-diversity search over
+large kernel spaces [ 1 , 2 , 6 , 8 ] . CuTeGen,
+TritonForge, PEAK, CudaForge, STARK, cuPilot, KernelBlaster, and KernelAgent instead structure optimization as iterative
+refinement loops that combine generation with execution feedback, profiling,
+hardware diagnosis, or persistent memory
+ [ 4 , 10 , 12 , 18 , 17 , 7 , 16 , 22 , 14 , 9 ] .
+CUDAAgent, TritonRL, CUDA-LLM, KernelLLM, and cudaLLM move more capability
+into specialized training or finetuning for CUDA or Triton generation
+ [ 5 , 11 , 19 , 20 , 21 ] , while
+KernelFalcon, StitchCUDA, and Agentic Operator Generation broaden the scope to
+correctness-first deep-agent generation, end-to-end GPU programs, or broad
+operator coverage on new hardware [ 13 , 15 , 3 ] .
+Compared with these systems, our focus is a resource-aware Triton optimizer
+that promotes candidates by measured latency under multi-fidelity evaluation,
+rather than relying primarily on offline RL, large evolutionary populations, or
+backend-agnostic generation. 
+
+ 3 Design 
+
+ 3.1 Problem Formulation 
+
+ Let 𝒫 \mathcal{P} denote the space of candidate kernel programs reachable under
+the allowed mutation operators, and let x ∈ 𝒳 x\in\mathcal{X} denote a concrete
+tensor shape configuration (e.g., batch size, sequence length) drawn from
+workload distribution 𝒟 \mathcal{D} .
+For a candidate program p ∈ 𝒫 p\in\mathcal{P} , define: 
+
+ • 
+
+ C ⁡ ( p ) ∈ { 0 , 1 } C(p)\in\{0,1\} : compile validity indicator, 
+
+ • 
+
+ K ⁡ ( p ) ∈ { 0 , 1 } K(p)\in\{0,1\} : correctness indicator (passes task and numerical tests), 
+
+ • 
+
+ ℓ ⁡ ( p , x ) \ell(p;x) : latency (us) on input x x . 
+
+ The target is to find the best valid program under correctness constraints: 
+
+ | 
+ p ⋆ = arg ⁡ min p ∈ 𝒫 ​ 𝔼 x ∼ 𝒟 ​ [ ℓ ⁡ ( p , x ) ] s.t.  ​ C ​ ( p ) = 1 , K ⁡ ( p ) = 1 . p^{\star}=\arg\min_{p\in\mathcal{P}}\;\mathbb{E}_{x\sim\mathcal{D}}[\ell(p;x)]\quad\text{s.t. }C(p)=1,\;K(p)=1. | 
+ | 
+ (1) | 
+
+ Equivalently, using throughput-style scoring used by the runtime loop, we can
+maximize 
+
+ | 
+ S ⁡ ( p , r ) = 10 6 max ⁡ ( 1 , ℓ r ​ ( p ) ) + γ ⁡ ( r ) , S(p,r)=\frac{10^{6}}{\max(1,\ell_{r}(p))}+\gamma(r), | 
+ | 
+ (2) | 
+
+ where r r is the rung index, b r b_{r} is the rung budget, and ℓ r ​ ( p ) \ell_{r}(p) 
+is the measured kernel latency at fidelity level r r . Inspired by similar concept of the work  [ 24 ] ,
+a rung is a stage in a multi-fidelity evaluation ladder.
+Successive rungs progressively increase measurement budget—more
+warmup iterations, higher repeat counts, broader input shape coverage, and
+optional GPU kernel profiling—and only top-performing candidates at each rung are
+promoted to the next. The score S ⁡ ( p , r ) S(p,r) is dominated by latency: with latency
+measured in microseconds, the leading term 10 6 / max ⁡ ( 1 , ℓ r ​ ( p ) ) 10^{6}/\max(1,\ell_{r}(p)) 
+corresponds to executions per second. We can use
+ γ ⁡ ( r ) = α ​ r + β ​ b r \gamma(r)=\alpha r+\beta b_{r} , where α \alpha and β \beta are small constants,
+or any appropriate function γ ⁡ ( r ) \gamma(r) that gives more weight to later rungs
+to differentiate two candidates that have near-identical latency for scoring.
+ S ⁡ ( p , r ) S(p,r) can be extended to include other factors
+such as code and optimization quality (e.g., judged by LLM),
+but we find that latency-based ranking is effective in practice. 
+
+ Because only a finite set of candidates can be evaluated, search is budgeted.
+Let ℰ \mathcal{E} be the set of evaluated candidate-rung pairs and
+ cost ⁡ ( p , r ) \mathrm{cost}(p,r) the measurement cost. The practical objective is: 
+
+ | 
+ max ℰ ⁡ max ( p , r ) ∈ ℰ ⁡ S ⁡ ( p , r ) s.t.  ​ ∑ ( p , r ) ∈ ℰ cost ⁡ ( p , r ) ≤ B , \max_{\mathcal{E}}\;\max_{(p,r)\in\mathcal{E}}S(p,r)\quad\text{s.t. }\sum_{(p,r)\in\mathcal{E}}\mathrm{cost}(p,r)\leq B, | 
+ | 
+ (3) | 
+
+ with global budget B B (wall-clock and evaluation budget). This motivates
+multi-fidelity scheduling: inexpensive low-rung screening followed by selective
+promotion to high-fidelity evaluation. 
+
+ 3.2 Definitions (Policy, Fidelity, and Runtime Terms) 
+
+ We use the following terms consistently throughout the paper. 
+
+ • 
+
+ Policy check 𝒱 ⁡ ( p ) \mathcal{V}(p) : a pre-benchmark gate that
+verifies the candidate Triton kernel compiles without error, exports the
+expected function signature, and satisfies output-shape and dtype constraints
+against the reference implementation. Only candidates that pass all checks
+proceed to benchmarking. 
+
+ • 
+
+ Fidelity level r r : the evaluation configuration used for a
+candidate, controlling the number of GPU warmup launches, timed repeat
+iterations, effort of GPU profiling, and the set of input shapes (e.g., batch size or
+sequence length) over which latency is measured. 
+
+ • 
+
+ Rung budget b r b_{r} : the total measurement cost allocated to
+fidelity level r r . Lower rungs use fewer repeats and a narrow shape
+subset for fast screening; higher rungs use more repeats, broader shape
+coverage, and optionally trigger GPU kernel profiling—using NVIDIA Nsight
+Compute (NCU), which reports per-kernel metrics such as SM occupancy, memory
+throughput, and pipeline stalls—for kernel analysis. Similar
+profiling-driven diagnosis approach  [ 22 , 2 ] has been used to give LLM more useful hints. 
+
+ • 
+
+ Promotion decision : the scheduler’s determination of whether
+a candidate kernel at rung r r has sufficient performance to advance to
+rung r + 1 r+1 for more thorough evaluation through ranking. 
+
+ 3.3 Key Observations: Diversity-First Search with Progressive Evaluation 
+
+ Observation 1 (Search-space ruggedness). 
+
+ Triton kernel optimization does not behave like smooth local search. A small
+source-level edit—such as changing a tile size, reordering a reduction loop,
+or adjusting a launch grid—can alter register pressure, shared-memory usage,
+and the Triton compiler’s code-generation decisions in non-obvious ways. Two
+kernels that differ by a single line may exhibit vastly different compile
+validity, numerical correctness, and runtime performance. 
+
+ Purely evolutionary pipelines that repeatedly mutate a small elite set therefore
+show high inter-round variance: a strong kernel at iteration t t can produce
+descendants at t + 1 t+1 that fail to compile or regress in latency. Over long
+runs these failures compound—an incorrect candidate can pollute later mutation
+context, a single noisy measurement can distort promotion decisions, and a
+static mutation prior can trap exploration in a narrow region of the design
+space. The practical implication is to prefer broad candidate generation
+with targeted, expert-informed guidance over narrow lineage evolution. 
+
+ Observation 2 (Fidelity should follow quality). 
+
+ Not all kernel candidates deserve the same measurement effort. Beyond
+low-level tuning, the choice of algorithm—e.g., online softmax vs. multi-pass reduction, or tiled vs. split-K matrix multiply—can
+dominate performance differences, making it essential to explore algorithmic
+alternatives early. A Triton kernel that crashes or produces wrong outputs can
+be rejected in milliseconds, while confirming that a promising candidate is
+genuinely faster requires many timed launches across diverse input shapes.
+Allocating this expensive measurement uniformly wastes budget, so we couple
+diverse, expert-guided candidate generation (across algorithm, tiling, compute/memory,
+and launch choices) with a progressive multi-fidelity funnel: cheap early
+rungs explore optimizations broadly while quickly prune invalid or weak kernels via correctness/compile gates,
+while only strong survivors receive broader-shape, higher-repeat, optionally
+profiled evaluation; this concentrates effort where it matters and improves
+ranking robustness under timing noise. 
+
+ 3.4 System Architecture and Pipeline Overview 
+
+ Motivated by the observations above, our system is built around two principles:
+(1) generate diverse candidates with expert-informed guidance with a focus on coverage—spanning
+algorithmic alternatives, tiling strategies, memory layouts/accesses, computation decomposition, etc.—to cover the major optimization axes broadly that can help escape
+brittle local descent, and (2) apply multi-fidelity scheduling not merely as a speed
+optimization but also as a reliability mechanism—progressively stricter and more
+expensive evaluation identifies kernels that are both fast and stable under
+measurement noise. 
+
+ Algorithm   1 formalizes the optimization loop. We denote a candidate
+by  c c , rung index by  r r , and the pending queue by  Q Q ;
+ 𝒱 ⁡ ( ⋅ ) \mathcal{V}(\cdot) , ℬ ⁡ ( ⋅ ) \mathcal{B}(\cdot) , and 𝒟 ⁡ ( ⋅ ) \mathcal{D}(\cdot) 
+are policy verification, benchmark evaluation, and the scheduler’s
+promote-or-prune decision, respectively. Each iteration pops a
+candidate–rung pair, verifies and benchmarks it, computes a latency-based
+score ( equation   2 ), and queries 𝒟 \mathcal{D} to decide
+promotion or pruning. Promoted candidates re-enter the generation plane for
+LLM code mutation and are re-enqueued at the next rung; pruned candidates are
+discarded. The loop terminates when the queue empties, returning the best
+kernel found. 
+
+ Algorithm 1 Online Multi-Fidelity Optimization Loop 
+
+ 1: 
+
+ Initial candidate queue Q Q , rung budgets { b r } \{b_{r}\} , fidelity policy F ⁡ ( r ) F(r) 
+
+ 2: 
+
+ Initialize best candidate c ⋆ ← c^{\star}\leftarrow baseline, best score s ⋆ ← − ∞ s^{\star}\leftarrow-\infty 
+
+ 3: 
+
+ while Q Q is not empty do 
+
+ 4: 
+
+   Pop ( c , r , strategy ) (c,r,\text{strategy}) from Q Q 
+
+ 5: 
+
+   Update scheduler state for candidate c c at rung r r 
+
+ 6: 
+
+    if 𝒱 ⁡ ( c ) \mathcal{V}(c) fails then 
+
+ 7: 
+
+    Log rejection and continue 
+
+ 8: 
+
+    end if 
+
+ 9: 
+
+   Evaluate m ← ℬ ⁡ ( c , r , F ⁡ ( r ) , b r ) m\leftarrow\mathcal{B}(c,r,F(r),b_{r}) 
+
+ 10: 
+
+    if m m failed then 
+
+ 11: 
+
+    Log test failure and continue 
+
+ 12: 
+
+    end if 
+
+ 13: 
+
+   Compute score s ⁡ ( c , r ) s(c,r) from adjudicated latency
+
+ 14: 
+
+   Profile and diagnose (GPU profiling/analysis/prompt context)
+
+ 15: 
+
+   Update scheduler with ( c , r , s ⁡ ( c , r ) ) (c,r,s(c,r)) 
+
+ 16: 
+
+    if s ⁡ ( c , r ) > s ⋆ s(c,r)>s^{\star} then 
+
+ 17: 
+
+     c ⋆ ← c c^{\star}\leftarrow c , s ⋆ ← s ⁡ ( c , r ) s^{\star}\leftarrow s(c,r) 
+
+ 18: 
+
+    end if 
+
+ 19: 
+
+    ( promote , r + ) ← 𝒟 ⁡ ( c , r , s ⁡ ( c , r ) ) (\text{promote},r^{+})\leftarrow\mathcal{D}(c,r,s(c,r)) ⊳ \triangleright 𝒟 \mathcal{D} ranks and promotes candidates with scores
+
+ 20: 
+
+    if promote then 
+
+ 21: 
+
+    Construct next candidate code via the LLM mutation
+
+ 22: 
+
+    Push ( c , r + , strategy ) (c,r^{+},\text{strategy}) to Q Q 
+
+ 23: 
+
+    end if 
+
+ 24: 
+
+ end while 
+
+ 25: 
+
+ return best candidate c ⋆ c^{\star} 
+
+ Input Contract test.py + input_kernel.py Orchestrator Verifier Benchmarker GPU Kernel Profiling + Diagnosis Prompt Builder LLM Generation Parser / Repair Adaptive Resource Allocation (promote / prune) Run Storage + Checkpoints + Artifacts Best Kernel Output output_kernel.py 
+
+ Evaluation Plane 
+
+ Generation Plane 
+
+ Figure 1: System architecture of the kernel optimization agent. 
+
+ Figure   1 shows the end-to-end optimization and kernel evolution pipeline: the orchestrator
+receives the input contract ( test.py and input_kernel.py ),
+routes each candidate through verification, benchmarking, and optional
+profiling, then feeds diagnosis into the generation plane (prompt builder,
+LLM, parser/repair). An adaptive resource allocation scheduler promotes or
+prunes candidates at each rung while persisting all artifacts.
+The architecture in Figure   1 is organized around two
+parallel planes—an Evaluation Plane and a Generation
+Plane —connected by a central adaptive resource allocation scheduler. 
+
+ A run begins with two user-supplied files: a test file (correctness tests,
+benchmark harness, input shapes) and an input kernel file (baseline Triton
+kernel). The orchestrator seeds the candidate queue with the baseline and an
+initial batch of expert-guided tasks. 
+
+ Evaluation Plane. 
+
+ Each candidate flows through three stages. The Verifier compiles the
+kernel, validates its function signature, and checks output correctness against the
+reference—failing candidates are rejected immediately. Survivors proceed to
+the Benchmarker , which measures GPU latency at the fidelity defined by
+the current rung. At higher rungs, GPU Kernel Profiling collects
+hardware metrics via Nsight Compute and analyzes the bottleneck.
+These profiler signals serve two roles: (1) kernel diagnosis
+that identifies the efficiency level of the kernels from compute throughput and memory bandwidth perspectives,
+and (2) prompt conditioning that steers the next mutation toward the
+identified bottleneck and opportunities for improvement. 
+
+ Concretely, we track representative counters for each subsystem: compute and
+memory saturation (SM/DRAM throughput compared to peak), execution mix
+(FP32/FP16, tensorcore activity), occupancy (active warps), memory metrics
+(global-load coalescing, cache hit rates, shared-memory bank conflicts), and
+stall composition (barrier,
+wait). Together, these counters provide a profile of current kernel’s state of optimization. 
+
+ Generation Plane. 
+
+ For promoted candidates, the Prompt Builder assembles a structured
+mutation prompt from the current kernel source, benchmark results, profiler
+bottleneck analysis, prior round outcomes, and an expert strategy hint.
+An example prompt construction is provided in Appendix  A.3 .
+This enables targeted edits (e.g., summary and proposed fixes based on profiling analysis) rather than unguided rewrites. Each round
+follows a consistent schema—gather context, diagnose, build prompt, generate
+code, parse/repair, and persist artifacts. The Parser / Repair module extracts the kernel from the LLM
+response and applies deterministic fixes (e.g., missing imports, broken
+signatures) when the output is malformed; if parsing fails entirely,
+deterministic fallback logic keeps the loop running. 
+
+ At rung 0, the initial seeds— used to
+populate the initial candidate queue in Algorithm 1 and scheduled across many workers—can be summarized into
+several broad mutation
+families: memory-focused edits (coalescing/reuse),
+ compute/pipeline-focused edits (stage/overlap tuning), and
+ utilization-focused edits (occupancy/parallel decomposition). This keeps
+the first generation diverse but controlled, providing robust starting points
+before richer diagnosis-conditioned mutations take over in later rounds. 
+
+ Adaptive Resource Allocation and Search Control. 
+
+ Candidate generation draws from two sources:
+expert-driven heuristic strategies for general GPU kernel optimization and LLM mutations conditioned on prior profiling diagnosis. The
+scheduler ranks candidates by s ⁡ ( c , r ) s(c,r) with deterministic tie-breaking,
+and online promotes the top fraction to the next rung with
+increased budget, and prunes the rest. Promoted candidates re-enter the
+evaluation plane at higher fidelity and also pass through the generation
+plane to produce refined variants informed by richer profiling data. A key
+design choice is the separation of ranking from mutation: promotion decisions
+are budget-aware and scheduler-driven, while code edits are diagnosis-guided,
+keeping the loop stable across long or interrupted runs. 
+
+ Key takeaway. Conceptually, our agentic system operationalizes the workflow of an experienced GPU programmer:
+it begins with broad, low-cost exploration over diverse methods e.g., high-level algorithmic and implementation strategies, then progressively
+concentrates budget on the most promising candidates as evidence accumulates, with the assistance of profiling tools for analysis. 
+
+ 4 Experiments 
+
+ We evaluate whether the system’s design choices—expert-guided candidate
+generation, multi-fidelity screening, and profiling-conditioned
+mutation—translate into measurable gains on real Triton kernels.
+We evaluate six representative Triton benchmarks spanning LLM and traditional DNN workloads, including both standalone and fused kernels (Appendix  A.1 ).
+The experiments are organized around two questions: (1) does the system produce similar or
+faster kernels than baselines across workloads with different computational
+profiles? and (2) how does speedup evolve over the course of a
+search run? 
+
+ All experiments run on a single NVIDIA A100-80GB PCIe GPU with driver 535.261,
+CUDA 12.8, PyTorch 2.9.1, Triton 3.5.1 on Ubuntu 20.04.
+Across experiments, the LLM used for generation is GPT-5.4.
+Each kernel is benchmarked in an isolated process with exclusive GPU access, implemented by the Evaluation plane. We
+compare four methods: (1) the PyTorch reference ( torch ), (2) a
+LLM-generated kernel without search ( base ) (See Appendix A.1), (3) an optimized kernel generated by
+KernelAgent  [ 22 ] , a state-of-the-art agentic kernel optimization system released by PyTorch, and (4) our system ( kernelbrain ). 
+
+ 4.1 Candidate Variance 
+
+ Before presenting speedup comparisons, we first validate a core assumption
+of our multi-fidelity design: that candidates generated by the same LLM exhibit large performance variance—the
+rugged landscape described in Observation 1. This is also true for manual optimization: a kernel with careful optimization
+applied by an expert can be a lot faster than a naïve implementation.
+(Section  3.3 ). 
+
+ Figure 2 : Rung-0 candidate score spread across all six operators.
+Scores are normalized to each benchmark’s baseline ( = 1.0 × =1.0\times ).
+Each dot is one LLM-generated candidate evaluated. Box plots show quartiles; annotations report the
+max-to-min ratio. 
+
+ Figure   2 plots rung-0 per-candidate scores for all six
+benchmarks, normalized to each benchmark’s slowest. The spread is large
+for several benchmarks: SDPAttn is widest ( 30.9 × 30.9\times ), GroupConv and
+RMSNorm remain broad ( > 6 × >6\times ), and MatVec is also highly variable.
+Softmax is comparatively tight ( ≈ 1.3 × \approx 1.3\times ), while LinearReLUDiv presents weak and strong clusters.
+These distributions support our multi-fidelity design: cheap rung-0
+screening has opportunity to remove very weak candidates early, and higher-fidelity budget is
+reserved for the promising survivors. 
+
+ 4.2 Speedup Results 
+
+ Figure 3 : Speedup comparison versus torch across all six benchmarks.
+Row 1: (a) GroupConv, a grouped 2-D convolution with 242 groups and kernel size 5 × 768 5{\times}768 , evaluated at input heights H ∈ { 4 , 8 , 16 } H\in\{4,8,16\} ; and (b) MatVec, a matrix–vector product C = A ​ B C{=}AB with M ∈ { 512 , 1024 , 2048 } M\in\{512,1024,2048\} and fixed K = 256 ​ k K=256\text{k} .
+Row 2: (c) RMSNorm, root-mean-square normalization over the channel dimension with C ∈ { 64,256,768 } C\in\{64,256,768\} ; and (d) Softmax, row-wise softmax with batch sizes up to 4096 and feature dimension up to 394 ​ k 394\text{k} .
+Row 3: (e) LinearReLUDiv, a fused linear layer followed by ReLU and element-wise division, with K = N = 8192 K{=}N{=}8192 and batch sizes B ∈ { 256,512 , 1024 } B\in\{256,512,1024\} ; and (f) SDPAttn, scaled dot-product attention at sequence lengths S ∈ { 128,256,512 } S\in\{128,256,512\} with HEAD_DIM = = 1024.
+Legend entries in each subplot are base , kernelagent , and kernelbrain . 
+
+ Across all six benchmarks, kernelbrain achieves the strongest overall
+quality among compared methods, with the largest margins on GroupConv (which we used in one of production model deployment) and lower
+optimization cost as detailed in Section  4.5 . 
+
+ Figure   3 reports per-configuration speedups across all six
+benchmarks. On GroupConv, kernelbrain achieves
+ 5.7 × 5.7\times – 6.7 × 6.7\times over torch across input heights
+ H ∈ { 4 , 8 , 16 } H\in\{4,8,16\} , consistently outperforming both base 
+( 1.5 1.5 – 2.2 × 2.2\times ) and kernelagent ( 3.6 3.6 – 5.4 × 5.4\times ). The gap
+widens at larger H H , reaching 6.72 × 6.72\times at H = 16 H{=}16 , indicating that the
+search discovers optimizations that scale with
+problem size.
+On MatVec, all methods perform near the torch baseline
+( 0.93 0.93 – 1.0 × 1.0\times ).
+For the remaining benchmarks, the same pattern holds with workload-dependent
+headroom: on RMSNorm, kernelbrain reaches 2.5 2.5 – 2.8 × 2.8\times and
+matches kernelagent while clearly outperforming base 
+( 1.3 1.3 – 1.5 × 1.5\times ); on Softmax, both search-based methods cluster at
+ 1.25 1.25 – 1.33 × 1.33\times and base stays on par; on LinearReLUDiv,
+ kernelbrain improves to 0.76 0.76 – 0.94 × 0.94\times versus
+ kernelagent ( 0.62 0.62 – 0.84 × 0.84\times ) and base 
+( 0.46 0.46 – 0.44 × 0.44\times ), reducing but not eliminating the gap to PyTorch; and
+on SDPAttn, kernelbrain leads at larger sequence lengths with
+ 1.17 1.17 – 1.54 × 1.54\times versus kernelagent ( 1.09 1.09 – 1.35 × 1.35\times ),
+while both methods remain below torch at S = 128 S{=}128 due to launch
+overheads. Though some bases are very slow (e.g., SDPAttn and MatVec),
+the eventual results demonstrate the effectiveness of our approach to evolve kernels towards faster implementations.
+Overall, Figure   3 shows that multi-fidelity, profiling-guided
+search consistently improves over base and usually over
+ kernelagent , with gains on benchmarks that expose richer
+algorithmic and scheduling choices. 
+
+ 4.3 Common Optimization Patterns Across Benchmarks 
+
+ Although the six benchmarks differ substantially in arithmetic intensity and
+dataflow, the best kernels converge to a small set of recurring GPU
+optimization patterns. First, the largest gains come from changing the
+parallel decomposition of work , not from minor local edits. For example,
+MatVec moves from a serial inner-product reduction to a cooperative split
+reduction across threadblocks, while SDPAttn improves by partitioning the head
+dimension into smaller slices that lower the live working set and increase
+threadblock residency. These changes expose more useful parallel work to the
+SMs and reduce the chance that a single oversized program becomes limited by
+register pressure or poor occupancy. 
+
+ Second, several winners improve primarily by reducing global
+memory traffic . Softmax replaces an always-two-pass implementation with a
+shape-aware fused or online reduction, and RMSNorm introduces a fast path that
+keeps small normalization tiles on chip rather than rereading them from memory.
+In both cases, the algorithmic objective is unchanged, but the optimized dataflow
+better matches the GPU memory hierarchy by converting redundant memory passes
+into buffered or streaming reductions. 
+
+ Third, for fused dense kernels such as LinearReLUDiv and for kernels
+such as GroupConv, the dominant improvements come from better scheduling
+and locality management . The strongest variants use more appropriate launch
+topologies, tile shapes, and code paths, which improve cache reuse,
+reduce boundary overhead, and align the program layout more closely with the
+underlying workload geometry. 
+
+ Appendix  A.4 shows some sample LLM generated code change recommendations
+during an optimization run. 
+
+ Key takeaway. These observations from the generated kernels again suggest that agentic GPU kernel optimization
+is most effective when it explores broad transformations that alter high-level kernel structure,
+including work partitioning, reduction organization, memory-traffic scheduling, and launch configuration.
+By exploring more GPU optimization techniques, this opens the door to larger performance gains than would be possible by spending budget heavily iteratively on small number of workers which tends to stagnate easily  [ 36 , 2 ] .
+The kernelagent uses small number of workers and more iteration counts. But the work tried to solve the diversity problem using Beam Search at each step.
+As shown in the discussed experiments results ( Section   4.2 ), kernelbrain still is able to find better kernels for some benchmarks, while consuming much less overall search time (See Section Section   4.5 ). 
+
+ 4.4 Observed Run Trajectory 
+
+ Run Start Seed + Generate 20 candidates + baseline Rung 0 eval, budget=small Success: 16 Fail: 5 Promoted to Rung 1: 7 total (6 candidates + baseline) Rung 1 eval, budget=medium Success: 5 Fail: 2 Promoted to Rung 2: 3 total (2 candidates + baseline) Rung 2 eval, budget=large Success: 3 Fail: 0 Run Finish Best: cand_0013 score 384.36 speedup 5.30x 
+
+ Figure 4 : Observed run trajectory with explicit promotion counts and representative candidate outcomes. 
+
+ Figure   4 illustrates one complete sample optimization run (MatVec)
+to show how the multi-fidelity funnel allocates budget. Starting from 20
+candidates plus baseline, rung 0 quickly prunes failures (16 pass, 5 fail),
+and only 7 candidates are promoted to rung 1. After stricter re-evaluation,
+2 more are dropped and 3 survivors reach rung 2 (full budget with profiling);
+all 3 pass, and the best reaches 5.30 × 5.30\times over baseline. Detailed per-rung survival statistics and interpretation is shown in
+Appendix  A.2 ( Table   A.1 ). 
+
+ Most failed jobs shown in the table arise from more challenging source-level edits.
+In simple failure cases, explicit policy guards improve generation quality.
+For example, enforcing test-harness constraints, preserving the required function
+signature, staying within Triton/Python rather than switching languages, and
+avoiding unsupported third-party calls, optionally with short code exemplars,
+helps steer the LLM toward valid candidates. 
+
+ Figure 5 : Combined best-speedup-versus-time trajectories across all six benchmarks. Each benchmark uses one color family; dashed styles distinguish kernelagent and kernelbrain . The x-axis reports end-to-end
+optimization runtime in minutes 
+
+ 4.5 Search Efficiency over Time 
+
+ Figure   5 overlays the best-speedup-over-time
+trajectories for all six benchmarks starting from base . Though fair
+comparison across different agent architectures remains an open research
+question, we report a controlled wall-clock comparison under a common budget
+setting. For each benchmark, we set the global budget B B (in Eq. (3)) of the
+full optimization run to up to 30 minutes of search time. Kernelagent 
+does not allocate uniform budget across runs with Beam Search .
+GroupConv show rapid early
+gains while
+MatVec converge quickly to better performance.
+LinearReLUDiv follows a steady upward curve, with kernelbrain 
+reaching its best speedup ( 2.14 × 2.14\times ) in roughly the same wall-clock time
+that kernelagent plateaus at 1.90 × 1.90\times .
+SDPAttn exhibits a distinctive step-function trajectory: sharp jumps occur after which speedup climbs steadily
+to 5.7 × 5.7\times .
+Together with the speedup results
+above, these trajectories demonstrate that the combination of expert-guided
+generation and multi-fidelity scheduling used in kernelbrain produces strong kernels effectively and efficiently. 
+
+ Figure 6 : KernelBrain (KB) time saved versus KernelAgent (KA); 
+
+ Figure   6 quantifies the optimization-time advantage,
+Across all six benchmarks, kernelbrain matches or
+exceeds kernelagent kernel quality, while consuming
+significantly less wall-clock time—saving 17–48% on five of six
+operators. Even on LinearReLUDiv, where the time saving is modest (5%),
+ kernelbrain still produces a 12% faster kernel.
+Together with the trajectories in Figure   5 , these
+results confirm that multi-fidelity screening and expert-guided mutation
+yield both better kernels and shorter optimization runs. 
+
+ 5 Conclusion 
+
+ We presented KernelBrain, a practical agentic optimizer for Triton kernel that
+combines expert-guided candidate generation, adaptive multi-fidelity resource
+allocation, and profiling-conditioned mutation under strict correctness and
+measurement controls. This integration improves both kernel quality and search efficiency, supporting our central
+claim that robust kernel optimization depends on jointly designing scheduling, diagnosis, and resource allocation. 
+
+ Limitations. Our current optimization scope is source-level Triton kernel generation and
+editing. Because Triton backend compilation and low-level code generation are
+outside this system’s control, some performance opportunities may remain
+unexploited even when source-level hints are strong. In practice, this means
+the framework improves kernels primarily through better algorithmic/scheduling
+guidance at the source level, while backend-level improvements require future
+co-design with compiler/runtime components. 
+
+ Broader Impact. This work can have positive impact by reducing the cost and energy required to
+optimize high-performance kernels, which can improve accessibility of efficient
+ML systems. It can also reduce optimization turnaround time in production ML engineering and lower
+infrastructure cost for repeated kernel tuning and deployment. The idea is also generic and could be applied to other agentic domains. 
+
+ References 
+
+ [1] 
+
+KernelEvolve Authors.
+
+ KernelEvolve: Toward production-scale automatic kernel optimization.
+
+ arXiv:2512.23236 , 2025.
+
+ [2] 
+
+Shiyi Cao, Ziming Mao, Joseph E. Gonzalez, and Ion Stoica.
+
+ K-Search: Co-evolving world models for efficient kernel optimization.
+
+ arXiv:2602.19128 , 2026.
+
+ [3] 
+
+Alec M. Hammond, Aram Markosyan, Aman Dontula, et al.
+
+ Agentic operator generation for ML ASICs.
+
+ arXiv:2512.10977 , 2025.
+
+ [4] 
+
+Tara Saba, Anne Ouyang, Xujie Si, and Fan Long.
+
+ CuTeGen: An LLM-based agentic framework for generation and optimization of high-performance GPU kernels using CuTe.
+
+ arXiv:2604.01489 , 2026.
+
+ [5] 
+
+Weinan Dai, Hanlin Wu, Qiying Yu, et al.
+
+ CUDA Agent: Large-scale agentic RL for high-performance CUDA kernel generation.
+
+ arXiv:2602.24286 , 2026.
+
+ [6] 
+
+Terry Chen, Zhifan Ye, Bing Xu, et al.
+
+ AVO: Agentic variation operators for autonomous evolutionary search.
+
+ arXiv:2603.24517 , 2026.
+
+ [7] 
+
+Jinwu Chen, Qidie Wu, Bin Li, et al.
+
+ cuPilot: A strategy-coordinated multi-agent framework for CUDA kernel evolution.
+
+ arXiv:2512.16465 , 2025.
+
+ [8] 
+
+Nina Wiedemann, Quentin Leboutet, Michael Paulitsch, Diana Wofk, and Benjamin Ummenhofer.
+
+ KernelFoundry: Hardware-aware evolutionary GPU kernel optimization.
+
+ arXiv:2603.12440 , 2026.
+
+ [9] 
+
+Terry Chen, Bing Xu, and Kirthi Devleker.
+
+ Automating GPU kernel generation with DeepSeek-R1 and inference time scaling.
+
+ NVIDIA Technical Blog, February 2025.
+
+ https://developer.nvidia.com/blog/automating-gpu-kernel-generation-with-deepseek-r1-and-inference-time-scaling/ .
+
+ [10] 
+
+Haonan Li, Keyu Man, Partha Kanuparthy, et al.
+
+ TritonForge: Profiling-guided framework for automated Triton kernel optimization.
+
+ arXiv:2512.09196 , 2025.
+
+ [11] 
+
+Jiin Woo, Shaowei Zhu, Allen Nie, Zhen Jia, Yida Wang, and Youngsuk Park.
+
+ TritonRL: Training LLMs to think and code Triton without cheating.
+
+ arXiv:2510.17891 , 2025.
+
+ [12] 
+
+Muhammad Usman Tariq, Abhinav Jangda, Angelica Moreira, Madan Musuvathi, and Tyler Sorensen.
+
+ PEAK: A performance engineering AI-assistant for GPU kernels powered by natural language transformations.
+
+ arXiv:2512.19018 , 2025.
+
+ [13] 
+
+Laura Wang and the PyTorch Team at Meta.
+
+ KernelFalcon: Autonomous GPU kernel generation via deep agents.
+
+ PyTorch Blog, November 2025.
+
+ https://pytorch.org/blog/kernelfalcon-autonomous-gpu-kernel-generation-via-deep-agents/ .
+
+ [14] 
+
+Kaiming Cheng, Laura Wang, Jack Khuu, Mark Saroufim, Wenyuan Chi, Jiannan Wang, and Joe Isaacson.
+
+ KernelAgent: Hardware-guided GPU kernel optimization via multi-agent orchestration.
+
+ PyTorch Blog, March 2026.
+
+ https://pytorch.org/blog/kernelagent-hardware-guided-gpu-kernel-optimization-via-multi-agent-orchestration/ .
+
+ [15] 
+
+Shiyang Li, Zijian Zhang, Winson Chen, Yuebo Luo, Mingyi Hong, and Caiwen Ding.
+
+ StitchCUDA: An automated multi-agents end-to-end GPU programming framework with rubric-based agentic reinforcement learning.
+
+ arXiv:2603.02637 , 2026.
+
+ [16] 
+
+Kris Shengjun Dong, Sahil Modi, Dima Nikiforov, et al.
+
+ KernelBlaster: Continual cross-task CUDA optimization via memory-augmented in-context reinforcement learning.
+
+ arXiv:2602.14293 , 2026.
+
+ [17] 
+
+Juncheng Dong, Yang Yang, Tao Liu, et al.
+
+ STARK: Strategic team of agents for refining kernels.
+
+ arXiv:2510.16996 , 2025.
+
+ [18] 
+
+Zijian Zhang, Rong Wang, Shiyang Li, Yuebo Luo, Mingyi Hong, and Caiwen Ding.
+
+ CudaForge: An agent framework with hardware feedback for CUDA kernel optimization.
+
+ arXiv:2511.01884 , 2025.
+
+ [19] 
+
+Wentao Chen, Jiace Zhu, Qi Fan, Yehan Ma, and An Zou.
+
+ CUDA-LLM: LLMs can write efficient CUDA kernels.
+
+ arXiv:2506.09092 , 2025.
+
+ [20] 
+
+Zacharias V. Fisches, Sahan Paliskara, Simon Guo, Alex Zhang, Joe Spisak, Chris Cummins, Hugh Leather, Gabriel Synnaeve, Joe Isaacson, Aram Markosyan, and Mark Saroufim.
+
+ KernelLLM: Making kernel development more accessible.
+
+ Hugging Face model card, June 2025.
+
+ https://huggingface.co/facebook/KernelLLM .
+
+ [21] 
+
+ByteDance Seed.
+
+ CudaLLM: A language model for high-performance CUDA kernel generation.
+
+ Hugging Face model card, 2026.
+
+ https://huggingface.co/ByteDance-Seed/cudaLLM-8B .
+
+ [22] 
+
+Meta PyTorch Team.
+
+ KernelAgent: Multi-agent GPU kernel synthesis and optimization.
+
+ GitHub repository, 2025.
+
+ https://github.com/pytorch-labs/kernelagent .
+
+ [23] 
+
+Alexander Novikov, Ngan Vu, Marvin Eisenberger, et al.
+
+ AlphaEvolve: A coding agent for scientific and algorithmic discovery.
+
+ arXiv:2506.13131 , 2025.
+
+ [24] 
+
+Liam Li, Kevin Jamieson, Giulia DeSalvo, Afshin Rostamizadeh, and Ameet Talwalkar.
+
+ A system for massively parallel hyperparameter tuning.
+
+ In Proceedings of Machine Learning and Systems (MLSys) , 2020.
+
+ [25] 
+
+Tianqi Chen, Thierry Moreau, Ziheng Jiang, et al.
+
+ TVM: An automated end-to-end optimizing compiler for deep learning.
+
+ In Proceedings of the 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI) , 2018.
+
+ [26] 
+
+Lianmin Zheng, Eddie Yan, et al.
+
+ AutoTVM: End-to-end learning-based automatic optimization for tensor
+programs.
+
+ arXiv:1805.08166 , 2018.
+
+ [27] 
+
+Lianmin Zheng, Ruochen Jia, et al.
+
+ Ansor: Generating high-performance tensor programs for deep learning.
+
+ In Proceedings of the 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI) , 2020.
+
+ [28] 
+
+Andrew Adams, Karima Ma, et al.
+
+ Learning to optimize Halide with tree search and random programs.
+
+ ACM Transactions on Graphics (TOG) , 2019.
+
+ [29] 
+
+Philippe Tillet, H. T. Kung, and David Cox.
+
+ Triton: An intermediate language and compiler for tiled neural
+network computations.
+
+ In Proceedings of Machine Learning and Systems (MLSys) , 2021.
+
+ [30] 
+
+NVIDIA.
+
+ TensorRT-LLM: TensorRT library for large language model inference.
+
+ GitHub repository, 2024.
+
+ https://github.com/NVIDIA/TensorRT-LLM .
+
+ [31] 
+
+vLLM Project Authors.
+
+ vLLM: Easy, fast, and cheap LLM serving with PagedAttention.
+
+ arXiv:2309.06180 , 2023.
+
+ [32] 
+
+SGLang Team.
+
+ SGLang: Fast serving framework for large language and vision-language models.
+
+ GitHub repository, 2024.
+
+ https://github.com/sgl-project/sglang .
+
+ [33] 
+
+Anne Ouyang, Simon Guo, Simran Arora, Alex L. Zhang, William Hu, Christopher Ré, and Azalia Mirhoseini.
+
+ KernelBench: Can LLMs write efficient GPU kernels?
+
+ arXiv:2502.10517 , 2025.
+
+ [34] 
+
+Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Re.
+
+ FlashAttention: Fast and memory-efficient exact attention with
+IO-awareness.
+
+ In Advances in Neural Information Processing Systems (NeurIPS) , 2022.
+
+ [35] 
+
+Zihao Ye, Lequn Chen, Ruihang Lai, et al.
+
+ FlashInfer: Efficient and customizable attention engine for
+LLM inference serving.
+
+ arXiv:2501.01005 , 2025.
+
+ [36] 
+
+OpenEvolve Authors.
+
+ OpenEvolve: An open-source evolutionary coding framework.
+
+ GitHub repository, 2025.
+
+ https://github.com/algorithmicsuperintelligence/openevolve .
+
+ [37] 
+
+Alhussein Fawzi, François Charton, et al.
+
+ AlphaTensor: Discovering algorithms for matrix multiplication.
+
+ Nature , 2022.
+
+ Appendix A Appendix 
+
+ A.1 Benchmark Descriptions and Shapes 
+
+ Below is a detailed description of the benchmarks evaluated in this paper. 
+
+ GroupConv. Grouped 2-D convolution matching
+ nn.Conv2d with groups = 242 =242 , in_channels = 242 =242 ,
+out_channels = 217,800 =217{,}800 , kernel size 5 × 768 5{\times}768 , stride ( 1 , 1 ) (1,1) ,
+padding ( 4 , 0 ) (4,0) , and dilation ( 1 , 1 ) (1,1) . The benchmark sweeps input tensors of
+shape ( N , C , H , W ) = ( 1,242 , H , 768 ) (N,C,H,W)=(1,242,H,768) with H ∈ { 4 , 8 , 16 } H\in\{4,8,16\} . 
+
+ MatVec. Matrix–vector multiplication C = A ​ B C{=}AB with
+ A ∈ ℝ M × K A\in\mathbb{R}^{M\times K} and B ∈ ℝ K × 1 B\in\mathbb{R}^{K\times 1} . The benchmark
+sweeps M ∈ { 512 , 1024 , 2048 } M\in\{512,1024,2048\} with fixed K = 256 ​ k ( = 2 18 ) K=256\text{k}\;(=2^{18}) . 
+
+ RMSNorm. Root-mean-square normalization over the channel
+dimension of an NCHW tensor. The benchmark sweeps inputs of shape
+ ( N , C , H , W ) = ( 16 , 64 , S , S ) (N,C,H,W)=(16,64,S,S) with S ∈ { 64,256,768 } S\in\{64,256,768\} and uses
+ ε = 10 − 5 \varepsilon=10^{-5} . 
+
+ Softmax. Row-wise softmax over the feature dimension. The
+benchmark uses three labeled points:
+ ( 1024 , 96 ​ k ( = 3 ⋅ 2 15 ) ) (1024,96\text{k}\;(=3\cdot 2^{15})) , ( 2048,192 ​ k ( = 3 ⋅ 2 16 ) ) (2048,192\text{k}\;(=3\cdot 2^{16})) , and ( 4096,384 ​ k ( = 3 ⋅ 2 17 ) ) (4096,384\text{k}\;(=3\cdot 2^{17})) for
+ ( batch_size , dim ) (\text{batch\_size},\text{dim}) . 
+
+ LinearReLUDiv. Fused linear transform, ReLU, and divide by a
+constant. The benchmark sweeps input matrices x ∈ ℝ M × 8192 x\in\mathbb{R}^{M\times 8192} 
+with M ∈ { 256,512 , 1024 } M\in\{256,512,1024\} , fixed K = N = 8192 K=N=8192 , and divisor 2.0 2.0 . 
+
+ SDPAttn. Scaled dot-product attention with
+ Q , K , V ∈ ℝ 32 × 32 × S × 1024 Q,K,V\in\mathbb{R}^{32\times 32\times S\times 1024} . The benchmark sweeps
+sequence length S ∈ { 128,256,512 } S\in\{128,256,512\} with batch size 32 32 , 32 32 heads, and
+head dimension 1024 1024 . 
+
+ For GroupConv, Softmax, LinearReLUDiv, and SDPAttn, the
+base kernels are generated by the KernelFalcon kernel-generation pipeline
+ [ 13 ] . For MatVec and RMSNorm, we use kernels from
+KernelAgent’s released examples as base kernels [ 22 ] . 
+
+ A.2 Per-Rung Survival Statistics 
+
+ Table   A.1 summarizes per-rung candidate survival across all
+six benchmarks. In our paper runs, we typically found a 3-rung schedule
+sufficient, with 20–30 initial candidates (not including the base). The runtime score uses
+ α = 0.02 \alpha=0.02 and β = 0.01 \beta=0.01 , and the measurement iterations increase from
+R0 to R2 as 4 → 16 → 60 4\rightarrow 16\rightarrow 60 .
+As shown in Table   A.1 , only 19.0–35.5% advance to rung 1,
+with the remainder filtered by test failures and ranking at Rung 0. A second
+round of pruning at rung 1 leaves 3–5 finalists—roughly 9.7–19.0% of the
+original pool—who receive full-budget rung-2 evaluation. The overall
+Rung 0 test-failure rate ranges from 0% (LinearReLUDiv and Softmax) to
+52.4% (GroupConv), reflecting workload-dependent kernel-generation
+difficulty. 
+
+ Table A.1 : Per-rung candidate survival across the six benchmarks.
+Fail% is relative to the number of candidates entering that rung;
+Promotion% is relative to the original candidate count. 
+
+ Benchmark | 
+ R0 Fail% | 
+ R0 → \to R1% | 
+ R1 Fail% | 
+ R1 → \to R2% | 
+
+ GroupConv | 
+ 52.4% | 
+ 19.0% | 
+ 25.0% | 
+ 14.3% | 
+
+ MatVec | 
+ 23.8% | 
+ 33.3% | 
+ 28.6% | 
+ 14.3% | 
+
+ RMSNorm | 
+ 16.1% | 
+ 25.8% | 
+ 25.0% | 
+ 9.7% | 
+
+ Softmax | 
+ 0.0% | 
+ 19.0% | 
+ 0.0% | 
+ 19.0% | 
+
+ LinearReLUDiv | 
+ 0.0% | 
+ 35.5% | 
+ 9.1% | 
+ 16.1% | 
+
+ SDPAttn | 
+ 19.2% | 
+ 23.1% | 
+ 0.0% | 
+ 15.4% | 
+
+ A.3 Optimization Prompt Template 
+
+ The optimization prompt is assembled from the
+baseline analysis, optimization prescription, benchmark summary, policy
+constraints, and baseline kernel source; later rungs additionally populate a
+combined profiling summary, proposed fixes etc. The LLM can use the
+profiling results to suggest prescriptions for further improvement. 
+
+ Abridged prompt skeleton. 
+
+ ⬇ 
+ You are a Triton kernel optimization expert . 
+
+ =========================== 
+
+ 1) Objective 
+
+ =========================== 
+
+ Produce a better kernel . py candidate while preserving correctness ... 
+
+ =========================== 
+
+ 2) Candidate Metadata 
+
+ =========================== 
+
+ candidate_id : { candidate_id } 
+
+ =========================== 
+
+ 3) Input Context 
+
+ =========================== 
+
+ Baseline Analysis ( JSON ): 
+
+ { baseline_json } 
+
+ Optimization Prescription : 
+
+ category : { prescription_category } 
+
+ summary : { prescription_summary } 
+
+ assessment : { prescription_assessment } 
+
+ proposed_change : { prescription_proposed_change } 
+
+ Kernel Synthesis Target : 
+
+ { synthesis_target } 
+
+ Policy Constraints : 
+
+ { policy_constraints } 
+
+ Recent Benchmark Metrics ( JSON ): 
+
+ { benchmark_json } 
+
+ Recent Profiling Summary ( JSON , NCU + profiling analysis ): 
+
+ ncu counters : { ncu_json } 
+
+ profiling_analysis : { profiling_json } 
+
+ Recent Debug Logs : 
+
+ { debug_logs } 
+
+ Current Kernel Source ( Python ): 
+
+ { kernel_code } 
+
+ =========================== 
+
+ 4) Output Requirements 
+
+ =========================== 
+
+ - Return only full Python source code for the mutated kernel module . 
+
+ - Preserve the callable kernel_function entrypoint and compatibility . 
+
+ - Apply at least one substantive performance - oriented code change . 
+
+ ... 
+
+ A.4 Softmax Optimization Prompt Shortlist 
+
+ Table   A.2 summarizes the observed optimization fixes
+proposed by the AI agent for Softmax during the search process. The prompts are
+grouped to cover complementary optimization categories (kernel formulation,
+parallel decomposition, layout/stride strategy, tiling/on-chip residency, and
+autotuning/occupancy). 
+
+ Table A.2 : AI-observed Softmax proposed fixes across optimization categories. 
+
+ ID 
+ | 
+
+ Prompt 
+ | 
+
+ Kernel Formulation and Math | 
+
+ 1 
+ | 
+
+ Replace the two-kernel design with a fused row-wise softmax kernel using online normalization. 
+ | 
+
+ 2 
+ | 
+
+ Use an online/single-pass softmax reduction algorithm for row max and normalization stats. 
+ | 
+
+ 3 
+ | 
+
+ Use exp2-based formulation with scaling where numerically acceptable. 
+ | 
+
+ 4 
+ | 
+
+ Replace division by row_sum with multiplication by reciprocal when profitable. 
+ | 
+
+ 5 
+ | 
+
+ Keep reductions in fp32 but consider narrower IO and vectorized loads/stores for contiguous cases. 
+ | 
+
+ Parallel Decomposition and Mapping | 
+
+ 6 
+ | 
+
+ Use shape-dependent parallelization: multiple rows per program for small rows, multiple programs per row for very large rows. 
+ | 
+
+ 7 
+ | 
+
+ Use a larger grid decomposition for long rows, e.g., split one row across multiple programs/warps and reduce partials. 
+ | 
+
+ 8 
+ | 
+
+ Use a multi-program or hierarchical reduction strategy for very large n_cols or low n_rows workloads. 
+ | 
+
+ 9 
+ | 
+
+ Introduce a 2D or split-row parallelization strategy for large-column softmax. 
+ | 
+
+ 10 
+ | 
+
+ Batch multiple small rows per program when n_cols is small. 
+ | 
+
+ 11 
+ | 
+
+ Use persistent row-level scheduling for contiguous inputs. 
+ | 
+
+ Layout and Stride Strategy | 
+
+ 12 
+ | 
+
+ Ensure the softmax dimension is contiguous or add optimized kernels for common strided layouts. 
+ | 
+
+ 13 
+ | 
+
+ Prefer making the reduced dimension contiguous before launching softmax when tensor reuse or batch size makes the transform worthwhile. 
+ | 
+
+ Tiling and On-Chip Residency | 
+
+ 14 
+ | 
+
+ Add a specialized path for small/medium n_cols where an entire row can stay in SRAM/registers. 
+ | 
+
+ 15 
+ | 
+
+ If n_cols fits, compute softmax in a single tiled resident pass with on-chip buffering. 
+ | 
+
+ 16 
+ | 
+
+ For large rows, tile through shared/SRAM and compute partial results to avoid full-row rereads when feasible. 
+ | 
+
+ 17 
+ | 
+
+ Introduce a specialized one-block softmax kernel for rows that fit entirely in a tile. 
+ | 
+
+ 18 
+ | 
+
+ Increase coverage of the single-pass contiguous-row kernel beyond the current <= 2048 threshold where hardware resources allow. 
+ | 
+
+ Autotuning, Occupancy, and Validation | 
+
+ 19 
+ | 
+
+ Add Triton autotuning for BLOCK_SIZE, num_warps, and num_stages keyed on n_cols and dtype. 
+ | 
+
+ 20 
+ | 
+
+ Autotune smaller BLOCK_SIZE options such as 128/256/512 for large-row cases. 
+ | 
+
+ 21 
+ | 
+
+ Retune/autotune with occupancy-aware constraints, including smaller BLOCK_SIZE or lower register-pressure variants. 
+ | 
+
+ 22 
+ | 
+
+ Profile register usage and occupancy with NCU/Triton compiler reports, then prune configs that depress residency. 
+ | 
+
+ 23 
+ | 
+
+ Add shape-specific heuristics to cap BLOCK_SIZE near the smallest power-of-two covering n_cols instead of allowing overly large tiles. 
+ | 
+
+ A.5 Relative Variability Metrics 
+
+ Table   A.3 reports KernelBrain kernel execution time variability as
+normalized percentile ratios (p90/p50, p95/p50, p99/p50) for all benchmark
+shapes, when measured over the iterations of each benchmark run. Across these
+rows, p90/p50 ranges from 1.002240 to 1.076765, p95/p50 ranges from 1.003646
+to 1.135351, and p99/p50 ranges from 1.008960 to 1.253867 (25% diff). The main point is
+that kernel ranking itself becomes challenging under this variability:
+benchmark- and shape-dependent tail behavior can materially reorder close
+candidates, so variance must be treated as a ranking-stability issue rather
+than conflated with speedup magnitude.For each shape, the speedup is computed as below,
+ t ¯ shape = ∑ i = 1 N iter t i N iter \bar{t}_{\text{shape}}=\frac{\sum_{i=1}^{N_{\text{iter}}}t_{i}}{N_{\text{iter}}} ,
+and,
+ speedup shape = t ¯ base,shape / t ¯ opt,shape \mathrm{speedup}_{\text{shape}}=\bar{t}_{\text{base,shape}}/\bar{t}_{\text{opt,shape}} . 
+
+ Table A.3 : KernelBrain tail ratios normalized by p50. 
+
+ Benchmark | 
+ Shape | 
+ p90/p50 | 
+ p95/p50 | 
+ p99/p50 | 
+
+ Softmax | 
+ (1024, 96k) | 
+ 1.014571 | 
+ 1.018561 | 
+ 1.031527 | 
+
+ Softmax | 
+ (2048, 192k) | 
+ 1.005321 | 
+ 1.007390 | 
+ 1.008960 | 
+
+ Softmax | 
+ (4096, 384k) | 
+ 1.002240 | 
+ 1.003646 | 
+ 1.010635 | 
+
+ LinearReLUDiv | 
+ M=256 | 
+ 1.030170 | 
+ 1.040696 | 
+ 1.049231 | 
+
+ LinearReLUDiv | 
+ M=512 | 
+ 1.023364 | 
+ 1.027099 | 
+ 1.048125 | 
+
+ LinearReLUDiv | 
+ M=1024 | 
+ 1.033003 | 
+ 1.040451 | 
+ 1.048637 | 
+
+ RMSNorm | 
+ S=64 | 
+ 1.076765 | 
+ 1.135351 | 
+ 1.253867 | 
+
+ RMSNorm | 
+ S=256 | 
+ 1.053016 | 
+ 1.074292 | 
+ 1.093731 | 
+
+ RMSNorm | 
+ S=768 | 
+ 1.040643 | 
+ 1.051436 | 
+ 1.070240 | 
+
+ GroupConv | 
+ H=4 | 
+ 1.011511 | 
+ 1.013012 | 
+ 1.025040 | 
+
+ GroupConv | 
+ H=8 | 
+ 1.011198 | 
+ 1.019219 | 
+ 1.021929 | 
+
+ GroupConv | 
+ H=16 | 
+ 1.023299 | 
+ 1.032570 | 
+ 1.033772 | 
+
+ ScaledDotProduct | 
+ SEQ=128 | 
+ 1.011675 | 
+ 1.016662 | 
+ 1.180335 | 
+
+ ScaledDotProduct | 
+ SEQ=256 | 
+ 1.011468 | 
+ 1.013225 | 
+ 1.023878 | 
+
+ ScaledDotProduct | 
+ SEQ=512 | 
+ 1.009772 | 
+ 1.011608 | 
+ 1.014925 | 
+
+ MatVec | 
+ M=512 | 
+ 1.073976 | 
+ 1.090014 | 
+ 1.112247 | 
+
+ MatVec | 
+ M=1024 | 
+ 1.026827 | 
+ 1.030629 | 
+ 1.051708 | 
+
+ MatVec | 
+ M=2048 | 
+ 1.015673 | 
+ 1.021878 | 
+ 1.028976 |

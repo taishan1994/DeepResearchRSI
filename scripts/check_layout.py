@@ -171,7 +171,8 @@ def main(argv: list[str] | None = None) -> int:
     # ---------- L6 行宽填充率 ----------
     # 只看正文（10pt），且只统计「同段内非末行」：下一行左端相同、行距正常。
     # 段末行天然不满宽，把它算进来会让指标永远偏低。
-    fills: list[float] = []
+    fills: list[tuple[float, float]] = []
+    all_x0: list[float] = []
     for pg in pages:
         rows = []
         for b in pg['page'].get_text('dict')['blocks']:
@@ -187,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
                 rows.append((round(ln['bbox'][1], 1), round(ln['bbox'][0], 1),
                              round(ln['bbox'][2], 1), round(sz, 1), txt))
         rows.sort()
+        all_x0.extend(x0 for _y, x0, _x1, _sz, _t in rows)
         for i, (y, x0, x1, sz, txt) in enumerate(rows):
             if len(txt) < 20:                   # 太短的多为列表项与公式行
                 continue
@@ -195,14 +197,39 @@ def main(argv: list[str] | None = None) -> int:
             ny, nx0, _nx1, _nsz, _nt = rows[i + 1]
             same_para = abs(nx0 - x0) < 1.5 and 0 < ny - y < sz * 2.4
             if same_para:
-                fills.append(x1)
+                fills.append((x0, x1))
+
+    # ⚠️ 双栏排版必须按**栏宽**而不是版心宽度判：NeurIPS 风格下栏宽
+    # 只有版心的一半，按 RIGHT_LIMIT 算填充率会得到恒定的 ~50% 而永远 FAIL。
+    # 做法：按「左端是否在页面中点右侧」把行分成左右两栏，每栏的右边界取
+    # 该栏实测的最大右端（任何正常排版都至少有一行顶到边界）。填充率用
+    # 中位数比这个边界——手动硬折行的文档中位数会明显短于边界，仍会被抓到。
+    mid = PAGE_W_PT / 2
+    cols: dict[int, list[float]] = {0: [], 1: []}
+    for x0, x1 in fills:
+        cols[0 if x0 < mid else 1].append(x1)
 
     if len(fills) >= 20:
-        fills.sort()
-        med = fills[len(fills) // 2]
-        ratio = med / RIGHT_LIMIT
-        detail = (f'同段非末行 {len(fills)} 条，右端中位 {med:.1f} pt'
-                  f'（边界 {RIGHT_LIMIT:.1f}，填充率 {ratio * 100:.1f}%）')
+        ratios = []
+        parts = []
+        for k in (0, 1):
+            xs = sorted(cols[k])
+            if len(xs) < 10:
+                continue
+            edge = xs[-1]
+            med = xs[len(xs) // 2]
+            ratios.append(med / edge)
+            parts.append(f'第{k + 1}栏中位 {med:.1f} / 边界 {edge:.1f}')
+        if not ratios:
+            xs = sorted(x1 for _x0, x1 in fills)
+            edge = RIGHT_LIMIT
+            med = xs[len(xs) // 2]
+            ratios = [med / edge]
+            parts = [f'中位 {med:.1f} / 边界 {edge:.1f}']
+        ratio = sum(ratios) / len(ratios)
+        detail = (f'同段非末行 {len(fills)} 条，'
+                  + '；'.join(parts)
+                  + f'（平均填充率 {ratio * 100:.1f}%）')
         if ratio < 0.90:
             problems.append(('FAIL', f'L6 行宽填充率过低：{detail}。'
                                      '多行为源码手动折行，未按版心宽度重排'))

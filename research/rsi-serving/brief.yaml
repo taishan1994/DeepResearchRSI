@@ -1,0 +1,109 @@
+# 研究简报 —— rsi-serving
+
+question: "模型推理端到端（服务 / 调度 / 投机解码 / 量化）的 RSI 走到了哪一步：循环改什么、判据怎么闭合、增益与代价、边界在哪？"
+
+scope:
+  topic: "rsi-serving"
+  region: global
+  language: zh-en
+  # 端到端层的自动化集中在 2025 之后（SGLang/vLLM 提供可编程接口是关键前提）
+  time_range: "2025-01 ～ 2026-11"
+as_of: 2026-11-05
+freshness: 30d
+deliverable: deep_analysis
+
+why_this_topic:
+  boundary: |
+    站内已有 rsi-inference 归档，但它研究的是「谁来写 kernel」——判据是一个数
+    （比 PyTorch 快几倍），一次 allclose + 一次计时就能判定。端到端层完全不是这样：
+    判据是一组统计量（配对运行的增益下界、无损失配率、SLO 违约率），而且
+    「无损」这件事本身需要被定义。SpecPilot（arXiv 2611.02501）是目前把这个
+    问题讲得最清楚的一篇：它把「该往哪优化」「是否晋级」「是否还无损」三件事
+    分别做成了可被脚本判定的量。
+
+    故本文与 rsi-inference 的分工是：那一篇问「哪一层先闭合」，这一篇问
+    「端到端层要用什么判据才敢说闭合」。两篇不重复：rsi-inference 的结论是
+    端到端层「半闭合」，本文要给出这个「半」到底卡在哪一步。
+  core_claim_to_test: |
+    一句话假设：端到端层的瓶颈不是「测不到速度」，而是**测到的速度不足以支撑判定**。
+    具体地，端到端的一次改动通常只有几个百分点，而系统噪声（批组成、调度抖动、
+    显存碎片）就在同一个量级；因此端到端循环必须把「改进」重写成统计命题：
+
+        晋级 <=> 增益的 95% 下界 > max(最小实际增益, k * stock 自身噪声)
+
+    若成立，则端到端层的方法学创新应集中在判据（配对运行、下界、无损定义、
+    注入故障验证），而不是搜索算法；反过来，若某个系统的增益主要来自机制本身、
+    判据只是包装，假设即失效。
+
+subquestions:
+  - id: q1
+    question: "端到端被优化的对象与 kernel 层有什么结构差异？"
+    why: |
+      kernel 层的对象是一个可独立编译、独立计时、独立验算的程序；端到端的对象是
+      配置、调度策略、算法（如投机解码的树形状）与运行时决策的混合体。
+      不先把这层对象说清楚，就会把「改一个 flag」和「改一个算法」当成同一件事。
+    expected_evidence: "论文中被优化的对象定义、系统架构、优化目标的量化指标"
+    done_when: "能给出端到端层的对象分类，并说明每类的正确性判据与性能判据"
+    status: unanswered
+
+  - id: q2
+    question: "判定怎么闭合：晋级判据、无损判据、成本模型各自怎么构造？"
+    why: |
+      这是本文的核心。三件事必须分开看：
+      (a) 成本模型回答「该往哪优化」；
+      (b) 晋级判据回答「这个改动是否真的更好」；
+      (c) 无损判据回答「它是否还正确」。
+      三者缺一，循环就会退化成「多试几次」。
+    expected_evidence: "ceiling 的因子分解、配对运行与置信下界的阈值、token forcing 的构造与两条拒绝规则"
+    done_when: "能复述三者的构造，并指出每一条判据的零假设与两类错误"
+    status: unanswered
+
+  - id: q3
+    question: "循环的形态与权限边界：agent 能改什么、被禁止做什么？"
+    why: |
+      自动优化系统的失败模式几乎都在「谁判定成功」上：agent 自评会漂，人评不可扩展。
+      权限边界落在哪一行代码上，决定了这个循环能否被信任。
+    expected_evidence: "阶段划分、agent 可调用的接口、禁止修改的组件、每轮产物"
+    done_when: "能写出每轮的输入/输出与判定规则，并指出 agent 被禁止做什么"
+    status: unanswered
+
+  - id: q4
+    question: "增益与代价：端到端能拿到多少，循环本身多贵？"
+    why: |
+      端到端最容易出错的不是数字，是口径：相对 AR 还是相对 stock、几何均值还是算术、
+      单请求还是批处理、sealed 还是 bench。同时循环自身的 GPU-小时必须计入，
+      否则「自动优化」会被当成免费。
+    expected_evidence: "主表数字与口径说明、每轮耗时与 GPU-小时、晋级率"
+    done_when: "能给出至少 8 条带口径标注的增益，并把循环成本折算进结论"
+    status: unanswered
+
+  - id: q5
+    question: "边界在哪：什么条件下同一机制反号或不成立？"
+    why: |
+      发布偏差让负结果消失。端到端层尤其如此，因为批处理会改变几乎所有机制的收益符号。
+      要找的是论文自己给出的反号证据，而不是推测。
+    expected_evidence: "批处理下的负增益、被关闭方向的测量依据、分布外结果"
+    done_when: "能指出至少三个使机制失效的条件，每个都有量化证据"
+    status: unanswered
+
+  - id: q6
+    question: "判据能迁移吗：端到端的三条判据工程能否用到别处？"
+    why: |
+      若结论只是「SpecPilot 很快」，这篇文章没有价值。真正可迁移的是判据的形状：
+      上界要分解成可重算的因子、晋级只看下界不看点估计、正确性判据要与指标判据分离。
+    expected_evidence: "多条独立工作的同向做法、反面案例（只报点估计的工作）"
+    done_when: "能给出可迁移的判据清单，并指出每一条的失效条件"
+    status: unanswered
+
+constraints:
+  source_priority: [academic, code, official, community, press]
+  citation_style: inline_markdown
+  depth: deep
+  budget:
+    max_tool_calls: 150
+    max_minutes: 120
+
+exclusions:
+  - "把端到端加速等同于 kernel 加速：两者之间是漏斗关系，第 5 章专门处理"
+  - "只报点估计的工作被当作「已验证」：没有下界或重复运行的结论一律降级"
+  - "把仓库 README 的自跑数字当作独立复现"

@@ -1,0 +1,2559 @@
+[SM120] Field report: DeepSeek-V4.1-Flash in production on 8x RTX PRO 6000 (PCIe, no NVLink) - working config, measured throughput, rejected topologies · Issue #40877 · sgl-project/sglang · GitHub
+
+Skip to content
+
+You signed in with another tab or window.
+Reload
+to refresh your session.
+
+You signed out in another tab or window.
+Reload
+to refresh your session.
+
+You switched accounts on another tab or window.
+Reload
+to refresh your session.
+
+Dismiss alert
+
+[SM120] Field report: DeepSeek-V4.1-Flash in production on 8x RTX PRO 6000 (PCIe, no NVLink) - working config, measured throughput, rejected topologies
+
+#40877
+
+New issue
+
+Copy link
+
+New issue
+
+Copy link
+
+Open
+
+Open
+
+[SM120] Field report: DeepSeek-V4.1-Flash in production on 8x RTX PRO 6000 (PCIe, no NVLink) - working config, measured throughput, rejected topologies
+#40877
+
+Copy link
+
+Description
+
+Lei-010
+
+opened
+on Sep 23, 2026
+
+Issue body actions
+
+Summary
+
+Field data from running
+DeepSeek-V4.1-Flash
+as a production SGLang backend on
+8× RTX PRO 6000 Blackwell Max-Q (SM120, 96 GB, PCIe-only — no NVLink)
+, including the
+only
+topology we could get to start, measured prefill/decode, a speculative-decoding A/B, and the configuration traps that cost us real experiments. Posting because SM120 + V4.1-Flash users currently have to rediscover all of this from scratch.
+
+Full write-up (with methodology and reproduction artifacts):
+https://github.com/Lei-010/hermes-agent/blob/main/docs/DeepSeek-V4.1-Flash-SM120-Performance-and-Production-Config.md
+
+Related: vLLM field report
+vllm-project/vllm#56700
+(same hardware, vLLM side), vLLM
+vllm-project/vllm#56892
+(SM120 bug/perf tracker).
+
+What works
+
+docker run --gpus all -d --name dsv41 \
+--shm-size=64g --ipc=host --network host \
+--restart unless-stopped \
+-e TP_SIZE=8 -e DP_SIZE=1 -e EP_SIZE=8 \
+-e SPEC_ALGORITHM=dspark -e DSPARK_BLOCK_SIZE=6 \
+-e CHUNKED_PREFILL_SIZE=2048 \
+-v /ssd/DeepSeek-V4.1-Flash:/model \
+
+<
+sglang image
+>
+
+Effective
+server_args
+(verified at runtime via
+/get_server_info
+):
+
+Parameter
+
+Value
+
+tp_size
+/
+ep_size
+/
+dp_size
+
+8 / 8 / 1
+
+speculative_algorithm
+
+DSPARK,
+speculative_dspark_block_size = 6
+
+chunked_prefill_size
+
+2048
+
+context_length
+
+1,048,576
+
+kv_cache_dtype
+
+fp8_e4m3
+
+mem_fraction_static
+
+0.72
+
+max_running_requests
+
+16
+
+attention_backend
+/
+moe_runner_backend
+
+dsv4
+/
+flashinfer_mxfp4
+
+CUDA graph decode / prefill
+
+full (max_bs 16) /
+disabled
+
+TP8/EP8 is not a preference — it is the only layout that starts
+(see "Topologies SGLang rejects" below).
+
+Measured throughput (cold, single stream, tokens from
+usage
+, not SSE chunk counts)
+
+128K cold prefill:
+
+Config
+
+tok/s
+
+chunked_prefill_size=2048
+(production)
+
+6,853
+
+same config re-run
+
+6,765 (−1.3%)
+
+flashmla prefill backend
+
+6,845
+
+fused-MoE all-reduce
+
+6,828
+
+chunked_prefill_size=4096
+
+6,301
+
+chunked_prefill_size=1024
+
+6,012
+
+32K prompt: ≈7,196 tok/s. GPU util ≈87% at 220 W of 600 W →
+communication-bound on PCIe
+, not compute-bound. ~7K tok/s looks like the ceiling for this board without NVLink.
+
+Radix/prefix cache is the only large multiplier: cache-hit prefill
+0.34 s for a 112K-token prefix ≈ 325K tok/s (≈39×)
+.
+
+Decode (client path over SSH tunnel, production config): prose 93.9 tok/s, structured/JSON 134.1 tok/s, TTFT 143–169 ms.
+
+DSPARK A/B (block_size=2, clean legs, each verified via
+server_info
++ acceptance length)
+
+Prompt class
+
+DSPARK ON
+
+DSPARK OFF
+
+prose
+
+76.5–78.9 tok/s
+
+36.4–36.5 tok/s
+
+structured
+
+120.3–120.5 tok/s
+
+36.5 tok/s
+
+accept len
+
+3.0 tokens/step
+
+1.0
+
+With DSPARK off the model flattens to ~36.5 tok/s regardless of prompt class — speculation is the difference between usable and unusable latency on this hardware. Production ships
+block_size=6
+(structured ≈237–252 tok/s vs 120 at block 2).
+
+Traps that cost us experiments (SGLang-specific)
+
+--enable-expert-parallel
+is a vLLM flag
+— SGLang takes
+ep_size
+; the vLLM spelling is rejected outright.
+
+docker run
+must pass
+TP_SIZE
+/
+DP_SIZE
+/
+EP_SIZE
+explicitly.
+Without
+-e
+, the container silently serves TP8 defaults and your "new" config never happens (we recorded a full sweep of false data this way before adding a config gate).
+
+ep_size ≤ tp_size
+or the MoE rank computation divides by zero:
+moe_ep_rank = tp_rank % (tp_size // moe_dp_size) // (tp_size // moe_dp_size // ep_size)
+.
+
+DSPARK + DP attention requires
+--enable-dp-lm-head
+— but is unreachable on this model anyway (next section).
+
+Topologies SGLang rejects on this model
+
+Attempt
+
+Result
+
+DP2 × TP4 (any EP)
+
+ValueError: V4.1 vision currently supports TP/EP without DP, CP, PP or MoE A2A
+— both replicas die within ~70 s
+
+prefill context-parallel
+
+same class of rejection
+
+--enable-dp-attention
+alone
+
+silently no DP group (
+dp_size: 1
+) — looks fine, isn't
+
+Other SM120 gaps we hit: MSCCL++ (
+_tune
+kernel crash), FlashInfer all-reduce fusion,
+flashmla_sparse_q8
+, and CUDA-graph capture for
+prefill
+(crashes even with DSPARK off, i.e. unrelated to speculation).
+
+Operational notes
+
+A defunct container can survive a single
+docker rm -f
+; the next
+docker run
+then fails on the name conflict while an orphaned engine process keeps the port and answers health checks — which silently mislabels the next experiment. Loop
+docker rm -f
+until the container is gone
+and
+nothing listens on the port.
+
+A parse failure must never satisfy an "expected config" assertion, or a server that has not started yet gets recorded as "spec disabled".
+
+Verify intended config from the server (
+/get_server_info
+) before timing anything; discard legs that fail the gate rather than recording them.
+
+Not established
+
+No 24 h soak (numbers come from a working day of production use), block sizes 4/8/12 not re-measured with the fixed sweep tool, and >32K prefill/long-context degradation not characterised.
+
+Activity
+
+KushagraKanaujia
+
+commented
+
+on
+
+Sep 25, 2026
+
+KushagraKanaujia
+
+on Sep 25, 2026
+
+More actions
+
+@Lei-010
+Useful caveat: your production re-run moved 1.3% (6,853 vs 6,765), and the flashmla (6,845) and fused-MoE all-reduce (6,828) rows sit inside that gap, so they are no-winners, not losses. One re-run is a single pair, not a noise estimate.
+
+I built Throttle for this: it won't call a winner until repeat runs measure noise.
+
+pipx install throttle-pro
+throttle check --url
+<
+sglang-url
+>
+--gpu-hourly-rate
+<
+usd
+>
+--concurrency 16 --requests-per-block 16 --label chunk2048
+
+I'll set it up with you, free.
+
+Lei-010
+
+commented
+
+on
+
+Sep 26, 2026
+
+Lei-010
+
+on Sep 26, 2026
+
+Author
+
+More actions
+
+Fair point, and worth recording here for anyone reading the table later: the flashmla (6,845) and fused-MoE all-reduce (6,828) rows fall inside the ±1.3% spread of the production re-run (6,853 vs 6,765), so the correct reading is "no detectable difference," not "these variants are slower." A single re-run is not a noise estimate — agreed.
+
+When the box is back from its current maintenance window, I'll re-measure those legs with N ≥ 5 repeats and report median + spread, so the prefill table carries real error bars. Not planning to adopt a third-party benchmarking tool for this — the existing harness (usage-based token counting +
+/get_server_info
+config gate before timing) already covers what we need, and adding an external dependency to a production endpoint is not something I want to take on.
+
+For anyone landing here from search: treat the prefill variants table as "all roughly equivalent on this hardware" until the repeated measurements land.
+
+KushagraKanaujia
+
+commented
+
+on
+
+Sep 26, 2026
+
+KushagraKanaujia
+
+on Sep 26, 2026
+
+More actions
+
+Makes sense, and thanks for writing up the corrected reading. One small tip for the N ≥ 5 pass: interleave the variants (A B C A B C…) instead of running each leg back to back, so any drift during the session (thermals, a background job) spreads across all variants instead of landing on whichever ran last. Looking forward to the table with error bars.
+
+Lei-010
+
+commented
+
+on
+
+Sep 27, 2026
+
+Lei-010
+
+on Sep 27, 2026
+
+Author
+
+More actions
+
+Update (2026-09-27): the live deployment is now 4-GPU TP4/EP4 — plus concurrency data
+
+Since the original report, this box has moved to a
+different serving topology
+, so the "TP8/EP8 is the only layout that starts" line in the write-up no longer describes what runs. Recording the current state here so the thread stays accurate — everything below is read from the live host (
+docker inspect
+,
+nvidia-smi
+,
+/state/launch.json
+) or measured against the live endpoint today.
+
+What runs now
+
+GPUs in use:
+4
+(the host exposes 7 devices; the container sees
+0–3
+, cards 4–6 idle)
+
+--tp 4 --ep-size 4
+— starts and serves; no topology rejection
+
+Image:
+deepseek-v41-4x6000:local
+(overlay over an unrecorded SGLang base:
+ai.sglang.build.commit=unknown
+,
+pip show sglang
+=
+0.0.0.dev0
+). It is
+not
+v0.5.20 — layer-by-layer comparison diverges from
+lmsysorg/sglang:v0.5.20
+at layer 17, so I'm deliberately
+not
+attributing these numbers to any released tag.
+
+Weights: 476 GB, revision
+fb2764a5cf321eaa5070ca8f9e892818f477c16d
+,
+--load-format safetensors
+
+--attention-backend dsv4
+,
+--moe-runner-backend flashinfer_mxfp4
+,
+--mem-fraction-static 0.82
+
+--context-length 409600
+,
+--max-running-requests 8
+,
+--cuda-graph-max-bs-decode 8
+,
+--chunked-prefill-size 2048
+
+--speculative-algorithm DSPARK --speculative-dspark-block-size 6
+— no SparsePrefillWorkspace OOM at 409k context in this configuration
+
+KV cache
+fp8_e4m3
+;
+offload_mode=ram
+
+≈86.1 GB / 97.9 GB VRAM per active card; 167–200 W, 38–45 °C
+
+Decode vs concurrency
+— 256 output tokens/request,
+temperature=0
+,
+ignore_eos=true
+,
+stream_options={"include_usage": true}
+, 2 rounds per level (best aggregate shown).
+N=2, so these are not error bars
+— read them as a first pass, not as a settled table.
+
+Concurrency
+
+Aggregate
+
+Scaling vs 1
+
+Per-stream
+
+TTFT
+
+TPOT
+
+1
+
+115.2 tok/s
+
+1.00×
+
+121.9 tok/s
+
+0.121 s
+
+8.2 ms
+
+2
+
+220.6 tok/s
+
+1.91×
+
+125.8 tok/s
+
+0.147 s
+
+8.0 ms
+
+4
+
+322.2 tok/s
+
+2.80×
+
+108.5 tok/s
+
+0.643 s
+
+9.3 ms
+
+8
+
+468.2 tok/s
+
+4.06×
+
+66.2 tok/s
+
+0.157 s
+
+15.2 ms
+
+Concurrency 2 is effectively free (per-stream rate unchanged) and 8 is the hard ceiling —
+max_running_requests=8
+with the decode graph captured to batch size 8. This is the dimension the original report had no data for (it was explicitly single-user/single-stream).
+
+Prefill
+: 4,714-token cold prompt → TTFT 0.788 s ⇒ ≈
+5,982 tok/s
+on 4 GPUs.
+
+Two measurement traps worth passing on to anyone reproducing this
+
+Count tokens from the server, not from SSE chunks.
+With DSPARK a single chunk carries 2–5 tokens, so counting chunks under-reports decode throughput by 3–5×. Use
+stream_options: {"include_usage": true}
+and
+usage.completion_tokens
+.
+
+Benchmark only when the interactive session is idle.
+An earlier run on the same build read
+20–47 % lower
+(single stream 96 vs 115 tok/s; 8-way aggregate 318 vs 468 tok/s) purely because the operator's own agent traffic was competing for the same 8-request budget.
+
+Full write-up with the configuration tables and open items:
+https://github.com/Lei-010/hermes-agent/blob/main/docs/DeepSeek-V4.1-Flash-SM120-Live-Config-and-Concurrency-2026-09-27.md
+
+Still owed from the previous exchange: the N≥5
+interleaved
+A/B (A B C A B C...) for the prefill variants with median + spread. The box is back up, so that is the next thing I run here.
+
+Lei-010
+
+commented
+
+on
+
+Sep 28, 2026
+
+Lei-010
+
+on Sep 28, 2026
+
+Author
+
+More actions
+
+Update: 1M context is now what runs — measured cold, plus a measurement correction
+
+Production was re-created with
+CONTEXT_LENGTH=1048576
+(same box: 4× RTX PRO 6000, TP4/EP4, DSPARK, fp8 KV; host exposes 7 GPUs, 4 in use). We measured it properly this time: cold prefill ladder, decode at short and at ~906K context, and stability. Write-up:
+https://github.com/Lei-010/hermes-agent/blob/main/docs/DeepSeek-V4.1-Flash-SM120-1M-Context-Validation-2026-09-28.md
+
+The one methodological change that matters: a unique marker at the head of every prompt.
+sglang's radix cache keeps a completed request's pages, so a "level" that shares its prefix with the previous level skips prefill for everything shared and reports a throughput that contains almost no prefill work. Two numbers in circulation are exactly that artifact — including one of ours.
+
+Prompt tokens
+
+Elapsed
+
+Prefill rate
+
+Condition
+
+402,625
+
+79.5 s
+
+5,065 tok/s
+
+cold (unique prefix)
+
+704,582
+
+175.2 s
+
+4,022 tok/s
+
+cold
+
+905,885
+
+260.5 s
+
+3,478 tok/s
+
+cold
+
+1,006,538
+
+310.5 s
+
+3,242 tok/s
+
+cold
+
+1,006,538
+(repeat)
+
+322.0 s
+
+3,126 tok/s
+
+cold
+
+So a full cold 1M-token prefill is
+~5 minutes
+on this box. The previously quoted "1040K in 74.5 s (13,962 tok/s)" is a prefix-cache hit — the 900K prefix was already resident, and only ~140K tokens were actually prefilled. The capability claim (a 1.04M-token request is accepted and answered) is correct; the rate must not be quoted. Our own earlier "409K = 62.7 s (6,528 tok/s)" was the same artifact; the true cold figure is 79.5 s (5,065 tok/s).
+
+Decode did not get worse for paying the 1M budget:
+single stream 152.5 tok/s (TTFT 0.125 s, TPOT 6.1 ms) versus 153.8 tok/s in the 409,600-token deployment; 2-way 229 tok/s, 4-way 302 tok/s, 8-way 452 tok/s. The SM90 story in
+#40441
+(decode graph width pinned to
+--context-length
+, 2.68× lever) did not materialise on this SM120 build at these lengths.
+
+At ~906K tokens of context
+(one cold fill, then repeated requests on the same prefix): TTFT
+2.38 s
+against 260 s cold, decode
+100 tok/s
+, TPOT
+10 ms
+, five sequential repeats inside 1 %. The prefix cache is worth 109× there — and it is evictable: one repeat after other traffic had to re-prefill the full 260 s.
+
+Long-context concurrency collapses, though:
+4 concurrent requests at 906K context finished 256 output tokens in 8.6 s =
+29.7 tok/s aggregate
+(≈7.4 per stream).
+max_running_requests=8
+is nominal at this context size; this endpoint serves one heavy request well, not several.
+
+Stability:
+two independent cold 1M passes, 5 sequential + 4 concurrent high-context decodes, no traceback / no OOM / no CUDA error in the log,
+dmesg
+Xid count unchanged (52 before and after),
+RestartCount
+0, GPU steady at 96.8 GB of 97.9 GB (98.9 %). Headroom is ~1 GB — worth knowing before running two long requests.
+
+Correction to our own 2026-09-27 crash report in this thread:
+a ~500K request SIGKILLed the entire TP group (
+Exited 137
+, no traceback, no OOM-killer, host RAM fine, last log line mid-prefill). We could not reproduce it today — cold 500K took 106 s, and cold 1M passed twice. Best current hypothesis (
+⚠️
+unproven): the first oversized request after a cold start triggers new Triton kernel-shape JIT compilation while a large prefill is in flight, stalling the scheduler past the 300 s watchdog, which kills the process group and therefore leaves no Python traceback. The timing fits — that container had become healthy ~90 s earlier, and its log carries both
+
+Triton kernel '_hc_mix_reduce_sinkhorn_kernel' took 20.78 s to compile after serving started.
+Health check failed. Server couldn't get a response from detokenizer for last 20 seconds.
+
+while today's 40-minute window has no compile or watchdog line at all. The falsifiable test: restart, make a cold ≥500K request the very first request, and see whether the group dies again. Until then, the operational rule we're using is to send one warm-up request of a few hundred K tokens after a cold start and let it finish before trusting the service.
+
+Still owed from the earlier exchange: the N≥5
+interleaved
+A/B (A B C A B C…) on the prefill variants with median + spread, per your suggestion to interleave so thermal/drift effects spread across variants. This round did not cover it; it remains the next measurement.
+
+KushagraKanaujia
+
+commented
+
+on
+
+Oct 6, 2026
+
+KushagraKanaujia
+
+on Oct 6, 2026
+
+More actions
+
+@Lei-010
+The unique-marker correction is the most useful line in this thread. Two cheap guards for the next pass: launch with
+--enable-cache-report
+and each response carries
+usage.prompt_tokens_details.cached_tokens
+, so every cold row can assert it is near zero instead of trusting the marker. For the Exited 137 theory, set
+--soft-watchdog-timeout
+below the 300 s hard watchdog; it dumps debug info when a forward batch runs long, which should show whether a Triton compile was in flight.
+
+Lei-010
+
+commented
+
+on
+
+Oct 11, 2026
+
+Lei-010
+
+on Oct 11, 2026
+
+Author
+
+More actions
+
+@KushagraKanaujia
+Adopted, and thank you — the marker only told us
+which
+runs to distrust;
+cached_tokens
+tells us whether the run actually did the work.
+--enable-cache-report
+is now the default in our bench harness.
+
+For the record, here is the size of the artifact it catches, on our box (8× RTX PRO 6000 SM120, V4.1-Flash, fp8 KV, single stream, 400-token completions, temp 0). Same ladder, two prefixes:
+
+prompt tokens
+
+TTFT, reused filler prefix
+
+TTFT, unique prefix
+
+~30K
+
+0.1 s
+
+2.0 s
+
+~114K
+
+0.3 s
+
+8.3 s
+
+It is not a constant offset — at ~114K the "prefill row" is doing almost no prefill work at all, because the radix cache returns the completed request's pages. Our earlier throughput numbers in this thread were built exactly that way. We now assert
+cached_tokens ≈ 0
+on every row
+before
+it is allowed into a table.
+
+On
+--soft-watchdog-timeout
+: agreed this is the right instrument for the Exited 137 question, and we have not wired it yet. Our 137s have all coincided with graph capture / first-batch kernel compilation, which is precisely the window a soft watchdog should catch — so we'll set it below the 300 s hard timeout on the next SGLang run and post whatever it dumps, rather than theorising.
+
+Thanks for both. The marker correction only told us where to look; this gives us something we can assert.
+
+KushagraKanaujia
+
+commented
+
+on
+
+Oct 11, 2026
+
+KushagraKanaujia
+
+on Oct 11, 2026
+
+More actions
+
+@Lei-010
+Glad it helped, and that table is a great illustration of the artifact. One catch for the assertion: in
+usage_processor.py
+(
+_details_if_cached
+), SGLang only emits
+prompt_tokens_details
+when cached_tokens > 0, so on a truly cold row the field is absent rather than 0. If the harness treats "missing" as a failure or skips the row, the cold rows you most want will be the ones that drop out. Reading it as
+usage.get("prompt_tokens_details") or {}
+and defaulting cached_tokens to 0 keeps them in.
+
+Hemanthdamineni
+
+commented
+
+on
+
+Oct 11, 2026
+
+Hemanthdamineni
+
+on Oct 11, 2026
+
+More actions
+
+Has anyone benchmarked DeepSeek V4.1-Flash at
+64+ concurrent requests with context lengths above 200K tokens
+on RTX PRO 6000 GPUs?
+
+I'm trying to evaluate whether this model can meet my target concurrency and latency requirements, but I haven't been able to find benchmarks that cover both high concurrency and long contexts.
+
+If anyone has tested this, I'd really appreciate the aggregate decode throughput, per-request tokens/sec, TTFT, GPU memory usage, and exact context length at C32, C64, or higher. It would also be useful to know whether the prompts were cold or benefited from prefix caching, and which serving configuration was used.
+
+Even preliminary results or configuration details would be very helpful. Thanks!
+
+Lei-010
+
+commented
+
+on
+
+Oct 13, 2026
+
+Lei-010
+
+on Oct 13, 2026
+
+Author
+
+More actions
+
+Two replies in one comment — one correction accepted, one honest "not yet".
+
+To
+@KushagraKanaujia
+— correction accepted, and it invalidates rows rather than a detail
+
+You are right, and the consequence is worse than a missing default:
+our cold-row selector was inverted with respect to the rows we care about.
+
+Our assertion was literally
+cached_tokens ≈ 0
+. Per your reading of
+usage_processor.py::_details_if_cached
+, SGLang emits
+prompt_tokens_details
+
+only when
+cached_tokens > 0
+, so on a genuinely cold row the key is
+absent
+, not
+0
+. In Python, a missing key is not a
+0
+— so any harness that reads the field directly and then tests it, or that discards rows where it is absent, drops precisely the cold rows that the whole measurement exists to capture. The surviving set skews warm, which is the one direction we cannot detect from the numbers themselves (a warm row looks like a
+faster
+cold row, not like a wrong one).
+
+So, stated as the corrected protocol rather than a silent edit, our cold-row predicate becomes:
+
+details
+
+=
+
+usage
+.
+get
+(
+"prompt_tokens_details"
+)
+or
+{}
+
+cached
+
+=
+
+details
+.
+get
+(
+"cached_tokens"
+,
+0
+)
+
+is_cold
+
+=
+
+cached
+
+==
+
+0
+
+Key-absent and
+cached_tokens == 0
+now collapse into the same class — cold — instead of the first being treated as a parse failure. Same for
+--enable-cache-report
+being on by default in the harness: it makes the field
+available
+, it does not make it present.
+
+We are re-running the cold/warm split with the corrected predicate before reposting any table. We are deliberately
+not
+just restating the previous numbers with the fix applied, because we do not yet know how many rows the old predicate was silently dropping — if it changes the cold medians we will say so in the new table rather than quietly replacing the old one. Correction acknowledged on the record; the audit trail is the point.
+
+To
+@Hemanthdamineni
+— we have single-stream, not the number you asked for
+
+We cannot answer your question as posed, and we would rather say that than quote something adjacent to it.
+
+What we do not have:
+a C64×200K measurement. Nothing at ≥200K context with ≥64 concurrent requests has been run on our box. Treat any number below as
+not
+that.
+
+What we do have
+(8× RTX PRO 6000, SM120, DSV4.1-Flash, and note these are
+different units
+from what you asked for):
+
+class
+
+value
+
+unit note
+
+single-stream decode, 909K context
+
+≈124 tok/s
+
+1 stream
+, not aggregate
+
+single-stream decode, 2K context
+
+≈165 tok/s
+
+decode is nearly flat in context length
+
+KV pool at
+--gpu-memory-utilization 0.98
+, fp8 KV
+
+2,983,601 tokens
+
+⇒
+2.85×
+concurrency at 1,048,576 tokens/request
+
+The 2.85× is a
+capacity
+ratio derived from the KV pool, not a measured 64-way serving result — it says the KV budget permits it, not that we have run it at that width. And prefix caching changes the answer materially: a cache-hit long prompt is served at a completely different cost point from a cold one, so any C64×200K number is only meaningful with the hit rate stated alongside it.
+
+We are running the C64 (and C32) × >200K ladder with cold and warm rows separated, and will post aggregate decode throughput, per-request tok/s, TTFT, VRAM, the exact context length, and the serving config. You are right that this is the missing datapoint for SM120 long-context serving — thanks for asking it directly.
+
+Lei-010
+
+commented
+
+on
+
+Oct 13, 2026
+
+Lei-010
+
+on Oct 13, 2026
+
+Author
+
+More actions
+
+C8 / C32 / C64 × ~200K on 8× RTX PRO 6000 (SM120), DSV4.1-Flash — the datapoint, and the two rows that are
+not
+a concurrency throughput
+
+@Hemanthdamineni
+— this is the C32/C64 × >200K measurement promised in my previous comment. It comes with a capacity ceiling that changes how the upper two rows must be read, so please take §3 with the table rather than after it.
+@KushagraKanaujia
+— the last section extends your
+_details_if_cached
+correction: on this build it fails in the
+opposite
+direction.
+
+1. Serving configuration — read from the running container, not from notes
+
+Hardware:
+8× NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition
+, 97,887 MiB (95.6 GiB) per card, all 8 in one engine
+
+Image:
+vllm-openai:dev253-fi071rc5-dsv41
+; container up since 2026-10-11 14:55 UTC
+
+Launch command (verbatim from
+docker inspect
+):
+
+vllm serve /models/DeepSeek-V4.1-Flash --served-model-name deepseek-v4.1-flash
+--trust-remote-code --tensor-parallel-size 8 --block-size 64 --kv-cache-dtype fp8
+--attention-config '{"indexer_kv_dtype":"fp8"}'
+--speculative-config '{"method":"dspark","num_speculative_tokens":5}'
+--max-cudagraph-capture-size 1024 --max-model-len 1048576
+--gpu-memory-utilization 0.98 --enable-auto-tool-choice
+--tool-call-parser deepseek_v41 --reasoning-parser deepseek_v41
+
+max_model_len
+=
+1,048,576
+, confirmed from
+/v1/models
+on the live endpoint
+
+Prefix caching:
+on
+(engine default).
+max_num_seqs
+is left at its default, so the width limit in these runs is the
+KV pool
+, not a scheduler cap.
+
+KV pool:
+2,983,601 tokens
+(
+kv_cache_size_tokens
+, from
+/metrics
+), fp8 KV, block size 64
+
+Exact context length tested:
+~200,000 prompt tokens per request
+(server-reported medians 199,940–200,045)
+
+Request shape:
+max_tokens=300
+,
+temperature=0
+. Note this is a reasoning model —
+completion_tokens_details.reasoning_tokens
+counts
+inside
+that 300, so the visible answer is short by construction.
+
+2. The ladder
+— N requests submitted simultaneously, ~200K tokens each, one tier at a time
+
+requested conc.
+
+achieved conc.
+
+prompt tokens (median)
+
+aggregate decode tok/s
+
+per-request decode tok/s (median)
+
+TTFT median
+
+failed
+
+8
+
+8
+
+200,045
+
+20.0
+
+5.7
+
+61.59 s
+
+0
+
+32
+
+32
+
+199,944
+
+24.9
+
+5.8
+
+120.55 s
+
+0
+
+64
+
+64
+
+199,940
+
+18.9
+
+5.5
+
+446.54 s
+
+0
+
+Wall time to last completion: 112.0 s / 336.2 s / 881.8 s. Errors: none in any tier.
+
+Column definitions — these matter more than the numbers:
+
+"achieved concurrency"
+= requests accepted and in flight. It does
+not
+mean co-resident in the KV pool. See §3.
+
+"aggregate decode tok/s"
+= Σ
+completion_tokens
+÷ wall-to-last-completion. That denominator contains prefill and any queueing, so it is an
+end-to-end
+rate, not a steady-state concurrent decode rate.
+
+"per-request decode tok/s (median)"
+=
+completion_tokens
+÷ (wall − TTFT), i.e. the decode phase only. Under contention this is the least contaminated column.
+
+3. The ceiling: C32/C64 could not all be resident — do not read those walls as throughput
+
+Arithmetic from the live pool size:
+
+2,983,601 ÷ 200,000 =
+14.9
+⇒
+~14
+full-length 200K sequences fit at once
+
+C8 needs 1.6M tokens =
+53.6 %
+of the pool ⇒ C8 is genuinely co-resident
+
+C32 needs 6.4M =
+2.1×
+the pool; C64 needs 12.8M =
+4.3×
+the pool ⇒ the scheduler must serialise
+
+So in the C32 and C64 rows, TTFT and wall time include
+waiting for a KV slot
+, not just compute. That is visible in the TTFT median going 61.6 s → 120.6 s → 446.5 s (7.25× from C8 to C64).
+I am therefore not reporting a "C64 concurrency throughput"
+: the honest statement is that 64 × 200K does not fit in this KV pool, and what the C64 row measures is a queued workload on a 200K-capable, ~14-slot engine.
+
+⚠️
+One caveat on that ceiling:
+num_gpu_blocks
+(78,783) ×
+block_size
+(64) = 5,042,112 block-tokens does
+not
+equal the engine's own
+kv_cache_size_tokens
+= 2,983,601, so I quote the engine metric and treat "~14" as derived/approximate. The ordering (C8 co-resident; C32/C64 not) holds either way.
+
+4. Cold vs warm, decided by an explicit repeat pair
+
+Single requests, one at a time, ~200K tokens, each with a unique marker at the head of the prompt:
+
+row
+
+prompt tokens
+
+TTFT
+
+wall
+
+decode tok/s
+
+A1 — cold (unique prefix)
+
+200,438
+
+14.106 s
+
+15.031 s
+
+190.3
+
+A2 — repeat of A1 (identical prefix)
+
+200,438
+
+0.586 s
+
+2.248 s
+
+180.5
+
+B1 — different fresh prefix
+
+200,500
+
+14.118 s
+
+15.662 s
+
+194.3
+
+Repeat-pair speedup:
+6.69× wall, 24.1× TTFT
+.
+
+B1 (a
+different
+unique prefix) is as slow as A1 ⇒ the speedup on A2 is prefix reuse, not warm-up or thermals.
+
+Decode rate is ~equal in all three (180–194 tok/s) ⇒ the entire difference is
+prefill
+. Cold 200K prefill = 200,438 ÷ 14.106 =
+14,209 tok/s single-stream
+. On a cache hit the nominal prefill rate is ~342,000 tok/s, i.e. essentially no prefill work was done — the cache returned the pages.
+
+A1 returned 176 output tokens (under the 300 cap) vs 300 for A2/B1; decode rates are consistent, so this does not change the prefill reading.
+
+The correction extension (the part worth copying into someone else's harness):
+
+On this build,
+prompt_tokens_details
+is not "absent on cold rows" — it is
+null
+on every row, including provably warm ones
+. Raw
+usage
+from a direct probe against this endpoint (3,645-token prompt; same prompt twice, then a different one), identical all three times:
+
+{
+"prompt_tokens"
+:
+3645
+,
+"total_tokens"
+:
+3677
+,
+"completion_tokens"
+:
+32
+,
+
+"prompt_tokens_details"
+:
+null
+,
+
+"completion_tokens_details"
+: {
+"reasoning_tokens"
+:
+32
+}}
+
+And on the 200K marker probe, the row that was 6.69× faster on wall time — i.e. one that
+demonstrably
+hit the prefix cache — still carries no usable details object. So there is no
+cached_tokens
+signal on this build at all: not "absent ⇒ cold", not "0 ⇒ cold". The value is
+null
+and the object never materialises.
+
+The practical consequence is the mirror image of the failure you flagged. Your fix,
+
+cached
+
+=
+(
+usage
+.
+get
+(
+"prompt_tokens_details"
+)
+or
+{}).
+get
+(
+"cached_tokens"
+,
+0
+)
+
+is_cold
+
+=
+
+cached
+
+==
+
+0
+
+correctly stops dropping cold rows — but on a build like this it silently classifies
+every
+row as cold, including rows that are provably warm, and it does so without raising anything. The assertion
+cached_tokens ≈ 0
+passes for the wrong reason. On this runtime, cold and warm can only be separated by an
+explicit repeated-prompt pair and the wall-time ratio
+, which is what the marker probe does — and why its verdict is meaningful here while a field-based one is not. Worth stating in the harness as a build capability check, not just a default value.
+
+5. Re-check of our own two previously-published "cold" figures
+
+Following the
+_details_if_cached
+correction, we re-verified our own cold numbers rather than quietly restating them. The marker probe on the current build returned:
+
+verdict_marker_design_holds = true
+— the design "unique marker at the head of every prompt, so a level cannot inherit the previous level's prefix" still discriminates correctly today: unique-prefix rows are cold (14.1 s TTFT), the identical repeat is warm (0.586 s), a
+different
+fresh prefix is cold again (14.1 s). Prefix caching is still real and still the dominant hazard for long-context ladders.
+
+field_usable_for_classification = false
+— as in §4,
+prompt_tokens_details
+cannot classify anything on this build.
+
+Both figures below therefore
+stand on method, with scope stated
+:
+
+2026-09-27 comment
+(id 5857197241):
+"4,714-token cold prompt → TTFT 0.788 s ⇒ ≈5,982 tok/s"
+— produced with the unique-marker convention on the then-live
+SGLang TP4/EP4
+build. Method re-checked tonight and it holds. Scope: the number itself is not re-measured here — that run was SGLang on 4 GPUs, tonight is vLLM on 8 — so it remains a statement about that deployment, not about this one.
+
+2026-09-28 comment
+(id 5861969696): the
+"1M context … measured cold"
+ladder (402,625 → 1,006,538 tokens, 5,065 → 3,242 tok/s). Same: unique marker per level, method re-checked and holds; the numbers are unchanged.
+
+New, and reproducible on the current vLLM stack: cold single-stream prefill at 200K =
+14.2K tok/s
+, and a prefix-cache hit converts that into effectively free prefill (TTFT 0.586 s, ~24× TTFT). That is the same phenomenon as both figures above, re-demonstrated on the serving stack we run today.
+
+6. What is
+not
+established
+— so nobody over-reads this table
+
+❌
+Per-card VRAM during the ladder: not sampled.
+What exists is a post-run instantaneous snapshot (2026-10-13 20:26 UTC / 2026-10-14 04:26 CST,
+num_requests_running=1
+, all 8 cards at 93.6 GiB / 95.6 GiB, 99 % util at that instant). It is
+not
+a load-time VRAM figure — do not use it as "VRAM at C64".
+
+❌ No per-request first-token trace; TTFT is a median across the tier.
+
+❌
+N = 1 per tier.
+No error bars.
+
+❌ No ≥1M-token × high-concurrency run; the ~14 ceiling is derived from the pool, not measured at 1M.
+
+❌ The ~180–194 tok/s solo-decode figure comes from the marker-probe rows (one request in flight), not from the ladder harness, so the per-stream collapse at C8 (5.7 tok/s vs ~180 solo, ≈32×) is
+indicative
+, not an isolated measurement — in the C8 row, decode of the 8 streams also overlaps the tail of prefill. If you need the clean number, run a 1× 200K decode leg with the ladder harness in the same session.
+
+Summary for
+@Hemanthdamineni
+:
+at ~200K context this box serves
+8 concurrent × 200K
+at ~5.7 tok/s per stream / 20 tok/s aggregate end-to-end;
+32 and 64 concurrent × 200K do not fit the KV pool (~14 slots)
+and their TTFTs are queueing-dominated, so I will not dress them up as a concurrency result. Measured cold prefill at 200K is 14.2K tok/s single-stream and a prefix-cache hit removes it almost entirely — which is why any long-context concurrency number has to state its hit rate to mean anything.
+
+KushagraKanaujia
+
+commented
+
+on
+
+Oct 13, 2026
+
+KushagraKanaujia
+
+on Oct 13, 2026
+
+More actions
+
+@Lei-010
+Thanks for checking it on the new stack. I think the
+null
+comes from a vLLM default, not a build gap. vLLM only fills
+prompt_tokens_details
+when the server starts with
+--enable-prompt-tokens-details
+. It defaults to False (
+enable_prompt_tokens_details: bool = False
+in
+vllm/entrypoints/launchers/cli_args.py
+), and the chat serving path returns
+None
+for the details object when it is off. Your
+docker inspect
+launch line doesn't include it, so every row reports
+null
+, warm or cold.
+
+Adding that flag should make
+cached_tokens
+show up on your warm rows (A2), which gives you a field-based check to sit next to the marker pair. Your harness then needs two different capability checks:
+
+SGLang:
+the key is missing when
+cached_tokens
+is 0, so treat a missing key as 0.
+
+vLLM:
+the field is
+null
+unless the flag is set, so treat
+null
+as "unknown" and refuse to call the row cold.
+
+Your point stands either way: a
+null
+that defaults to cold passes the assertion for the wrong reason.
+
+Lei-010
+
+commented
+
+on
+
+Oct 14, 2026
+
+Lei-010
+
+on Oct 14, 2026
+
+Author
+
+More actions
+
+@KushagraKanaujia
+— correction accepted, and it is mine to own:
+§4 attributed the
+null
+to the build when it is a flag we did not set.
+
+You have the mechanism right. I checked it against the source
+in our own running container
+rather than against main, so the detail is exact for the build the published numbers came from:
+
+vllm/entrypoints/launchers/cli_args.py:148
+—
+enable_prompt_tokens_details: bool = False
+
+vllm/entrypoints/openai/chat_completion/serving.py:97
+—
+if not enable_prompt_tokens_details:
+— the chat serving path gates the details object on exactly this
+
+the flag is on the CLI surface:
+[--enable-prompt-tokens-details | --no-enable-prompt-tokens-details]
+
+And the launch line quoted in §1 of that same comment carries no such flag — I re-read my own quote to be sure before writing this. So the
+observation
+(
+null
+on every row, including the provably-warm one) was correct; the sentence
+"on this build … it never materialises"
+was wrong. The right sentence is
+"on this launch configuration"
+— the signal is one flag away.
+
+Retracted (§4):
+"there is no
+cached_tokens
+signal on this build at all". Wrong. What is true is the stronger and more useful statement you made of it:
+a
+null
+that defaults to cold passes the assertion for the wrong reason.
+
+Retracted, with scoping (§5):
+
+field_usable_for_classification = false
+describes our launch configuration, not the stack, and should have been scoped that way.
+
+Unchanged (§5):
+
+verdict_marker_design_holds = true
+still stands. It is a wall-time judgement on the marker pair, it never depended on the field, and it is what the re-check of our 2026-09-27 and 2026-09-28 "cold" figures rested on.
+Those two figures' methodology is unaffected by this correction
+— only my claim about
+why
+the field was useless has to go.
+
+Adopted as two rules rather than one, per framework:
+
+stack
+
+field state
+
+rule
+
+SGLang
+
+key missing when
+cached_tokens == 0
+
+treat missing as 0
+
+vLLM
+
+null
+unless
+--enable-prompt-tokens-details
+
+treat
+null
+as
+unknown
+— refuse to call the row cold
+
+I will rerun the cold/warm pair with the flag on and post the field-based check
+beside
+the marker pair, so the two can be compared rather than one standing in for the other. That needs a server restart, so it belongs in a maintenance window rather than in the numbers already published — I am not going to restate that table with a flag I have not actually run.
+
+Thanks for the second catch. Two corrections from you in one thread, both of them mine.
+
+Hemanthdamineni
+
+commented
+
+on
+
+Oct 14, 2026
+
+Hemanthdamineni
+
+on Oct 14, 2026
+
+Last edited by
+Hemanthdamineni
+
+More actions
+
+Thanks
+@Lei-010
+— this is the datapoint I was after, and the scoping in §3/§6 is appreciated (and thanks
+@KushagraKanaujia
+for the --enable-prompt-tokens-details catch). A few things I want to pin down before relying on the ladder, mostly about what it actually measures:
+
+The C8–C64 rows look prefill-bound end to end, not decode-bound. C8 needs 8 × 200K = 1.6M prompt tokens; at your measured cold 14.2K tok/s that’s ~113 s, and the C8 wall was 112.0 s. C32 and C64 work out to ~19K and ~14.5K tok/s of aggregate prefill. With max_tokens=300 (~2 s of solo decode), the “per-request decode tok/s” column is decode steps interleaved with other requests’ prefill chunks. So I’d read 5.7 tok/s as prefill contention, not concurrent decode capacity. Could you add a leg where all N prompts are prefilled first (warm, unique prefixes already cached) and then decode a longer max_tokens (e.g. 2K) concurrently? That would give the real C8/C14 × 200K decode rate. With the prompt-tokens-details flag now on, cached_tokens would also confirm those rows are warm.
+
+Co-residency could be measured rather than derived. vllm:num_requests_running, vllm:num_requests_waiting, vllm:kv_cache_usage_perc and vllm:num_preemptions_total sampled every few seconds during C32/C64 would show the real resident width. Since V1 allocates blocks incrementally, it would also show whether requests were preempted and recomputed, which would inflate C32/C64 wall/TTFT beyond pure queueing. It might also explain the num_gpu_blocks × block_size ≠ kv_cache_size_tokens gap.
+
+Cross-post comparisons: the latest tables are vLLM TP8, while the earlier ones were SGLang TP4/EP4 (with offload_mode=ram, since 476 GB of weights doesn’t fit in 4 × 97.9 GB) and SGLang TP8/EP8 before that. It would help readers if each table stated the engine, and if the C8 short-context SGLang number (66.2 tok/s/stream) wasn’t read against the C8 × 200K vLLM number (5.7). The closest like-for-like I can find is your 4 × 906K SGLang run at ~7.4 tok/s/stream.
+
+Decode spread: single-stream decode is 165 tok/s at 2K, 180–194 at 200K and 124 at 909K. Since DSPARK acceptance depends on content (your own A/B showed prose vs structured at ~1.6×), using the same prompt body across context lengths with N≥3 would separate the context-length effect from the acceptance effect.
+
+None of this changes the headline that ~14 × 200K fit the pool and 64 × 200K doesn’t. But what I’m really trying to size is concurrent decode tok/s at ~200K with ~8–14 resident streams, and the current table doesn’t isolate that yet. Happy to share a small harness for the prefill-then-decode leg if useful. Thanks again for doing the extra testing and documenting both what the results establish and what they don't.
+
+Lei-010
+
+commented
+
+on
+
+Oct 15, 2026
+
+Lei-010
+
+on Oct 15, 2026
+
+Author
+
+More actions
+
+Two corrections accepted on the record. One is a
+labelling defect that changes how our own table has to be read
+, the other a scoping one. Both are ours; both get fixed before any new number is posted.
+
+1. Engine labelling — right, and it invalidates a comparison that is currently
+available
+to a reader
+
+Every table we have put in this thread should have carried its engine. Here they are, in one place, so nobody has to reconstruct it:
+
+Numbers in this thread
+
+Engine
+
+Hardware
+
+Decode-relevant flags
+
+C8 / C32 / C64 × ~200K ladder
+(our comment id=6154536398)
+
+vLLM TP8
+
+8× RTX PRO 6000 Blackwell Max-Q (SM120)
+
+image
+vllm-openai:dev253-fi071rc5-dsv41
+;
+--tensor-parallel-size 8 --block-size 64 --kv-cache-dtype fp8 --max-model-len 1048576 --gpu-memory-utilization 0.98
+; dspark speculative,
+num_speculative_tokens=5
+;
+--max-cudagraph-capture-size 1024
+
+Earlier long-context numbers cited here
+
+SGLang TP4/EP4
+,
+offload_mode=ram
+
+4× SM120
+
+weights (~476 GB) do not fit in 4 × 97.9 GB, hence the RAM offload
+
+Numbers preceding those
+
+SGLang TP8/EP8
+
+8× SM120
+
+—
+
+66.2 tok/s/stream
+
+SGLang,
+short context
+
+—
+
+different engine
+and
+different context length
+
+Taken as stated, the pair
+66.2
+(SGLang, short context) vs
+5.7
+(vLLM, C8 × 200K) is a cross-engine, cross-context comparison and is
+not
+like-for-like. We agree it must not be read that way, and from here every row we publish will carry engine + context length inline rather than in a preamble. The nearest like-for-like we have to a long-context multi-stream SGLang number is the 4 × 906 K run, and even that differs in TP degree and offload mode — so we will state the pairing rather than imply a ranking.
+
+2. The "per-request decode tok/s" column — we accept it, and the case is stronger than the one you made
+
+You are right that those rows cannot be read as concurrent decode capacity. Running your own arithmetic against our published wall-clock times makes it sharper than "prefill-bound ≈ prefill":
+
+row
+
+N × prompt
+
+total prompt tokens
+
+wall
+
+N × (single-stream cold prefill rate)
+
+measured / predicted
+
+C8
+
+8 × 200,045
+
+1,600,360
+
+112.0 s
+
+112.6 s
+
+0.994
+
+C32
+
+32 × 199,944
+
+6,398,208
+
+336.2 s
+
+450.3 s
+
+0.747
+
+C64
+
+64 × 199,940
+
+12,796,160
+
+881.8 s
+
+900.6 s
+
+0.979
+
+Single-stream cold prefill at 200 K = 14,209 tok/s. So
+C8 and C64 land within 1–2 % of "prefill serialized one request at a time at the single-stream rate"
+, and the TTFT medians agree on the same model (C8: 61.59 s measured vs 56.3 s predicted at the 4th request, ratio 1.09; C64: 446.54 s vs 450.3 s, ratio 0.99). C32 is the one row where prefill ran
+faster
+than single-stream (ratio 0.75), i.e. batching did help there.
+
+There is also a second reason, independent of yours, and it is the one that will be in the new protocol:
+the run used
+max_tokens=300
+.
+Spread over the whole wall that is 2.68 / 0.89 / 0.34 tok/s per request even if 100 % of the wall were decode — the run simply has no resolution to measure steady-state decode at these output lengths. The harness divides each request's token count by its
+post-first-token
+window (≈50 s at C8 for ≤300 tokens ⇒ ≈6 tok/s, consistent with the 5.7 median), and that window overlaps other requests' prefill. So the number is real, but it is a
+mixed-resource figure from a 300-token sample
+, not a decode rate.
+
+Withdrawn:
+the implication that
+5.7 / 5.8 / 5.5
+describe concurrent decode capability. They do not, and we will not restate them that way.
+
+3. What we will post, and what we will not claim
+
+Both of your requested legs, plus one bound:
+
+Prefill-then-decode.
+All N unique prefixes prefilled and prefix-cache-warmed first,
+then
+released concurrently with
+max_tokens=2K
+, so decode runs with zero prefill contention. That is the only way to answer the question your C8 arithmetic identifies.
+
+Measured co-residency, not derived.
+During the run, sampled at a few seconds' cadence:
+vllm:num_requests_running
+,
+vllm:num_requests_waiting
+,
+vllm:kv_cache_usage_perc
+,
+vllm:num_preemptions_total
+. That gives the actual resident width, and it is also the only way to tell whether preemption/recompute inflated the C32/C64 wall and TTFT beyond queueing. It will not, by itself, explain
+num_gpu_blocks × block_size ≠ kv_cache_size_tokens
+— but it will let us report the three values
+as measured
+rather than inferring a cause, which is the most we are currently entitled to say.
+
+Both legs are non-destructive (HTTP only against the live server). Standing caveats we will keep in the frame: N = 1 per cell so no error bars; per-card memory during load not captured (only a post-hoc instantaneous snapshot); C32/C64 exceed the KV pool by 2.1× / 4.3× (pool 2,983,601 tokens ⇒ 14.9 concurrent at 200 K), so their wall and TTFT contain queueing by construction. And we will mark the engine and context length on every row.
+
+Hemanthdamineni
+
+commented
+
+on
+
+Oct 15, 2026
+
+Hemanthdamineni
+
+on Oct 15, 2026
+
+More actions
+
+Thanks
+@Lei-010
+, that plan covers what I asked. Since you're about to run, a few additions so this round can answer the sizing question in one pass.
+
+1. Memory breakdown: Why is the pool ~2.98M tokens?
+
+Please provide a per-GPU memory breakdown at steady state after startup:
+
+Model weights (target model)
+
+DSPARK draft weights
+
+CUDA graph memory (
+--max-cudagraph-capture-size 1024
+may have a significant footprint)
+
+Activation memory / profiling peak reserved
+
+NCCL and communication buffers
+
+KV pool, plus the remaining headroom with
+--gpu-memory-utilization 0.98
+
+vLLM's startup log already reports most of this. Pasting the relevant lines verbatim would be ideal:
+
+Model loading took … GiB
+
+Available KV cache memory: … GiB
+
+GPU KV cache size: … tokens
+
+Maximum concurrency for 1,048,576 tokens per request: …×
+
+CUDA graph capture details
+
+Please also report
+bytes of KV per token and the breakdown across KV cache groups
+. For DSV4.1, I'd expect separate groups for main compressed attention, the FP8 indexer cache, and any sliding-window component.
+
+That split should help explain why
+num_gpu_blocks × block_size
+(5.04M) differs from
+kv_cache_size_tokens
+(2.98M), and establish the actual formula behind the ~14 concurrent slots at 200K.
+
+2. Engram offload A/B, if supported
+
+If DSV4.1-Flash's Engram conditional-memory lookup tables can be kept in host RAM on this stack, please run an A/B comparison with offloading enabled versus disabled.
+
+For each configuration, report:
+
+KV pool size and the
+Maximum concurrency
+startup line
+
+Single-stream decode throughput
+
+Prefill performance at 200K
+
+This should help quantify the performance cost of host-memory lookups versus any GPU memory savings.
+
+Please specify the exact flag or configuration used, or explicitly state if this is unsupported in the current build.
+
+3. Prefill-then-decode benchmark
+
+For the prefill-then-decode leg, please make the following adjustments:
+
+Identical prompt body:
+Use the same prompt body for every request, varying only the unique head marker. This keeps DSPARK acceptance comparable across concurrency levels.
+
+Concurrency sweep:
+Run C1, C8, and C14 (the derived pool limit) at 200K to establish a scaling curve rather than a single data point.
+
+DSPARK acceptance:
+Report mean acceptance length for each concurrency tier. A drop under batching changes how the decode numbers should be interpreted.
+
+Cache verification:
+Enable
+--enable-prompt-tokens-details
+and report
+cached_tokens
+per request to confirm that the decode leg is fully warm.
+
+Configuration:
+Include
+max_num_batched_tokens
+in the config table, since it controls how much prefill competes with decode during the cold ladder.
+
+4. Additional experiments, if time permits
+
+A. CUDA graph capture size A/B
+
+Compare startup KV pool sizes with
+--max-cudagraph-capture-size 64
+versus
+1024
+. The resident concurrency is only ~14–16, so the larger capture size may be consuming memory that could otherwise be allocated to KV cache.
+
+B. CPU KV offload
+
+Run one C32 × 200K benchmark using native vLLM CPU KV offload or LMCache. The goal is to determine whether offloading performs better than queueing requests and recomputing their KV cache.
+
+C. GPU telemetry during the run
+
+Alongside the
+/metrics
+scrape, collect GPU samples throughout the benchmark:
+
+nvidia-smi --query-gpu=memory.used,clocks.sm,power.draw --format=csv -l 2
+
+This could reveal whether Max-Q clock-down is contributing to decode throughput drift between concurrency tiers.
+
+Thanks again for keeping the record this clean.
+
+Lei-010
+
+commented
+
+on
+
+Oct 16, 2026
+
+Lei-010
+
+on Oct 16, 2026
+
+Author
+
+More actions
+
+@Hemanthdamineni
+— thanks, all four are answerable, but they split cleanly by what the
+running
+container can answer (read-only, done now) versus what needs a
+restart
+(next destructive slot). Answering in that order so §A is usable immediately.
+
+§A. Memory breakdown — answered now, from this container
+
+The container has been up since
+10-14 22:12
+, so the vLLM startup lines are still in
+docker logs
+, and
+/metrics
+plus
+nvidia-smi
+are live. Per GPU (8× RTX PRO 6000, TP8,
+--gpu-memory-utilization 0.98
+,
+--kv-cache-dtype fp8
+,
+--block-size 64
+):
+
+Component
+
+Value
+
+Source
+
+Model weights
+
+49.44 GiB
+
+Model loading took 49.44 GiB memory and 706.103005 seconds
+
+CUDA graph pool
+
+9.48 GiB actual
+(16.96 GiB estimated)
+
+CUDA graph pool memory: 9.48 GiB (actual), 16.96 GiB (estimated)
+
+KV cache (reserved)
+
+16.48 GiB
+
+Available KV cache memory: 16.48 GiB
+
+Sum of the three
+
+75.40 GiB
+
+Steady-state used per GPU
+
+91.85 GiB
+(94,059 MiB)
+
+nvidia-smi
+
+Unaccounted remainder
+
+≈16.45 GiB
+
+difference
+
+So the sizing answer is:
+~16.45 GiB per GPU is not in weights + graphs + KV
+— that is activations, NCCL/communication buffers, the profiling peak reserve, and allocator fragmentation. That is the part I cannot attribute further from a steady-state snapshot; I can only bound it.
+
+KV pool:
+
+GPU KV cache size: 2,983,601 tokens, Maximum concurrency for 1,048,576 tokens per request: 2.85x
+
+Bytes of KV per token: 5,931 B/token (5.79 KB/token)
+—
+16.48 GiB ÷ 2,983,601
+.
+
+2.85×
+for the 1M request is consistent with
+2,983,601 ÷ 1,048,576 = 2.85
+.
+
+On your 5.04M vs 2.98M question:
+
+num_gpu_blocks × block_size = 78,783 × 64 = 5,042,112
+, i.e.
+1.69× the reported
+kv_cache_size_tokens
+. I do
+not
+yet have the per-group split to explain the ratio — the group metadata does live in
+/metrics
+(
+cache_config_info
+currently reports
+block_size=64
+,
+cache_dtype=fp8
+,
+_block_size_resolved=True
+), and parsing it into your expected "main compressed attention" vs. other groups is exactly what the next run's §B.3 collects. I would rather hand you the parsed groups than a guess.
+
+Launch args relevant to your §4A and §3:
+
+--block-size 64 --kv-cache-dtype fp8 --tensor-parallel-size 8
+--attention-config '{"indexer_kv_dtype":"fp8"}'
+--speculative-config '{"method":"dspark", ..., "num_speculative_tokens":5}'
+--max-cudagraph-capture-size 1024 <-- the 1024 you flagged
+--max-model-len 1048576 --gpu-memory-utilization 0.98
+--max-num-batched-tokens <-- NOT set (defaults)
+--enable-prompt-tokens-details <-- NOT set (see §C)
+
+So your §4A premise holds:
+the capture size is 1024
+, and the graph pool is 9.48 GiB actual against a 16.96 GiB estimate.
+
+§B. Covered by the next non-destructive run (no container restart)
+
+§B.1 — C1 / C8 / C14 @ 200K.
+These three tiers already exist but sit in two different legs, and I will present them side by side rather than as one sweep:
+
+C1 @ 200K
+— the
+200000
+cell of the acceptance leg, N=3, single-stream.
+
+C8 / C14 @ 200K
+— the warmed prefill-then-decode leg. (C14 is the derived pool limit:
+2,983,601 ÷ 200,000 ≈ 14.9
+.)
+
+§B.2 — identical prompt body.
+Adopted. The acceptance leg already builds the short-context prompt as a
+byte-exact prefix
+of the long-context prompt (that is its whole design), so only context length varies there. For the warmed decode leg, the warm-up prompts will be
+one shared body differing only in the unique head marker
+— I am stating that as what this run will do, not as a property of the last one.
+
+§B.3 —
+max_num_batched_tokens
+, config table, KV groups.
+Collected verbatim into the run report (not from notes).
+
+§B.4 — DSPARK mean acceptance length per tier.
+Reported per tier where the tier emits decoder statistics; if a tier does not, I will say so per row rather than interpolate.
+
+§B.5 — GPU telemetry during the run
+(
+memory.used, clocks.sm, power.draw
+, 2 s interval) so the Max-Q clock-down hypothesis can be checked against the decode drift rather than assumed.
+
+§C. Needs a container restart → the later destructive slot
+
+Your §3 "cache verification" and §4A/§4B and §2 are
+launch-arg changes
+, so they cannot be done against this container:
+
+cached_tokens
+per request
+— requires
+--enable-prompt-tokens-details
+on the server. It is
+not set
+here, which is also why our earlier
+prompt_tokens_details: null
+reading was not evidence about caching (that correction is in
+#issuecomment-6183079036
+and
+#issuecomment-6160123631
+). Once the flag is on, the warm/cold claim becomes checkable per request instead of by wall-clock inference.
+
+CUDA graph capture size 64 vs 1024 A/B
+— two restarts, and a startup on this stack is expensive (706 s model load, plus graph capture finishing ~1.6 min after the KV-pool line), so it is a scheduled pair rather than an inline A/B.
+
+Engram offload A/B and native CPU KV offload / LMCache
+— both need different launch args or a different build. If the current build has no flag for Engram host-memory lookup tables, I will say that explicitly rather than approximate it.
+
+I will report these in the same round as the restart, so the comparison table stays on one stack — I would rather not mix a restarted configuration into the current container's rows.
+
+§D. Not established (so nobody reads more into the numbers than they carry)
+
+Per-card VRAM during load
+— the 49.44 GiB is the vLLM load line, not a sampled peak; the 9.48 GiB graph figure is likewise a reported pool, not an observed maximum.
+
+Per-request traces
+— nothing here is per-request; all figures are process-level.
+
+The KV group split behind the 1.69× ratio
+— pending §B.3.
+
+Anything at C > 14.9 concurrent at 200K
+— that is the pool ceiling; above it the scheduler queues and walls stop being throughput. Our earlier table (
+#issuecomment-6154536398
+) carries that caveat, and the C64 row in it is the one I already labelled as prefill-dominated rather than decode.
+
+Thanks again for the precise asks — the memory-breakdown one in particular forced a number I had been quoting without decomposing.
+
+Hemanthdamineni
+
+commented
+
+on
+
+Oct 16, 2026
+
+Hemanthdamineni
+
+on Oct 16, 2026
+
+More actions
+
+Thanks a lot
+@Lei-010
+. The §A / §B / §C split is really clear, and §A answered more than I expected from a live container. I really appreciate the time you're putting into this.
+
+Since restarts are expensive on your side (706 s load plus graph capture), I wanted to share a few ideas
+before
+the next restart slot, in case any of them can fit into that same window. I've tried to base each one on vLLM's own DeepSeek-V4.1-Flash
+recipe
+and
+blog
+rather than on my own assumptions. This is entirely your production box and your time, so please treat all of it as optional suggestions and pick whatever is easy or interesting to you.
+
+What I'm hoping to understand
+
+My underlying question is whether something like
+64 concurrent × 200K
+could be co-resident on 8× RTX PRO 6000, or what specifically prevents it. I tried a rough per-GPU budget, and I'd be grateful for corrections:
+
+Component (per GPU)
+
+Rough estimate
+
+Basis
+
+Usable at
+--gpu-memory-utilization 0.95
+
+~90.8 GiB
+
+95.6 GiB × 0.95
+
+Weights with Engram offloaded
+
+~36.6 GiB
+
+(476 − 183.1 GiB Engram) ÷ 8, from the recipe's checkpoint breakdown
+
+CUDA graph pool at capture size 384
+
+~4–5 GiB (my guess)
+
+scaled from your 9.48 GiB at 1024
+
+Activation + non-torch
+
+~8–10 GiB (my guess)
+
+from your remainder
+
+Left for KV
+
+~39 GiB
+
+Since the vLLM blog notes that V4.1's shared KV latent is replicated on every rank under TP, each GPU would need to hold all 64 × 200K = 12.8M tokens. That works out to roughly
+≤ 3.3 KB/token
+. Your current figure is 5,931 B/token, while vLLM's H200 TP4 row (38.5 GiB KV ≈ 20M tokens) suggests about 2.07 KB/token at fp8. So it seems possible in principle, but I may well be missing something specific to SM120 or this build.
+
+Things that might explain the gap (if you get a chance to check)
+
+SWA bounded replay.
+The vLLM blog mentions that without it, prefix caching stores uncompressed FP8 SWA KV at every hit boundary (more than 10× global KV). It's on by default in newer builds. I wondered whether
+dev253
+has it, and whether passing
+--swa-bounded-replay
+explicitly is accepted.
+
+Engram placement.
+The checkpoint includes 183.1 GiB of Engram tables, and the recipe's NVIDIA TP configs offload them with
+--engram-config '{"cpu_offload":true}'
+. I didn't see it in your launch command, and the recipe mentions some builds set the default through
+VLLM_PLE_CPU_OFFLOAD
+. Your 49.44 GiB/GPU sits between "fully resident" (~59.5) and "fully offloaded" (~36.6), so I wasn't sure what's actually on the GPU. Your earlier SGLang setup used
+offload_mode=ram
+, so the host may already have the ~183 GiB of RAM this needs.
+
+KV groups.
+If convenient, the resolved
+kv_cache_config
+lines at
+VLLM_LOGGING_LEVEL=DEBUG
+would show per-group page sizes, any padding-layer warning, and whether DSpark's KV shares the pool. That might also explain the 78,783 × 64 vs 2,983,601 difference.
+
+Indexer dtype.
+vLLM's Blackwell configs use
+indexer_kv_dtype: mxfp4
+. I'm curious whether SM120 accepts it, but completely fine to skip.
+
+Graph sizing.
+The recipe sizes capture as seqs × 6 (with DSpark), so 1024 corresponds to ~128 sequences. For 64,
+--max-num-seqs 64 --max-cudagraph-capture-size 384
+might return some of the ~7.5 GiB difference between estimated and actual graph memory.
+
+In case it's a useful starting point, this is the command I had in mind. It's derived from the recipe, not validated on SM120, so please adjust freely:
+
+VLLM_LOGGING_LEVEL=DEBUG VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+vllm serve /models/DeepSeek-V4.1-Flash --served-model-name deepseek-v4.1-flash \
+--trust-remote-code --tensor-parallel-size 8 \
+--engram-config
+'
+{"cpu_offload":true}
+'
+\
+--swa-bounded-replay \
+--kv-cache-dtype fp8 --block-size 64 \
+--attention-config
+'
+{"indexer_kv_dtype":"fp8"}
+'
+\
+--speculative-config
+'
+{"method":"dspark","num_speculative_tokens":5}
+'
+\
+--max-model-len 1048576 --max-num-seqs 64 \
+--max-cudagraph-capture-size 384 --max-num-batched-tokens 8192 \
+--gpu-memory-utilization 0.95 \
+--enable-prompt-tokens-details \
+--tokenizer-mode deepseek_v41 \
+--enable-auto-tool-choice --tool-call-parser deepseek_v41 \
+--reasoning-parser deepseek_v41
+
+(
+--language-model-only
+would free a bit more memory, but only if your traffic is text-only.)
+
+What would be most helpful to see, if time allows
+
+A memory table that adds up.
+A per-GPU breakdown that sums to the
+nvidia-smi
+figure: context, weights (noting whether the drafter and ViT are included), any resident Engram, graph pool, activation and non-torch (the DEBUG memory-profiling line prints these), KV pool, and whatever small remainder is left. Also the
+GPU KV cache size
+and
+Maximum concurrency
+startup lines.
+
+One change per startup, if feasible.
+The startup lines alone (no benchmark) for: baseline + DEBUG logging, then + Engram offload, then + the seqs/graph sizing, then + bounded replay. That would show what each change contributes. I completely understand if that's too many restarts. Just the first and last would already tell a lot, and a persistent
+/root/.cache/vllm
+mount might speed up the later ones.
+
+The warm decode leg up to C64.
+C1 / C8 / C14 / C32 / C64 at ~200K, with prompts sharing one body and differing only in the head marker, prefilled first and then decoded together with
+max_tokens=2048
+, and
+cached_tokens
+confirming they're warm. Sampling
+num_requests_running
+,
+num_requests_waiting
+,
+kv_cache_usage_perc
+,
+num_preemptions_total
+and
+nvidia-smi
+(memory, clocks, power) every couple of seconds would show whether all 64 are truly resident and whether any preemption happens. DSpark acceptance per tier would be a nice bonus.
+
+A note on the cold ladder.
+Even if everything fits, 64 × 200K cold is about 12.8M tokens of prefill (~15 min at ~14K tok/s). Long client timeouts might help so slow first tokens don't look like failures.
+
+If 64 doesn't fit under TP8 even after these, it would really help to know whether a given item is unsupported on this build, just not tried yet, or not something you'd want to run in production. All three are completely reasonable answers. I also wondered whether a data-parallel attention layout (e.g. TP4 × DP2) starts on SM120, since that's how vLLM avoids the KV replication. If it fails, the error could be valuable for the vLLM SM120 tracker (#56892).
+
+I'm not expecting FP4 KV. The 890 B/token figure depends on FlashMLA's NVFP4 path, and even vLLM's B200/GB200 recipe uses fp8.
+
+Thank you again for all the effort and care in this thread. The corrections and clear scoping have made it the most trustworthy SM120 V4.1 reference I've come across. No rush at all; I'll look forward to whatever you're able to share from the next restart slot.
+
+Lei-010
+
+commented
+
+on
+
+Oct 17, 2026
+
+Lei-010
+
+on Oct 17, 2026
+
+Author
+
+More actions
+
+Update from the 10-17 restart window: DSpark spec-depth sweep (k=2…6), one cudagraph-capture OOM, and post-fix throughput
+
+Thanks
+@Hemanthdamineni
+— your 10-16 list is queued (see §Status at the end). This window went to a production-tuning goal, so what follows is one-change-per-leg data of a different kind: the
+speculative depth
+sweep, plus a startup failure that is worth reporting on its own.
+
+Setup (every leg identical except one flag)
+
+8× RTX PRO 6000 (SM120, PCIe, no NVLink), TP8, image
+vllm-openai:dev253-fi071rc5-dsv41
+(local build; nightly base
+7d0b4e5
+, FlashInfer 0.7.1rc2)
+
+per leg:
+fresh container
+,
+--speculative-config '{"method":"dspark","num_speculative_tokens":<k>}'
+,
+--max-cudagraph-capture-size 1024
+,
+VLLM_USE_FLASHINFER_SAMPLER=0
+,
+--gpu-memory-utilization 0.98
+; everything else byte-identical (
+--kv-cache-dtype fp8 --block-size 64 --max-model-len 1048576 --attention-config '{"indexer_kv_dtype":"fp8"}'
+)
+
+load per leg: 30 s greedy c8 (512-token completions), 30 s sampled c8 (temp 1.0 / top_p 1.0), then 3× 256-token single-stream warm runs
+
+window: 2026-10-17 20:50→22:44 CST (12:50→14:44 UTC)
+
+Results
+(
+engine
+= all 8 streams;
+per-stream
+= median single request)
+
+k
+
+engine tok/s (greedy c8)
+
+per-stream
+
+accept
+
+tok/step
+
+iter ms
+
+single-stream (warm)
+
+sampled c8 per-stream
+
+2
+
+612.6
+
+83.5
+
+58.9%
+
+2.18
+
+28.5
+
+128.4
+
+32.7
+
+3
+
+605.0
+
+82.4
+
+50.8%
+
+2.52
+
+33.3
+
+180.0
+
+75.0
+
+4
+
+477.0
+
+61.5
+
+43.3%
+
+2.73
+
+45.8
+
+184.6
+
+72.5
+
+6
+
+407.6
+
+63.3
+
+31.0%
+
+2.86
+
+56.1
+
+179.5
+
+–
+
+5 (earlier run, same box)
+
+564.9 sustained
+
+70.6
+
+41.4%
+
+3.07
+
+–
+
+112–141
+
+–
+
+8 (earlier run, same box)
+
+−24% vs k=5
+
+–
+
+–
+
+–
+
+–
+
+–
+
+–
+
+What we trust from this: (1)
+the marginal cost of one extra draft position is far from linear
+— dropping k=4→3 removes one draft token but cuts iteration time 45.8→33.3 ms; (2) k=2 and k=3 tie within 1.3% on greedy c8, yet k=2 collapses under sampled c8 (32.7) and single-stream (128.4). We cannot explain that yet — happy to re-run if anyone finds it interesting; (3) the optimum is workload-shape-dependent, so we shipped
+k=3
+, not the greedy-argmax k=2.
+
+Startup failure at
+--max-cudagraph-capture-size 512
+(first boot of k=3 + sampler + cap512):
+
+torch.OutOfMemoryError
+on
+all 8 ranks
+inside
+Capturing decoder replay CUDA graphs
+(innermost frame
+mhc_shifted_post_pre
+), short by 20 MiB:
+88.26 GiB allocated by PyTorch, 3.21 GiB in private pools (CUDA Graphs), 3.16 GiB reserved-unallocated
+
+that boot had
+Available KV cache memory: 25.33 GiB
+— shrinking the capture size handed more memory to the KV pool, and then graph capture ran out
+
+the pool estimator is systematically off:
+CUDA graph pool memory: 4.39 GiB (actual), 7.81 GiB (estimated), difference: 77.8%
+at cap512; it was 78.8% at cap1024
+
+what boots (and is now in production):
+--gpu-memory-utilization 0.96
++
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+, same cap512/sampler/k=3 →
+Available KV cache memory: 23.88 GiB
+,
+GPU KV cache size: 4,321,853 tokens
+,
+Maximum concurrency for 1,048,576 tokens per request: 4.12x
+(≈5,935 B/token, consistent with the 5,931 B/token in §A)
+
+Post-fix verified throughput
+(30 s legs against the live container): single-stream 181.2 (186.3 / 189.5 / 172.9), greedy c8 82.2 per-stream, engine 640.2, accept 50.1%, iter 31.2 ms, sampled c8 78.2 per-stream (48.5%), TTFT 0.11–0.12 s. Versus the previous production config (k=5, no sampler, cap1024): single-stream 130→181 (+39%), engine 565→640 (+13%).
+
+§Status of your 10-16 asks
+— none ran in this window; they are the plan for the next destructive slot: DEBUG memory table,
+--engram-config '{"cpu_offload":true}'
+,
+--max-num-seqs 64 --max-cudagraph-capture-size 384
+,
+--swa-bounded-replay
+, the C1→C64 warm ladder at ~200K, an
+indexer_kv_dtype=mxfp4
+probe, and a TP4×DP2 attempt. Two things may matter for your modelling: (a) the cap512 OOM above suggests graph sizing and KV sizing interact exactly as you suspected in item 5; (b) DeepSeek released
+V4.1-Flash-1017
+today (2026-10-17) and its
+config.json
+
+drops
+the indexer fields this checkpoint carries (
+index_topk
+,
+sliding_window
+,
+compress_ratios
+), so the indexer question may change shape — we switch to it in the next slot with the same k=3 + sampler + cap512 config and will post the startup lines.
+
+Sign up for free
+
+to join this conversation on GitHub.
+
+Already have an account?
+
+Sign in to comment
+
+Metadata
+
+Metadata
+
+Assignees
+
+No one assigned
+
+Labels
+
+No labels
+No labels
+
+Type
+
+No type
+
+Projects
+
+No projects
+
+Milestone
+
+No milestone
+
+Relationships
+
+None yet
+
+Development
+
+No branches or pull requests
+
+Issue actions
+
+Open in GitHub Copilot app
+
+You can’t perform that action at this time.

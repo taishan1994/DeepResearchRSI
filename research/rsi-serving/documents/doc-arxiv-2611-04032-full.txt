@@ -1,0 +1,4351 @@
+ 
+ 
+ 
+ 1Introduction 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Skip to main content 
+ 
+ 
+ 
+ Report GitHub Issue
+
+ × 
+ 
+
+ 
+ Title: 
+ 
+
+ Content selection saved. Describe the issue below:
+
+ Description: 
+ 
+ 
+
+ 
+ Submit without GitHub 
+ Submit in GitHub 
+ 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Why HTML? 
+ 
+ Report Issue 
+ 
+ Back to Abstract 
+ 
+ 
+ Download PDF 
+ 
+ Contents 
+ 
+ 
+ Reading mode 
+ 
+ 
+ Colour theme 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ Abstract 
+
+ 1 Introduction 
+
+ 2 Background 
+
+ 3 Design 
+ 
+ 3.1 Measure sparsely, transfer analytically 
+ 
+ 3.1.1 Anchors 
+
+ 3.1.2 Transfer laws 
+
+ 
+
+ 3.2 Reduce, measure, restore 
+
+ 3.3 The configuration space 
+
+ 3.4 Discrete-event simulator (DES) 
+
+ 3.5 KV offload engines 
+
+ 3.6 Speculative decoding without an anchor 
+
+ 
+
+ 4 The Tuning Agent 
+ 
+ 4.1 Mix planner 
+
+ 
+
+ 5 Evaluation 
+ 
+ 5.1 Methodology 
+
+ 5.2 Collective communication 
+
+ 5.3 Pipelines and multiple nodes 
+
+ 5.4 Fixed-length workloads 
+
+ 5.5 Expert load under EP 
+
+ 5.6 Variable-length agentic workloads 
+
+ 5.7 Ranking fidelity 
+
+ 5.8 Pareto frontiers 
+
+ 5.9 Speculative decoding 
+
+ 5.10 Disaggregated serving 
+
+ 5.11 Agent case studies 
+
+ 
+
+ 6 Related Work 
+
+ 7 Limitations 
+
+ 8 Conclusion 
+
+ References 
+
+ A Design details 
+ 
+ A.1 Discrete-event simulator 
+
+ A.2 Speculative decoding model 
+
+ 
+
+ B Component models 
+ 
+ B.1 Decode shard per doubling 
+
+ B.2 Communication 
+
+ B.3 MoE expert load 
+
+ B.4 Pipeline parallelism 
+
+ B.5 Memory and capacity 
+
+ B.6 KV cache below HBM 
+
+ 
+
+ C Pipeline parallelism and multiple nodes 
+ 
+ C.1 Pipeline parallelism 
+
+ C.2 Serving across nodes 
+
+ 
+
+ D Additional results 
+ 
+ D.1 Narrower anchors 
+
+ D.2 Deployment mix on the full trace 
+
+ D.3 Agent searches 
+
+ D.4 Disaggregated layouts 
+
+ 
+
+ E Harvest checks 
+
+ F Per-configuration agentic results 
+
+ G Component and collective checks 
+ 
+ G.1 Component checks 
+
+ G.2 Collective communication 
+
+ 
+
+ H Pipeline-parallel measurements 
+
+ I Anchor artifact 
+
+ J Tuning agent details 
+
+ K Reproduction 
+
+ 
+ 
+ 
+ 
+ 
+ License: CC BY-NC-ND 4.0
+ 
+ 
+arXiv:2611.04032v1 [cs.AI] 02 Nov 2026
+
+ 
+ 
+ 
+
+   
+ 
+ ROCm InferaSim: Cut LLM Serving Trial Costs
+ and Deploy the Best Configuration 
+
+   
+ 
+ Anshu Raina   Yao Fu   Zhang Jiejing   Peyman Razaghi
+ 
+Shiksha Patel   Ravi Gupta   Deval Shah   Adeem Jassani
+ 
+Subhajit Dutta Chowdhury   Lorri Rao   Kailash Gogineni
+ 
+Zhenyu Gu   Onil Gunawardana   Emad Barsoum 
+
+ 
+ Advanced Micro Devices Inc. (AMD)
+
+ 
+ Correspondence to: anshu.raina@amd.com 
+
+ Abstract
+
+ 
+ Serving a large language model (LLM) efficiently requires making several key decisions: the serving engine, how the model is split across graphics processing units (GPUs), numeric precisions, scheduler settings, speculative decoding, key–value (KV) cache management, and prefill–decode disaggregation. The best configuration depends on the model, hardware, workload, and serving objective (interactivity, time to first token, or throughput). Today, operators typically rely on trial and error to identify the best combination, with each experiment occupying one or more nodes for several minutes. Exhaustively evaluating all candidate configurations in our study would require approximately 25,000 GPU-hours. We propose ROCm InferaSim, a framework that predicts LLM serving performance using a few short measurements. Many configuration choices, such as batch size, prompt length, and GPU count, change the amount of work performed by each GPU without changing the underlying GPU kernels. ROCm InferaSim benchmarks each distinct set of kernels once, on at most one node, and we call this measurement an anchor . Analytical laws carry the anchor to other deployments (a configuration on a given set of GPUs) that run the same kernels. For deployments spanning multiple nodes, ROCm InferaSim first reduces the configuration to a single-node equivalent, measures its performance, and then analytically scales the results to the full deployment. A simulator replays realistic multi-turn serving traffic, while an automated tuning agent uses the predicted performance to search for efficient serving configurations. We evaluate on AMD Instinct™ MI355X GPUs with three engines (vLLM, SGLang, and ATOM). Measuring 11 anchors took 9.1 GPU-hours; measuring the 226 fixed-length configurations they cover took 204 GPU-hours. On 172 configurations that pass our measurement filters, time per output token has 8.1% median error. On a multi-turn coding workload, predictions are within 8% on throughput. For 159 additional deployments that run prefill and decode on separate GPUs, throughput is within 5.5%, although no such deployment is used as an anchor. Using predictions alone, among configurations an anchor covers, a short list of the mix planner’s five best candidates contains a deployment within 12% of the best feasible pairings of model and latency target.
+
+ 
+
+ 
+ 1 Introduction
+
+ 
+ Serving a large language model (LLM) efficiently is a configuration problem. An operator picks a serving engine, such as vLLM  [ 26 ] or SGLang  [ 60 ] , and decides how to split the model across graphics processing units (GPUs) (Figure  2 ). Tensor parallelism (TP) splits every layer across GPUs  [ 47 ] . Expert parallelism (EP) places whole experts of a mixture-of-experts (MoE) model on different GPUs  [ 27 ] . Data parallelism (DP) gives each GPU its own requests, and engines often apply it to the attention layers only (attention DP)  [ 12 , 60 ] . Pipeline parallelism (PP) gives each GPU a block of consecutive layers  [ 21 ] . TP4 is TP across four GPUs; EP8 and PP2 read alike. The operator also picks precisions for weights, activations and the key–value (KV) cache, scheduler limits, speculative decoding  [ 28 ] , whether prefill and decode run on separate GPUs ( disaggregated ) or the same ones ( colocated )  [ 40 , 61 ] , and the number of replicas. These choices interact, and the best combination changes with the model, the hardware and the traffic. The goal is the cheapest deployment meeting a latency service-level objective (SLO).
+
+ 
+ Figure 1: ROCm InferaSim at a glance. (a) GPU-hours to measure every candidate versus only ROCm InferaSim’s anchors. (b) Median prediction error on each validation set (§ 5 ). Agentic sets show the error factor of § 5.1 minus one. Tails are 99th-percentile (p99) time per output token (TPOT). 
+ 
+ 
+ Trial and error is expensive.   Today, each trial loads the model, starts the engine and runs a benchmark. Our measurements show that a configuration holds its GPUs for a median 3.4 minutes, plus engine start-up. Frontier models increasingly require multiple nodes. Evaluating the 226 fixed-length configurations (fixed prompt and output lengths) in our study consumed 204 GPU-hours. Measuring all candidates of the searches in § 5.11 would take about 25,000 GPU-hours (Figure  1 a). Operators therefore tune by hand and deploy the best of a few trials.
+
+ 
+ Existing tools fall short.   Performance models could eliminate the need for repeated trials, but existing approaches have two main limitations. Operator-level simulators such as Vidur  [ 2 ] profile each operator and must profile again whenever the model, engine, or kernel library changes. Vidur models only dense layers, and none of these simulators ships data for AMD GPUs (§ 6 ). Analytical models  [ 58 , 8 , 59 ] compute a step’s time from hardware peak rates (roofline arithmetic  [ 49 ] ). Although these models capture how computational workloads decrease as more GPUs are added, they overlook the fixed per-step cost of kernel launches, synchronization, sampling, and scheduling. This cost remains largely unchanged as the GPU count increases and therefore strongly influences how execution time scales. Ignoring it and naively halving a measured four-GPU DeepSeek-V4-Pro step time to predict eight-GPU performance gives 44% median error.
+
+ 
+ Our approach.   ROCm InferaSim rests on the key observation that many serving choices change how much work each GPU performs without changing which kernels run. Batch size, context length, TP/EP/PP width, replica count, arrival rate and keeping the KV cache in host memory fall into this category. In contrast, numerical precision, attention implementation, graph-capture mode, speculative decoding method and inference engine can alter the kernels themselves. We call the kernels that one engine step launches its kernel set . ROCm InferaSim profiles each kernel set once in a short run on at most one node. We call this measurement an anchor . Its analytical transfer laws predict other deployments with the same kernel set. They keep the fixed per-step cost of kernel launches, synchronization, sampling and scheduling unchanged while scaling only the GPU-divisible work. On the same four-to-eight-GPU DeepSeek-V4-Pro transfer, this reduces median error to 0.9% (§ 3.1.2 ).
+
+ 
+ Beyond one node.   We handle a deployment larger than a node in three steps adapted from training performance prediction  [ 43 ] . We reduce it to a configuration that fits on one node, measure that, and analytically restore what the reduction removed, such as pipeline stages, cross-node communication and wider sharding (§ 3.2 ). We also model factors specific to inference: disaggregated pools and their KV-cache transfers, KV caches in host memory, and request queueing.
+
+ 
+ Agentic traffic and search.   These step predictions describe how a deployment executes, but choosing a deployment also requires modeling the traffic it serves, especially agentic sessions that pause between turns and reuse long prefixes. ROCm InferaSim embeds its step model in a discrete-event simulator that captures queueing, batching and prefix reuse. A tuning agent and mix planner then search these predictions instead of evaluating every candidate on GPUs.
+
+ 
+ Contributions.   This paper makes four contributions:
+
+ 
+ • 
+ 
+ Anchors and analytical transfer laws that predict every deployment sharing an anchor’s kernel set from one measurement (§ 3.1 –§ 3.1.2 ).
+
+ • 
+ 
+ A reduce–measure–restore method for serving that covers pipelines across nodes, disaggregated prefill and decode pools, and KV caches in host memory (§ 3.2 –§ 3.5 ).
+
+ • 
+ 
+ A simulate mode that predicts with no measurement at all, used to rank candidates within one engine, and a tuning agent and mix planner that search with the predictor (§ 4 ).
+
+ • 
+ 
+ An evaluation on AMD Instinct MI355X GPUs with vLLM, SGLang, and the ATOM engine from AMD  [ 6 ] , on fixed-length, agentic and disaggregated traffic (§ 5 , Figure  1 b).
+
+ 
+
+ 
+ 2 Background
+
+ 
+ Engines and metrics.   Serving engines process concurrent requests using continuous batching  [ 57 ] , adding and removing requests between steps as they arrive and finish. Each step advances every running request by one token and can also process chunks of new prompts, up to a token budget  [ 4 , 3 ] . Processing a prompt is prefill , and generating output tokens is decode . The KV cache is stored in pages  [ 26 ] , and requests that share a prefix reuse its cached KV  [ 60 , 42 ] . Users see time to first token (TTFT), time per output token (TPOT, per request) or inter-token latency (ITL, the gap between consecutive tokens), and throughput. TPOT and ITL have similar means but different tails. TTFT depends mostly on how long a request waits.
+
+ 
+ Agentic traffic.   Unlike fixed-length benchmarks, which issue independent requests, coding agents generate multi-turn sessions. A turn’s prompt can reach hundreds of thousands of tokens, much of it a prefix processed during earlier turns. Agents also pause to “think” between turns, creating dependencies in request timing. Agentic workloads therefore combine prefix reuse with interdependent requests. We evaluate both fixed-length and agentic traffic.
+
+ 
+ four GPUs: GPU 0 GPU 1 GPU 2 GPU 3 TP: split every layer 1 4 \frac{1}{4} of W W 1 4 \frac{1}{4} of W W 1 4 \frac{1}{4} of W W 1 4 \frac{1}{4} of W W EP: place whole experts E i E_{i} E 1 , 2 E_{1,2} E 3 , 4 E_{3,4} E 5 , 6 E_{5,6} E 7 , 8 E_{7,8} attention DP: own requests req. A req. B req. C req. D PP: own a block of layers L i L_{i} L 1..8 L_{1..8} L 9..16 L_{9..16} L 17..24 L_{17..24} L 25..32 L_{25..32} disaggregation: prefill pool decode pool KV cache 
+ 
+
+ Figure 2: Forms of parallelism, each on four GPUs. Disaggregation runs prefill and decode in separate pools and sends the KV cache from one to the other. Replicas repeat a layout behind a router. 
+ 
+
+ 
+ 3 Design
+
+ 
+ 1 Serving spec model ⋅ \cdot hardware ⋅ \cdot recipe ⋅ \cdot workload → \rightarrow op graph 2 Sparse anchor (§ 3.1.1 ) one step sweep, ≤ \leq 1 node per kernel set 3 Kernel models GEMM, attention, comm., pipeline (simulate mode) 4 Step cost model step ( b , ctx , TP , EP , PP ) (b,\text{ctx},\text{TP},\text{EP},\text{PP}) + collectives + memory 5 Analytical predictor means, memory, capacity 6 Discrete-event simulator (§ 3.4 ) sessions, queues, cache 7 Search (§ 4 ): Pareto sweep / tuning agent short list → \rightarrow confirm on hardware reduce (§ 3.2 ) transfer (§ 3.1.2 ), restore (§ 3.2 ) 
+ 
+
+ Figure 3: ROCm InferaSim architecture. The step cost model (4) is calibrated either by an anchor (2) measured on a target reduced to at most one node (anchored mode) or by kernel models alone (3, simulate mode). The analytical predictor (5) and the discrete-event simulator (6) both use it, and both feed the search (7). 
+ 
+ 
+ Figure  3 shows the structure of ROCm InferaSim. At its center is a step cost model that predicts the time of one prefill, decode or mixed step for any batch, context length and parallel layout. It runs in one of two modes. In anchored mode it is calibrated by an anchor (§ 3.1.1 ). In simulate mode , ROCm InferaSim predicts step time without a GPU measurement. It uses the serving specification and the engine’s model code to reconstruct the operations executed in one step. It predicts general matrix multiplication (GEMM) times with Origami  [ 48 ] , and our own analytical models price attention, the other operators, communication (§ 5.2 ) and pipeline stages (§ 5.3 ), with a minimum cost per kernel launch. Both modes use the same step model. Anchored mode uses the measured anchor step time as its baseline and applies analytical models to predict how that time changes for widths, batch sizes or context lengths not covered by the anchor. Simulate mode has no measured baseline, so its predictions are used only to rank candidates (§ 5.7 ).
+
+ 
+ 3.1 Measure sparsely, transfer analytically
+
+ 
+ ROCm InferaSim sorts serving choices into two kinds. A choice is anchor-defining if it changes the kernels a step runs, and each combination of such choices needs its own anchor. A choice is transferable if it changes only how much work each GPU does, and is predicted from an existing anchor.
+
+ 
+ Anchor-defining choices.   These are the model checkpoint, the precision of weights, activations, KV cache and experts, the attention and MoE implementations, graph capture, the speculative method, the engine and the GPU type.
+
+ 
+ Transferable choices.   These are batch size and concurrency, prompt and context length, the TP, EP, PP and attention-DP widths, the number of replicas, the arrival pattern, and KV caching in host memory. The laws of § 3.1.2 keep the fixed per-step cost and scale the rest.
+
+ 
+ 3.1.1 Anchors
+
+ 
+ An anchor times complete engine steps for one kernel set, and every configuration with that kernel set is predicted from it. We call the measurement run a harvest , and the ROCm InferaSim tool that performs it the harvester . The harvester starts the engine with the anchor’s configuration on idle GPUs, runs the sweeps below and writes the results to a JavaScript Object Notation (JSON) file (Appendix  I , uploaded separately). The file holds:
+
+ 
+ • 
+ 
+ a decode sweep with the median decode step time at each batch size the engine captures as a graph;
+
+ • 
+ 
+ a prefill sweep over five prompt lengths, fitted as T ⁡ ( n ) = F + c 1 ​ n + c 2 ​ n 2 T(n)=F+c_{1}n+c_{2}n^{2} for n n prompt tokens;
+
+ • 
+ 
+ an optional probe of several prompts processed in one step;
+
+ • 
+ 
+ a signature of what transfer relies on: engine version, prompt length, whether real weights were loaded, whether prefix caching was off, and the captured batch sizes.
+
+ 
+
+ 
+ When an anchor applies.   An anchor is used for a target only if all its anchor-defining fields match the target’s. ROCm InferaSim checks these fields one by one. It does not verify from a kernel trace that the target runs the same kernels. It refuses an anchor from another GPU type or engine and flags one used outside its measured range (Appendix  E ). Anchors are cached by kernel set and TP width, and each pair is measured once. This paper uses 75 cached anchors.
+
+ 
+ 3.1.2 Transfer laws
+
+ 
+ Decode across TP width.   Let s w ​ ( b ) s_{w}(b) be the measured decode step time at TP width w w and batch b b . Weight reads and matrix multiplications are split across more GPUs as TP grows, so that part of the step shrinks. The fixed per-step cost does not. Dividing the whole step by the width ratio, s w ′ = s w ​ w / w ′ s_{w^{\prime}}=s_{w}\,w/w^{\prime} , wrongly shrinks both parts. ROCm InferaSim instead keeps the fixed part f f , taken from the anchor’s own batch sweep, and scales only the remainder:
+
+ 
+
+ 
+ 
+ s w ′ ​ ( b ) = f + ( s w ​ ( b ) − f ) ⋅ ρ w → w ′ ​ ( b ) . s_{w^{\prime}}(b)=f+\bigl(s_{w}(b)-f\bigr)\cdot\rho_{w\to w^{\prime}}(b). 
+ 
+ (1) 
+ 
+ 
+ Here f f is the cheapest step of the anchor’s decode sweep (its batch-1 step), and ρ \rho is how much the remainder shrinks from width w w to w ′ w^{\prime} . By default ρ = w / w ′ \rho=w/w^{\prime} . Where the same setup was also harvested at half the anchor’s width, ρ \rho is measured instead: the per-doubling shrink of s ⁡ ( b ) − s ⁡ ( 1 ) s(b)-s(1) between the two widths, at each b > 1 b>1 whose excess is at least 1 ms, clamped to [ 0.5 , 1 ] [0.5,1] and raised to the number of doublings (Appendix  B.1 ). As a check, we moved a DeepSeek-V4-Pro TP4 anchor to TP8 and compared with measured TP8 steps at batches 1–64. Eq.  1 has 0.9% median error. Two simpler transfers do worse (Table  18 ). Halving the TP4 step has 44.1% error. Subtracting simulate mode’s predicted TP4-to-TP8 drop from the measured TP4 step has 18.5%, because simulate mode shards the fixed cost too.
+
+ 
+ Prefill across TP width.   Prefill follows the same idea. The fixed term F F is kept and the per-token terms c 1 c_{1} and c 2 c_{2} are scaled with width. For DeepSeek-V4-Pro, solving the TP4 and TP8 prefill steps for F F gives 146.9 ms at 4k-token prompts and 145.9 ms at 8k, within 1%.
+
+ 
+ Decode is a staircase under graph capture.   The engine pads a batch up to the next captured graph size, so a batch of 33 costs as much as 40. Piecewise graphs exempt only attention, so steps soften but remain. ROCm InferaSim reads the measured step at the padded size instead of interpolating, which would make in-between batches look cheaper. Eager mode and batches above the largest graph are not padded.
+
+ 
+ Context length.   A decode step reads the KV cache of every running request and slows down as contexts grow. Anchors measured at two prompt lengths give the cost per extra token of context. Otherwise ROCm InferaSim uses the anchor’s context and reports the mismatch.
+
+ 
+ Expert imbalance.   With EP, an MoE layer finishes only when its busiest GPU finishes. Load is uneven by chance at small batch, and because a trained router prefers some experts. ROCm InferaSim records the router’s choices once per checkpoint and replays them for any EP layout, with or without expert-parallel load balancing (EPLB)  [ 14 ] , which replicates hot experts. The anchor often has a smaller EP than the target, so ROCm InferaSim computes imbalance at each EP. A single value would cancel in the ratio and make wider EP look free (§ 5.5 ). Simulate mode applies the same replay at the target EP, but we validate imbalance only in anchored mode. Without a recording, it samples a uniform router.
+
+ 
+ Other components.   Communication, pipeline hops, host time and KV transfers are priced from constants measured once per platform (Table  5 , Appendix  B ). Memory use is computed analytically and limits concurrency.
+
+ 
+ 3.2 Reduce, measure, restore
+
+ 
+ Table 1: Reduce, measure, restore. Each row is one way a target can be larger than its anchor. Columns give what the measured run keeps, how ROCm InferaSim adds the rest back, and the measured deployments (never anchors) that check it. 
+ 
+ 
+ 
+ 
+ 
+ Target exceeds the anchor in 
+ 
+ 
+ 
+ Reduced to 
+ 
+ 
+ 
+ Restored by 
+ 
+ 
+ 
+ Validated on 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ TP width 
+ 
+ 
+ 
+ TP/2 or narrower, same node 
+ 
+ 
+ 
+ fixed cost kept, rest scaled (Eq.  1 ) 
+ 
+ 
+ 
+ 90 TP8 deployments from TP4 anchors: 9.7% throughput error (§ 5.4 ) 
+ 
+
+ 
+ 
+ 
+ EP width 
+ 
+ 
+ 
+ the anchor’s EP (often 1) 
+ 
+ 
+ 
+ busiest-GPU imbalance at both EPs; the engine’s dispatch (App.  B.3 ) 
+ 
+ 
+ 
+ nine vLLM EP runs: 2.2% TPOT; three SGLang EP runs: within 2.5% 
+ 
+
+ 
+ 
+ 
+ Pipeline stages, across nodes 
+ 
+ 
+ 
+ PP1 on one node 
+ 
+ 
+ 
+ a network hop per stage, plus the host time PP exposes (Eq.  4 ) 
+ 
+ 
+ 
+ 24 two-node pipelines of 2–16 GPUs: 11.6% TPOT (§ 5.3 ) 
+ 
+
+ 
+ 
+ 
+ Communication across nodes 
+ 
+ 
+ 
+ none in the anchor 
+ 
+ 
+ 
+ α + m / B \alpha+m/B on in-node and network links (§ 5.2 ) 
+ 
+ 
+ 
+ 35 two-node collectives: within about 10% 
+ 
+
+ 
+ 
+ 
+ Disaggregated pools 
+ 
+ 
+ 
+ one replica, prefill and decode together 
+ 
+ 
+ 
+ one simulated pool per phase, each with its own layout, plus the KV transfer (§ 5.10 ) 
+ 
+ 
+ 
+ 159 splits of 8–24 GPUs: 5.5% throughput, 5.3% interactivity 
+ 
+
+ 
+ 
+ 
+ Host KV tier (offload) 
+ 
+ 
+ 
+ GPU memory only 
+ 
+ 
+ 
+ a host-memory level in the simulated cache, reloads over the host link (§ 3.5 ) 
+ 
+ 
+ 
+ 20 covered agentic offload runs (§ 5.6 ) 
+ 
+
+ 
+ 
+ 
+ Load and traffic 
+ 
+ 
+ 
+ a few batch sizes or one load 
+ 
+ 
+ 
+ simulated sessions, queues, prefix cache and replicas (§ 3.4 ) 
+ 
+ 
+ 
+ 172 fixed-length and 95 agentic deployments 
+ 
+
+ 
+ 
+ 
+ 
+ Some targets cannot run as they are on one node, because they are wider than the anchor, span nodes, split prefill and decode, or use host memory. For these ROCm InferaSim uses three steps adapted from training performance prediction  [ 43 ] . Figure  3 places reduction before the anchor (2) and restoration in the step model (4); Table  1 lists cases.
+
+ 
+ • 
+ 
+ Reduce the target to a run with the same kernels, using one replica with prefill and decode together, on at most one node, at one load or a few batch sizes. For a target that spans nodes, ROCm InferaSim removes pipeline stages first and then narrows EP and TP until the run holds one stage’s kernels.
+
+ • 
+ 
+ Measure that run once to obtain an anchor (§ 3.1.1 ).
+
+ • 
+ 
+ Restore the removed parts (communication, memory, scheduling) with analytical laws and measured constants.
+
+ 
+ Only the restore step depends on the target. One measurement serves all targets with the same kernels, and a 24-GPU disaggregated deployment costs no more to predict than one GPU. We rederive the training method’s TP, EP and pipeline laws for prefill and decode steps. Disaggregated pools, host-memory KV and queueing are new.
+
+ 
+ 3.3 The configuration space
+
+ 
+ A deployment combines the parallelism forms of Figure  2 with precisions, kernel implementations, scheduler settings, speculation and KV memory tiers. Table  4 (Appendix  A ) lists the choices and how each is priced. Each choice has its own cost term, and two layouts that differ in one choice get different predictions. Illegal combinations are removed (for example, TP must divide the number of attention heads), as are those that do not fit in GPU memory. The Pareto sweep enumerates the space for each model, and the agent searches spaces too large to enumerate (§ 4 ).
+
+ 
+ 3.4 Discrete-event simulator (DES)
+
+ 
+ Why simulate requests.   SLOs are usually set on tail latency, and tails have their own causes. In one measured run with 64 clients, the 99.9th-percentile ITL was 1392 ms while the median was 21.7 ms, because each newly admitted prompt stalls all running decodes. A model of averages cannot show this. The DES simulates individual requests and produces latency distributions.
+
+ 
+ What it simulates.   The DES advances a virtual clock through request arrivals, admission, steps and completions, and the step cost model prices each step. It mimics the target engine’s scheduler (token budget, chunked prefill, mixed steps and, for ATOM, separate prefill-only steps), a paged KV cache, a block-level prefix cache that evicts like the engines do, and routing across replicas. The cache hit rate is a result of the simulation, not an input. This scheduler model and the harvester’s launch code are the only engine-specific parts of ROCm InferaSim. Like our measurements, it runs C C clients that each send a new request when the previous one finishes, or open-loop arrivals.
+
+ 
+ Agentic sessions.   A session’s next turn is sent only after the previous turn finishes and its think time passes. Its prefix hit comes from a simulated cache replayed in the engine’s admission order (Appendix  A.1 ).
+
+ 
+ Host time.   Central processing unit (CPU) work per request (tokenization, detokenization, preparing uncached prompts) overlaps the GPU and is added only to TTFT and end-to-end latency. It is fitted per engine from the anchor runs. TTFT is reported both from admission, as engine benchmarks do, and from arrival, as users see it.
+
+ 
+ Scheduler settings.   Configurations that differ only in a scheduler setting run the same kernels, and the anchor alone cannot tell them apart. ROCm InferaSim models their effect on scheduling in the DES instead. These are the cap on running requests, the chunked-prefill budget, the attention-DP split of requests, the largest captured batch, and the KV capacity a KV-cache precision gives. This separates configurations that would otherwise tie (§ 5.7 ).
+
+ 
+ 3.5 KV offload engines
+
+ 
+ A multi-turn trace reuses long prefixes, but GPU high-bandwidth memory (HBM) holds the KV cache of only the most recent sessions. Offload engines add a second, larger tier in host dynamic random-access memory (DRAM): SGLang’s HiCache, LMCache  [ 34 ] (used by our ATOM runs), vLLM’s CPU offload connector and, for disaggregated SGLang, the unified memory and bandwidth pool (UMBP) of MoRI (Modular RDMA Interface)  [ 7 ] , a remote direct memory access (RDMA) library from AMD. Nearly two in five runs of our agentic data use one. Offloading changes which prompt tokens must be recomputed. It leaves the kernels alone and is transferable. The DES models it as a second cache level. Blocks evicted from HBM move to DRAM, and a DRAM hit is copied back before the request runs (Appendix  B.6 ).
+
+ 
+ 3.6 Speculative decoding without an anchor
+
+ 
+ Speculative decoding lets a small drafter propose several tokens that the main model then checks in one step. The drafters we measure are the models’ own multi-token-prediction (MTP) heads  [ 18 ] . An anchor measured with speculation already includes the drafter’s cost and acceptance. Otherwise ROCm InferaSim prices each drafter layer like a main-model layer of the same kind, and takes the number of accepted tokens at each draft depth from InferenceX  [ 46 ] , a public collection of measured serving runs, optionally adjusted per domain with SPEED-Bench  [ 1 ] . It picks the draft depth with the most tokens per unit of step time (Appendix  A.2 ).
+
+ 
+ 4 The Tuning Agent
+
+ 
+ A prediction takes under half a second and orders candidates well (§ 5.7 ), which makes it usable in place of trials inside a search. The ROCm InferaSim tuning agent searches the serving space this way (Figure  4 , details in Appendix  J ), following a two-phase design from automated tuning of distributed training. A lever is one setting the agent may change, together with its allowed values. There are 36 levers, covering the choices of Table  4 , such as parallel widths, disaggregation and its pools, precisions, kernel backends, graph capture, scheduler budgets, draft depth, communication algorithms and kernel fusions. The agent optimizes one of 24 predicted objectives, such as throughput, latency, tokens/s per user, capacity or cost.
+
+ 
+ Inputs model, cluster, objective, SLOs, 36 levers Phase 1: seeds one lever at a time from a safe baseline Score each trial legal? structure, HBM, SLO predict: anchor or simulate Ledger every trial, metrics, legality and reason Phase 2: LLM loop reads last 40 rows, writes hypotheses, 5–8 configs Best legal config + fusion opportunities → \rightarrow confirm on GPUs stop proposals 
+ 
+
+ Figure 4: The tuning agent. Seed trials and LLM proposals go through the same legality check and prediction. The LLM never estimates performance itself. Each trial is one prediction of under half a second, with no GPU. 
+ 
+ 
+ Two phases.   First, a fixed seed planner changes one lever at a time from a safe baseline. Each gain then has a clear cause. Then an LLM loop, written in DSPy  [ 23 ] in the style of ReAct  [ 53 ] , reads the latest 40 trials in the ledger (the trial log). It writes hypotheses and 5–8 partial configurations and evaluates them one at a time, combining levers the seeds change separately.
+
+ 
+ Legality.   A candidate that does not fit in 90% of HBM or misses a latency target is rejected outright, and the ledger records why. Since the LLM’s proposals go through the same checks and predictions as the seeds, it can waste trials but cannot return an illegal or unpriced configuration. For each (TP, PP, EP) shape, one anchor serves all scheduler and load trials. Where no anchor applies, the agent uses simulate mode, only for ranking.
+
+ 
+ Kernel fusions.   An engine build can fuse adjacent kernels into one. The agent offers six fusion patterns found in kernel traces (Table  21 ). Each is priced at 75–100% of its ideal saving, which is the launch cost of the removed kernels (Table  5 ) plus the intermediate data no longer written to and read back from memory. Every trial reports the legal fusions saving at least 2% of its decode step (Appendix  J ).
+
+ 
+ 4.1 Mix planner
+
+ 
+ An operator serving several models needs a deployment mix, with one configuration per model and user class. The mix planner uses four latency tiers (Table  15 ): realtime, interactive, responsive and bulk. Each tier sets a minimum per-user token rate ( interactivity ) and a maximum TTFT. The planner predicts every candidate on the agentic trace with the DES. A candidate qualifies if it meets the interactivity target and its predicted TTFT is at most half the limit, which covers the TTFT error we measure in § 5.6 . Among those within 5% of the best predicted throughput per GPU, it picks the one with most headroom.
+
+ 
+ 5 Evaluation
+
+ 
+ We first check the parts that no anchor contains, communication and pipelines across nodes (§ 5.2 –§ 5.3 ). We then measure prediction error on fixed-length and agentic traffic (§ 5.4 –§ 5.6 ), check whether predictions order candidates correctly (§ 5.7 ), and test Pareto frontiers, speculative decoding and disaggregated serving (§ 5.8 –§ 5.10 ). Finally we evaluate the planner’s choices and its cost (§ 5.11 ).
+
+ 
+ 5.1 Methodology
+
+ 
+ Setup.   All measurements use nodes of eight AMD Instinct MI355X GPUs (288 GB of HBM3E each, connected by AMD Infinity Fabric™ links), with recent vLLM, SGLang and ATOM builds on ROCm™ 7 software and graph capture on. The models range from large MoE models (DeepSeek-V4-Pro and -Flash, GLM-5.2, Kimi-K3, MiniMax-M3, Qwen3.5) to smaller ones such as Qwen3-14B, gpt-oss-120b and Llama-3.1-8B  [ 15 , 17 , 24 , 52 , 39 , 19 ] . Agentic runs replay the AgentX trace (§ 5.6 ), and 1k/1k means 1024 prompt and 1024 output tokens. Table  9 (Appendix  D ) lists the sets.
+
+ 
+ Metrics.   For fixed-length traffic we report the median absolute percentage error of mean TTFT, mean TPOT and output throughput. Agentic metrics vary by two orders of magnitude. For them we report an error factor , the geometric mean of max ⁡ ( y ^ / y , y / y ^ ) \max(\hat{y}/y,\,y/\hat{y}) over runs, where y ^ \hat{y} is predicted and y y measured. A factor of 1.00 is exact, and 1.10 means a typical 10% miss in either direction. We report accuracy for anchored mode, and ranking for both modes.
+
+ 
+ When an anchor covers a run.   An anchor covers a target if it has the same engine build and the same layout (TP may be narrower), and was measured within 4 × 4\times of the target’s concurrency. A narrower anchor must be a full batch sweep. Transferable choices such as prompt length, the KV tier, draft depth and replicas do not affect coverage. Covered targets use anchored mode. The rest are still projected in anchored mode from the nearest anchor of the same model, but only to rank, and are marked as such.
+
+ 
+ 5.2 Collective communication
+
+ 
+ Communication outside the anchor’s own GPUs, such as wider TP and EP groups and every transfer that leaves the node, comes from a model. We measured ROCm Communication Collectives Library (RCCL) collectives from 8 KiB to 1 GiB and vLLM’s custom all-reduce from 4 KiB to 8 MiB, on 2–8 GPUs and across two nodes over AMD Pollara network cards. On points not used for fitting, every collective, group size and link type is within about 10% mean error (Table  19 , Appendix  G ).
+
+ 
+ 5.3 Pipelines and multiple nodes
+
+ 
+ A simple pipeline model predicts that TPOT does not change with the number of stages, but measured SGLang TPOT grows by 920–1130  μ \mu s per stage. Each token passes every stage and returns from the last to the first, so ROCm InferaSim adds one transfer per stage, plus the host time that SGLang cannot hide under PP (Table  5 ). On three models at PP 1–8 this gives 2.3–9.2% median TPOT error, against 14.9–26.1% for the simple model. We also predicted 24 two-node pipelines (one stage per node, TP1–8 in each, 2–16 GPUs) from single-node anchors without PP. Their median error is 11.6% on TPOT and throughput (Appendix  C ). The hop between nodes costs about the same as one inside a node, which makes PP a natural way to span nodes.
+
+ 
+ 5.4 Fixed-length workloads
+
+ 
+ Figure 5: Predicted against measured throughput per GPU and interactivity for every scored run that is not an anchor: our 172 fixed-length runs, 262 InferenceX runs (159 of them disaggregated) and the 95 covered AgentX runs, all in anchored mode. Dotted lines show ± \pm 20%. 
+ 
+ 
+ Setting.   We score 172 measured MI355X serving configurations of eight models with 1024- or 8192-token prompts, 1024 output tokens, 1–256 concurrent requests, TP 2–8 and three engines. Eleven anchors cover them all.
+
+ 
+ Accuracy.   The median error is 8.1% on TPOT, 8.8% on throughput and 13.6% on TTFT (Figure  5 , per model in Table  10 , Appendix  D ). Of all configurations, 93% are within 20% on TPOT and 88% on throughput. TPOT and throughput are the most accurate because decode repeats one step that the anchor measures directly. Long prompts fare better: at 8192 tokens all three median errors are 6.3–6.9%.
+
+ 
+ Narrower anchors.   No anchor here uses more than half a node, so all 90 TP8 deployments are predicted from TP4 anchors. Their median throughput error is 9.7%, against 6.1% at the anchor’s own width (Table  14 , Appendix  D.1 ).
+
+ 
+ Tail latency.   On the 88 runs with at least 160 requests, the DES predicts the 99th percentile (p99) within a median 10.7% on TPOT, 9.8% on end-to-end latency and 13.8% on ITL. For comparison, repeated runs of one configuration differ by 1–4% on these p99s.
+
+ 
+ 5.5 Expert load under EP
+
+ 
+ Routing is skewed, and prompts matter.   We replayed the recorded router of three MoE checkpoints at EP8. For DeepSeek-V4-Pro at batch 64 the busiest GPU receives 1.4–1.8 × \times the mean routed tokens, against 1.2 × \times for a uniform router. In a prefill chunk it receives up to 2.1 × \times , against 1.02 × \times . The prompt text matters as much as the batch. Random tokens, which fixed-length benchmarks send, give the hottest expert 46 × \times its fair share in prefill, and real code spreads most evenly. Benchmarks on random tokens thus overstate production imbalance.
+
+ 
+ Accuracy.   Nine vLLM runs shard experts (DeepSeek-V4-Flash at TP4/EP4, DeepSeek-V4-Pro at TP8/EP8), each predicted from an anchor without EP. With busiest-GPU factors from the recorded routing, TPOT is within 2.2% and throughput within 2.1% (1.4% and 1.5% with a sampled uniform router). On SGLang, without an all-to-all backend, expert outputs combine with the TP all-reduce. Pricing that all-reduce brings three held-out SGLang EP runs within 2.5% with a uniform router and 10.5% with the recorded routing (Appendix  B.3 ).
+
+ 
+ 5.6 Variable-length agentic workloads
+
+ 
+ Table 2: Agentic AgentX replay on MI355X in anchored mode: error factor (1.00 is exact) on held-out configurations, predicted from 28 anchors. Covered runs share an anchor’s engine build, layout and precision and run within 4 × 4\times its session count. A run may appear in several rows. ITL plays the role of TPOT. 
+ 
+ 
+ 
+ Held-out set 
+ n n 
+ Tput 
+ ITL 
+ TTFT 
+
+ 
+ 
+ 
+ Covered, all 
+ 95 
+ 1.08 
+ 1.14 
+ 1.23 
+
+ 
+ ≤ 2 × \leq 2\times anchor’s sessions 
+ 38 
+ 1.07 
+ 1.11 
+ 1.19 
+
+ 
+ 2 2 – 4 × 4\times anchor’s sessions 
+ 57 
+ 1.08 
+ 1.16 
+ 1.26 
+
+ 
+ SGLang + HiCache 
+ 12 
+ 1.15 
+ 1.40 
+ 1.38 
+
+ 
+      host tier added to an anchor without one 
+ 5 
+ 1.06 
+ 1.17 
+ 1.42 
+
+ 
+ ATOM + LMCache 
+ 4 
+ 1.05 
+ 1.19 
+ 1.11 
+
+ 
+ vLLM + CPU offload 
+ 4 
+ 1.04 
+ 1.04 
+ 1.25 
+
+ 
+ different draft depth 
+ 2 
+ 1.08 
+ 1.06 
+ 1.15 
+
+ 
+ 
+ 
+ 
+ Setting.   We replay SemiAnalysis’s AgentX agentic coding trace  [ 45 ] through the AIPerf client  [ 36 ] , with its recorded think times, on 184 MI355X configurations. They cover six models (DeepSeek-V4-Pro, DeepSeek-V4.1-Flash, GLM-5.2, Kimi-K3, MiniMax-M3, Qwen3.5), three engines, TP2–TP8 with and without EP and attention DP, 1–384 concurrent sessions, host KV tiers, several draft depths, routers and 13 disaggregated deployments.
+
+ 
+ Anchors.   Each layout (model, engine build, precision and TP/EP/DP width) gets one anchor, fixed before any scoring. Among its runs without disaggregation or a host tier, it is the one closest to four sessions. No anchor is disaggregated. All runs use the model’s published drafter. Every anchor therefore includes speculation, and only a different draft depth is transferred. Five layouts ran only with a host KV tier, so their anchors include it. The other 156 are held out.
+
+ 
+ Accuracy.   On the 95 held-out runs that an anchor covers, anchored mode is within 8% on throughput, 14% on ITL and 23% on TTFT (error factors 1.08, 1.14 and 1.23, Table  2 ), across all six models and 1–384 sessions. Appendix  F splits them by model, engine and precision.
+
+ 
+ KV offload.   For the five SGLang runs whose host tier is added to an anchor measured without one, throughput is within 6% and ITL within 17%. Whether a turn’s prefix is still in HBM, in DRAM or gone depends on an eviction order the anchor never sees. On two runs with a different draft depth, throughput is within 8%.
+
+ 
+ Decode context parallelism.   Thirteen runs use decode context parallelism (DCP), which splits each request’s KV cache across GPUs during decode. They are GLM-5.2 on ATOM at TP4 with DCP4 and Kimi-K3 on vLLM at TP8 with DCP8. DCP changes the attention kernels and needs its own anchor, so each group is anchored on one of its own runs, not on a run without DCP. With anchors at the middle concurrency, the nine held-out runs are within 8% (throughput) and 12% (ITL).
+
+ 
+ We score the 13 agentic disaggregated runs in § 5.10 .
+
+ 
+ Figure 6: Two measured Pareto charts. GLM-5.2 on the agentic trace keeps all ten measured-frontier configurations, and MiniMax-M3 at 8k/1k with disaggregated splits keeps 11 of 12. Measured runs are filled and anchored-mode predictions are open. 
+ 
+
+ 
+ 5.7 Ranking fidelity
+
+ 
+ For a search, getting the order right matters more than the absolute error. We group configurations that serve the same model, prompt length and concurrency into a choice set , since these are the alternatives an operator compares. A pair is decisive if its measured gap exceeds both the run-to-run noise and a floor of 3%. We rank on throughput and TPOT (ITL on agentic traffic), not on TTFT. A predicted tie counts as half correct. Anchored mode orders 93.4% of decisive throughput pairs and 85.4% of TPOT pairs correctly (Table  11 , Appendix  D ). Its throughput pick is the measured best in 73% of sets and within 0.2% of the best in nine of ten. Candidates in one set share an anchor, so their errors move together.
+
+ 
+ Simulate mode   orders 89.0% of throughput pairs and 84.3% of TPOT pairs without any measurement. The fixed per-step cost is shared by candidates on one engine and mostly cancels, so simulate mode ranks within one engine.
+
+ 
+ On agentic traffic.   We rank within one engine, because engines differ in per-step costs an anchor on another engine cannot see. The AgentX trace gives 41 such choice sets (same model, engine and session count) over 87 held-out runs. Anchored mode orders 90.9% of decisive throughput pairs and all 51 ITL pairs, and its throughput pick is the measured best in 37 of 41 sets (simulate mode: 81.8% and 90.2%).
+
+ 
+ 5.8 Pareto frontiers
+
+ 
+ A deployment review usually asks for the trade-off between throughput per GPU and per-user interactivity, the Pareto frontier, for each model, engine and precision. ROCm InferaSim sweeps every engine, precision, parallel layout and concurrency, combined with scheduler settings, on 1k/1k and 8k/1k prompt/output lengths and on the AgentX trace, in both modes. Each drafter that InferenceX  [ 46 ] uses for a model gets its own line, at draft depths 1–8 with the best depth kept per concurrency. The sweep covers 13 models and 169,962 points (8,490 on the trace) and runs on CPUs only.
+
+ 
+ Measured frontiers.   We check frontiers only on measured configurations, which leaves 529 configurations in 25 charts, made up of our 172 fixed-length runs, 262 InferenceX fixed-length runs not used as anchors (159 of them disaggregated), and the 95 covered AgentX runs. Anchored mode has 7.0% median error on throughput per GPU and 6.5% on interactivity, and a median Spearman correlation of 0.99 within a chart (Figure  6 , Table  13 , Appendix  D ). Of the 206 configurations on a measured frontier, 170 (83%) are also on the predicted frontier. Deploying from the predicted frontier therefore loses no throughput per GPU at the median and 0.7% at the 90th percentile, with at most 3% lower interactivity.
+
+ 
+ 5.9 Speculative decoding
+
+ 
+ The sweep has 43 measured speculative runs, all with MTP. EAGLE-3  [ 29 ] , DSpark and n-gram drafters are predicted only. Anchored mode predicts the MTP runs with 12.2% median error on interactivity and 8.9% on throughput per GPU, close to the 10.6% and 9.8% without speculation. At 50 tokens/s per user, the best speculative configuration gives a median 2.05 × 2.05\times the throughput per GPU of the best plain one (0.86–4.73 × \times over ten charts). Its best draft depth ranges from 2 to 8 (median 5), so it must be searched per chart.
+
+ 
+ 5.10 Disaggregated serving
+
+ 
+ In a disaggregated deployment, prefill and decode run in separate pools of GPUs, and the KV cache is sent from one pool to the other. ROCm InferaSim predicts each pool with the step model for its phase, carrying a colocated anchor to the pool’s layout. No disaggregated anchor is needed. Across several servers a cluster router (e.g., Dynamo  [ 37 ] , llm-d  [ 35 ] ) places requests; the DES routes each to the least-loaded prefill and decode replicas. Throughput per GPU counts the GPUs of both pools, and the KV transfer is priced on its backend (Appendix  D.4 ). The sweep has eight pool layouts of 12–40 GPUs, including attention-DP pools (TP8, EP8, attention DP 8: “DEP8”). Both kinds are swept to the same client counts, and five modeling details, among them each pool’s own KV budget, decide which wins (Appendix  D.4 ).
+
+ 
+ Measured splits.   We evaluate on 159 disaggregated fixed-length deployments from InferenceX on MI355X. They cover DeepSeek-V4-Pro, GLM-5, MiniMax-M3 and Qwen3.5-397B at 1k/1k and 8k/1k, with TP4 or TP8 pools, 17 with attention DP. Pools use anchors from InferenceX’s colocated runs. The median error is 5.5% on throughput per GPU, 5.3% on interactivity and 17% on TTFT (Figure  5 , per backend in Table  16 , Appendix  D.4 ).
+
+ 
+ Where it pays, predicted.   In the GLM-5.2 sweep, disaggregated layouts give the most throughput per GPU between about 15 and 74 tokens/s per user, or up to about 170 with MTP. With 8k-token prompts, disaggregation often wins, by 1.14 1.14 – 2.72 × 2.72\times , because long prefills no longer stall decode steps (Table  3 ). With 1k-token prompts colocation wins or ties every tier that both kinds meet. On the layouts InferenceX measured, the predicted winner is right in 19 of 21 tier decisions at 1k/1k and 23 of 27 at 8k/1k.
+
+ 
+ Table 3: Colocated or disaggregated, by latency tier (anchored mode, no speculation, 14 charts). Predicted sweep: charts where the best disaggregated layout beats the best colocated one on throughput per GPU within the tier, and that gain at 8k/1k. Right call: on the layouts InferenceX measured, tier decisions where the predicted winner (split or colocated) is the measured one; no split is an anchor. ∗ Only a disaggregated layout meets the tier. The 1k/1k interactive win is 1.02 × 1.02\times , a tie. The GLM-5.2 split in microscaling 4-bit floating point (MXFP4) with TP4 prefill and TP8 decode was predicted at 1.22 × 1.22\times in the interactive tier and measured in our own runs at 1.30 × 1.30\times with the split at the same 16 clients, or 1.67 × 1.67\times at 24, which the sweep skips. 
+ 
+ 
+ 
+ 
+ Predicted sweep 
+ Right call 
+
+ 
+ Tier (tok/s/user, TTFT) 
+ 1k/1k 
+ 8k/1k 
+ 8k gain 
+ 1k 
+ 8k 
+
+ 
+ 
+ 
+ realtime ( ≥ \geq 150, ≤ \leq 1 s) 
+ 1/1 ∗ 
+ – 
+ – 
+ 2/2 
+ 2/2 
+
+ 
+ interactive ( ≥ \geq 70, ≤ \leq 2.5 s) 
+ 1/4 
+ 3/4 
+ 1.37–2.72 × \times 
+ 4/5 
+ 6/7 
+
+ 
+ responsive ( ≥ \geq 25, ≤ \leq 10 s) 
+ 0/7 
+ 7/7 
+ 1.19–1.58 × \times 
+ 6/7 
+ 7/9 
+
+ 
+ bulk (no limit) 
+ 0/7 
+ 2/7 
+ 1.14–1.19 × \times 
+ 7/7 
+ 8/9 
+
+ 
+ all 
+ 
+ 
+ 
+ 19/21 
+ 23/27 
+
+ 
+ 
+ 
+ 
+ On agentic traffic.   The AgentX data holds 13 measured splits (seven DeepSeek-V4-Pro on SGLang, six Kimi-K3 on vLLM) and no disaggregated anchor. Predicting each pool from a colocated anchor gives error factors of 1.12 on ITL and 1.08 on throughput (Appendix  D.4 ). With these splits among the candidates, the planner picks a DeepSeek-V4-Pro DEP8 split in the responsive and bulk tiers. It is the measured best in one and 1.5% short in the other; colocated-only picks lose 46% and 43%.
+
+ 
+ 5.11 Agent case studies
+
+ 
+ Deployment mix: setting.   We gave the mix planner six models and, as candidates, the 123 AgentX runs an anchor covers (95 held out plus the 28 anchors), so every prediction is in anchored mode. Each candidate has a measured run. We can check each pick on hardware while the planner sees only predictions.
+
+ 
+ Result.   In 23 of the 24 model–tier slots, at least one candidate meets the tier on hardware. Without using a GPU, the planner picks the measured best in 14 of them and a configuration within 12% of the best in 16 (Table  15 , Appendix  D.2 ), with a median throughput loss of 0%. No exact pick is an anchor run.
+
+ 
+ Short list.   A short list of the planner’s five best predictions holds the measured best in 21 of the 23 slots and a configuration within 12% of it in 22, and every slot then has a candidate that meets the tier on hardware.
+
+ 
+ Search scale.   The seed stage ran 192 searches (24 objectives, four models, with and without an SLO), scoring 56,328 candidates in 3–8 CPU-hours (Appendix  D.3 ).
+
+ 
+ Cost.   A prediction, including a DES run of 10 × C 10\times C requests, takes 0.17–0.48 s on one CPU core. The 226 fixed-length configurations anchored mode covers took 204 GPU-hours (671 runs) to measure, their 11 anchors 9.1 GPU-hours. The 172 scored in § 5.4 are filtered separately. Simulate mode ranks 287 configurations (248 GPU-hours to measure) without a GPU.
+
+ 
+ 6 Related Work
+
+ 
+ Profile-based serving simulators.   Vidur  [ 2 ] profiles each operator for every model and TP width, and supports only dense models, so it cannot run any MoE model we evaluate. We ported it to MI355X and ran it on the 30 SGLang Llama-3.1-8B runs of § C.1 . Its median errors are 34%, 40% and 40% on TTFT, TPOT and throughput, against 14%, 7.2% and 7.4% for ROCm InferaSim. Vidur times its own FlashInfer  [ 55 ] kernels and models no host or per-stage overhead.
+
+ 
+ Operator-level simulators with MoE.   APEX  [ 31 ] searches DP, PP, TP and EP plans from profiled operators. LLMServingSim  [ 11 ] co-simulates accelerators and serving software. AIConfigurator  [ 51 ] , the closest to ROCm InferaSim, composes aggregated and disaggregated step times from a per-GPU kernel database. Frontier  [ 16 ] and KernelSight-LM  [ 54 ] add disaggregation, graphs, speculation or roofline kernel models to operator-level simulators. All build a step operator by operator and re-collect their databases per model, engine build and kernel library. ROCm InferaSim instead measures the whole step, so graph padding, fused kernels and host time come with the anchor (Table  12 ).
+
+ 
+ Analytical and hardware-design models.   Roofline tools  [ 58 , 8 ] , Optimus  [ 25 ] , LLMCompass  [ 59 ] , Calculon  [ 22 ] and ASTRA-sim  [ 44 , 50 ] compute step times from hardware descriptions, and BestServe  [ 20 ] ranks colocated and disaggregated strategies with per-stack efficiencies and no MoE. Like simulate mode they need no GPU, but they omit the fixed per-step cost that § 3.1.2 keeps across widths.
+
+ 
+ Tuning by trial.   SCOOT  [ 9 ] tunes vLLM and TensorRT-LLM flags with Bayesian optimization over live runs, and LLM-guided optimizers  [ 33 , 32 ] still pay for a real run per trial. ROCm InferaSim’s agent keeps the search loop  [ 53 , 23 ] but replaces each trial with a sub-second prediction.
+
+ 
+ Prediction from measurements.   Habitat  [ 56 ] , Daydream  [ 62 ] , Lumos  [ 30 ] and hybrid measured-analytical models  [ 43 ] predict training performance from measured kernels, traces or small benchmarks. Serving differs because the step also depends on traffic, through batching, prefix reuse, speculation  [ 28 ] and disaggregation  [ 40 , 61 ] , which now also separates attention from experts  [ 63 ] and prefill across datacenters  [ 41 ] .
+
+ 
+ 7 Limitations
+
+ 
+ All measurements were taken on AMD Instinct MI355X GPUs. The method is not tied to this hardware: given short anchor runs of the same kernel sets on another GPU, the same transfer laws predict its other deployments. Extending the evaluation to NVIDIA GPUs is future work.
+
+ 
+ 8 Conclusion
+
+ 
+ ROCm InferaSim predicts LLM serving performance from a few short measurements instead of a trial per configuration. It anchors each kernel set once, on at most one node, and carries the anchor to other deployments with transfer laws that keep the fixed per-step cost and scale only the work that more GPUs divide. Deployments larger than a node are reduced, measured and restored. A discrete-event simulator replays multi-turn agentic traffic, and a tuning agent and mix planner search with them. Eleven anchors measured in 9.1 GPU-hours predict fixed-length TPOT with 8.1% median error and agentic throughput within about 8%, and 159 additional disaggregated deployments within 5.5% with no disaggregated anchor. Its predicted Pareto frontiers keep 83% of the measured frontier configurations, and its five-candidate short list reaches a near-best deployment in the feasible slots. Measuring each kernel set once and deriving the rest turns serving configuration from a search over hardware into a search over predictions.
+
+ 
+ References
+
+ 
+ [1] 
+ T. Abramovich, M. Ashkenazi, I. Putterman, B. Chislett, T. Mitra, B. Darvish Rouhani, R. Zilberstein, and Y. Geifman (2026) 
+ 
+ SPEED-Bench: a unified and diverse benchmark for speculative decoding .
+ 
+ arXiv preprint arXiv:2604.09557 .
+ 
+ Cited by: §A.2 ,
+ §3.6 .
+ 
+
+ [2] 
+ A. Agrawal, N. Kedia, J. Mohan, A. Panwar, N. Kwatra, B. S. Gulavani, R. Ramjee, and A. Tumanov (2024) 
+ 
+ Vidur: a large-scale simulation framework for LLM inference .
+ 
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+ 
+ Cited by: §1 ,
+ §6 .
+ 
+
+ [3] 
+ A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, A. Tumanov, and R. Ramjee (2024) 
+ 
+ Taming throughput-latency tradeoff in LLM inference with Sarathi-Serve .
+ 
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+ 
+ pp. 117–134 .
+ 
+ Cited by: §2 .
+ 
+
+ [4] 
+ A. Agrawal, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, and R. Ramjee (2023) 
+ 
+ SARATHI: efficient LLM inference by piggybacking decodes with chunked prefills .
+ 
+ arXiv preprint arXiv:2308.16369 .
+ 
+ Cited by: §2 .
+ 
+
+ [5] 
+ AMD (2024) 
+ 
+ RCCL: ROCm communication collectives library .
+ 
+ Note: https://github.com/ROCm/rccl 
+ 
+ Cited by: §B.2 .
+ 
+
+ [6] 
+ AMD (2025) 
+ 
+ ATOM: AiTer optimized model .
+ 
+ Note: https://github.com/ROCm/ATOM 
+ 
+ Cited by: 4th item .
+ 
+
+ [7] 
+ AMD (2025) 
+ 
+ MoRI: modular RDMA interface .
+ 
+ Note: https://github.com/ROCm/mori 
+ 
+ Cited by: §3.5 .
+ 
+
+ [8] 
+ A. R. Bambhaniya, R. Raj, G. Jeong, S. Kundu, S. Srinivasan, S. Subramanian, M. Elavazhagan, M. Kumar, and T. Krishna (2024) 
+ 
+ Demystifying AI platform design for distributed inference of next-generation LLM models .
+ 
+ arXiv preprint arXiv:2406.01698 .
+ 
+ Cited by: §1 ,
+ §6 .
+ 
+
+ [9] 
+ K. Cheng, Z. Wang, W. Hu, T. Yang, J. Li, and S. Zhang (2025) 
+ 
+ SCOOT: SLO-oriented performance tuning for LLM inference engines .
+ 
+ In Proceedings of the ACM Web Conference (WWW) ,
+ 
+ Cited by: §6 .
+ 
+
+ [10] 
+ X. Cheng, X. Yu, C. Shao, J. Li, Y. Xiong, et al. (2026) 
+ 
+ DSpark: confidence-scheduled speculative decoding with semi-autoregressive generation .
+ 
+ arXiv preprint arXiv:2607.05147 .
+ 
+ Cited by: §A.2 .
+ 
+
+ [11] 
+ J. Cho, M. Kim, H. Choi, G. Heo, and J. Park (2024) 
+ 
+ LLMServingSim: a HW/SW co-simulation infrastructure for LLM inference serving at scale .
+ 
+ In IEEE International Symposium on Workload Characterization (IISWC) ,
+ 
+ Cited by: §6 .
+ 
+
+ [12] 
+ DeepSeek-AI (2024) 
+ 
+ DeepSeek-V3 technical report .
+ 
+ arXiv preprint arXiv:2412.19437 .
+ 
+ Cited by: §1 .
+ 
+
+ [13] 
+ DeepSeek-AI (2025) 
+ 
+ DeepEP: an efficient expert-parallel communication library .
+ 
+ Note: https://github.com/deepseek-ai/DeepEP 
+ 
+ Cited by: Table 4 .
+ 
+
+ [14] 
+ DeepSeek-AI (2025) 
+ 
+ EPLB: expert parallelism load balancer .
+ 
+ Note: https://github.com/deepseek-ai/EPLB 
+ 
+ Cited by: §3.1.2 .
+ 
+
+ [15] 
+ DeepSeek-AI (2026) 
+ 
+ DeepSeek-V4: towards highly efficient million-token context intelligence .
+ 
+ arXiv preprint arXiv:2606.19348 .
+ 
+ Cited by: §5.1 .
+ 
+
+ [16] 
+ Y. Feng, X. Tan, Y. Deng, Y. Jiang, Y. Zhu, and H. Xu (2026) 
+ 
+ Frontier: towards comprehensive and accurate LLM inference simulation .
+ 
+ arXiv preprint arXiv:2605.21312 .
+ 
+ Cited by: §6 .
+ 
+
+ [17] 
+ GLM-5 Team (2026) 
+ 
+ GLM-5: from vibe coding to agentic engineering .
+ 
+ arXiv preprint arXiv:2602.15763 .
+ 
+ Cited by: §5.1 .
+ 
+
+ [18] 
+ F. Gloeckle, B. Youbi Idrissi, B. Rozière, D. Lopez-Paz, and G. Synnaeve (2024) 
+ 
+ Better & faster large language models via multi-token prediction .
+ 
+ In International Conference on Machine Learning (ICML) ,
+ 
+ Cited by: §3.6 .
+ 
+
+ [19] 
+ A. Grattafiori, A. Dubey, A. Jauhri, et al. (2024) 
+ 
+ The Llama 3 herd of models .
+ 
+ arXiv preprint arXiv:2407.21783 .
+ 
+ Cited by: §5.1 .
+ 
+
+ [20] 
+ X. Hu, T. Zeng, X. Yuan, L. Song, G. Zhang, and B. He (2025) 
+ 
+ BestServe: serving strategies with optimal goodput in collocation and disaggregation architectures .
+ 
+ arXiv preprint arXiv:2506.05871 .
+ 
+ Cited by: §6 .
+ 
+
+ [21] 
+ Y. Huang, Y. Cheng, A. Bapna, O. Firat, D. Chen, M. Chen, H. Lee, J. Ngiam, Q. V. Le, Y. Wu, and Z. Chen (2019) 
+ 
+ GPipe: efficient training of giant neural networks using pipeline parallelism .
+ 
+ In Advances in Neural Information Processing Systems (NeurIPS) ,
+ 
+ Cited by: §1 .
+ 
+
+ [22] 
+ M. Isaev, N. McDonald, L. Dennison, and R. Vuduc (2023) 
+ 
+ Calculon: a methodology and tool for high-level co-design of systems and large language models .
+ 
+ In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC) ,
+ 
+ Cited by: §6 .
+ 
+
+ [23] 
+ O. Khattab, A. Singhvi, P. Maheshwari, Z. Zhang, K. Santhanam, S. Vardhamanan, S. Haq, A. Sharma, T. T. Joshi, H. Moazam, H. Miller, M. Zaharia, and C. Potts (2024) 
+ 
+ DSPy: compiling declarative language model calls into self-improving pipelines .
+ 
+ In International Conference on Learning Representations (ICLR) ,
+ 
+ Cited by: §4 ,
+ §6 .
+ 
+
+ [24] 
+ Kimi Team (2026) 
+ 
+ Kimi K3: open frontier intelligence .
+ 
+ arXiv preprint arXiv:2607.24653 .
+ 
+ Cited by: §5.1 .
+ 
+
+ [25] 
+ J. Kundu, W. Guo, A. BanaGozar, U. De Alwis, S. Sengupta, P. Gupta, and A. Mallik (2024) 
+ 
+ Performance modeling and workload analysis of distributed large language model training and inference .
+ 
+ In IEEE International Symposium on Workload Characterization (IISWC) ,
+ 
+ Cited by: §6 .
+ 
+
+ [26] 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica (2023) 
+ 
+ Efficient memory management for large language model serving with PagedAttention .
+ 
+ In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) ,
+ 
+ pp. 611–626 .
+ 
+ Cited by: §1 ,
+ §2 .
+ 
+
+ [27] 
+ D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N. Shazeer, and Z. Chen (2021) 
+ 
+ GShard: scaling giant models with conditional computation and automatic sharding .
+ 
+ In International Conference on Learning Representations (ICLR) ,
+ 
+ Cited by: §1 .
+ 
+
+ [28] 
+ Y. Leviathan, M. Kalman, and Y. Matias (2023) 
+ 
+ Fast inference from transformers via speculative decoding .
+ 
+ In International Conference on Machine Learning (ICML) ,
+ 
+ pp. 19274–19286 .
+ 
+ Cited by: §1 ,
+ §6 .
+ 
+
+ [29] 
+ Y. Li, F. Wei, C. Zhang, and H. Zhang (2025) 
+ 
+ EAGLE-3: scaling up inference acceleration of large language models via training-time test .
+ 
+ arXiv preprint arXiv:2503.01840 .
+ 
+ Cited by: §5.9 .
+ 
+
+ [30] 
+ M. Liang, H. T. Kassa, W. Fu, B. Coutinho, L. Feng, and C. Delimitrou (2025) 
+ 
+ Lumos: efficient performance modeling and estimation for large-scale LLM training .
+ 
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+ 
+ Cited by: §6 .
+ 
+
+ [31] 
+ Y. Lin, W. Kwon, R. Pineda, and F. N. P. Fard (2024) 
+ 
+ APEX: an extensible and dynamism-aware simulator for automated parallel execution in LLM serving .
+ 
+ arXiv preprint arXiv:2411.17651 .
+ 
+ Cited by: §6 .
+ 
+
+ [32] 
+ S. Liu, C. Gao, and Y. Li (2025) 
+ 
+ AgentHPO: large language model agent for hyper-parameter optimization .
+ 
+ In Conference on Parsimony and Learning (CPAL) ,
+ 
+ PMLR , Vol. 280 , pp. 1146–1169 .
+ 
+ Cited by: §6 .
+ 
+
+ [33] 
+ T. Liu, N. Astorga, N. Seedat, and M. van der Schaar (2024) 
+ 
+ Large language models to enhance Bayesian optimization .
+ 
+ In International Conference on Learning Representations (ICLR) ,
+ 
+ Cited by: §6 .
+ 
+
+ [34] 
+ Y. Liu, Y. Cheng, J. Yao, et al. (2025) 
+ 
+ LMCache: an efficient KV cache layer for enterprise-scale LLM inference .
+ 
+ arXiv preprint arXiv:2510.09665 .
+ 
+ Cited by: §3.5 .
+ 
+
+ [35] 
+ llm-d (2025) 
+ 
+ Llm-d: a Kubernetes-native distributed inference stack .
+ 
+ Note: https://github.com/llm-d/llm-d 
+ 
+ Cited by: §5.10 .
+ 
+
+ [36] 
+ NVIDIA (2025) 
+ 
+ AIPerf: generative AI inference benchmarking tool .
+ 
+ Note: https://github.com/ai-dynamo/aiperf 
+ 
+ Cited by: §5.6 .
+ 
+
+ [37] 
+ NVIDIA (2025) 
+ 
+ Dynamo: a datacenter-scale distributed inference serving framework .
+ 
+ Note: https://github.com/ai-dynamo/dynamo 
+ 
+ Cited by: §5.10 .
+ 
+
+ [38] 
+ NVIDIA (2025) 
+ 
+ NIXL: NVIDIA inference xfer library .
+ 
+ Note: https://github.com/ai-dynamo/nixl 
+ 
+ Cited by: Table 4 .
+ 
+
+ [39] 
+ OpenAI (2025) 
+ 
+ Gpt-oss-120b & gpt-oss-20b model card .
+ 
+ arXiv preprint arXiv:2508.10925 .
+ 
+ Cited by: §5.1 .
+ 
+
+ [40] 
+ P. Patel, E. Choukse, C. Zhang, A. Shah, Í. Goiri, S. Maleki, and R. Bianchini (2024) 
+ 
+ Splitwise: efficient generative LLM inference using phase splitting .
+ 
+ In ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) ,
+ 
+ pp. 118–132 .
+ 
+ Cited by: §1 ,
+ §6 .
+ 
+
+ [41] 
+ R. Qin, W. He, Y. Wang, Z. Li, X. Xu, Y. Wu, W. Zheng, and M. Zhang (2026) 
+ 
+ Prefill-as-a-service: KVCache of next-generation models could go cross-datacenter .
+ 
+ arXiv preprint arXiv:2604.15039 .
+ 
+ Cited by: §6 .
+ 
+
+ [42] 
+ R. Qin, Z. Li, W. He, J. Cui, F. Ren, M. Zhang, Y. Wu, W. Zheng, and X. Xu (2025) 
+ 
+ Mooncake: trading more storage for less computation — a KVCache-centric architecture for serving LLM chatbot .
+ 
+ In 23rd USENIX Conference on File and Storage Technologies (FAST) ,
+ 
+ pp. 155–170 .
+ 
+ Cited by: §2 .
+ 
+
+ [43] 
+ A. Raina, P. Razaghi, Y. Chen, C. Yao, Y. Fu, V. Goyal, D. Patel, W. Xie, Z. Gu, and E. Barsoum (2026) 
+ 
+ Beyond the trial-and-error loop: hybrid projection and automated tuning for distributed training .
+ 
+ In Advances in Neural Information Processing Systems (NeurIPS) ,
+ 
+ Cited by: §1 ,
+ §3.2 ,
+ §6 .
+ 
+
+ [44] 
+ S. Rashidi, S. Sridharan, S. Srinivasan, and T. Krishna (2020) 
+ 
+ ASTRA-SIM: enabling SW/HW co-design exploration for distributed DL training platforms .
+ 
+ In IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) ,
+ 
+ pp. 81–92 .
+ 
+ Cited by: §6 .
+ 
+
+ [45] 
+ SemiAnalysis (2026) 
+ 
+ AgentX: an agentic coding inference benchmark .
+ 
+ Note: https://inferencex.semianalysis.com/agentx 
+ 
+ Cited by: §5.6 .
+ 
+
+ [46] 
+ SemiAnalysis (2026) 
+ 
+ InferenceX: open source AI accelerator research platform standard .
+ 
+ Note: https://github.com/SemiAnalysisAI/InferenceX 
+ 
+ Cited by: §A.2 ,
+ §3.6 ,
+ §5.8 .
+ 
+
+ [47] 
+ M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B. Catanzaro (2019) 
+ 
+ Megatron-LM: training multi-billion parameter language models using model parallelism .
+ 
+ arXiv preprint arXiv:1909.08053 .
+ 
+ Cited by: §1 .
+ 
+
+ [48] 
+ R. Swann, M. Osama, X. Guo, B. Nelson, L. Zhang, A. Brown, Y. Ong, A. Yazdani, S. Siddens, G. Dasika, and A. Underwood (2025) 
+ 
+ tritonBLAS: Triton-based analytical approach for GEMM kernel parameter selection .
+ 
+ arXiv preprint arXiv:2512.04226 .
+ 
+ Cited by: §3 .
+ 
+
+ [49] 
+ S. Williams, A. Waterman, and D. Patterson (2009) 
+ 
+ Roofline: an insightful visual performance model for multicore architectures .
+ 
+ Communications of the ACM 52 ( 4 ), pp. 65–76 .
+ 
+ Cited by: §1 .
+ 
+
+ [50] 
+ W. Won, T. Heo, S. Rashidi, S. Sridharan, S. Srinivasan, and T. Krishna (2023) 
+ 
+ ASTRA-sim2.0: modeling hierarchical networks and disaggregated systems for large-model training at scale .
+ 
+ In IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) ,
+ 
+ pp. 283–294 .
+ 
+ Cited by: §6 .
+ 
+
+ [51] 
+ T. Xu, Y. Liu, X. Lu, Y. Zhao, et al. (2026) 
+ 
+ AIConfigurator: lightning-fast configuration optimization for multi-framework LLM serving .
+ 
+ arXiv preprint arXiv:2601.06288 .
+ 
+ Cited by: §6 .
+ 
+
+ [52] 
+ A. Yang, A. Li, B. Yang, et al. (2025) 
+ 
+ Qwen3 technical report .
+ 
+ arXiv preprint arXiv:2505.09388 .
+ 
+ Cited by: §5.1 .
+ 
+
+ [53] 
+ S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, and Y. Cao (2023) 
+ 
+ ReAct: synergizing reasoning and acting in language models .
+ 
+ In International Conference on Learning Representations (ICLR) ,
+ 
+ Cited by: §4 ,
+ §6 .
+ 
+
+ [54] 
+ X. Yao, T. Kim, H. Pei, X. Liu, K. Ulrich, L. Lausen, A. Khetan, X. Song, G. Karypis, and M. Herbordt (2026) 
+ 
+ KernelSight-LM: a kernel-level LLM inference simulator .
+ 
+ arXiv preprint arXiv:2606.28565 .
+ 
+ Cited by: §6 .
+ 
+
+ [55] 
+ Z. Ye, L. Chen, R. Lai, W. Lin, Y. Zhang, S. Wang, T. Chen, B. Kasikci, V. Grover, A. Krishnamurthy, and L. Ceze (2025) 
+ 
+ FlashInfer: efficient and customizable attention engine for LLM inference serving .
+ 
+ In Eighth Conference on Machine Learning and Systems (MLSys) ,
+ 
+ Cited by: §6 .
+ 
+
+ [56] 
+ G. X. Yu, Y. Gao, P. Golikov, and G. Pekhimenko (2021) 
+ 
+ Habitat: a runtime-based computational performance predictor for deep neural network training .
+ 
+ In USENIX Annual Technical Conference (ATC) ,
+ 
+ pp. 503–521 .
+ 
+ Cited by: §6 .
+ 
+
+ [57] 
+ G. Yu, J. S. Jeong, G. Kim, S. Kim, and B. Chun (2022) 
+ 
+ Orca: a distributed serving system for transformer-based generative models .
+ 
+ In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+ 
+ pp. 521–538 .
+ 
+ Cited by: §2 .
+ 
+
+ [58] 
+ Z. Yuan, Y. Shang, Y. Zhou, Z. Dong, Z. Zhou, C. Xue, B. Wu, Z. Li, Q. Gu, Y. J. Lee, Y. Yan, B. Chen, G. Sun, and K. Keutzer (2024) 
+ 
+ LLM inference unveiled: survey and roofline model insights .
+ 
+ arXiv preprint arXiv:2402.16363 .
+ 
+ Cited by: §1 ,
+ §6 .
+ 
+
+ [59] 
+ H. Zhang, A. Ning, R. B. Prabhakar, and D. Wentzlaff (2024) 
+ 
+ LLMCompass: enabling efficient hardware design for large language model inference .
+ 
+ In ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) ,
+ 
+ pp. 1080–1096 .
+ 
+ Cited by: §1 ,
+ §6 .
+ 
+
+ [60] 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng (2024) 
+ 
+ SGLang: efficient execution of structured language model programs .
+ 
+ In Advances in Neural Information Processing Systems (NeurIPS) ,
+ 
+ Cited by: §1 ,
+ §2 .
+ 
+
+ [61] 
+ Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang (2024) 
+ 
+ DistServe: disaggregating prefill and decoding for goodput-optimized large language model serving .
+ 
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+ 
+ pp. 193–210 .
+ 
+ Cited by: §1 ,
+ §6 .
+ 
+
+ [62] 
+ H. Zhu, A. Phanishayee, and G. Pekhimenko (2020) 
+ 
+ Daydream: accurately estimating the efficacy of optimizations for DNN training .
+ 
+ In USENIX Annual Technical Conference (ATC) ,
+ 
+ pp. 337–352 .
+ 
+ Cited by: §6 .
+ 
+
+ [63] 
+ R. Zhu, Z. Jiang, C. Jin, P. Wu, C. A. Stuardo, D. Wang, X. Zhang, H. Zhou, H. Wei, Y. Cheng, J. Xiao, X. Zhang, L. Liu, H. Lin, L. Chang, J. Ye, X. Yu, X. Liu, X. Jin, and X. Liu (2025) 
+ 
+ MegaScale-Infer: efficient mixture-of-experts model serving with disaggregated expert parallelism .
+ 
+ In Proceedings of the ACM SIGCOMM Conference ,
+ 
+ Cited by: §6 .
+ 
+
+ 
+
+ 
+ AI Usage Disclosure
+
+ 
+ Generative artificial intelligence (AI) tools were used in this work as follows. Coding assistants in the Cursor editor, backed by large language models, were used to write and refactor parts of the predictor, the evaluation harness and the plotting scripts, to launch and monitor cluster jobs, and to analyze results; the authors reviewed the code, and every reported number comes from scripts run on recorded measurements (Appendix  K ). The same assistants were used to search the literature and to draft and edit parts of the text, tables and figures of this paper; the authors revised all drafted text and verified the claims and citations against their sources. No AI tool generated measurement data. Separately, ROCm InferaSim’s tuning agent uses an LLM as part of the method (§ 4 ): the LLM only proposes configurations to try, and every performance number comes from the predictor, not from the LLM.
+
+ 
+
+ 
+ Appendix A Design details
+
+ 
+ Table 4: What ROCm InferaSim searches and how each choice is priced. † \dagger : anchor-defining (changes the kernels, so it needs its own anchor); all other choices are transferred from an anchor or priced by the DES. 
+ 
+ 
+ 
+ 
+ 
+ Choice 
+ 
+ 
+ 
+ Options 
+ 
+ 
+ 
+ How it is priced 
+ 
+
+ 
+ Parallelism inside a replica 
+
+ 
+ 
+ 
+ Tensor (TP) 
+ 
+ 
+ 
+ 1–8 
+ 
+ 
+ 
+ sharded part ∝ 1 / TP \propto 1/\mathrm{TP} , unsharded floor kept (Eq.  1 ) 
+ 
+
+ 
+ 
+ 
+ Expert (EP) 
+ 
+ 
+ 
+ divisors of experts 
+ 
+ 
+ 
+ busiest rank gates the MoE layer; imbalance at both EPs 
+ 
+
+ 
+ 
+ 
+ Attention data (DP) 
+ 
+ 
+ 
+ divisors of TP 
+ 
+ 
+ 
+ ranks own whole requests; DES runs parallel schedulers 
+ 
+
+ 
+ 
+ 
+ Pipeline (PP) 
+ 
+ 
+ 
+ divisors of layers, across nodes 
+ 
+ 
+ 
+ p p hops plus host time PP stops overlapping (Eq.  4 ) 
+ 
+
+ 
+ 
+ 
+ Decode context (DCP) 
+ 
+ 
+ 
+ 1–8 
+ 
+ 
+ 
+ KV and attention sharded; ranked only under a covering anchor 
+ 
+
+ 
+ Across replicas 
+
+ 
+ 
+ 
+ Replicas 
+ 
+ 
+ 
+ up to cluster size 
+ 
+ 
+ 
+ DES routes sessions across replicas 
+ 
+
+ 
+ 
+ 
+ Disaggregation 
+ 
+ 
+ 
+ prefill and decode pools, each with TP, EP, DP, replicas; NVIDIA Inference Transfer Library (NIXL)  [ 38 ] , Mooncake or MoRI 
+ 
+ 
+ 
+ two DES pools; KV hand-off priced on the hand-off backend 
+ 
+
+ 
+ Kernels 
+
+ 
+ 
+ 
+ Precision † 
+ 
+ 
+ 
+ weights, linear layers, experts, KV: bfloat16 (BF16), 8-bit floating point (FP8), 4-bit floating point (FP4) 
+ 
+ 
+ 
+ anchor; KV dtype also sizes the pool 
+ 
+
+ 
+ 
+ 
+ Backends † 
+ 
+ 
+ 
+ attention (aiter, Triton, Composable Kernel (CK)), sparse top- k k , MoE, DeepEP  [ 13 ] , fused kernels 
+ 
+ 
+ 
+ anchor 
+ 
+
+ 
+ 
+ 
+ Graph capture † 
+ 
+ 
+ 
+ none, piecewise, full 
+ 
+ 
+ 
+ anchor; batch padded to captured sizes 
+ 
+
+ 
+ 
+ 
+ Collectives 
+ 
+ 
+ 
+ custom one-/two-shot, quick-reduce, fused root-mean-square normalization (RMSNorm), RCCL 
+ 
+ 
+ 
+ α + m / B \alpha+m/B per variant (§ B.2 ) 
+ 
+
+ 
+ Scheduling and load 
+
+ 
+ 
+ 
+ Scheduler 
+ 
+ 
+ 
+ running cap, token budget, chunk size, KV memory share 
+ 
+ 
+ 
+ DES parameters (§ 3.4 ) 
+ 
+
+ 
+ 
+ 
+ Speculation 
+ 
+ 
+ 
+ method † (MTP, EAGLE-3, DSpark, n-gram), depth 0–8 
+ 
+ 
+ 
+ drafter cost and measured acceptance (§ 3.6 ) 
+ 
+
+ 
+ 
+ 
+ Memory tiers 
+ 
+ 
+ 
+ host-DRAM KV tier, prefix cache 
+ 
+ 
+ 
+ DES cache replay 
+ 
+
+ 
+ 
+ 
+ Load 
+ 
+ 
+ 
+ concurrency, arrival process and rate 
+ 
+ 
+ 
+ DES 
+ 
+
+ 
+ 
+ 
+ 
+ Parallelism forms are mostly transferable, while kernel choices are anchor-defining. A deployment can combine TP, EP, attention DP, PP inside or across nodes, decode context parallelism, replicas behind a router, and disaggregated prefill and decode pools joined by a KV hand-off. Under attention DP each rank owns whole requests, so a TP8 replica does not store a latent cache eight times. These forms change which GPU does which work, not which kernels run, so they are transferable. The exception is DCP, which changes the attention kernels and is ranked only under a covering anchor (§ 5.6 ). Precisions, backends, graph capture and the speculative method change the kernels, so each needs its own anchor.
+
+ 
+ A.1 Discrete-event simulator
+
+ 
+ Input.   The DES takes either a synthetic workload or a trace. A synthetic workload gives prompt and output lengths (fixed or drawn from a range), an arrival process, and optionally a pool of shared prefixes whose popularity is uniform or Zipf-skewed. A trace follows the Mooncake format, as JSON lines or a JSON array. Each record has an arrival timestamp, input and output lengths, and hash_ids , the ordered hashes of the prompt’s fixed-size token blocks. Optional fields add a think time, a session id, the request this turn waits on, and the requests it joins (a turn that waits for several sub-agent calls). A compact form lets a record reuse the first n n blocks of an earlier record, so long agentic contexts are not repeated in the file. Hash blocks are 512 tokens in Mooncake’s traces and 64 in AgentX; the DES infers the size from the trace and counts cache capacity in these blocks.
+
+ 
+ Prefix cache.   Each replica owns a content-addressed block cache. A block’s hash covers its whole prefix, so a block also identifies its predecessor and the cache forms a tree, as in a radix cache. A request’s hit is the longest leading run of its blocks already resident; only the uncached suffix is prefilled. Its blocks are then inserted, and blocks beyond the capacity the memory model gives the KV pool are evicted. Eviction takes the least recently used (LRU) leaf : a block is never dropped while a resident block continues from it, so shared heads survive pressure and only divergent tails are reclaimed. This matters: on the AgentX trace at 256 clients against DeepSeek-V4’s 231,336-block pool, flat LRU turns the sweep over contexts into a cycle that evicts every block just before its reuse (0% hits), while leaf-first eviction gives 90.6%, against the trace’s published reuse of about 92%. With a host-memory tier, evicted blocks move one tier down instead of being dropped, and a hit found there makes the request wait for the load.
+
+ 
+ Admission order.   Hits depend on the order requests reach the cache, so the cache is replayed in the order the engine admits them. Requests that fit in the KV pool run in arrival order. When a backlog builds up, the engine picks the waiting request with the longest resident prefix (SGLang’s default policy, which vLLM’s prefix-caching scheduler approximates), and the replay does the same over the backlog only. A session turn is not a candidate until the request it waits on has been served, so it cannot take the hit that request creates. Each client’s next turn refills that client’s slot, so the context it continues is the one just served.
+
+ 
+ Routing.   With several replicas, the router picks a replica for each request before its hit is resolved. Policies are least-loaded, a KV-aware cost that trades prefix overlap against load like a cluster router’s, prefix hashing that colocates requests sharing a leading block, round robin and random. Under disaggregation a request goes to a prefill replica (the one holding its prefix on traces), its KV is handed off on the transfer backend, and it decodes on the least-loaded decode replica.
+
+ 
+ Timed simulation.   Each replica then runs its own event loop over a virtual clock: arrivals, scheduler steps and completions. Closed-loop clients send their next request when the previous one finishes plus its think time; open-loop requests arrive at their timestamps. At each step the scheduler model fills the batch as the target engine does, within the running-request cap and token budget, with chunked prefill, mixed or prefill-only steps, and pages of KV per request. A request’s cached prefix counts as already computed. The step cost model (anchored or simulate mode) prices the step’s mix of prefill tokens and decode contexts, the clock advances by that time, and each running request emits a token. Host time per request is added to TTFT and end-to-end latency (§ 3.4 ). Attention-DP ranks run as parallel schedulers in lockstep, so a step costs as much as its slowest rank.
+
+ 
+ Output.   Per-request TTFT, ITL, TPOT and end-to-end latency give medians and tails, and their totals give throughput per GPU and the hit rate per replica. The tuning agent receives these numbers for each candidate. They come from the same step cost model the analytical predictor uses, so the two agree when queueing and cache effects are absent, and the DES adds those effects when they are present.
+
+ 
+ A.2 Speculative decoding model
+
+ 
+ An anchor measured with speculation already contains the draft cost and the acceptance. Elsewhere ROCm InferaSim models the drafter. MTP and EAGLE-3 heads are built from the target’s own layer types, so each drafter layer is priced as a target layer of the same kind, plus the language-model (LM) head and sampling, at the drafter’s vocabulary and context. The number of drafter layers is a parameter: MTP defaults to the model’s MTP layer count and EAGLE-3 to one dense layer over a pruned vocabulary, and a model card or flag can change either. DSpark  [ 10 ] defaults to a three-layer MoE backbone per block plus a light serial head, and n-gram drafting is free. In anchored mode the draft cost is the measured step scaled by the modeled ratio of draft time to step time. A verify step at depth k k commits
+
+ 
+
+ 
+ 
+ L ⁡ ( k ) = 1 + ∑ i = 1 k ∏ j = 1 i a j L(k)=1+\sum_{i=1}^{k}\prod_{j=1}^{i}a_{j} 
+ 
+ (2) 
+ 
+ 
+ tokens, where a j a_{j} is the probability that draft token j j is accepted given that tokens 1 . . j − 1 1..j{-}1 were. For models where InferenceX  [ 46 ] publishes measured acceptance lengths, ROCm InferaSim takes L ⁡ ( k ) L(k) from them. Other models use the sibling head’s curve (MTP for EAGLE-3 and vice versa) or the drafter’s default, the per-depth median over InferenceX models. Beyond the last measured depth, L L is extrapolated with a geometric acceptance chain fitted to the measured points. Acceptance also depends on how predictable the text is. SPEED-Bench  [ 1 ] measures it in six domains, which ROCm InferaSim groups into three optional entropy classes: low (coding, math), mixed (science, question answering) and high (writing, roleplay). The measured curves count as coding, and a class scales the first-position acceptance by its mean rate relative to coding. When the depth is left open, ROCm InferaSim tries every depth from 0, meaning no speculation, up to the limit and keeps the one with the most tokens per unit of step time at the projected batch, so it speculates only when that pays. On 43 measured MTP runs, anchored mode with the drafter model is nearly as accurate as on runs without speculation (§ 5.9 ).
+
+ 
+ Appendix B Component models
+
+ 
+ Table 5: Measured constants on MI355X. Collectives cost α + m / B \alpha+m/B ; ranges span 2–8 GPUs. Each is measured once per platform and reused for every model. 
+ 
+ 
+ 
+ Component 
+ Constant 
+ Value 
+
+ 
+ 
+ 
+ Custom all-reduce, in node 
+ α \alpha , B B 
+ 4.9–11.0  μ \mu s, 56–123 GB/s 
+
+ 
+ RCCL all-to-all, in node 
+ α \alpha , B B 
+ 35–38  μ \mu s, 113–409 GB/s 
+
+ 
+ Send/recv, two nodes 
+ α \alpha , B B 
+ 44  μ \mu s, 45 GB/s 
+
+ 
+ All-reduce, 16 GPUs, two nodes 
+ α \alpha , B B 
+ 91  μ \mu s, 32 GB/s 
+
+ 
+ Kernel occupancy (fusions) 
+ per kernel 
+ 4.98  μ \mu s 
+
+ 
+ Pipeline hop (SGLang) 
+ per stage 
+ 970  μ \mu s 
+
+ 
+ Host time PP stops overlapping 
+ per step 
+ 0.33 + 0.0063 ​ b 0.33+0.0063\,b  ms 
+
+ 
+ Tokenization 
+ per prompt token 
+ 5–11  μ \mu s 
+
+ 
+ KV hand-off, MoRI 
+ floor, B B 
+ 120  μ \mu s, 47.9 GB/s 
+
+ 
+ 
+ 
+ 
+ B.1 Decode shard per doubling
+
+ 
+ Doubling TP does not always halve the excess above the floor in Eq.  1 , so ROCm InferaSim measures the shrink factor ρ \rho when it can. This needs the same stack to have been harvested also at half the anchor’s width. ρ \rho is then the ratio of the excess at w w to the excess at w / 2 w/2 , at each batch both sweeps share. It is clamped to [ 0.5 , 1 ] [0.5,1] , interpolated in log ⁡ b \log b , and applied once per doubling from w w to w ′ w^{\prime} . Both harvests stay at or below the anchor’s width, so the target width is still never measured. Only the decode half of the sibling harvest is used, because the prefill transfer already has its own length curve. Per doubling, the excess shrinks to 0.50, the ideal, for DeepSeek-V4-Pro on ATOM (TP4 to TP8). It shrinks only to 0.55–0.69 for GLM-5.2 on SGLang (TP2 to TP4 and TP4 to TP8), 0.68–0.71 for DeepSeek-V4-Flash on SGLang and 0.76 for MiniMax-M2.7 on ATOM (both TP2 to TP4).
+
+ 
+ B.2 Communication
+
+ 
+ Per layer, the kernel charges two TP all-reduces (one under attention DP). Per MoE layer, it charges an EP dispatch and combine. Per step, it charges p p point-to-point hops across pipeline stages (§ B.4 ). Every collective costs a latency plus a bandwidth term, t = α + m / B t=\alpha+m/B , on one of two tiers.
+
+ 
+ Inside a node.   Decode messages are small. Below 8 MiB, vLLM does not call RCCL  [ 5 ] ; it uses its own one- and two-shot custom all-reduce. We price that range with α + m / B \alpha+m/B measured on the custom kernel, per group size and per kernel variant. All-to-all below 32 MiB is priced the same way on RCCL. Inside a step we charge only m / B m/B , because α \alpha is the per-kernel launch and occupancy cost that the step already charges for every kernel it issues. We measured that cost as 4.98  μ \mu s per kernel from a TP1–8 sweep. Large messages go to RCCL over the xGMI mesh. In a fully connected node of N N GPUs, each GPU has N − 1 N{-}1 links and a group of g g GPUs uses g − 1 g{-}1 of them, so B ⁡ ( g ) = B node ​ η ​ ( g − 1 ) / ( N − 1 ) B(g)=B_{\text{node}}\,\eta\,(g{-}1)/(N{-}1) with one node parameter B node B_{\text{node}} and an efficiency η \eta . On MI355X, N = 8 N=8 . In anchored mode, the anchor step already contains the engine’s communication, and transfer moves it with the step.
+
+ 
+ Across nodes.   Traffic that leaves the node crosses the network interface cards (NICs). We price it from the NIC datasheet bandwidth and a per-message latency, and hierarchical collectives combine the two tiers. Pipeline stages are placed contiguously, so a pipeline over n n nodes has n − 1 n{-}1 forward boundaries on the network, plus the token return from the last stage to the first. All other hops stay on xGMI. § G validates both tiers on one and two nodes.
+
+ 
+ B.3 MoE expert load
+
+ 
+ Under EP, an MoE layer ends only when its most loaded rank ends, because each rank runs only its own experts. Two effects make ranks uneven. The first is chance. A decode step at batch b b makes only b ​ k bk top- k k choices, so how many land on each rank varies from step to step. The second is skew. A trained router favors some experts whatever the input, and the tokens of one prompt pick alike. Chance is large in inference decode, which runs at small batch. Training steps carry thousands of tokens, so there it averages out.
+
+ 
+ The busiest rank gates each layer.   For a step of t t tokens at width EP, ROCm InferaSim uses two factors: I n = 𝔼 ⁡ [ max r ⁡ n r ] / n ¯ I_{n}=\mathbb{E}[\max_{r}n_{r}]/\bar{n} , the busiest rank’s routed tokens over the mean, and I d = 𝔼 ⁡ [ max r ⁡ d r ] / d ¯ I_{d}=\mathbb{E}[\max_{r}d_{r}]/\bar{d} , its distinct experts read over the mean. Both are expectations of a per-layer maximum, because each layer waits for its own busiest rank. The busiest rank’s expert GEMM is priced with I n ​ n ¯ I_{n}\bar{n} rows over I d ​ d ¯ I_{d}\bar{d} experts: at weight-bound decode the experts read set the cost, and at compute-bound prefill the rows do. Token permutation and the activation scale with I n I_{n} ; attention, the router and communication are unchanged. At EP = 1 \mathrm{EP}=1 every rank holds a slice of every expert, so both factors are 1. With no measurement, ROCm InferaSim samples a uniform top- k k router, which captures chance and not skew. A uniform router at EP8 already gives I d = 1.75 I_{d}=1.75 at b = 4 b=4 , 1.31 1.31 at b = 16 b=16 and 1.09 1.09 at b = 64 b=64 for GLM-5.2’s 256 experts and top-8, and under 1.08 1.08 on rows once a step carries 512 tokens or more.
+
+ 
+ Skew is measured from the checkpoint’s routing.   We serve the checkpoint on SGLang at TP8 with its expert-distribution recorder on, which logs the top- k k choice of every token in every layer, and replay the log on any EP layout offline. A decode batch of b b requests is b b tokens of one recorded decode step, each from a different request; a prefill chunk is a contiguous run of prompt tokens. One recording takes a few minutes of serving once the weights are loaded and covers every EP width and batch; the replay is stored as a table of I n I_{n} and I d I_{d} per EP, phase and token count, which both modes read with no GPU: simulate mode prices the busiest rank’s expert GEMM with it directly, and anchored mode takes its ratio between the anchor’s and the target’s EP. Engines can mitigate imbalance by replicating hot experts (EPLB); the replay prices that too, by placing R R extra copies of the hottest experts greedily on long-run load. Without a recording, ROCm InferaSim keeps the analytical bound in which only the share of routed mass that still lands on a single slot stays hot:
+
+ 
+
+ 
+ 
+ I ′ = 1 + ( I − 1 ) ​ E E + R . I^{\prime}=1+(I-1)\,\frac{E}{E+R}. 
+ 
+ (3) 
+ 
+ 
+
+ 
+ Table 6: Busiest-rank routed tokens over the mean ( I n I_{n} ) for DeepSeek-V4-Pro (384 experts, top-6) at EP8, replayed from recorded routing. Random tokens are what fixed-length benchmarks send, sonnet text is what the AgentX replay sends, and code is real Python source. Uniform is a sampled uniform router (chance only); EPLB adds 48 replicas. 
+ 
+ 
+ 
+ Prompts 
+ decode b = 4 b{=}4 
+ decode b = 64 b{=}64 
+ decode, EPLB b = 64 b{=}64 
+ prefill 8k 
+
+ 
+ 
+ 
+ Uniform router 
+ 1.89 
+ 1.20 
+ – 
+ 1.02 
+
+ 
+ Random tokens 
+ 2.03 
+ 1.60 
+ 1.41 
+ 2.06 
+
+ 
+ Sonnet text 
+ 2.07 
+ 1.77 
+ 1.17 
+ 1.76 
+
+ 
+ Code 
+ 1.95 
+ 1.41 
+ 1.19 
+ 1.44 
+
+ 
+ 
+ 
+ 
+ What the recording shows.   Table  6 gives DeepSeek-V4-Pro at EP8. At b ≤ 4 b\leq 4 the real router is within 10% of the uniform one: chance dominates. From b ≈ 16 b\approx 16 skew dominates, and it does not average out: the busiest rank carries 1.4 1.4 – 1.8 × 1.8\times the mean at b = 64 b=64 , and up to 2.1 × 2.1\times in a prefill chunk, against 1.2 × 1.2\times and 1.02 × 1.02\times for a uniform router. The prompts matter as much as the batch. Random tokens, which fixed-length benchmarks send, concentrate prefill on few experts, and the hottest expert takes 46 × 46\times its fair share of routings; real code spreads the most evenly. A projection should therefore use the recording whose prompts resemble the target’s traffic, and a benchmark scored on random tokens overstates the imbalance of production traffic. At b = 64 b=64 replication removes most of the skew on sonnet text and code but less than half on random tokens, and none of the chance at small batch, because it balances long-run load, not a single step. The other two recorded checkpoints follow the same pattern at EP8: at b = 64 b=64 the busiest rank carries 1.30 1.30 – 1.66 × 1.66\times the mean on GLM-5.2 and 1.44 1.44 – 1.89 × 1.89\times on DeepSeek-V4-Flash, lowest on code in both, and in an 8192-token prefill 1.30 1.30 – 1.74 × 1.74\times and 1.47 1.47 – 2.14 × 2.14\times .
+
+ 
+ Imbalance is evaluated at both widths.   An anchor is harvested at reduced width (§ 3.1.1 ), often with a smaller EP than the target. If one imbalance value were applied to both sides of the transfer ratio, it would cancel, and a wider EP would look free. ROCm InferaSim therefore evaluates I n I_{n} and I d I_{d} separately at the anchor’s EP and at the target’s EP, so the ratio keeps the penalty of sharding experts more finely. Training-side projection reduces EP for the same reason and restores it analytically. On the nine measured runs in our corpus that shard experts (DeepSeek-V4-Flash on vLLM at TP4/EP4, 2–256 clients, and DeepSeek-V4-Pro at TP8/EP8), each restored from an anchor harvested without EP, anchored mode projects TPOT within a median 2.2% and throughput within 2.1% with the recorded random-token routing, which is what these benchmarks send, and within 1.4% and 1.5% with the uniform router.
+
+ 
+ A controlled pair.   The corpus runs change EP together with the anchor’s width. To isolate EP, we served DeepSeek-V4-Pro on SGLang at TP8 on one node twice, once with every rank holding a slice of every expert (EP1) and once with experts sharded (EP8), at 1, 4, 16 and 64 clients on 1k prompts and 4 and 16 on 8k. EP8 is 10–13% slower in TPOT up to 16 clients and level at 64. Projected from the EP1 run, anchored mode reads EP8’s TPOT within a median 3.5% and its throughput within 3.4% without the busiest-rank factors. On this engine the step pays for reading fewer, wider experts, while on vLLM it also pays for the busiest rank.
+
+ 
+ SGLang’s EP dispatch.   With --ep-size and no all-to-all backend, SGLang keeps tokens replicated across the TP group and combines expert outputs with the TP all-reduce. Pricing an EP all-to-all on top of the all-reduce charges about 19 ms per prefill forward. With dispatch priced as SGLang runs it, the pair above fits best with half of the busiest rank’s surplus of distinct experts ( I d I_{d} ) kept, and TPOT is within 3.0%. We then scored three SGLang runs that change only --ep-size against the same configuration without EP, none of them used in the fit: GLM-5.2 MXFP4 at EP4 and EP8 on 1k prompts and DeepSeek-V4-Pro at EP8 on 8k prompts, all at 64 clients. Priced with the all-reduce and both factors in full they are within − 2.2 -2.2 to + 2.5 % +2.5\% under the uniform router and at most + 10.5 % +10.5\% under the recorded routing.
+
+ 
+ Few experts read slowly.   A grouped GEMM over few experts reads HBM below peak, and ROCm InferaSim charges the shortfall. One or two experts give too few independent streams to saturate HBM, and how far they fall short depends on the kernel. On MI355X at one row per expert, one expert reaches 25% of peak bandwidth with DeepSeek’s FP8 kernel and 14% with gpt-oss’s MXFP4 kernel. Both saturate by about 16 experts. ROCm InferaSim charges the shortfall for the group size from the curve of the expert dtype. Sharding by TP cuts the bytes without cutting the group, so it is not charged. This term decides EP transfer at decode, where an EP8 rank reads one to three whole experts instead of slices of all of them.
+
+ 
+ The anchor’s own router.   In anchored mode the router’s skew at the anchor’s width is inside the measured step, because the harvest loads real weights; random weights spread tokens evenly and make an MoE anchor too fast (§ E ). What the anchor cannot hold is the imbalance at a wider EP, which is why the factors above are evaluated at both widths. Simulate mode also needs how many distinct experts a decode step reads, because a small-batch MoE step is bound by weight bandwidth and its cost follows the experts touched, not the experts held. For t t tokens with top- k k routing, independent routing touches a fraction 1 − ( 1 − k / E ) t 1-(1-k/E)^{t} of the experts. Real tokens touch fewer. ROCm InferaSim takes this from a coverage curve measured on the checkpoint’s own router: for DeepSeek-V3 (256 experts, top-8) it bottoms at 0.89 of the independent prediction at 64 tokens, while for gpt-oss-120b (128 experts, top-4) it bottoms at 0.78. The gpt-oss curve is fitted to decode latency, so it also absorbs the grouped-GEMM efficiency the kernel model misses, and is an effective coverage rather than a physical one.
+
+ 
+ B.4 Pipeline parallelism
+
+ 
+ Serving has no backward pass, so a PP layout runs every layer of a token in sequence, and the only overlap comes from micro-batches in flight. A serial model (the sum of the stages plus p − 1 p{-}1 activation transfers of a few KiB) predicts that TPOT does not depend on depth. Measured TPOT on SGLang grows steadily with depth (§ C.1 ). Three measured facts explain why.
+
+ 
+ Every step makes p p hops.   At one client, the added TPOT per stage is 920–1130  μ \mu s on three models at PP 2, 4 and 8 (Figure  7 a), about 20 × \times an eager send/recv of the activation. A step makes p − 1 p{-}1 activation sends plus one more hop: the last stage returns the sampled token to stage 0 before the next step can start. ROCm InferaSim charges p ⁡ ( t p2p + o ) p\,(t_{\text{p2p}}+o) per step, with one per-hop overhead o = 970 ​ μ o=970\,\mu s.
+
+ 
+ Scheduler host time stops overlapping.   On one stage, SGLang overlaps CPU scheduling of step k + 1 k{+}1 with the GPU forward of step k k . With PP > > 1, it turns that overlap off. Running the same single-stage engine with overlap on and off isolates the host time H ⁡ ( b ) H(b) . On all three models it is 0.31–0.39 ms at small batch and 0.69–0.78 ms at 64 requests, and H ⁡ ( b ) = 0.33 ​ ms + 6.3 ​ μ ​ s ⋅ b H(b)=0.33\,\text{ms}+6.3\,\mu\text{s}\cdot b fits well (Figure  7 b).
+
+ 
+ In a full pipeline, host time adds up.   The clients split into p p micro-batches of C / p C/p . With two or more micro-batches, no stage waits for another, so each of the p p stages adds its host time to the cycle:
+
+ 
+
+ 
+ 
+ s PP ​ ( C ) = s ⁡ ( C / p ) + p ⁡ ( t p2p + o ) + p ​ H ​ ( C / p ) , s_{\text{PP}}(C)=s\bigl(C/p\bigr)+p\,(t_{\text{p2p}}+o)+p\,H\bigl(C/p\bigr), 
+ 
+ (4) 
+ 
+ 
+ where s s is the full-depth forward at the micro-batch size. Nothing here is fitted to a PP ladder: o o comes from concurrency-1 runs and H H from single-stage probes.
+
+ 
+ Across nodes.   For hops that cross the network, t p2p t_{\text{p2p}} is the NIC-tier send/recv of § B.2 . The per-hop overhead o o and host time H H are engine costs and do not change. So a multi-node pipeline projects from the same single-node anchors (§ C.2 ).
+
+ 
+ B.5 Memory and capacity
+
+ 
+ The memory model is fully analytical. It covers weights by component dtype and layout; KV bytes per token, including sparse-attention indexer keys and compressed pools; and the activation working set. It sets the largest sustainable concurrency, so ROCm InferaSim never reports throughput at a concurrency that HBM cannot hold. Against the pool size each engine prints at startup, projected KV bytes per token agree to 0.0% for GLM-5.2 (BF16, 49 logs) and MiniMax-M3 (FP8), and to 2% for GLM-5.2 FP8. Some pools do not reduce to per-token arithmetic, such as hybrid linear attention and DeepSeek-V4’s compressed multi-head latent attention (MLA) pool. For those we use the size the engine reports, so admission is always simulated against the real pool.
+
+ 
+ B.6 KV cache below HBM
+
+ 
+ The DES models the tier as a second level of its block cache. Blocks evicted from HBM by the engine’s leaf-first LRU rule move to DRAM and are dropped only when DRAM is also full. A request whose prefix is DRAM-resident has those blocks promoted back, and the DES queues the transfer on the host link of its rank before scheduling the request, so a load adds to that request’s TTFT and does not stall other requests’ steps; loads that arrive together queue behind each other. The tier’s size is the DRAM each run hands its engine, divided over its GPUs (256–2,399 GB per node here), and the link is rated at the host-to-device bandwidth. Hits are therefore an output of the replay: a tier that is too small for the sessions in flight recomputes them, as the engine does. The four offload engines share this model and differ in their DRAM budget and in the scheduler they sit under. Covered offloaded runs are predicted within 4–16% on throughput per engine, and within 6% where the tier is added to an anchor measured without one (§ 5.6 ).
+
+ 
+ In the Pareto sweep the tier is an input, its size per GPU and its link bandwidth, and the frontier is drawn with KV in HBM only and with a DRAM tier.
+
+ 
+ Appendix C Pipeline parallelism and multiple nodes
+
+ 
+ C.1 Pipeline parallelism
+
+ 
+ Table 7: Pipeline parallelism on SGLang: median absolute TPOT error (%) over the PP > > 1 rows, for the serial model and the per-stage model of Eq.  4 (this work). 
+ 
+ 
+ 
+ Model 
+ rows 
+ serial 
+ this work 
+
+ 
+ 
+ 
+ Llama-3.1-8B 
+ 24 
+ 18.1 
+ 7.2 
+
+ 
+ Qwen3-14B-FP8 
+ 9 
+ 14.9 
+ 2.3 
+
+ 
+ Qwen3.6-35B-A3B 
+ 9 
+ 26.1 
+ 9.2 
+
+ 
+ 
+ 
+ 
+ Figure 7: Pipeline parallelism on SGLang, three models. (a) At one client, the added TPOT per stage does not change with depth: 920–1130  μ \mu s, because every step makes p p hops. (b) Host time per step (overlap-off minus overlap-on, one stage), against 0.33 ​ ms + 6.3 ​ μ ​ s ⋅ b 0.33\,\text{ms}+6.3\,\mu\text{s}\cdot b . (c) Median TPOT error over PP > > 1 rows for the serial model and Eq.  4 , anchored mode. 
+ 
+ 
+ We measured three models on SGLang: Llama-3.1-8B-Instruct, Qwen3-14B-FP8 and Qwen3.6-35B-A3B, at TP1 with PP 1, 2, 4 and 8, concurrency 1, 16 and 64, 1024-token prompts and outputs, and prefix caching off. Llama also has 8192-token prompts and a TP2 × \times PP2 layout. Each model’s PP layouts are projected from its PP1 anchor, so the study isolates the PP model. Appendix  H gives absolute values and signed errors.
+
+ 
+ Accuracy.   Eq.  4 has 7.2%, 2.3% and 9.2% median TPOT error on Llama, Qwen3-14B-FP8 and Qwen3.6-35B-A3B; the serial model has 18.1%, 14.9% and 26.1% (Table  7 , Figure  7 c). Nothing in Eq.  4 was fitted to these ladders.
+
+ 
+ Inside a node, PP buys capacity, not speed.   At one client and 1024-token prompts, Llama TPOT rises from 4.46 ms at PP1 to 6.32, 8.15 and 12.06 ms at PP2, 4 and 8 (4.57 to 7.18, 9.18 and 14.24 ms at 8192 tokens). At 1024 tokens and 64 clients, throughput falls from 7,773 to 6,988, 5,809 and 3,833 tok/s. At 8192 tokens and 64 clients, PP raises absolute throughput from 2,519 to 3,151–3,494 tok/s, but uses 2–8 × \times the GPUs: PP4 gives 874 tok/s per GPU against 2,519 for PP1. PP is for KV capacity and for models too large for one layout. Its most important use is spanning nodes (§ C.2 ).
+
+ 
+ C.2 Serving across nodes
+
+ 
+ Figure 8: SGLang Llama-3.1-8B pipelines across two MI355X nodes. (a) Measured TPOT at one client for layouts run both on one node and across two: crossing the NICs adds no systematic cost. (b) Projected against measured TPOT for all 24 two-node configurations, from single-node anchors; the band is ± \pm 10%. 
+ 
+ 
+ Table 8: SGLang Llama-3.1-8B pipelines split across two MI355X nodes: median absolute error (%) per layout, projected from single-node anchors. 
+ 
+ 
+ 
+ 
+ GPUs 
+ 
+ 
+ 
+
+ 
+ Layout 
+ /node 
+ rows 
+ TPOT 
+ Tput 
+
+ 
+ TP1 × \times PP2 
+ 1 
+ 6 
+ 6.7 
+ 6.3 
+
+ 
+ TP2 × \times PP2 
+ 2 
+ 6 
+ 9.5 
+ 11.3 
+
+ 
+ TP4 × \times PP2 
+ 4 
+ 6 
+ 13.7 
+ 14.9 
+
+ 
+ TP8 × \times PP2 
+ 8 
+ 6 
+ 21.7 
+ 33.8 
+
+ 
+ All 
+ 
+ 24 
+ 11.6 
+ 11.6 
+
+ 
+ 
+ 
+ 
+ We split the SGLang Llama-3.1-8B pipelines of § C.1 across two MI355X nodes in the standard layout: one pipeline stage per node, TP inside each node, and the stage boundary and token return on the Pollara NICs. Four layouts, TP1 to TP8 per node (2 to 16 GPUs), run at 1024- and 8192-token prompts and 1, 16 and 64 clients: 24 configurations. The projection uses the same single-node PP1 anchors as § C.1 and no two-node measurement. The placement-aware pipeline model moves the two cross-node hops onto the NIC tier; nothing else changes.
+
+ 
+ Results.   Anchored mode projects the two-node pipelines at 11.6% median error on both TPOT and throughput (Table  8 , Figure  8 b), for layouts of up to 16 GPUs, including TP4 and TP8 stages never measured under a pipeline.
+
+ 
+ Crossing nodes is cheap.   The model and the measurements agree that crossing nodes adds little. Inside a step the model prices each NIC hop at a few microseconds of wire latency plus one kernel launch, not the 44  μ \mu s α \alpha of a standalone send/recv benchmark (Table  5 ), for the same reason as inside a node (§ B.2 ). Over the four layout and prompt-length pairs that also ran on one node, that is at most 10  μ \mu s per token, against a 970  μ \mu s per-hop engine cost. At one client, the same layout on one node and on two differs by − - 0.69 to + + 1.03 ms per token, with no consistent sign, and two of the four pairs ran faster across nodes (Figure  8 a). So pipeline parallelism is the natural way to span nodes.
+
+ 
+ What it means for search.   Every two-node candidate here was projected from single-node anchors in under half a second each, while measuring the two-node ladder held 16 GPUs for about an hour and a half. The larger the deployment, the larger the share of the space that needs no measurement.
+
+ 
+ Appendix D Additional results
+
+ 
+ Table 9: Evaluation sets, all measured on MI355X. Engines: A=ATOM, S=SGLang, V=vLLM. Configurations are measured ones, except for the Pareto sweep, which is projected and compared with every measured run it matches. Anchors are the distinct anchors each set is projected from. Model versions differ between sets (DeepSeek-V4-Flash and MiniMax-M2.7 in the fixed-length corpus, DeepSeek-V4.1-Flash and MiniMax-M3 in the AgentX replay, GLM-5 in InferenceX and GLM-5.2 in our own runs); each name is the checkpoint that set measured. 
+ 
+ 
+ 
+ 
+ 
+ Set 
+ 
+ Models 
+ Engines 
+ 
+ 
+ Traffic 
+ 
+ Configs 
+ Anchors 
+ 
+ 
+ Scored on 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Pipelines 
+ 
+ 3 
+ S 
+ 
+ 
+ 1k or 8k in, 1–64 clients, PP 1–8, one or two nodes 
+ 
+ 24 (2 nodes) 
+ 4 + 4 
+ 
+ 
+ pipeline model (§ 5.3 ) 
+ 
+
+ 
+ 
+ 
+ Fixed-length corpus 
+ 
+ 8 
+ A, S, V 
+ 
+ 
+ random prompts, 1k or 8k in, 1k out, 1–256 clients 
+ 
+ 172 
+ 11 
+ 
+ 
+ error and order (§ 5.4 , § 5.7 ) 
+ 
+
+ 
+ 
+ 
+ Agentic replay 
+ 
+ 6 
+ A, S, V 
+ 
+ 
+ AgentX coding trace, 1–384 sessions, with and without KV offload, colocated and split 
+ 
+ 184 
+ 28 
+ 
+ 
+ error where covered, order, deployment mix (§ 5.6 , § 5.11 ) 
+ 
+
+ 
+ 
+ 
+ Disaggregated splits 
+ 
+ 4 
+ A, S, V 
+ 
+ 
+ 1k or 8k in, 1k out, 1–2,048 clients, 8–24 GPUs 
+ 
+ 159 
+ 16 
+ 
+ 
+ error with no disaggregated anchor (§ 5.10 ) 
+ 
+
+ 
+ 
+ 
+ Pareto sweep 
+ 
+ 13 
+ A, S, V 
+ 
+ 
+ 1k/1k, 8k/1k and AgentX 
+ 
+ 169,962 proj. 
+ 23 
+ 
+ 
+ frontier error and order (§ 5.8 ) 
+ 
+
+ 
+ 
+ 
+ 
+ Figure 9: Predicted against measured, 172 fixed-length configurations. Dotted lines show ± \pm 20%. Anchored mode stays near the diagonal on all three metrics. 
+ 
+ 
+ Table 10: Fixed-length accuracy on MI355X: median absolute error (%) per model, anchored mode. Every anchor here is a sweep of 4 to 11 batch sizes. Engines: A=ATOM, S=SGLang, V=vLLM. The output sequence length (OSL) is 1024 for all rows. Tput is output throughput. 
+ 
+ 
+ 
+ Model 
+ n n 
+ Eng. 
+ TTFT 
+ TPOT 
+ Tput 
+
+ 
+ MiniMax-M2.7 
+ 7 
+ A 
+ 2.7 
+ 4.5 
+ 4.7 
+
+ 
+ Qwen3-14B-FP8 
+ 8 
+ A/S 
+ 4.8 
+ 1.5 
+ 1.2 
+
+ 
+ GLM-5.2-MXFP4 
+ 67 
+ S 
+ 11.7 
+ 9.5 
+ 10.6 
+
+ 
+ DeepSeek-R1-0528-MXFP4 
+ 7 
+ A 
+ 14.9 
+ 12.1 
+ 10.9 
+
+ 
+ DeepSeek-V4-Flash 
+ 67 
+ S/V 
+ 15.2 
+ 6.3 
+ 7.4 
+
+ 
+ Qwen3.6-35B-A3B 
+ 7 
+ A 
+ 19.1 
+ 8.1 
+ 9.0 
+
+ 
+ DeepSeek-V4-Pro-MXFP4 
+ 2 
+ V 
+ 19.7 
+ 12.5 
+ 10.2 
+
+ 
+ gpt-oss-120b 
+ 7 
+ A 
+ 24.7 
+ 4.0 
+ 6.4 
+
+ 
+ ISL 1k / OSL 1k 
+ 99 
+ 
+ 19.1 
+ 9.2 
+ 9.6 
+
+ 
+ ISL 8k / OSL 1k 
+ 73 
+ 
+ 6.3 
+ 6.4 
+ 6.9 
+
+ 
+ All 
+ 172 
+ 
+ 13.6 
+ 8.1 
+ 8.8 
+
+ 
+ 
+ 
+ 
+ Table 11: Choice ranking in both modes on the scored corpus of § 5.4 (42 choice sets; both modes scored on the same 172 configurations and pairs). Pair accuracy is the share of decisive pairs in the right order (ties count half). Top-1 is how often the predicted pick is the measured best. Regret is how much slower the pick is than the best, median/p90 over sets. 
+ 
+ 
+ 
+ Mode 
+ Metric 
+ Pairs 
+ Pair acc. (%) 
+ Top-1 (%) 
+ Regret p50/p90 (%) 
+
+ 
+ 
+ 
+ anchored 
+ Throughput 
+ 68 
+ 93.4 
+ 73 
+ 0.0/0.2 
+
+ 
+ 
+ TPOT 
+ 89 
+ 85.4 
+ 60 
+ 0.0/3.9 
+
+ 
+ simulate 
+ Throughput 
+ 68 
+ 89.0 
+ 59 
+ 0.0/6.2 
+
+ 
+ 
+ TPOT 
+ 89 
+ 84.3 
+ 54 
+ 0.1/7.0 
+
+ 
+ 
+ 
+ 
+ Most remaining ranking errors are pairs that noise or identical execution makes impossible to order. Anchored mode misorders only three throughput pairs. All three are GLM-5.2 SGLang pairs at 8192-token prompts and 256 clients, where repeated runs of the same configuration differ by 25–63%. On TTFT, 39 of 118 decisive pairs differ only in a flag that does not change execution, so no predictor can order them. On the rest, ROCm InferaSim orders 82–84% correctly.
+
+ 
+ Table 12: Serving performance models as each paper reports them. Setups differ, so errors are not directly comparable; the table shows what each model needs and where it was validated. The row marked “run by us” is our own run, median error on the same rows as ROCm InferaSim. 
+ 
+ 
+ 
+ System 
+ 
+ 
+ Step cost from 
+ 
+ 
+ 
+ Reported validation 
+ 
+
+ 
+ 
+ 
+ Vidur 
+ 
+ 
+ profiled operators per model and shard; dense only 
+ 
+ 
+ 
+ < < 9% request latency 
+ 
+
+ 
+ run by us 
+ 
+ 
+ profiled on MI355X 
+ 
+ 
+ 
+ 40% TPOT, 40% throughput on 30 SGLang rows (ROCm InferaSim: 7.2%, 7.4%) 
+ 
+
+ 
+ APEX 
+ 
+ 
+ profiled operators 
+ 
+ 
+ 
+ 10.7% on plan speedups, vLLM and SGLang 
+ 
+
+ 
+ LLMServingSim 
+ 
+ 
+ accelerator simulators 
+ 
+ 
+ 
+ 14.7%, vLLM on 4 × \times RTX 3090 
+ 
+
+ 
+ AIConfigurator 
+ 
+ 
+ kernel database per GPU and framework; NVIDIA only 
+ 
+ 
+ 
+ 7.8% TPOT on one H100 node; 25.5% throughput on its Pareto picks (TensorRT-LLM) 
+ 
+
+ 
+ BestServe 
+ 
+ 
+ roofline, efficiencies tuned per stack; dense only 
+ 
+ 
+ 
+ 8.6–30.1% over four scenarios 
+ 
+
+ 
+ LLMCompass 
+ 
+ 
+ hardware description 
+ 
+ 
+ 
+ 4.1% inference latency 
+ 
+
+ 
+ SCOOT 
+ 
+ 
+ a live run per trial 
+ 
+ 
+ 
+ none needed: every trial is measured 
+ 
+
+ 
+ ROCm InferaSim 
+ 
+ 
+ one step sweep on at most one node per kernel set 
+ 
+ 
+ 
+ 8.1% TPOT, 8.8% throughput on 172 configurations, 3 engines; 5.5% on 159 disaggregated splits; agentic (incl. KV offload) 8% throughput, 14% ITL on 95 configurations; MI355X 
+ 
+
+ 
+ 
+ 
+ 
+ Table 13: Measured Pareto charts against anchored-mode projections. Error is the median relative error per point; ρ \rho is the median within-chart Spearman correlation of throughput per GPU; frontier hit counts measured-frontier configurations that are also on the projected frontier. Anchor runs are excluded; the AgentX row is the 95 covered runs. 
+ 
+ 
+ 
+ Corpus 
+ Charts 
+ Points 
+ Tput/GPU err 
+ Interact. err 
+ ρ \rho 
+ Frontier hit 
+
+ 
+ 
+ 
+ Our fixed-length runs 
+ 11 
+ 172 
+ 8.8% 
+ 8.2% 
+ 0.99 
+ 63/80 
+
+ 
+ InferenceX fixed-length 
+ 8 
+ 262 
+ 7.0% 
+ 6.0% 
+ 0.99 
+ 65/79 
+
+ 
+ AgentX trace (covered) 
+ 6 
+ 95 
+ 4.2% 
+ 5.2% 
+ 0.99 
+ 42/47 
+
+ 
+ All 
+ 25 
+ 529 
+ 7.0% 
+ 6.5% 
+ 0.99 
+ 170/206 
+
+ 
+ 
+ 
+ 
+ D.1 Narrower anchors
+
+ 
+ Table 14: TP8 deployments projected from TP4 anchors (fixed-length corpus, anchored mode): median absolute error (%) and the Pearson correlation r r of log projected against log measured throughput. Same-width rows are the corpus rows at their anchor’s own TP. ISL is the input sequence length. 
+ 
+ 
+ 
+ Model 
+ ISL 
+ n n 
+ TTFT 
+ TPOT 
+ Tput 
+ r r 
+
+ 
+ GLM-5.2-MXFP4 (S) 
+ 8k 
+ 50 
+ 5.7 
+ 7.7 
+ 9.2 
+ 
+
+ 
+ GLM-5.2-MXFP4 (S) 
+ 1k 
+ 17 
+ 22.6 
+ 15.9 
+ 19.5 
+ 
+
+ 
+ DeepSeek-R1-0528-MXFP4 (A) 
+ 1k 
+ 7 
+ 14.9 
+ 12.1 
+ 10.9 
+ 
+
+ 
+ Qwen3.6-35B-A3B (A) 
+ 1k 
+ 7 
+ 19.1 
+ 8.1 
+ 9.0 
+ 
+
+ 
+ gpt-oss-120b (A) 
+ 8k 
+ 7 
+ 24.7 
+ 4.0 
+ 6.4 
+ 
+
+ 
+ DeepSeek-V4-Pro-MXFP4 (V) 
+ 1k 
+ 2 
+ 19.7 
+ 12.5 
+ 10.2 
+ 
+
+ 
+ TP4 → \to TP8, all 
+ 
+ 90 
+ 16.5 
+ 9.3 
+ 9.7 
+ 0.994 
+
+ 
+ Same width 
+ 
+ 82 
+ 11.0 
+ 5.5 
+ 6.1 
+ 0.992 
+
+ 
+ 
+ 
+ 
+ Agentic.   Anchoring three TP8 stacks at TP4 instead projects their ten held-out TP8 runs within 1.08, 1.18 and 1.24, against 1.04, 1.10 and 1.34 from TP8 anchors; the default anchors stay at the target width.
+
+ 
+ D.2 Deployment mix on the full trace
+
+ 
+ Table 15: Deployment mix for six models on MI355X, agentic trace. Per tier: slots where some configuration meets the tier on hardware, picks that are the measured best or within 12% of its throughput, and picks that miss the tier. 
+ 
+ 
+ 
+ 
+ Tier 
+ Interactivity 
+ TTFT 
+ Slots 
+ Best / within 12% 
+ Miss 
+
+ 
+ 
+ 
+ realtime 
+ ≥ \geq 150 tok/s 
+ ≤ \leq 1 s 
+ 5 
+ 2 / 3 
+ 1 
+
+ 
+ interactive 
+ ≥ \geq 70 tok/s 
+ ≤ \leq 2.5 s 
+ 6 
+ 3 / 4 
+ 1 
+
+ 
+ responsive 
+ ≥ \geq 25 tok/s 
+ ≤ \leq 10 s 
+ 6 
+ 4 / 4 
+ 0 
+
+ 
+ bulk 
+ – 
+ – 
+ 6 
+ 5 / 5 
+ 0 
+
+ 
+ All 
+ 
+ 
+ 23 
+ 14 / 16 
+ 2 
+
+ 
+ 
+ 
+
+ 
+ 
+ On the full 184-run trace we restrict the candidates to the 123 runs an anchor covers (same engine build and layout, within 4 × 4\times of its sessions; the 28 anchors are among them), so that every projection is anchored mode, and score each pick against the measured best of these candidates. All 23 slots keep a candidate that meets the tier. The planner picks that best in 14 and a configuration within 12% of it in 16, with a median loss of 0%, and its five-candidate short list holds the best in 21 slots and a configuration within 12% in 22.
+
+ 
+ D.3 Agent searches
+
+ 
+ We ran the agent’s seed stage for 24 objectives and four models, each with and without an SLO, on an agentic request shape of 130k prompt and 900 output tokens. This scores 56,328 candidates and uses no LLM. For DeepSeek-V4-Pro, the only model measured where the searches land, the throughput optimum found (TP8, attention DP, FP4, 256 clients) is predicted within 0.3% of its measured value. Speculative decoding won four of the 24 objectives, all of them per-user latency, and the SLO changed the answer for 8. The searches took 3–8 CPU-hours, and measuring their candidates would take about 25,000 GPU-hours (§ 1 ).
+
+ 
+ D.4 Disaggregated layouts
+
+ 
+ Table 16: Disaggregated validation, anchored mode: median absolute error (%) on the 159 InferenceX fixed-length splits on MI355X that we evaluate (four models, 8–24 GPUs, 1–2,048 clients). Each pool restores one of 16 anchors built from colocated runs; no split is used as an anchor. TTFT is scored on the mean InferenceX reports. 
+ 
+ 
+ 
+ Runs 
+ n n 
+ Tput 
+ Inter. 
+ TTFT 
+
+ 
+ 
+ 
+ SGLang + MoRI splits 
+ 58 
+ 8.5 
+ 12.6 
+ 22.2 
+
+ 
+ vLLM + NIXL splits 
+ 37 
+ 5.2 
+ 4.0 
+ 7.1 
+
+ 
+ ATOM + Mooncake splits 
+ 64 
+ 4.8 
+ 2.3 
+ 18.6 
+
+ 
+ All splits 
+ 159 
+ 5.5 
+ 5.3 
+ 16.9 
+
+ 
+ 
+ 
+ 
+ TTFT and the KV hand-off.   TTFT needs two things a colocated step model does not have. An anchor’s lowest-concurrency TTFT is part GPU prefill and part host time (Hypertext Transfer Protocol (HTTP) handling, tokenization at 5–11  μ \mu s per prompt token, scheduling); its own decode stalls give the GPU part, so the rest is the host’s. A split pays that host time on both servers: at low concurrency the measured DeepSeek-V4-Pro ATOM splits sit 158 ms above GPU prefill at 8k, about twice the 80 ms of host time in the colocated anchor. On the prefill server part of it is serial, so ROCm InferaSim bills half of the anchor’s host time on the prefill step that admits a request, and later prompts queue behind it. This lowers the median split TTFT error from 23% to 17%. The first token is stamped when a decode replica admits the request, since the router streams from the decode server. At up to 16 clients the median TTFT error is 2.4% for vLLM + NIXL, 12% for SGLang + MoRI and 16% for ATOM + Mooncake. The KV hand-off is priced as a floor plus the exposed bytes over each prefill GPU’s own link. For MoRI these are 47.9 GB/s and 120  μ \mu s per batched transfer, from MoRI’s remote direct memory access (RDMA) benchmark over the one 400 Gb/s Pollara NIC per GPU, and only the last layer is exposed, because MoRI streams the cache layer by layer while prefill runs; NIXL and Mooncake send the whole cache after prefill, at 400 GB/s with a 5  μ \mu s floor and 200 GB/s with 10  μ \mu s. At these prompt lengths the hand-off is small: replacing the 300 GB/s MoRI rate of an earlier version with the measured 47.9 GB/s moves no projected TTFT by more than 3% and leaves every median error unchanged.
+
+ 
+ Residual rule for agentic splits.   We drop the anchor’s end-to-end residual for the 13 agentic splits, since it corrects the colocated scheduler, which a split does not run.
+
+ 
+ What decides the comparison.   Five modeling details decide whether disaggregation or colocation wins. First, each prefill replica adds capacity. Second, each pool has its own KV budget, summed over its attention-DP ranks. Without this, a DEP8 decode pool holds an eighth of its KV, and the comparison favors colocation. Third, each pool admits at most the requests its engine’s recipe allows, and SGLang caps a decode pool without attention DP at 128. Fourth, under attention DP every prefill rank has its own token budget and attends only its own prompts, while the MoE sees all of them. Fifth, an anchor harvested with speculation is not used for a target without it.
+
+ 
+ On agentic traffic.   We ran the mix planner’s rule (§ 4.1 ) on the AgentX trace in simulate mode, for six models, with colocated and disaggregated layouts as candidates, both swept to 256 clients. It picks a disaggregated layout in three of 19 slots that some layout meets: DeepSeek-V4-Pro at the interactive tier with DEP8 prefill and decode pools, MiniMax-M3 at the interactive tier and Qwen3.5-397B at the realtime tier. InferenceX measured splits of that model on the same trace, and a DEP8 split is also what the planner picks when those measured splits are its candidates, though there in the responsive and bulk tiers (§ 5.10 ). The token ratio alone would mislead: at the trace’s shape of 130k prompt and 900 output tokens it gives prefill 144 of every 145 GPUs, but prefix reuse leaves about 10,400 computed prompt tokens per request, and decode holds each request’s full KV cache for all 900 steps, so memory, not decode work, sizes the decode pool. Elsewhere, with a median 97.8% of prompt tokens hitting the prefix cache, the uncached prefill per turn is short and seldom stalls decode, as with 1k-token prompts. Most other picks combine forms of parallelism: 12 of 19 are TP8 with EP8 and attention DP over all eight ranks.
+
+ 
+ Appendix E Harvest checks
+
+ 
+ An anchor is only as good as the conditions of its harvest, so ROCm InferaSim keeps those conditions in the artifact. Each check below stops a measurement from silently describing something other than the deployment. We validated each check on measured runs. None is a fitted correction. The remedy is always to record and check, then re-harvest or refuse.
+
+ 
+ The prompt length is recorded.   The attention backend decides whether an anchor transfers across prompt lengths. We applied the same 8192-token DeepSeek-V4 anchor at 1024 tokens. On SGLang, whose backend reads a fixed top- k k of the cache, it is within 3%. On vLLM’s dense MLA path, it is 41% high (18.96 vs. 13.44 ms). So anchors keep their decode sweep’s prompt length, and sweeps at two lengths give a per-token decode slope.
+
+ 
+ Weights are real.   An untrained router spreads tokens evenly over experts. With random weights, GLM-5.2 decode is 1.337 × 1.337\times too fast at batch 64 and 1.045 × 1.045\times at batch 4, and the gap grows with batch, as expert imbalance would cause. Anchors record whether weights were real, and the harvester uses real checkpoints.
+
+ 
+ Prefix caching is off during harvest.   A length sweep reuses its own prefix by design. With caching on, a DeepSeek-V4-Pro sweep gave 68–89 ms across 1024–8192 tokens at R 2 = 0.995 R^{2}=0.995 ; with caching off, it gave 143–782 ms. Nothing downstream can tell the two apart, so the harvester disables caching and the anchor records it.
+
+ 
+ Width is checked.   A target more than one TP doubling from its anchor is flagged as extrapolated: GLM-5.2 prefill gains 1.80 × 1.80\times from TP2 to TP4 but only 1.32 × 1.32\times from TP4 to TP8, which a TP4 anchor cannot see. A new engine build needs a new harvest.
+
+ 
+ Packing probes check themselves.   If the token budget does not admit a probe’s sequences together, the probe measures serialization. Two checks catch this: a step of N N packed tokens must cost 0.63–1.39 × \times a single N N -token sequence (bad probes gave 3.59 × \times and 7.06 × \times ), and the fit must reproduce the probe’s widest step. Taking each probe at the billed sequence length gives TTFT errors of − - 2.2, +13.9, − - 4.4 and +1.1% on four models (Table  18 ).
+
+ 
+ Mechanisms, not factors.   We model a cost by the mechanism that causes it, and we measure the mechanism. The PP model of § B.4 , for example, uses the token-return hop and the host time SGLang cannot overlap under PP; we measured both, and it has 2.3% median TPOT error on Qwen3-14B-FP8 with nothing fitted to a PP ladder. Constants in ROCm InferaSim are measurements of named quantities, taken once per architecture or engine and applied unchanged everywhere else. The few fitted terms (host time per engine, the node bandwidth B node B_{\text{node}} , the gpt-oss coverage curve and the share of I d I_{d} kept for SGLang) are stated where they are used.
+
+ 
+ Appendix F Per-configuration agentic results
+
+ 
+ Table  17 breaks the 95 covered agentic configurations of § 5.6 (same layout, image and precision as an anchor, within 4 × 4\times of its sessions) down by model, engine and precision. The 28 anchors are 7 at TP2, 10 at TP4 and 11 at TP8; 20 run four sessions.
+
+ 
+ Table 17: Agentic AgentX replay, anchored mode: geometric-mean error factor max ⁡ ( r , 1 / r ) \max(r,1/r) per model, engine and precision over the covered held-out configurations. 
+ 
+ 
+ 
+ Model 
+ Engine 
+ Prec. 
+ n n 
+ Tput 
+ ITL 
+ TTFT 
+
+ 
+ 
+ 
+ DeepSeek-V4-Pro 
+ ATOM 
+ FP4 
+ 7 
+ 1.12 
+ 1.21 
+ 1.50 
+
+ 
+ DeepSeek-V4-Pro 
+ SGLang 
+ FP4 
+ 4 
+ 1.35 
+ 2.01 
+ 1.16 
+
+ 
+ DeepSeek-V4-Pro 
+ vLLM 
+ FP4 
+ 5 
+ 1.07 
+ 1.14 
+ 1.65 
+
+ 
+ DeepSeek-V4.1-Flash 
+ ATOM 
+ FP4 
+ 6 
+ 1.03 
+ 1.10 
+ 1.14 
+
+ 
+ DeepSeek-V4.1-Flash 
+ SGLang 
+ FP4 
+ 9 
+ 1.03 
+ 1.09 
+ 1.42 
+
+ 
+ DeepSeek-V4.1-Flash 
+ vLLM 
+ FP4 
+ 8 
+ 1.05 
+ 1.04 
+ 1.08 
+
+ 
+ GLM-5.2 
+ ATOM 
+ FP4 
+ 9 
+ 1.04 
+ 1.11 
+ 1.07 
+
+ 
+ GLM-5.2 
+ SGLang 
+ FP4 
+ 7 
+ 1.06 
+ 1.13 
+ 1.35 
+
+ 
+ GLM-5.2 
+ SGLang 
+ FP8 
+ 6 
+ 1.06 
+ 1.13 
+ 1.47 
+
+ 
+ Kimi-K3 
+ vLLM 
+ FP4 
+ 5 
+ 1.04 
+ 1.05 
+ 1.20 
+
+ 
+ MiniMax-M3 
+ ATOM 
+ FP4 
+ 9 
+ 1.03 
+ 1.06 
+ 1.11 
+
+ 
+ MiniMax-M3 
+ vLLM 
+ FP4 
+ 7 
+ 1.08 
+ 1.24 
+ 1.17 
+
+ 
+ Qwen3.5 
+ SGLang 
+ FP4 
+ 8 
+ 1.15 
+ 1.06 
+ 1.10 
+
+ 
+ Qwen3.5 
+ SGLang 
+ FP8 
+ 5 
+ 1.13 
+ 1.13 
+ 1.14 
+
+ 
+ All covered 
+ 
+ 
+ 95 
+ 1.08 
+ 1.14 
+ 1.23 
+
+ 
+ 
+ 
+
+ 
+ Appendix G Component and collective checks
+
+ 
+ G.1 Component checks
+
+ 
+ Table 18: Checks of individual modeling decisions against measured MI355X runs. 
+ 
+ 
+ 
+ 
+ 
+ Decision 
+ 
+ 
+ 
+ Setup 
+ 
+ 
+ 
+ Result 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Decode TP transfer (Eq.  1 ) 
+ 
+ 
+ 
+ DeepSeek-V4-Pro TP4 anchor → \to measured TP8, b b =1–64 
+ 
+ 
+ 
+ 0.9% (max 3.5%) vs. 18.5% (TP4 minus simulated drop), 44.1% (TP4 halved) 
+ 
+
+ 
+ 
+ 
+ Prefill fixed term 
+ 
+ 
+ 
+ DeepSeek-V4-Pro TP4 & TP8 prefill, solve for F F 
+ 
+ 
+ 
+ F F =146.90 / 145.86 ms at 4k / 8k-token prompts 
+ 
+
+ 
+ 
+ 
+ Anchor width 
+ 
+ 
+ 
+ each TP-ladder rung as anchor for the others 
+ 
+ 
+ 
+ 4 GPUs 6.6% vs. 8 GPUs 7.6% 
+ 
+
+ 
+ 
+ 
+ Fallback width law 
+ 
+ 
+ 
+ Llama-8B / GLM-5.2 TP4 → \to TP8 prefill 
+ 
+ 
+ 
+ serial s s plus parallel p / w p/w : − - 4.6 / − - 20.2% vs. holding the fitted intercept − - 20.8 / − - 26.5% 
+ 
+
+ 
+ 
+ 
+ Packed prefill at billed length 
+ 
+ 
+ 
+ 4 models probed at 1024-tok sequences 
+ 
+ 
+ 
+ TTFT − - 2.2, +13.9, − - 4.4, +1.1% 
+ 
+
+ 
+ 
+ 
+ Single-wave decode anchor 
+ 
+ 
+ 
+ DeepSeek-V4-Pro TP8 mean TPOT / median ITL 
+ 
+ 
+ 
+ 1.14/1.23/1.41 at C C =16/32/64: stalls the DES already models 
+ 
+
+ 
+ 
+ 
+ PP per-hop cost (Eq.  4 ) 
+ 
+ 
+ 
+ added TPOT / p p at C C =1, 3 models, PP 2–8 
+ 
+ 
+ 
+ 920–1130  μ \mu s per hop; fit o o =970  μ \mu s 
+ 
+
+ 
+ 
+ 
+ PP host time (Eq.  4 ) 
+ 
+ 
+ 
+ SGLang overlap off − - on, PP1, 3 models, b b =1–64 
+ 
+ 
+ 
+ 0.31–0.39 ms small batch, 0.69–0.78 ms at 64; 0.33 + 0.0063 ​ b 0.33+0.0063\,b  ms 
+ 
+
+ 
+ 
+ 
+ Irreducible residual 
+ 
+ 
+ 
+ rows equal in every field the projector reads 
+ 
+ 
+ 
+ 2.7% TTFT, 0.7% TPOT 
+ 
+
+ 
+ 
+ 
+ 
+ Table  18 checks individual decisions against measured runs. Two need a comment. First, anchors measure a single wave of decode. Under continuous batching, every admitted prefill stalls decode; the stalls are rare but large, and at 16–64 concurrent requests they make mean TPOT 1.14–1.41 × \times median ITL. Feeding a mean-TPOT anchor to a simulator that schedules those stalls itself over-predicts TPOT by about the same amount (+13%, +23%, +31%), so a single-wave anchor avoids counting the scheduler twice. Second, packed-prefill probes must be taken at the sequence length the anchor is billed at, because packing changes with each sequence’s length.
+
+ 
+ G.2 Collective communication
+
+ 
+ Table 19: Collective model on MI355X against 124 single-node and 35 two-node measurements: constants, mean absolute percentage error (MAPE) per group size, worst point. Custom all-reduce has one ( α , B ) (\alpha,B) pair per kernel (one-shot, two-shot); above 8 MiB in a node, one B node B_{\text{node}} is fitted on a single point; across nodes, one bandwidth per collective is fitted on its 1 GiB point; the datasheet row fits nothing. Points are held out from the fit that predicts them. 
+ 
+ 
+ 
+ Collective (sizes) 
+ GPUs 
+ α \alpha ( μ \mu s) 
+ B B (GB/s) 
+ MAPE (%) 
+ max (%) 
+
+ 
+ Inside a node: decode sizes, per-kernel fit, leave-one-size-out 
+
+ 
+ Custom all-reduce, graph ( ≤ \leq 8 MiB) 
+ 2 / 4 / 8 
+ 4.9 / 5.5, 6.4 / 6.4, 11.0 
+ 60.4 / 63, 100 / 56, 123 
+ 2.5 / 4.1 / 4.5 
+ 12 
+
+ 
+ RCCL all-to-all ( ≤ \leq 32 MiB) 
+ 2 / 4 / 8 
+ 37.8 / 35.2 / 37.8 
+ 113.3 / 205.5 / 408.8 
+ 5.3 / 4.9 / 4.2 
+ 12 
+
+ 
+ Inside a node: > > 8 MiB, one parameter for the whole node 
+
+ 
+ RCCL all-reduce 
+ 2 / 4 / 8 
+ 50.8 / 41.1 / 39.0 
+ mesh, 600 
+ 1.8 / 1.3 / 5.1 
+ 13 
+
+ 
+ RCCL all-to-all 
+ 2 / 4 / 8 
+ 40.1 / 36.5 / 39.1 
+ mesh, 600 
+ 3.5 / 9.6 / 5.4 
+ 10 
+
+ 
+ RCCL send/recv 
+ 2 
+ 59.1 
+ mesh, 600 
+ 5.8 
+ 7 
+
+ 
+ Across two nodes: > > 8 MiB, one bandwidth per collective 
+
+ 
+ Send/recv, datasheet NIC 
+ 2 
+ 44.2 
+ 40.0 
+ 9.1 
+ 13 
+
+ 
+ Send/recv 
+ 2 
+ 44.2 
+ 45.1 
+ 3.6 
+ 11 
+
+ 
+ All-reduce 
+ 2 / 16 
+ 58.7 / 90.5 
+ 19.8 / 31.6 
+ 4.7 / 5.3 
+ 9 
+
+ 
+ All-to-all 
+ 16 
+ 47.4 
+ 37.9 
+ 10.1 
+ 15 
+
+ 
+ 
+ 
+ 
+ Figure 10: MI355X collectives, measured (points) and modeled (lines). Left: decode-size messages on vLLM’s custom all-reduce under graph capture and on RCCL all-to-all. Middle: RCCL above 8 MiB inside a node, where one node parameter predicts every point. Right: RCCL across two nodes over Pollara NICs. 
+ 
+ 
+ We measured the collectives a serving step issues on MI355X, on one node and across two. Inside a node: RCCL all-reduce, all-to-all and send/recv from 8 KiB to 1 GiB on 2, 4 and 8 GPUs, plus vLLM’s custom all-reduce from 4 KiB to 8 MiB under graph capture, the way a decode step runs it. Across two nodes: send/recv between stage GPUs, all-reduce with one GPU per node and over all 16 GPUs, and the 16-GPU all-to-all of a two-node EP group, over the eight 400 Gb/s Pollara NICs of each node on two node pairs. Each point is the median of seven timing windows, timed on the slowest rank. The model tracks every collective, group size and tier to within about 10% mean error (Figure  10 , Table  19 ).
+
+ 
+ Decode sizes.   At kilobytes to a few megabytes, the cost comes from the kernel, not the wire. vLLM’s custom all-reduce runs a one-shot kernel below its switch size (256 KiB on eight GPUs, 512 KiB on four) and a two-shot kernel above it, so ROCm InferaSim prices each with its own α + m / B \alpha+m/B . With leave-one-size-out scoring, the fit is within 2.5–4.5% across 2, 4 and 8 GPUs, and RCCL all-to-all within 4.2–5.3%. The one-shot floors, 4.9–6.4  μ \mu s, match the 4.98  μ \mu s per-kernel occupancy we measured independently from the TP sweep. That is why a step charges only m / B m/B on top of the kernels it already counts.
+
+ 
+ Large messages: one parameter per node.   Above 8 MiB, RCCL runs over the xGMI mesh. One number, B node = 600 B_{\text{node}}=600  GB/s, fitted on a single point (8-GPU, 1 GiB all-reduce), predicts every other point on every group size: 1.3–5.1% mean error for all-reduce, 3.5–9.6% for all-to-all and 5.8% for send/recv.
+
+ 
+ Across nodes.   With nothing fitted, the datasheet NIC (50 GB/s at 0.8 point-to-point efficiency) predicts cross-node send/recv within 9.1% mean error. This is the hop a pipeline stage boundary uses. Fitting one bandwidth per collective on its own 1 GiB point and holding out every other size gives 3.6% for send/recv, 4.7% (one GPU per node) and 5.3% (16 GPUs) for all-reduce, and 10.1% for the two-node all-to-all. Above 1 MiB, the two node pairs differ by a median of 0.7%, so one profile per cluster is enough on the pairs we measured. Table  19 lists every constant.
+
+ 
+ Appendix H Pipeline-parallel measurements
+
+ 
+ Table  20 gives the absolute measurements behind Table  7 for all three models, with the signed anchored-mode error of the per-stage model (Eq.  4 ). PP1 rows are included for reference; the PP model does not affect them.
+
+ 
+ Table 20: Pipeline-parallel ladders on SGLang: measured values and signed anchored-mode error (%) of the per-stage model. TTFT and TPOT in ms, throughput in tok/s. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Measured 
+ Error 
+
+ 
+ Model 
+ ISL 
+ TP 
+ PP 
+ C C 
+ TTFT 
+ TPOT 
+ Tput 
+ TTFT 
+ TPOT 
+ Tput 
+
+ 
+ 
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 1 
+ 1 
+ 29 
+ 4.46 
+ 223 
+ -7 
+ -3 
+ +4 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 1 
+ 16 
+ 185 
+ 5.03 
+ 3071 
+ +32 
+ +13 
+ -12 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 1 
+ 64 
+ 514 
+ 7.73 
+ 7773 
+ +19 
+ +21 
+ -17 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 2 
+ 1 
+ 35 
+ 6.32 
+ 157 
+ -5 
+ -1 
+ +1 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 2 
+ 16 
+ 170 
+ 7.40 
+ 2117 
+ -10 
+ +7 
+ -6 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 2 
+ 64 
+ 375 
+ 8.79 
+ 6988 
+ +15 
+ +20 
+ -17 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 2 
+ 2 
+ 1 
+ 32 
+ 5.75 
+ 173 
+ -2 
+ -10 
+ +11 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 2 
+ 2 
+ 16 
+ 238 
+ 6.65 
+ 2325 
+ -9 
+ -3 
+ +3 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 2 
+ 2 
+ 64 
+ 368 
+ 7.76 
+ 7882 
+ +75 
+ +13 
+ -14 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 4 
+ 1 
+ 40 
+ 8.15 
+ 122 
+ +0 
+ +1 
+ -1 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 4 
+ 16 
+ 144 
+ 9.78 
+ 1614 
+ -31 
+ +0 
+ +0 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 4 
+ 64 
+ 320 
+ 10.71 
+ 5809 
+ +3 
+ +5 
+ -5 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 8 
+ 1 
+ 52 
+ 12.06 
+ 83 
+ +2 
+ +0 
+ -0 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 8 
+ 16 
+ 112 
+ 15.06 
+ 1056 
+ -29 
+ -1 
+ +1 
+
+ 
+ Llama-3.1-8B 
+ 1k 
+ 1 
+ 8 
+ 64 
+ 217 
+ 16.50 
+ 3833 
+ +3 
+ -3 
+ +3 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 1 
+ 1 
+ 144 
+ 4.57 
+ 213 
+ +5 
+ -3 
+ +2 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 1 
+ 16 
+ 1146 
+ 8.19 
+ 1720 
+ +14 
+ +9 
+ -9 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 1 
+ 64 
+ 3949 
+ 21.56 
+ 2519 
+ +21 
+ +4 
+ -6 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 2 
+ 1 
+ 182 
+ 7.18 
+ 136 
+ -14 
+ -11 
+ +12 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 2 
+ 16 
+ 1008 
+ 9.42 
+ 1539 
+ -26 
+ +1 
+ +2 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 2 
+ 64 
+ 2891 
+ 17.44 
+ 3160 
+ -12 
+ -2 
+ +3 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 2 
+ 2 
+ 1 
+ 157 
+ 6.73 
+ 145 
+ -8 
+ -22 
+ +28 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 2 
+ 2 
+ 16 
+ 910 
+ 8.04 
+ 1792 
+ -22 
+ -8 
+ +10 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 2 
+ 2 
+ 64 
+ 2402 
+ 13.08 
+ 4151 
+ +0 
+ -1 
+ +1 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 4 
+ 1 
+ 192 
+ 9.18 
+ 107 
+ -15 
+ -9 
+ +10 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 4 
+ 16 
+ 699 
+ 11.56 
+ 1308 
+ -34 
+ -9 
+ +12 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 4 
+ 64 
+ 1827 
+ 16.54 
+ 3494 
+ -24 
+ -12 
+ +15 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 8 
+ 1 
+ 268 
+ 14.24 
+ 69 
+ -35 
+ -14 
+ +17 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 8 
+ 16 
+ 553 
+ 17.05 
+ 910 
+ -40 
+ -10 
+ +13 
+
+ 
+ Llama-3.1-8B 
+ 8k 
+ 1 
+ 8 
+ 64 
+ 1227 
+ 19.12 
+ 3151 
+ -33 
+ -8 
+ +10 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 1 
+ 1 
+ 44 
+ 8.86 
+ 112 
+ +9 
+ -0 
+ +0 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 1 
+ 16 
+ 353 
+ 10.26 
+ 1510 
+ +56 
+ -0 
+ -1 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 1 
+ 64 
+ 1121 
+ 12.79 
+ 4610 
+ +22 
+ +2 
+ -4 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 2 
+ 1 
+ 46 
+ 11.12 
+ 90 
+ +23 
+ -3 
+ +3 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 2 
+ 16 
+ 344 
+ 12.74 
+ 1224 
+ -7 
+ -2 
+ +2 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 2 
+ 64 
+ 812 
+ 14.65 
+ 4147 
+ +15 
+ -1 
+ +0 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 4 
+ 1 
+ 50 
+ 13.02 
+ 77 
+ +30 
+ -2 
+ +2 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 4 
+ 16 
+ 269 
+ 15.03 
+ 1047 
+ -29 
+ -3 
+ +3 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 4 
+ 64 
+ 659 
+ 16.26 
+ 3789 
+ +5 
+ -3 
+ +2 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 8 
+ 1 
+ 55 
+ 16.93 
+ 59 
+ +48 
+ -2 
+ +2 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 8 
+ 16 
+ 175 
+ 20.03 
+ 793 
+ -23 
+ -2 
+ +2 
+
+ 
+ Qwen3-14B-FP8 
+ 1k 
+ 1 
+ 8 
+ 64 
+ 569 
+ 21.48 
+ 2906 
+ -23 
+ -4 
+ +5 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 1 
+ 1 
+ 53 
+ 3.95 
+ 250 
+ -70 
+ +0 
+ +1 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 1 
+ 16 
+ 259 
+ 7.51 
+ 2063 
+ -70 
+ +2 
+ +1 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 1 
+ 64 
+ 504 
+ 12.82 
+ 4811 
+ -62 
+ -2 
+ +5 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 2 
+ 1 
+ 58 
+ 6.19 
+ 160 
+ -65 
+ -5 
+ +6 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 2 
+ 16 
+ 264 
+ 9.52 
+ 1638 
+ -83 
+ -9 
+ +13 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 2 
+ 64 
+ 344 
+ 13.25 
+ 4713 
+ -65 
+ -3 
+ +5 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 4 
+ 1 
+ 64 
+ 8.17 
+ 122 
+ -63 
+ -4 
+ +5 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 4 
+ 16 
+ 319 
+ 11.33 
+ 1375 
+ -90 
+ -12 
+ +17 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 4 
+ 64 
+ 265 
+ 14.88 
+ 4229 
+ -68 
+ -11 
+ +14 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 8 
+ 1 
+ 82 
+ 12.43 
+ 80 
+ -61 
+ -6 
+ +6 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 8 
+ 16 
+ 324 
+ 16.44 
+ 955 
+ -89 
+ -10 
+ +13 
+
+ 
+ Qwen3.6-35B-A3B 
+ 1k 
+ 1 
+ 8 
+ 64 
+ 200 
+ 18.90 
+ 3355 
+ -71 
+ -11 
+ +14 
+
+ 
+ 
+ 
+
+ 
+ Appendix I Anchor artifact
+
+ 
+ An anchor is one JSON file per (model, engine, anchor-defining choices, width). Its fields:
+
+ 
+ • 
+ 
+ Signature: accelerator architecture, engine and image, model checkpoint, weight/activation/KV/expert dtypes, attention and MoE backend, graph-capture mode and sizes, speculative method, TP/EP/attention-DP width.
+
+ • 
+ 
+ Decode sweep: median ITL of a single wave at each captured batch size, at a recorded prompt length. Optional sweeps at a second prompt length enable context differencing.
+
+ • 
+ 
+ Prefill sweep: TTFT at concurrency 1 for five prompt lengths with prefix caching off, and the fitted F F , c 1 c_{1} , c 2 c_{2} .
+
+ • 
+ 
+ Packed-prefill probe (optional): step time with k k sequences of the billed length. The token budget is recorded so serialization can be detected.
+
+ • 
+ 
+ Provenance: harvest timestamp, node, whether weights were real, whether prefix caching was off, and the client command line.
+
+ 
+ Anchors live in a cache directory, and projection selects them by signature; a benchmark is rerun only for a kernel set or width the cache does not hold. Projection refuses an anchor whose accelerator or engine differs from the target. If its prompt length, width or packing length differs, projection uses it but flags it.
+
+ 
+ Appendix J Tuning agent details
+
+ 
+ 
+ 
+ Input: model card, cluster, objective, SLO budgets, request profile, lever list.
+ Ledger: every trial with its configuration, metrics, legality and reason. 
+ 
+ 1. 
+ 
+ Seed. Build the baseline. Emit the ordered seed list (TP, attention DP, precision, load, scheduler, speculation, EP and MoE options, collectives, disaggregation). Keep the first N seed N_{\text{seed}} legal, distinct seeds. 
+ 
+ 2. 
+ 
+ Score. For each candidate: check structure; project it with the anchor of its parallel shape; reject it if memory exceeds the HBM cap or a latency budget is missed; log it. 
+ 
+ 3. 
+ 
+ Plan. The planner LLM reads the ledger and emits hypotheses and 5–8 partial configurations as JSON. 
+ 
+ 4. 
+ 
+ Investigate. A recursive LM runs the plan with tools: evaluate, read history, read best, read budget, write notes, ask a sub-question. Each evaluation goes through step 2. 
+ 
+ 5. 
+ 
+ Stop when the budget is used, or when the best trial has not changed after 70% of the budget. Return the best legal trial. 
+ 
+ 
+ Mix planner: for each model and tier, project every candidate, keep those that meet the tier with margin, and select one (§ 4.1 ). 
+ 
+
+ Figure 11: The ROCm InferaSim tuning agent. Each candidate costs one projection of under half a second, and no GPU. 
+ 
+ 
+ Fusions.   Fusions enter the search like any other lever, and every trial reports which fusions would pay off. The legality check has three rules. It offers the quant-fed patterns only with low-precision activations and the MoE patterns only on MoE models, and it rejects a list that repeats a fusion or combines named fusions with the generic flag. The seed planner adds the full legal set and its BF16-safe subset. Every trial reports its fusion opportunities , the legal fusions worth at least 2% of that trial’s decode step, largest first. The LLM loop reads them from the ledger and proposes fusions together with the configuration they pay on. The agent thus returns a deployment together with the kernel work most worth doing for it.
+
+ 
+ Table 21: Named fusions the agent proposes. Each is priced from the step the predictor already charges. 
+ 
+ 
+ 
+ Fusion 
+ 
+ 
+ Replaces 
+ 
+
+ 
+ 
+ 
+ norm_quant 
+ 
+ 
+ RMSNorm and the activation quant feeding the attention and multilayer perceptron (MLP) GEMMs 
+ 
+
+ 
+ add_rmsnorm 
+ 
+ 
+ residual add and the following RMSNorm, twice per layer 
+ 
+
+ 
+ moe_expert 
+ 
+ 
+ expert gate/up, activation, quant and down in one kernel 
+ 
+
+ 
+ moe_routing 
+ 
+ 
+ router top- k k and permute 
+ 
+
+ 
+ act_quant 
+ 
+ 
+ sigmoid linear unit (SiLU) ⋅ \cdot mul and quant feeding the down projection 
+ 
+
+ 
+ rope_kvstore 
+ 
+ 
+ rotary position embedding (RoPE) into the KV-cache store 
+ 
+
+ 
+ 
+ 
+ 
+ Backbone.   The planner and the investigation loop are DSPy modules over one chat model, reached through LiteLLM, so any provider can be substituted without changing the agent; response caching is off. The 192 searches of § 5.11 ran only the deterministic seed stage over a shared grid of candidates, with no LLM call, so their results are reproducible and do not depend on a backbone.
+
+ 
+ What the LLM sees.   Both stages receive the same five inputs as JSON or compact text: the architecture record (layers, hidden size, heads, MoE and sparse-attention fields), the target cluster (nodes, GPUs per node, HBM), the legal value set of every lever, the objective and its direction, and a summary of the trials so far (the 40 most recent, § 4 ). The operator may add free-form guidance, and a scratchpad carries notes across rounds.
+
+ 
+ Planner prompt.   The planner is asked to design a search before using any tool: which levers are most likely to move the objective for this model, cluster and request profile, in what order to try them, and what to do if they fail. The prompt names the trade-offs to account for: latency against throughput (batch, concurrency, request rate), KV capacity (KV dtype, memory fraction, block size), prefill cost (chunk size, token budget), MoE communication (EP, DeepEP, load balancing), disaggregation, and the kernel options. It returns a short rationale, at most five testable hypotheses, 5–8 partial configurations as a JSON array ordered from most to least promising, and a polish plan. A partial configuration names only the levers it changes; the rest come from the baseline.
+
+ 
+ Investigation prompt and tools.   The search stage receives the plan and runs a loop. In each iteration it reads the scratchpad and the history, picks a configuration not yet tried, evaluates it, and every 3–5 evaluations writes what it learned. It stops when the budget is spent or the incumbent stops improving. Its tools are: evaluate a configuration (one projection, returning metrics, a signed score and, if the configuration is illegal, the reason); read the history; read the incumbent; read the legal sets, architecture, cluster and objective; read the remaining budget; write or read the scratchpad; and ask a sub-question of the same LLM. It returns the best configuration, a summary of what worked, and suggested follow-ups.
+
+ 
+ Guards.   The LLM never prices a configuration. Every proposal goes through the same structural check, memory cap, SLO check and projection as the seed sweep’s, and a value outside a lever’s legal set is rejected with its reason. Sparse attention is offered only at the width the checkpoint was trained with, and, when the operator lists validated weight precisions, only those are offered. The 192 searches scored 56,328 candidates, about 293 per search, including the seeds.
+
+ 
+ Appendix K Reproduction
+
+ 
+ Software.   Engines ran from public container images: ATOM rocm/atom-dev:nightly_202607231538 and nightly_202608280858 , SGLang lmsysorg/sglang-rocm:v0.5.19-rocm720-mi35x (the September 2026 dated tags), and vLLM vllm/vllm-openai-rocm:v0.30.0 plus vLLM built from its public source at commit 29468dde , whose nightly image is no longer hosted. All are on Docker Hub. Agentic replays used the public images recorded with each InferenceX run ( rocm/atom-dev , lmsysorg/sglang-rocm and vllm/vllm-openai-rocm nightlies). Inside a node, collectives were measured with PyTorch’s RCCL process group and vLLM’s custom all-reduce in the vLLM image. Across nodes, they were measured in the SGLang image over RDMA over Converged Ethernet (RoCE) on the Pollara NICs, with GPU-direct RDMA through DMA-BUF, rings pinned to one rail per NIC, and cross-rail traffic relayed through a peer GPU on the same node (RCCL’s PXN mode). Fixed-length clients used the vLLM benchmark_serving random dataset with --ignore-eos and 10 ​ C 10C prompts per point. The agentic replay used AIPerf.
+
+ 
+ Artifacts.   One script produces each number in the paper from one result file. score_corpus.py scores the fixed-length corpus in both modes. comm_bench.py (one node and two) and comm_correlate2.py produce the collective data. pp_bench.sbatch , pp2n.sbatch and pp_project.py produce the pipeline-parallel study on one node and across two, and overlap_probe.sbatch the host-time probe of Eq.  4 . rank_choice.py produces the choice-ranking scores and time_proj.py the projection timings. The Pareto sweep and its comparison with measured runs come from the projector’s pareto command. We will release the anchors, the measured corpora and these scripts with the camera-ready version.
+
+ 
+ Search study.   The 24 objectives are: throughput (total, decode and prefill, each per GPU and for the fleet); latency and interactivity (TTFT, TPOT, end-to-end latency, the uncontended decode step, per-user interactivity, per-request generation rate); capacity (maximum concurrent sequences, maximum sustainable concurrency); memory (per GPU, KV cache, weights, activations); prefill/decode interference (mixed-step fraction, TPOT pollution, mixed decode step); communication time (prefill, decode); and the GPU cost of a replica. Each objective of § 5.11 is searched with and without the SLO bound. Each engine’s legality predicate removes the levers it does not support.
+
+ 
+
+ 
+
+ 
+ 
+ Experimental support, please
+ view the build logs 
+ for errors. Generated by
+ 
+ 
+ L
+ A 
+ T
+ E 
+ 
+ xml 
+ 
+ .
+ 
+
+ 
+ Instructions for reporting errors
+
+ We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+ support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+ methods listed below:
+
+ 
+ Click the "Report Issue" ( 
+ 
+ ) button, located in the page header.
+
+ 
+ Tip: You can select the relevant text first, to include it in your report.
+
+ Our team has already identified the following issues . We appreciate your time reviewing and reporting rendering errors we
+ may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+ should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+ all.
+
+ Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion , and welcome developer contributions .
+
+ 
+
+ 
+ 
+ 
+ 
+ We gratefully acknowledge support from our major funders ,
+ member institutions , ,
+ and all contributors.
+ 
+
+ 
+ About &middot; 
+ Help &middot; 
+ Contact &middot; 
+ Subscribe &middot; 
+ Copyright &middot; 
+ Privacy &middot; 
+ Accessibility &middot; 
+ Operational Status (opens in new tab) 
+ 
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 

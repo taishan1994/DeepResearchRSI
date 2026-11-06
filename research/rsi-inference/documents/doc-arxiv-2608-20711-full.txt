@@ -1,0 +1,1163 @@
+AsmEvo: Agentic Assembly-Level Optimization of AMD GPU Kernels with Functional Equivalence Verification 
+
+ Ji Liu
+
+ Puyuan Yang
+
+ Rongzhang Zheng
+
+ Fan Wang
+
+ Jinglin Wang
+ † † thanks: Work performed during an internship at AMD. 
+
+ Muhammad A. Awad
+
+ Mortis Huang
+
+ Andy Chang
+
+ Zekai Li
+
+ Zeping Li
+
+ Zihao An
+
+ Yue Liu
+
+ Yuchen Yang
+
+ Jianghui Wang
+
+ Chushi Chen
+
+ Ziqiong Liu
+
+ Fuwei Yang
+
+ Dong Li
+
+ Wen Heng Chung
+
+ Shengcai Liu
+
+ Emad Barsoum
+
+ Abstract 
+
+ High-performance ML systems increasingly rely on GPU kernels whose editable source is unavailable, generated, or too distant from final machine code to expose remaining optimizations. Existing LLM kernel optimizers and autotuners mainly operate on CUDA, Triton, HIP, or tensor-program source and validate against reference implementations. We study a stricter setting: optimizing an already compiled AMDGPU code object, where the deployed binary is the only behavioral oracle. 
+
+ We present AsmEvo, an agentic assembly-level optimizer for AMD GPU kernels. Given an AMDGPU code object K 0 K_{0} , AsmEvo reconstructs a reassemblable representation, proposes low-level edits with a long-horizon agent, rebuilds an ABI-preserving optimized object, and accepts candidates only after differential verification against K 0 K_{0} under identical launches. AsmEvo combines code-object recovery, metadata-aware rebuilding, profiling-guided hot-window editing, correctness-gated timing, and conservative in-place patch fallback. 
+
+ We conduct extensive experiments with AsmEvo on various AMD GPU kernels. On MI308X, AsmEvo improves 29 of 30 selected KernelBench kernels, reaching 1.35x geometric-mean and 3.88x maximum speedup. On MI300X production workloads, it improves all evaluated AITer binaries and vLLM/SGLang Triton assembly kernels, reaching 1.09x/1.31x and 1.18x/1.34x geometric-mean/maximum speedups, respectively, while preserving functional equivalence. 
+
+ 1 Advanced Micro Devices, Inc. (AMD) 
+ 2 Southern University of Science and Technology, Shenzhen, China 
+
+ Introduction 
+
+ Modern machine learning workloads depend on GPU kernels whose final performance is decided
+not only by high-level schedules, but also by low-level decisions made after lowering:
+wait-counter placement, instruction selection, register allocation, kernel descriptors, and
+ABI-visible metadata  ( Tillet, Kung, and Cox 2019 ; Chen et al. 2018a ; Zheng et al. 2020 ) . Compilers  ( Chen et al. 2018a ) , tensor-program autotuners  ( Zheng et al. 2020 ; Chen et al. 2018b ) , DSLs such as Triton, and vendor
+libraries such as AITer  ( AMD ROCm 2025 ) , rocBLAS  ( AMD ROCm 2016 ) , and Composable Kernel  ( AMD ROCm 2019 ) are highly effective, yet they also
+create a practical boundary. Once a kernel has become an AMDGPU code object  ( AMD ROCm 2023 ) , the remaining
+optimization opportunities may no longer be exposed through the source program—and in many
+deployments the source is not available at all. 
+
+ This source-free setting is common in deployed ML systems: serving stacks may expose only a
+compiled HSACO  ( AMD ROCm 2023 ) , a JIT cache artifact  ( Tillet, Kung, and Cox 2019 ) , or a vendor binary, such as AITer code objects or
+Triton-generated kernels embedded in vLLM  ( Kwon et al. 2023 ) and SGLang  ( Zheng et al. 2024 ) . Re-optimizing the deployed artifact is
+attractive because it targets the exact code that runs on the GPU, but it is brittle: a local
+instruction edit can corrupt memory, violate the kernarg ABI, desynchronize metadata, or
+appear faster only by changing semantics  ( Villa et al. 2019 ; Raayai-Ardakani et al. 2025 ) . 
+
+ Recent LLM-based kernel systems  ( Wang et al. 2025 ; Zhang et al. 2025 ; Dai et al. 2026 ; Chen et al. 2026 ) generate and refine CUDA, Triton, HIP, or tensor-program
+kernels from high-level specifications, including KernelBench ( Ouyang et al. 2025 ) . They
+assume an editable source artifact and an independent reference implementation. Compiled
+code-object kernels provide neither: the original binary is both the deployed artifact and
+the only behavioral oracle. 
+
+ This paper asks whether a kernel can be optimized directly at the assembly level 
+using only the original compiled binary to define acceptable behavior. We present AsmEvo, a
+post-compilation optimizer for AMDGPU code objects and recovered AMDGCN assembly. AsmEvo
+reconstructs a reassemblable representation, exposes hot instruction windows to a search
+driver, rebuilds edited candidates while preserving the launcher ABI, and accepts a candidate
+only after differential verification against the original binary under identical inputs and
+launch configurations. Thus the optimization signal is non-hackable: fast but incorrect
+candidates are rejected before timing. 
+
+ The central challenge is obtaining a faithful oracle from a binary with no high-level
+signature. AsmEvo uses a two-tier differential oracle. For kernels whose launch structure is
+inferable from metadata, it synthesizes guarded inputs and compares outputs directly. For
+mixed-dtype, strided, block-table, or pointer-rich production kernels, it captures a real
+dispatch—kernargs, launch geometry, and referenced device memory—and replays candidates
+against that state using tolerance-aware checks for floating-point outputs and byte-exact
+checks for integer and opaque state. 
+
+ AsmEvo turns verified edits into loadable objects through a metadata-aware rebuild route: it regenerates descriptors and AMDGPU metadata while freezing the kernarg layout, so the optimized object remains a drop-in replacement. A conservative in-place byte patch is used only when rebuild fails and the edit is resource-neutral and size-non-increasing. Profiling and static analysis localize hot instruction windows, which are edited, spliced back into the full assembly, rebuilt, and reverified. 
+
+ On top of this environment, AsmEvo uses a long-horizon agentic search driver under external verification. Deterministic gates own build validation, resource checks, equivalence, timing, commit thresholds, and lineage management; the agent plans architecture-specific edits, uses failed attempts as memory, explores diverse verified start points, composes compatible improvements, and redirects stalled searches. This separation lets learning-based exploration help where useful while every accepted result is certified externally. 
+
+ We conduct extensive experiments with AsmEvo on diverse AMD GPU kernels. On MI308X, AsmEvo improves 29 of 30 selected KernelBench kernels, reaching 1.35x geometric-mean and 3.88x maximum speedup. On MI300X production workloads, it improves all evaluated AITer binaries and vLLM/SGLang Triton assembly kernels, reaching 1.09x/1.31x and 1.18x/1.34x geometric-mean/maximum speedups, respectively, while preserving functional equivalence. These results show that AsmEvo complements source-level compilers, JIT systems, autotuners, and production inference libraries. 
+
+ Our contributions are as follows: 
+
+ • 
+
+ We formulate source-free, ABI-preserving GPU kernel optimization as a correctness-gated post-compilation problem over AMDGPU code objects, where the original binary is the differential correctness oracle and every reported speedup must pass external verification. 
+
+ • 
+
+ We build a binary recovery, rebuild, and differential-verification pipeline : round-trip recovery of reassemblable AMDGCN assembly, metadata-aware ABI-preserving rebuild, conservative patch fallback, and a two-tier oracle combining synthetic launch inference with real-dispatch replay. 
+
+ • 
+
+ We instantiate a long-horizon agentic search driver under external verification : the agent plans architecture-specific edits, uses failed attempts as memory, explores diverse verified start points, composes compatible improvements, and recovers from stalls, while deterministic gates own correctness and timing. Evaluations on KernelBench, AITer, and vLLM/SGLang Triton JIT kernels show consistent post-compilation gains. 
+
+ Related Work 
+
+ LLM Kernel Optimization and Tensor Compilers. 
+
+ LLM-based kernel optimization has developed along several complementary directions.
+KernelBench  ( Ouyang et al. 2025 ) established an execution-guided setting in which generated kernels are iteratively
+refined using correctness and performance feedback. Subsequent work
+explores reinforcement learning with measured rewards
+ ( Baronio et al. 2026 ; Li et al. 2026 ; Liu et al. 2026 ; Dai et al. 2026 ) , agentic and evolutionary search over candidate
+implementations ( KernelEvolve Team, Meta Platforms 2026 ; Lange et al. 2025 ) , and specialized kernel-generation
+models ( Meta AI 2025 ) . Related benchmarks  ( Li et al. 2025 ; Lange et al. 2025 ) further show that performance optimization
+remains difficult and that insufficient validation can reward fast but semantically incorrect
+kernels. In parallel, tensor compilers and DSLs
+optimize schedules, tiling, memory movement, and code generation, including Halide
+ ( Ragan-Kelley et al. 2013 ) , TVM ( Chen et al. 2018a ) , AutoTVM ( Chen et al. 2018b ) , Ansor
+ ( Zheng et al. 2020 ) , MetaSchedule ( Shao et al. 2022 ) , and Triton
+ ( Tillet, Kung, and Cox 2019 ) . Despite their different search mechanisms, these approaches operate
+before or during compilation and assume editable source or IR together with a high-level
+correctness reference. AsmEvo targets the complementary post-compilation setting: its input
+is the emitted AMDGPU code object, and the original binary serves as the behavioral oracle. 
+
+ Assembly Optimization and Binary Rewriting. 
+
+ Superoptimizers search for faster programs at the instruction or IR level. STOKE
+ ( Schkufza, Sharma, and Aiken 2013 ) applies stochastic search to x86 assembly, Souper
+ ( Sasnauskas et al. 2017 ) discovers missing LLVM optimizations, and AlphaDev
+ ( Mankowitz et al. 2023 ) learns low-level sorting routines. Recent learning-based systems further
+optimize assembly code: Wei et al. (2025a) apply reinforcement learning to CPU assembly,
+while CuAsmRL  ( He and Yoneki 2025 ) formulates NVIDIA SASS instruction scheduling as an
+assembly game and learns to reorder instructions for higher throughput. These methods assume
+CPU-oriented specifications or operate on NVIDIA SASS schedules with constrained
+transformations. AsmEvo instead targets source-free AMDGPU code objects and jointly addresses
+assembly recovery, ABI- and metadata-preserving rebuild, broader agent-proposed edits, and
+differential verification against the original binary. 
+
+ GPU binary frameworks primarily target instrumentation. NVBit ( Villa et al. 2019 ) modifies
+NVIDIA SASS, while Luthier ( Raayai-Ardakani et al. 2025 ) operates on loaded ROCm code objects for
+instrumentation and analysis. Added overhead is acceptable for these uses, whereas AsmEvo
+seeks faster, verified drop-in objects while preserving launcher semantics, resource
+declarations, descriptors, and metadata. 
+
+ Correctness of Optimized Code. 
+
+ Compiler and translation-validation systems check whether optimizations preserve semantics;
+Alive2  ( Lopes et al. 2021 ) , for example, validates LLVM transformations. Program-equivalence
+reasoning remains difficult even for strong language models  ( Wei et al. 2025b ) , motivating
+execution-based verification rather than model judgment. Existing GPU optimizers typically
+compare against source-level or framework references. Such references are unavailable for
+HSACO-only artifacts, so AsmEvo treats the original binary as a differential oracle and
+checks equivalence before timing. Its guarantees are empirical and limited to the evaluated
+inputs and launch configurations. 
+
+ Positioning of AsmEvo. 
+
+ To our knowledge, AsmEvo is the first system to combine agentic search, ABI- and
+metadata-preserving AMDGPU code-object rebuilding, and differential verification against the
+original deployed binary. Existing source-level kernel agents are not designed to consume
+HSACO-only artifacts or certify drop-in equivalence without this recovery and verification
+harness. We therefore compare search drivers within the same harness, holding recovery,
+rebuilding, correctness verification, and commit gates fixed. AsmEvo complements rather than
+replaces source-level compilers, autotuners, and inference libraries. 
+
+ Method 
+
+ Overview 
+
+ AsmEvo optimizes compiled AMDGPU code objects without source code or an independent reference
+implementation. It treats the original object K 0 K_{0} as a differential oracle and admits an
+optimized object K ′ K^{\prime} only after ABI-preserving rebuild, functional-equivalence verification,
+and performance measurement. We denote the recovered assembly by s ⁡ ( K ) s(K) , evaluated inputs by
+ 𝒳 \mathcal{X} , and verified speedup by s ^ ​ ( K ) = T ⁡ ( K 0 ) / T ⁡ ( K ) \hat{s}(K)=T(K_{0})/T(K) . A deterministic controller
+owns all correctness-critical operations, while a modular long-horizon LLM driver proposes
+edits and replans from structured feedback. This separation creates a verifiable environment
+in which fast but incorrect candidates cannot advance the search. 
+
+ Figure 1: AsmEvo combines faithful code-object recovery, metadata-aware ABI-preserving rebuild,
+and correctness-before-performance evaluation against the original K 0 K_{0} . A modular LLM
+driver proposes edits through multi-start search, verified composition, and anti-stall
+redirection, while only verified, latency-improving candidates enter the lineage. 
+
+ Problem Formulation 
+
+ Given K 0 K_{0} , AsmEvo seeks an optimized code object K ′ K^{\prime} satisfying three requirements. 
+
+ R1 (ABI preservation). 
+
+ K ′ K^{\prime} preserves symbols, kernarg layout, launch semantics, and externally visible metadata,
+allowing the original host launcher to invoke it unchanged. 
+
+ R2 (Functional equivalence). 
+
+ For every evaluated input x ∈ 𝒳 x\in\mathcal{X} , K ′ K^{\prime} matches the output of the original-binary
+oracle O ⁡ ( x ) = run ⁡ ( K 0 , x ) O(x)=\mathrm{run}(K_{0},x) : 
+
+ | 
+ eq ⁡ ( K ′ , x ) ≡ c x ≥ θ ∧ ‖ Δ x ‖ ∞ ≤ τ ∧ ι ⁡ ( K ′ , x ) , c x = cos ( K ′ ( x ) , O ( x ) ) , Δ x = K ′ ( x ) − O ( x ) , \begin{array}[]{l}\mathrm{eq}(K^{\prime},x)\equiv c_{x}\geq\theta\,\wedge\,\|\Delta_{x}\|_{\infty}\leq\tau\,\wedge\,\iota(K^{\prime},x),\\
+c_{x}=\cos\!\big(K^{\prime}(x),O(x)\big),\qquad\Delta_{x}=K^{\prime}(x)-O(x),\end{array} | 
+ | 
+ (1) | 
+
+ where ι \iota requires bit-exact integer buffers and intact out-of-bounds guards. 
+
+ R3 (Latency improvement). 
+
+ K ′ K^{\prime} reduces measured latency. Commits are judged against the current verified best, while
+reported speedup is s ^ ​ ( K ′ ) = T ⁡ ( K 0 ) / T ⁡ ( K ′ ) \hat{s}(K^{\prime})=T(K_{0})/T(K^{\prime}) relative to the original object. 
+
+ Equivalence is empirical rather than formal and is scoped to the evaluated inputs and launch
+configurations. Unlike source-level autotuning, AsmEvo optimizes an already compiled binary,
+preserves its ABI, and verifies behavior against the unmodified deployed object. 
+
+ Code-Object Recovery and Round-Trip Fidelity 
+
+ AsmEvo reconstructs editable assembly s ⁡ ( K 0 ) s(K_{0}) from the AMDGPU ELF container. Because raw
+disassembly omits the declaration layer, AsmEvo recovers sections, symbols, notes, kernel
+descriptors, AMDGPU metadata, and the AMDGCN instruction body. It also reconstructs
+ .amdhsa_kernel declarations and re-symbolizes PC-relative control flow so that
+branches remain valid after instruction insertion, deletion, or reordering. 
+
+ A one-time round-trip gate reassembles and relinks s ⁡ ( K 0 ) s(K_{0}) and compares the regenerated
+instruction body, kernel descriptors, and metadata with K 0 K_{0} , masking only fields determined
+by linking. Passing this gate establishes that later edits operate on a faithful, rebuildable
+representation. Rare recovery repairs are accepted only when the repaired representation
+passes the same byte-level round-trip check. 
+
+ Input Acquisition and Differential Oracle 
+
+ Equivalence requires executing K 0 K_{0} and each candidate with identical inputs and launch
+specifications. However, a code object exposes neither a high-level function signature nor
+the application logic that constructs pointer-rich arguments. AsmEvo therefore provides a
+two-tier oracle acquisition mechanism. 
+
+ Tier 1: synthetic inference. 
+
+ When launch structure is recoverable from descriptors and metadata, AsmEvo infers argument
+offsets, scalar types, pointer roles, buffer sizes, and launch dimensions. It then generates
+deterministic inputs covering representative shapes, strides, dtypes, boundary values, and
+random seeds. Allocations include guard regions initialized with canaries, allowing the
+equivalence check to detect out-of-bounds writes in addition to output divergence. 
+
+ Tier 2: real-dispatch capture. 
+
+ Metadata alone is insufficient for many production kernels, including those using mixed
+dtypes, non-contiguous tensors, block tables, nested pointer structures, or application-defined
+workspace layouts. For such kernels, AsmEvo intercepts a real application dispatch and records
+its kernarg buffer, grid and workgroup dimensions, referenced device-memory regions, and
+pre-dispatch memory state. The original object is executed once to produce the reference
+post-state. 
+
+ Candidates replay the captured dispatch with identical launch parameters and memory contents.
+When captured arguments contain absolute device pointers, memory regions are restored at their
+original virtual addresses so that nested pointers remain valid without reconstructing
+application-level data structures. Floating-point outputs are checked using
+Eq.  1 , while integer buffers, opaque state, and guard regions are checked
+byte-exactly. This mechanism allows AsmEvo to verify deployed kernels even when no standalone
+source-level test harness is available. 
+
+ Metadata-Aware Rebuild 
+
+ AsmEvo converts each edited assembly into a loadable code object by rescanning it for
+VGPR/SGPR/AGPR, LDS, and scratch usage. It then recomputes resource fields in both the kernel
+descriptor and AMDGPU metadata before relinking the object. The kernarg layout, kernarg
+segment size, symbol interface, and launch semantics remain frozen, preserving compatibility
+with the original launcher. 
+
+ If normal rebuilding fails because an object contains unsupported or incompletely recovered
+constructs, AsmEvo may use a conservative in-place byte patch. This fallback is restricted to
+resource-neutral and size-non-increasing edits, retaining the original descriptors and
+metadata. Patched candidates still pass static consistency, differential equivalence, and
+performance gates; the fallback therefore changes only the rebuild mechanism, not the
+acceptance criterion. 
+
+ Profiling and Hot-Window Localization 
+
+ Hardware counters, instruction sampling, and static analysis identify stall-dominant
+instruction windows in large kernels. The resulting profile summarizes instruction mix,
+dependency chains, memory behavior, occupancy constraints, and resource pressure for the
+search driver. Instead of placing the entire assembly in every optimization context, AsmEvo
+selects a hot window together with the surrounding data dependencies and relevant metadata. 
+
+ A proposed local edit is spliced back into the complete assembly before whole-kernel rebuild
+and verification. Hot-window localization therefore reduces search context and discourages
+unrelated modifications without weakening the full-kernel acceptance criterion. 
+
+ Gated Verification Harness 
+
+ AsmEvo performs two setup checks once per kernel: round-trip fidelity and oracle acquisition.
+Each candidate then passes Algorithm  1 , which checks assembly validity, static
+resource and ABI consistency, functional equivalence, and finally performance. Correctness
+strictly precedes timing, preventing broken but fast candidates from receiving a positive
+optimization signal. 
+
+ Timing uses warmup followed by the median of R R event-timed launches. Candidate timing and
+oracle execution occur under the same device and launch conditions. Distinct outcomes such
+as assembly failure, metadata inconsistency, output divergence, runtime failure, and
+insufficient speedup are returned as structured feedback to the search driver. 
+
+ Algorithm 1 GatedEval : verify and time a candidate edit. 
+
+ 0: 
+
+  edited assembly s ′ s^{\prime} ; oracle ( 𝒳 , O ) (\mathcal{X},O) ; original K 0 K_{0} 
+
+ 1: 
+
+   if ¬ Assembles ​ ( s ′ ) \neg\textsc{Assembles}(s^{\prime}) then 
+
+ 2: 
+
+    return ⟨ asm_invalid ⟩ \langle\textsc{asm\_invalid}\rangle 
+
+ 3: 
+
+   end if 
+
+ 4: 
+
+   c ← Build ​ ( s ′ ) c\leftarrow\textsc{Build}(s^{\prime}) 
+
+ 5: 
+
+   if ¬ StaticConsistent ​ ( c ) \neg\textsc{StaticConsistent}(c) then 
+
+ 6: 
+
+    return ⟨ abi_invalid ⟩ \langle\textsc{abi\_invalid}\rangle 
+
+ 7: 
+
+   end if 
+
+ 8: 
+
+   for x ∈ 𝒳 x\in\mathcal{X} do 
+
+ 9: 
+
+    if ¬ eq ⁡ ( c , x ) \neg\,\mathrm{eq}(c,x) then 
+
+ 10: 
+
+     return ⟨ divergent ⟩ \langle\textsc{divergent}\rangle 
+
+ 11: 
+
+    end if 
+
+ 12: 
+
+   end for 
+
+ 13: 
+
+   s ^ ​ ( c ) ← T ⁡ ( K 0 ) / T ⁡ ( c ) \hat{s}(c)\leftarrow T(K_{0})/T(c) 
+
+ 14: 
+
+   return ⟨ ok , s ^ ​ ( c ) ⟩ \langle\textsc{ok},\hat{s}(c)\rangle 
+
+ Long-Horizon Agentic Search 
+
+ The verification harness accepts any candidate generator; AsmEvo instantiates it with a
+long-horizon LLM search driver. A deterministic controller owns the wall-clock budget,
+workspace state, rebuild and verification calls, commit decisions, candidate lineage, and
+termination conditions. The LLM analyzes profiling evidence, selects bottlenecks, proposes
+localized assembly transformations, interprets structured failures, and replans after
+unproductive attempts. Thus, the model may guide exploration, but it cannot declare either
+correctness or performance. 
+
+ Commit gate and verified lineage. 
+
+ A candidate c c is committed only if 
+
+ | 
+ m ⋆ = ( 1 + max ⁡ ( ϵ , k ⋅ cv ) ) ​ s ^ ​ ( K ⋆ ) , g ⁡ ( c ) ≡ [ ⋀ x eq ⁡ ( c , x ) ] ∧ s ^ ​ ( c ) ≥ max ⁡ ( m ⋆ , s floor ) , \begin{array}[]{c}m^{\star}=\big(1+\max(\epsilon,k\!\cdot\!\mathrm{cv})\big)\hat{s}(K^{\star}),\\[2.0pt]
+g(c)\equiv\Big[\textstyle\bigwedge_{x}\mathrm{eq}(c,x)\Big]\wedge\hat{s}(c)\geq\max(m^{\star},s_{\mathrm{floor}}),\end{array} | 
+ | 
+ (2) | 
+
+ where cv \mathrm{cv} is the timing coefficient of variation, ϵ \epsilon is a minimum
+improvement margin, and s floor s_{\mathrm{floor}} rejects trivial rewrites. The variance-aware
+threshold prevents measurement noise from advancing the search. 
+
+ Accepted candidates form a tree-structured lineage rather than a single destructive chain.
+Each node records its parent, verified speedup, changed instruction windows, resource usage,
+and optimization rationale. Workers may therefore branch from the current best or return to
+an earlier verified version when a promising direction reaches a local optimum. The reported
+global best follows a no-regress invariant. 
+
+ Multi-start exploration. 
+
+ In single mode, the driver proposes one edit from the current best. In team mode, a planner
+assigns orthogonal optimization directions—such as latency hiding, dependency reduction,
+register-pressure control, memory-access restructuring, or instruction simplification—to
+parallel workers. Start points are selected from diverse verified lineage nodes rather than
+requiring every worker to modify the same candidate. Every proposal is independently rebuilt
+and passed through GatedEval . 
+
+ Verified composition. 
+
+ Individually successful edits are not assumed to remain correct or beneficial when combined.
+The integrator considers candidates that share a base and modify disjoint or complementary
+instruction regions. It applies their edits incrementally, rebuilding and verifying after
+each step. A composition is committed only if it passes all correctness gates and improves
+over both parent candidates; otherwise, the best individual candidate is retained. 
+
+ Memory and anti-stall supervision. 
+
+ A bounded run memory stores successful optimization insights, structured gate outcomes,
+failure signatures, and hashes of repeated candidates. If the controller detects prolonged
+no-improvement, repeated proposals, or infrastructure failures, it requests a redirect that
+summarizes attempted directions and marks exhausted hypotheses. The driver may then change
+the targeted bottleneck or backtrack to an earlier verified node. Persistent stalls escalate
+to wider multi-start exploration. All redirected candidates remain subject to the same
+deterministic gates. 
+
+ Algorithm  2 summarizes the complete loop. The controller resets each worker
+to a verified state after evaluation, preventing unverified modifications from accumulating
+across iterations. 
+
+ Algorithm 2 AsmEvo long-horizon verified search. 
+
+ 0: 
+
+  original object K 0 K_{0} ; budget B B ; directions M M ; GPUs G G 
+
+ 1: 
+
+   assert RoundTrip ( s ⁡ ( K 0 ) , K 0 ) (s(K_{0}),K_{0}) 
+
+ 2: 
+
+   ( 𝒳 , O ) ← AcquireOracle ​ ( K 0 ) (\mathcal{X},O)\leftarrow\textsc{AcquireOracle}(K_{0}) 
+
+ 3: 
+
+   K ⋆ ← K 0 K^{\star}\leftarrow K_{0} ; initialize lineage ℒ \mathcal{L} and memory ℳ \mathcal{M} 
+
+ 4: 
+
+   while elapsed time < B <B do 
+
+ 5: 
+
+    D ← Plan ​ ( K ⋆ , profile , ℳ , M ) D\leftarrow\textsc{Plan}(K^{\star},\mathrm{profile},\mathcal{M},M) 
+
+ 6: 
+
+    P ← StartPoints ​ ( ℒ , D ) P\leftarrow\textsc{StartPoints}(\mathcal{L},D) ; C ← ∅ C\leftarrow\emptyset 
+
+ 7: 
+
+    for each ( d , b ) ∈ P (d,b)\in P assigned to GPU g ∈ G g\in G do 
+
+ 8: 
+
+     s ′ ← Edit ​ ( s ⁡ ( b ) , d , ℳ ) s^{\prime}\leftarrow\textsc{Edit}(s(b),d,\mathcal{M}) 
+
+ 9: 
+
+     r ← GatedEval ​ ( s ′ , ( 𝒳 , O ) , K 0 ) r\leftarrow\textsc{GatedEval}(s^{\prime},(\mathcal{X},O),K_{0}) 
+
+ 10: 
+
+     if r = ⟨ ok , s ^ ⟩ r=\langle\textsc{ok},\hat{s}\rangle then 
+
+ 11: 
+
+      C ← C ∪ { ( s ′ , b , s ^ ) } C\leftarrow C\cup\{(s^{\prime},b,\hat{s})\} 
+
+ 12: 
+
+     end if 
+
+ 13: 
+
+    end for 
+
+ 14: 
+
+    c ~ ← Integrate ​ ( C ) \tilde{c}\leftarrow\textsc{Integrate}(C) 
+
+ 15: 
+
+    if c ~ ≠ ∅ \tilde{c}\neq\emptyset then 
+
+ 16: 
+
+     r ⋆ ← GatedEval ​ ( s ⁡ ( c ~ ) , ( 𝒳 , O ) , K 0 ) r^{\star}\leftarrow\textsc{GatedEval}(s(\tilde{c}),(\mathcal{X},O),K_{0}) 
+
+ 17: 
+
+     if r ⋆ = ⟨ ok , s ^ ⋆ ⟩ ∧ g ⁡ ( c ~ ) r^{\star}=\langle\textsc{ok},\hat{s}^{\star}\rangle\wedge g(\tilde{c}) then 
+
+ 18: 
+
+      K ⋆ ← c ~ K^{\star}\leftarrow\tilde{c} ; append to ℒ \mathcal{L} ; re-profile
+
+ 19: 
+
+     end if 
+
+ 20: 
+
+    end if 
+
+ 21: 
+
+    ℳ ← UpdateMemory ​ ( ℳ , C ) \mathcal{M}\leftarrow\textsc{UpdateMemory}(\mathcal{M},C) 
+
+ 22: 
+
+    if stalled then 
+
+ 23: 
+
+     RedirectOrEscalate ( ℒ , ℳ ) (\mathcal{L},\mathcal{M}) 
+
+ 24: 
+
+    end if 
+
+ 25: 
+
+    if converged then 
+
+ 26: 
+
+     break 
+
+ 27: 
+
+    end if 
+
+ 28: 
+
+   reset worker workspaces to verified K ⋆ K^{\star} 
+
+ 29: 
+
+   end while 
+
+ 30: 
+
+   return K ⋆ K^{\star} and lineage ℒ \mathcal{L} 
+
+ Scope and Limitations 
+
+ AsmEvo provides empirical differential equivalence rather than formal verification; its
+guarantee is limited to evaluated inputs and launch configurations. Additional shapes require
+new inferred inputs or dispatch captures. The overall harness is architecture-agnostic, but
+the current recovery and metadata-aware rebuild implementation is calibrated for CDNA-class
+AMD GPUs. Complex application state may require real-dispatch capture, and achievable gains
+depend on optimization headroom remaining in the compiled kernel. 
+
+ Experiments 
+
+ We evaluate whether AsmEvo (1) improves compiled benchmark kernels and (2) transfers to
+source-free production artifacts under a fixed verification harness. We use KernelBench Level 1 and Level 2, AITer code objects, and
+Triton JIT HSACOs emitted by vLLM and SGLang. The unmodified binary is always the
+ 1.00 × 1.00\times reference. 
+
+ Source | 
+ Size | 
+
+ Coverage 
+ | 
+
+ KernelBench L1 | 
+ 15 | 
+
+ activations, losses, reductions/norms, depthwise conv, matmul, pooling 
+ | 
+
+ KernelBench L2 | 
+ 15 | 
+
+ fused GEMM/matmul and conv pipelines, normalization, activations, pooling, reductions 
+ | 
+
+ AITer | 
+ 4 | 
+
+ code-object MoE, FP8 FMHA, BF16 FMHA, BF16 FMHA backward 
+ | 
+
+ Triton JIT | 
+ 4 | 
+
+ vLLM/SGLang A8W8 GEMM, MoE, MoE LoRA, AWQ GEMM 
+ | 
+
+ Table 1: Kernel sources, counts, and operator coverage. 
+
+ Experimental Setup 
+
+ Experiments use CDNA3 AMD Instinct GPUs with ROCm: KernelBench Level 1 and Level 2 run on
+MI308X, while AITer and the Triton JIT HSACOs run on MI300X. All search agents use
+Claude Opus 4.8 with provider-default decoding. By default, AsmEvo performs multi-start
+search with four GPU workers under a fixed 0.5-day (12-hour) wall-clock budget per kernel.
+For each kernel, AsmEvo recovers a reassemblable AMDGCN representation, performs a one-time
+round-trip fidelity check, and builds the differential oracle. Every candidate passes
+ GatedEval in a fixed order: functional-equivalence verification first, performance
+measurement second. The equivalence check is repeated three times per candidate, using
+ θ = 0.9999 \theta=0.9999 and τ = 10 − 3 \tau=10^{-3} in Eq.  1 . Latency is the median of event-timed
+launches after warmup. Because the hardware is shared and clocks cannot be locked, we use
+a large, representative launch configuration to suppress launch and event noise. Commits
+use the variance-aware margin in Eq.  2 , with ϵ = 0.002 \epsilon=0.002 , k = 0.85 k=0.85 ,
+and s floor = 1.0 s_{\mathrm{floor}}=1.0 . We report speedups rather than raw latencies in all result
+tables. 
+
+ Split | 
+ Kernels | 
+ Improved | 
+ Geo. | 
+ Max | 
+ Attempts/K | 
+ Commits/K | 
+ GPU | 
+ Best case | 
+
+ KernelBench L1 | 
+ 15 | 
+ 15 (100%) | 
+ 1.56 | 
+ 3.88 | 
+ 119.3 | 
+ 7.2 | 
+ MI308X | 
+ Depthwise Conv2D | 
+
+ KernelBench L2 | 
+ 15 | 
+ 14 (93%) | 
+ 1.17 | 
+ 2.55 | 
+ 156.4 | 
+ 6.8 | 
+ MI308X | 
+ Matmul+Swish+Sum+GroupNorm | 
+
+ All KernelBench | 
+ 30 | 
+ 29 (97%) | 
+ 1.35 | 
+ 3.88 | 
+ 137.8 | 
+ 7.0 | 
+ MI308X | 
+ Depthwise Conv2D | 
+
+ Table 2: KernelBench performance under the default AsmEvo configuration. Speedups are measured against the original compiled code object and reported only after functional-equivalence verification. 
+
+ Artifact Sources and Coverage 
+
+ Table  1 lists the four sources. They cover the operator types most common in large language models: 15 validated KernelBench Level 1 operators, 15 KernelBench Level 2 operators, and 8 production kernels comprising 4 AITer code objects and 4 Triton JIT HSACOs. 
+
+ The sources differ in how the input binary is obtained. For KernelBench, we use an AMD GEAK-style agent  ( Wang et al. 2025 ) with GPT-5.0 to refine HIP versions of the PyTorch benchmark kernels for five rounds, compile them, and give AsmEvo only the compiled object as K 0 K_{0} . Production kernels are used exactly as deployed. We select AITer code objects from MI300X workloads and collect the Triton JIT HSACOs emitted by vLLM and SGLang during inference. Each binary is paired with a captured real dispatch—kernargs, launch geometry, and referenced device memory—for deterministic replay. The capture is required because these kernels use mixed dtypes and pointer-rich layouts that synthetic launch inference cannot reconstruct, motivating the real-dispatch oracle. The selected Level 1 and Level 2 HIP inputs are all faster than their
+PyTorch operators in the source-level benchmark, so K 0 K_{0} is not a weak
+baseline. 
+
+ Source | 
+
+ Kernel 
+ | 
+ Speedup | 
+
+ AITer | 
+
+ aiter_fmoe_fp8_blockscale 
+ subgu256 
+ | 
+ 1.310 | 
+
+ AITer | 
+
+ aiter_fmha_hd128_fp8_causal 
+ | 
+ 1.007 | 
+
+ AITer | 
+
+ new_aiter_fmha_hd192x128 
+ bf16_causal 
+ | 
+ 1.025 | 
+
+ AITer | 
+
+ new_aiter_fmha_bwd_hd128 
+ bf16_causal_a32 
+ | 
+ 1.049 | 
+
+ vLLM | 
+
+ gemm_a8w8_blockscale 
+ | 
+ 1.234 | 
+
+ SGLang | 
+
+ sglang_fused_moe 
+ lora_kernel 
+ | 
+ 1.025 | 
+
+ vLLM | 
+
+ fused_moe_kernel 
+ | 
+ 1.343 | 
+
+ SGLang | 
+
+ awq_gemm_kernel 
+ | 
+ 1.133 | 
+
+ Table 3: Verified per-kernel speedups over the original production binaries
+on MI300X. Only binary-level AITer and assembly-level Triton results are included.
+The family geometric means are 1.09 × 1.09\times for AITer and
+ 1.18 × 1.18\times for Triton JIT. Triton JIT HSACOs are collected from vLLM
+and SGLang and evaluated using captured production dispatches. 
+
+ Metrics 
+
+ For each optimized kernel, verified speedup is
+ s ^ ​ ( K ′ ) = T ⁡ ( K 0 ) / T ⁡ ( K ′ ) \hat{s}(K^{\prime})=T(K_{0})/T(K^{\prime}) , where K 0 K_{0} is the original code object and
+ T ⁡ ( ⋅ ) T(\cdot) is the median post-warmup latency. For KernelBench splits, we report
+geometric-mean and maximum speedups, the number of improved kernels, and the mean
+attempts and commits per kernel. For each production-kernel family, we report
+the geometric-mean speedup together with individual per-kernel speedups.
+A kernel is improved only if its final candidate passes Eq.  2 and
+has s ^ ​ ( K ′ ) > 1 \hat{s}(K^{\prime})>1 . The commit rate is the total number of verified commits
+divided by the total number of candidates submitted to GatedEval .
+Every reported speedup passes functional-equivalence verification before timing. 
+
+ Results 
+
+ KernelBench Kernels 
+
+ Table  2 reports the default AsmEvo results on MI308X.
+AsmEvo improves all 15 KernelBench Level 1 kernels, reaching a
+ 1.56 × 1.56\times geometric-mean speedup and a 3.88 × 3.88\times maximum on
+depthwise Conv2D with asymmetric input and a square kernel. It improves 14 of 15 Level 2
+fused-operator kernels, with a 1.17 × 1.17\times geometric mean and a
+ 2.55 × 2.55\times maximum on Matmul+Swish+Sum+GroupNorm. Across all 30 selected kernels,
+AsmEvo improves 29, with a geometric-mean speedup of 1.35 × 1.35\times . Despite the high improvement rate,
+only 5.1% of evaluated candidates become verified commits, indicating that
+useful assembly rewrites are sparse. 
+
+ The two splits exhibit different improvement profiles. Level 1 has a median speedup of
+ 1.31 × 1.31\times ; six kernels exceed 1.5 × 1.5\times , spanning depthwise convolution,
+normalization, activation, and matrix-multiplication operators. In addition to the
+ 3.88 × 3.88\times depthwise-convolution result, MinGPTNewGelu reaches 3.82 × 3.82\times ,
+RMSNorm reaches 2.63 × 2.63\times , and upper-triangular matrix multiplication reaches
+ 2.28 × 2.28\times . The diversity of these operators indicates that the gains are not confined
+to one instruction pattern or workload class. 
+
+ Level 2 is more concentrated near parity: its median is 1.10 × 1.10\times , and only
+Matmul+Swish+Sum+GroupNorm exceeds 1.5 × 1.5\times . The next-largest gains are
+ 1.32 × 1.32\times on ConvTranspose3d+AvgPool+Clamp+Softmax+Multiply and 1.30 × 1.30\times 
+on ConvTranspose2d+Softmax+BiasAdd+Scaling+Sigmoid. One
+GEMM+GroupNorm+Swish pipeline remains at 1.00 × 1.00\times . This narrower distribution is
+consistent with fused kernels exposing less local post-compilation headroom, while the
+ 2.55 × 2.55\times best case shows that substantial opportunities can still remain in individual
+fused artifacts. 
+
+ Figure 2: Verified AsmEvo speedups over the original code objects
+( 1.00 × 1.00\times ) for 30 selected KernelBench kernels, ranked by speedup. The lower panel
+shows each kernel’s operator composition. All reported candidates pass functional-equivalence verification. 
+
+ Production Code Objects 
+
+ Table  3 reports production kernels individually rather than as a
+single aggregate because production binaries differ in launch semantics and oracle
+requirements. For AITer code objects, AsmEvo improves all four retained kernels,
+reaching a 1.09 × 1.09\times geometric mean speedup and a 1.31 × 1.31\times maximum speedup on the
+FP8 blockscale MoE kernel. For Triton JIT compiled HSACOs from vLLM and SGLang, measured on MI300X, AsmEvo
+improves all four assembly-level Triton kernels, reaching a 1.18 × 1.18\times geometric mean speedup and a
+ 1.34 × 1.34\times maximum speedup on the vLLM fused MoE kernel. These results show that the same
+post-compilation harness applies beyond benchmark-generated kernels. 
+
+ The production results also reveal that optimization headroom depends strongly on the
+upstream artifact. The four AITer binaries contain one large gain and three comparatively
+small gains, whereas three of the four Triton assembly results exceed 1.1 × 1.1\times .
+Because the kernels implement different operators and launch configurations, this comparison
+does not isolate the upstream compiler as the cause; it instead demonstrates that AsmEvo can
+recover useful opportunities from both vendor code objects and runtime-generated HSACOs.
+We report only assembly-level optimization for Triton and binary-level optimization for
+AITer; IR-level variants are excluded from all aggregates and claims. 
+
+ Case Study: Representative KernelBench Results 
+
+ The largest KernelBench gain occurs on
+ 84_conv_depthwise_2D_asymmetric_input_square_kernel , which improves by
+ 3.88 × 3.88\times . Two other Level 1 kernels show similarly substantial but structurally
+different gains: 88_MinGPTNewGelu reaches 3.82 × 3.82\times , while
+ 36_RMSNorm_ reaches 2.63 × 2.63\times . Upper-triangular matrix multiplication
+improves by 2.28 × 2.28\times . Together, these cases cover convolution, activation,
+normalization, and structured matrix multiplication, illustrating why a single fixed
+peephole rule would be insufficient for the evaluated set. 
+
+ The strongest Level 2 case,
+ 37_Matmul_Swish_Sum_GroupNorm , reaches 2.55 × 2.55\times despite combining
+several operations in one compiled artifact. AsmEvo treats the complete kernel as the
+acceptance unit: local assembly changes are rebuilt into the full code object and retained
+only when the fused output passes the same differential oracle. This is important for fused
+pipelines, where an apparently independent instruction sequence may affect a later reduction,
+normalization, or activation stage. 
+
+ Case Study: Triton Production Kernels 
+
+ The strongest Triton assembly result is the vLLM
+ fused_moe_kernel at 1.343 × 1.343\times . The vLLM
+ gemm_a8w8_blockscale kernel reaches 1.234 × 1.234\times , showing that measurable
+headroom remains even in a quantized block-scale GEMM emitted for a production serving
+stack. On SGLang, awq_gemm_kernel reaches 1.133 × 1.133\times , while
+ sglang_fused_moe_lora_kernel obtains a smaller but verified
+ 1.025 × 1.025\times gain. The range from 1.025 × 1.025\times to 1.343 × 1.343\times illustrates why
+AsmEvo measures each rebuilt HSACO rather than assuming that a syntactically plausible
+assembly transformation will improve every JIT-generated kernel. 
+
+ For these kernels, validation uses captured production dispatches rather than reconstructed
+synthetic arguments. The original kernarg layout, launch geometry, and referenced device
+memory are replayed for both K 0 K_{0} and the optimized object. This keeps the reported
+assembly gains tied to the same pointer-rich MoE and quantized-GEMM states observed in the
+serving frameworks. 
+
+ Case Study: AITer Code Objects 
+
+ AITer kernels provide a useful stress test because they are product-grade inference artifacts.
+Although difficult to express at the source level after compilation, AsmEvo’s gains arise
+from narrow opportunities that remain visible in recovered AMDGCN assembly: scheduling around
+long-latency memory operations, wait-counter placement, cache-hint and buffer-load variants,
+and reduced conversion or address-generation work. 
+
+ Across the AITer cases, the most promising edits are localized rather than structural. The
+FP8 blockscale MoE kernel reaches 1.31 × 1.31\times , the FP8 causal FMHA kernel reaches
+ 1.007 × 1.007\times , and the two BF16 causal FMHA variants reach 1.025 × 1.025\times and
+ 1.049 × 1.049\times . These attention and MoE kernels expose opportunities around routing cleanup,
+pointer-rich access patterns, causal attention paths, and resource-pressure-sensitive
+scheduling. Hoisting, interleaving, or tighter wait counters can reduce stalls without
+changing the launcher ABI. Because synthetic launch reconstruction is often insufficient for
+mixed-dtype, strided, or pointer-rich kernels, every accepted edit is replayed against a
+captured production dispatch before its speedup is reported. 
+
+ Dispatch and End-to-End Validation 
+
+ AsmEvo rebuilds each accepted edit into a loadable AMDGPU code object that preserves the
+original symbol, kernarg layout, descriptor-visible resources, and metadata contract. The
+optimized artifact therefore follows the same host-side dispatch path as the original. For
+KernelBench-derived HIP kernels, we replace the original MI308X object and run the same
+benchmark harness. 
+
+ For production libraries, we additionally validate the native runtime path. AITer
+replacements pass its unit tests under the original launch configurations. For vLLM and
+SGLang, we replace the cached Triton HSACO, disable recompilation, and run framework tests
+against the replacement. These checks confirm that the measured speedups remain usable as
+drop-in artifacts rather than only as replay-harness gains. 
+
+ Conclusion 
+
+ AsmEvo extends GPU kernel optimization to source-free AMDGPU code objects, using the original
+binary as the behavioral oracle and admitting candidates only after ABI-preserving rebuild
+and functional-equivalence verification. It improves 29 of 30 selected KernelBench kernels
+( 1.35 × 1.35\times geometric mean, 3.88 × 3.88\times maximum) and all eight production kernels from
+AITer, vLLM, and SGLang. These results show that deployed binaries retain recoverable
+low-level headroom and that agentic search can exploit it safely under deterministic gates. 
+
+ References 
+
+ AMD ROCm (2016) 
+
+AMD ROCm. 2016.
+
+ rocBLAS: AMD ROCm Basic Linear Algebra Subprograms Library.
+
+ https://github.com/ROCm/rocBLAS .
+
+ Accessed: 2026-07-28.
+
+ AMD ROCm (2019) 
+
+AMD ROCm. 2019.
+
+ Composable Kernel: Performance Portable Programming Model for Machine Learning Tensor Operators.
+
+ https://github.com/ROCm/composable_kernel .
+
+ Accessed: 2026-07-28.
+
+ AMD ROCm (2023) 
+
+AMD ROCm. 2023.
+
+ AMDGPU Code Object Format.
+
+ https://rocm.docs.amd.com/projects/llvm-project/en/latest/LLVM/llvm/html/AMDGPUUsage.html .
+
+ Accessed: 2026-07-28.
+
+ AMD ROCm (2025) 
+
+AMD ROCm. 2025.
+
+ AITer: AMD AI Tensor Engine.
+
+ https://github.com/ROCm/aiter .
+
+ Accessed: 2026-07-28.
+
+ Baronio et al. (2026) 
+
+Baronio, C.; Marsella, P.; Pan, B.; Guo, S.; and Alberti, S. 2026.
+
+ Kevin: Multi-Turn RL for Generating CUDA Kernels.
+
+ In ICLR 2026 .
+
+ Chen et al. (2018a) 
+
+Chen, T.; Moreau, T.; Jiang, Z.; Zheng, L.; Yan, E.; Cowan, M.; Shen, H.; Wang, L.; Hu, Y.; Ceze, L.; Guestrin, C.; and Krishnamurthy, A. 2018a.
+
+ TVM: An Automated End-to-End Optimizing Compiler for Deep Learning.
+
+ In OSDI 2018 , 578–594.
+
+ Chen et al. (2026) 
+
+Chen, T.; Ye, Z.; Xu, B.; Ye, Z.; Liu, T.; Hassani, A.; Chen, T.; Kerr, A.; Wu, H.; Xu, Y.; et al. 2026.
+
+ AVO: Agentic variation operators for autonomous evolutionary search.
+
+ arXiv preprint arXiv:2603.24517 .
+
+ Chen et al. (2018b) 
+
+Chen, T.; Zheng, L.; Yan, E.; Jiang, Z.; Moreau, T.; Ceze, L.; Guestrin, C.; and Krishnamurthy, A. 2018b.
+
+ Learning to optimize tensor programs.
+
+ In NeurIPS 2018 , volume 31.
+
+ Dai et al. (2026) 
+
+Dai, W.; Wu, H.; Yu, Q.; Gao, H.-a.; Li, J.; Jiang, C.; Lou, W.; Song, Y.; Yu, H.; Chen, J.; et al. 2026.
+
+ Cuda agent: Large-scale agentic rl for high-performance cuda kernel generation.
+
+ arXiv preprint arXiv:2602.24286 .
+
+ He and Yoneki (2025) 
+
+He, G.; and Yoneki, E. 2025.
+
+ CuAsmRL: Optimizing GPU SASS Schedules via Deep Reinforcement Learning.
+
+ In Proceedings of the 23rd ACM/IEEE International Symposium on Code Generation and Optimization (CGO ’25) , 493–506. New York, NY, USA: Association for Computing Machinery.
+
+ ISBN 979-8-4007-1275-3.
+
+ KernelEvolve Team, Meta Platforms (2026) 
+
+KernelEvolve Team, Meta Platforms. 2026.
+
+ KernelEvolve: Scaling Agentic Kernel Coding for Heterogeneous AI Accelerators at Meta.
+
+ In ISCA 2026 .
+
+ Kwon et al. (2023) 
+
+Kwon, W.; Li, Z.; Zhuang, S.; Sheng, Y.; Zheng, L.; Yu, C. H.; Gonzalez, J.; Zhang, H.; and Stoica, I. 2023.
+
+ Efficient memory management for large language model serving with pagedattention.
+
+ In SOSP 2023 , 611–626.
+
+ Lange et al. (2025) 
+
+Lange, R. T.; Prasad, A.; Sun, Q.; Faldor, M.; Tang, Y.; and Ha, D. 2025.
+
+ Towards Robust Agentic CUDA Kernel Benchmarking, Verification, and Optimization.
+
+ arXiv:2509.14279.
+
+ Li et al. (2025) 
+
+Li, S.; Wang, Z.; Zhang, Y.; et al. 2025.
+
+ TritonBench: Benchmarking Large Language Model Capabilities for Generating Triton Operators.
+
+ In Findings of ACL 2025 .
+
+ Li et al. (2026) 
+
+Li, X.; Sun, X.; Wang, A.; Li, J.; and Shum, C. 2026.
+
+ CUDA-L1: Improving CUDA Optimization via Contrastive Reinforcement Learning.
+
+ In ICLR 2026 .
+
+ Liu et al. (2026) 
+
+Liu, W.; Xu, J.; Li, Y.; Zheng, L.; Li, T.; Liu, Q.; and He, J. 2026.
+
+ Dr. Kernel: Reinforcement Learning Done Right for Triton Kernel Generations.
+
+ In ICML 2026 .
+
+ Lopes et al. (2021) 
+
+Lopes, N. P.; Lee, J.; Hur, C.-K.; Liu, Z.; and Regehr, J. 2021.
+
+ Alive2: Bounded Translation Validation for LLVM.
+
+ In PLDI 2021 .
+
+ Mankowitz et al. (2023) 
+
+Mankowitz, D. J.; Michi, A.; Zhernov, A.; Gelmi, M.; Selvi, M.; Paduraru, C.; Leurent, E.; Iqbal, S.; Lespiau, J.-B.; Ahern, A.; Koppe, T.; Millikin, K.; Gaffney, S.; Elster, S.; Broshear, J.; Gamble, C.; Milan, K.; Tung, R.; Hwang, M.; Cemgil, T.; Barekatain, M.; Li, Y.; Mandhane, A.; Hubert, T.; Schrittwieser, J.; Hassabis, D.; Kohli, P.; Riedmiller, M.; Vinyals, O.; and Silver, D. 2023.
+
+ Faster Sorting Algorithms Discovered Using Deep Reinforcement Learning.
+
+ Nature , 618: 257–263.
+
+ Meta AI (2025) 
+
+Meta AI. 2025.
+
+ KernelLLM: Fine-tuning LLMs to Translate PyTorch Modules into Efficient Triton Kernels.
+
+ https://huggingface.co/facebook/KernelLLM .
+
+ Ouyang et al. (2025) 
+
+Ouyang, A.; Guo, S.; Arora, S.; Zhang, A. L.; Hu, W.; Ré, C.; and Mirhoseini, A. 2025.
+
+ KernelBench: Can LLMs Write Efficient GPU Kernels?
+
+ In ICML 2025 , volume 267 of Proceedings of Machine Learning Research .
+
+ Raayai-Ardakani et al. (2025) 
+
+Raayai-Ardakani, M.; Nguyen, A.; Rosales, I.; Xu, D.; Sun, Y.; Sun, Y.; Kaeli, D.; and Rubin, N. 2025.
+
+ Luthier: A Dynamic Binary Instrumentation Framework Targeting AMD GPUs.
+
+ In ISPASS 2025 , 137–149. IEEE.
+
+ Ragan-Kelley et al. (2013) 
+
+Ragan-Kelley, J.; Barnes, C.; Adams, A.; Paris, S.; Durand, F.; and Amarasinghe, S. 2013.
+
+ Halide: A Language and Compiler for Optimizing Parallelism, Locality, and Recomputation in Image Processing Pipelines.
+
+ In PLDI 2013 , 519–530.
+
+ Sasnauskas et al. (2017) 
+
+Sasnauskas, R.; Chen, Y.; Collingbourne, P.; Ketema, J.; Taneja, J.; and Regehr, J. 2017.
+
+ Souper: A Synthesizing Superoptimizer.
+
+ arXiv:1711.04422.
+
+ Schkufza, Sharma, and Aiken (2013) 
+
+Schkufza, E.; Sharma, R.; and Aiken, A. 2013.
+
+ Stochastic Superoptimization.
+
+ In ASPLOS 2013 , 305–316.
+
+ Shao et al. (2022) 
+
+Shao, M.; Feng, S.; Gupta, R.; and Li, T. C. 2022.
+
+ Tensor Program Optimization with Probabilistic Programs.
+
+ arXiv:2205.13603.
+
+ Tillet, Kung, and Cox (2019) 
+
+Tillet, P.; Kung, H.-T.; and Cox, D. 2019.
+
+ Triton: an intermediate language and compiler for tiled neural network computations.
+
+ In ACM SIGPLAN MAPL 2019 , 10–19.
+
+ Villa et al. (2019) 
+
+Villa, O.; Stephenson, M.; Nellans, D. W.; and Keckler, S. W. 2019.
+
+ NVBit: A Dynamic Binary Instrumentation Framework for NVIDIA GPUs.
+
+ In MICRO 2019 , 372–383.
+
+ Wang et al. (2025) 
+
+Wang, J.; Joshi, V.; Majumder, S.; Chao, X.; Ding, B.; Liu, Z.; Brahma, P. P.; Li, D.; Liu, Z.; and Barsoum, E. 2025.
+
+ Geak: Introducing triton kernel ai agent & evaluation benchmarks.
+
+ arXiv preprint arXiv:2507.23194 .
+
+ Wei et al. (2025a) 
+
+Wei, A.; Suresh, T.; Tan, H.; Xu, Y.; Singh, G.; Wang, K.; and Aiken, A. 2025a.
+
+ Improving Assembly Code Performance with Large Language Models via Reinforcement Learning.
+
+ arXiv:2505.11480.
+
+ Wei et al. (2025b) 
+
+Wei, A.; et al. 2025b.
+
+ EquiBench: Benchmarking Large Language Models’ Reasoning about Program Semantics via Equivalence Checking.
+
+ In EMNLP 2025 .
+
+ Zhang et al. (2025) 
+
+Zhang, Z.; Wang, R.; Li, S.; Luo, Y.; Hong, M.; and Ding, C. 2025.
+
+ Cudaforge: An agent framework with hardware feedback for cuda kernel optimization.
+
+ arXiv preprint arXiv:2511.01884 .
+
+ Zheng et al. (2020) 
+
+Zheng, L.; Jia, C.; Sun, M.; Wu, Z.; Yu, C. H.; Haj-Ali, A.; Wang, Y.; Yang, J.; Zhuo, D.; Sen, K.; Gonzalez, J. E.; and Stoica, I. 2020.
+
+ Ansor: Generating High-Performance Tensor Programs for Deep Learning.
+
+ In OSDI 2020 , 863–879.
+
+ Zheng et al. (2024) 
+
+Zheng, L.; Yin, L.; Xie, Z.; Sun, C.; Huang, J.; Yu, C. H.; Cao, S.; Kozyrakis, C.; Stoica, I.; Gonzalez, J. E.; et al. 2024.
+
+ Sglang: Efficient execution of structured language model programs.
+
+ In NeurIPS 2024 , volume 37, 62557–62583.

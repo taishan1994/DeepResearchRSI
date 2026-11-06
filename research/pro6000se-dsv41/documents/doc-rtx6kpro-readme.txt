@@ -1,0 +1,191 @@
+# RTX PRO 6000 Blackwell LLM Wiki
+
+This repository is a field wiki for running frontier LLMs on NVIDIA RTX PRO
+6000 Blackwell / SM120 PCIe systems. It is more than a few launch snippets: it
+contains reproducible Docker builds, exact vLLM and SGLang runbooks, benchmark
+tables, KLD quality checks, quantization notes, DCP/MTP/DSpark/DFlash debugging,
+PCIe topology work, and regression history.
+
+## Start Here
+
+For GLM-5.3, Qwen3.8-Flash-Next, DeepSeek V4 text/Vision and V4.1, start with
+the **[shared Docker launch guide](docs/unified-vllm-docker.md)**. One image
+provides model profiles, speculation, GPU selection and optional LMCache.
+Each model page has a complete launch command, exact option examples and
+recorded speeds. Use the [recipe archive](archive/serving-guides/README.md)
+to reproduce a preceding release without changing the recommended model URLs.
+
+| Model family | Start here | Scope |
+|---|---|---|
+| GLM-5.3-Flash | [GLM-5.3-Flash](models/glm-5.3-flash.md) | Unified TP4 profile, NVFP4 target, no-spec/MTP3/MXFP8 DFlash2 choices, bounded decode/prefill/Sieve measurements and quality reports. |
+| GLM-5.3-Flash Spark | [Two-GPU recipe](models/glm-5.3-flash-spark-tp2.md) | Memory-tuned Spark checkpoint preset for two 96-GB GPUs, MTP3 and optional RAM/disk prefix storage. |
+| GLM-5.2 | [GLM-5.2 Runbook Hub](models/glm-5.2.md) | Fathomless vLLM, NVFP4, online FP8/MXFP8, B12X, DCP, MTP, KLD. |
+| DeepSeek-V4.1-Flash | [DeepSeek-V4.1-Flash](models/deepseek-v4.1-flash.md) | Unified TP4 profile, native text/vision, adaptive DSpark K7, RAM/SSD Engram tables, bounded API and throughput evidence. |
+| DeepSeek-V4-Flash / DSpark | [DeepSeek V4 text](models/deepseek-v4-flash.md), [DeepSeek V4 Vision](models/deepseek-v4-flash-vision.md) | Unified TP2 profiles, fixed DSpark K5/K3, B12X, optional LMCache and measured image comparisons. |
+| Kimi | [Kimi Runbook Hub](models/kimi.md) | Kimi-K2.7-Code, DFlash, parser/tool-call runtime. |
+| Xiaomi MiMo | [MiMo Runbook Hub](models/mimo.md) | MiMo V2.5 Pro FP4-DFlash. |
+| Qwen3.8-Flash-Next | [Qwen3.8-Flash-Next](models/qwen38-flash-next.md) | Unified TP1/TP2 profile, MTP3, CPU PLE tables, optional vision and FP8 KV. |
+| Qwen3.8-27B | [Qwen3.8-27B on RTX PRO 6000 Blackwell](models/qwen38-27b.md), [readable QSRT K5 training result](models/qwen38-qsrt-k5-training-result.md), [exact QSRT K5 specification](models/qwen38-qsrt-k5-r16.md) | TP1, TP2, and TP4 throughput evidence plus the QSRT K5 training interpretation, artifact, fidelity, runtime, and source contract. |
+| GLM-5.1 | [GLM-5.1 Runbook Hub](models/glm-5.1.md) | Historical GLM-5.1, KLD methodology, older B12X/SGLang work. |
+| Legacy / secondary models | [Legacy Model Runbooks](models/legacy.md) | DeepSeek-V4-Pro, GLM-4.7, Qwen, MiniMax, older Kimi pages. |
+
+Need the complete map of every Markdown page?
+
+| Index | Use |
+|---|---|
+| [Full Wiki Index](INDEX.md) | Complete generated catalog of every page in this repository. |
+| [Glossary And Acronym Guide](GLOSSARY.md) | Acronym expansions and writing rules for newcomer-friendly docs. |
+| [Newcomer Onboarding](docs/newcomer-onboarding.md) | How to ask useful questions without lowering the technical signal. |
+
+## What Is In This Repository?
+
+| Need | Where |
+|---|---|
+| Shared image launch, speculation and cache settings | [Unified Docker guide](docs/unified-vllm-docker.md), then the relevant model profile page. Other model families retain their own runbooks. |
+| Rebuild the unified image | [Versioned runtime configuration and assembly sources](docs/unified-vllm-docker.md#inspect-or-override-the-launch); historical recipes remain in model release pages and [scripts](scripts/). |
+| Compare backend speed | Model benchmark tables plus [Benchmark Results](benchmarks/results.md). |
+| Check quantization fidelity | [General KLD methodology](kld/README.md), [GLM-5.2 KLD](benchmarks/glm52-kld-evaluation.md), and model-specific KLD sections. |
+| Compare model output quality on a real Czech tutoring workload | [Czech tutoring quality comparison](benchmarks/czech-tutor-quality-comparison.md): DeepSeek-V4-Flash, V4.1-Flash, Qwen3.8-Flash-Next and GLM-5.3-Flash per reasoning mode, with a reproducible runner. |
+| Understand MTP, DSpark, or DFlash | [Speculative Decoding](optimization/speculative-decoding.md), DS4/Kimi/MiMo pages. |
+| Debug topology or PCIe behavior | [Topology](hardware/topology.md), [PCIe Bandwidth](hardware/pcie-bandwidth.md), [GPU Configurations](hardware/gpu-configs.md). |
+| Avoid known runtime footguns | [Common Issues](troubleshooting/common-issues.md), model caveats, and daily summaries. |
+| Reproduce a preceding deployment or compare releases | [Archived serving guides](archive/serving-guides/README.md), historical versioned pages and [Daily Summaries](daily-summaries/). |
+
+## Serving Guides and Reproduction Records
+
+| Area | Page | Why it matters |
+|---|---|---|
+| GLM-5.3-Flash serving stack | [GLM-5.3-Flash](models/glm-5.3-flash.md) | Profile-based MTP3/DFlash2 launches and bounded wheel-image measurements; no-spec, DCP4 and clock-specific history remain attributed to their release. |
+| GLM-5.2 serving stack | [GLM-5.2 Infernal Invocation r18](models/glm5.2-infernal-invocation-r18.md) | Source-qualified CUDA 13.3 profiles with sparse-prefill row validation, projection-mixed EXL3 TP4, online MCG K6, and NVFP4 TP8. |
+| GLM-5.2 MXFP4 | [GLM-5.2 FP8 + MXFP4 Experts](models/glm5.2_mxfp4.md) | Native MXFP4 expert checkpoint path and A8 serving notes. |
+| DS4 text and Vision serving profiles | [DeepSeek V4 text](models/deepseek-v4-flash.md), [Vision](models/deepseek-v4-flash-vision.md) | One image, separate fixed-K5/K3 profiles, optional external cache, GPU KV capacity and matched throughput tables. |
+| Shared GLM/Qwen/DS4/DS4.1 image | [Unified Docker guide](docs/unified-vllm-docker.md) | One launch interface and image selection point; model-specific alternatives, cache support and a six-profile measurement table. |
+| DS4 full reference | [DS4 DSpark v9](models/ds4dspark-v9.md) | Full DSpark and standard MTP sweep reference. |
+| Kimi-K2.7-Code | [Kimi-K2.7-Code v3](models/kimi-k27-code_v3.md) | Fathomless Kimi DFlash validation. |
+| MiMo FP4-DFlash | [MiMo FP4-DFlash v3](models/xiaomi-mimo-v2.5-pro-fp4-dflash_v3.md) | MiMo DFlash validation and fix notes. |
+
+Older pages are intentionally preserved. Prefer the hub page for each model
+family unless you are reproducing a specific historical result.
+
+## Core Topics
+
+| Topic | Page |
+|---|---|
+| Docker images and release lines | [Docker Images](optimization/docker-images.md) |
+| Unified model profiles, speculation and LMCache | [Shared Docker launch guide](docs/unified-vllm-docker.md) |
+| PCIe oneshot all-reduce | [PCIe oneshot all-reduce](optimization/pcie-oneshot-allreduce.md) |
+| NCCL tuning and empty graph-file failures | [NCCL tuning](optimization/nccl-tuning.md) |
+| Speculative decoding | [Speculative decoding](optimization/speculative-decoding.md) |
+| NVFP4 quantization | [NVFP4 quantization](optimization/nvfp4-quantization.md) |
+| Hybrid NVFP4 assembly | [Hybrid NVFP4 assembly](optimization/hybrid-nvfp4-assembly.md) |
+| B12X FP8 / DeepGEMM comparison | [B12X dense FP8 GEMM vs DeepGEMM](optimization/b12x-dense-fp8-gemm-vs-deepgemm.md) |
+| B12X W4A8 tiny decode | [B12X W4A8 MX tiny decode](optimization/b12x-w4a8mx-tiny-decode-kernel.md) |
+| DSpark upstream consolidation | [DSpark upstream consolidation](optimization/dspark-upstream-consolidation.md) |
+| I/O tuning | [I/O tuning](optimization/io-tuning.md) |
+
+## Benchmarks And Quality
+
+| Area | Page |
+|---|---|
+| Consolidated throughput | [Benchmark Results](benchmarks/results.md) |
+| Shared beta serving-image comparison | [Karmic Kraken model measurements](benchmarks/karmic-kraken-serving.md); [archived comparisons](archive/serving-guides/README.md) retain their separate image and clock conditions. |
+| vLLM vs SGLang throughput | [Inference throughput](benchmarks/inference-throughput/README.md) |
+| GLM-5.2 KLD and quant quality | [GLM-5.2 KLD Evaluation](benchmarks/glm52-kld-evaluation.md) |
+| General KLD methodology | [Measuring quantization distribution fidelity in vLLM](kld/README.md) |
+| MTP quality checks | [MTP Quality Evaluation](benchmarks/mtp-quality-evaluation.md) |
+| NVFP4 quantization comparison | [NVFP4 Quantization Comparison](benchmarks/nvfp4-quantization-comparison.md) |
+| GLM-5.3-Flash behavioral fidelity | [R30 nucleus-sampling comparison of published NVFP4, QAD, and QAD TV-nucleus](models/glm-5.3-flash/verifier-backed-behavioral-fidelity.md) |
+| GLM-5.3-Flash QAD step-2,500 fidelity | [Qualified temperature-1/top-p-0.95 practical-equivalence result](models/glm-5.3-flash/qad-step2500-verifier-backed-behavioral-fidelity.md) |
+| GLM-5.3-Flash QAD TV-nucleus step-2,500 fidelity | [Qualified temperature-1/top-p-0.95 practical-equivalence result and greedy diagnostic](models/glm-5.3-flash/qad-tvn-step2500-verifier-backed-behavioral-fidelity.md) |
+
+KLD is a regression and quantization-sanity tool, not a complete quality metric.
+Use it together with long-context decode, coding probes, acceptance-rate checks,
+and task-level benchmarks.
+
+## Hardware And Topology
+
+Most measurements in this repository target RTX PRO 6000 Blackwell / GB202 /
+SM120 cards:
+96 GB GDDR7 per GPU, PCIe 5.0 x16, no NVLink, usually 4-GPU, 8-GPU, or 16-GPU
+PCIe-switch systems.
+
+| Area | Page |
+|---|---|
+| SM120 vs SM100 | [SM120 vs SM100 Architecture](hardware/sm120-vs-sm100-architecture.md) |
+| PCIe topology | [Topology](hardware/topology.md) |
+| PCIe bandwidth | [PCIe Bandwidth](hardware/pcie-bandwidth.md) |
+| GPU configs | [GPU Configurations](hardware/gpu-configs.md) |
+| ASUS ESC8000A-E13P | [ASUS ESC8000A-E13P + Broadcom Switches](hardware/asus-esc8000a-e13p-broadcom-switches.md) |
+| ASRockRack Turin 16 GPU | [ASRockRack + EPYC Turin + 4x c-payne](hardware/asrockrack-turin-cpayne-16gpu.md) |
+| ASRock WRX90 16 GPU | [ASRock WRX90 + 4x c-payne](hardware/wrx90-cpayne-16gpu-4switch.md) |
+| Power tuning | [Blackwell power limit sweep](hardware/blackwell-power-limit-sweep.md) |
+
+## Inference Engines
+
+| Engine | Page | Role |
+|---|---|---|
+| vLLM | [vLLM](inference-engines/vllm.md) | Primary runtime for supported GLM-5.2, DS4, Kimi, and MiMo pages. |
+| FlashInfer | [FlashInfer](inference-engines/flashinfer.md) | SM120 sparse MLA, CUTLASS MoE, sampler, and kernel integration notes. |
+| SGLang | [SGLang](inference-engines/sglang.md) | Historical and alternate runtime notes, especially older GLM/MiMo paths. |
+
+## Acronym Policy
+
+The wiki uses many acronyms: DCP, MTP, DSpark, DFlash, MLA, MoE, KLD, TP, CC,
+P2P, NVFP4, MXFP8, and more. To make pages readable for newcomers:
+
+- Expand important acronyms on first use: `Decode Context Parallelism (DCP)`.
+- Do not expand acronyms inside commands, Docker tags, environment variables,
+  JSON, file paths, or raw logs.
+- Use [Glossary And Acronym Guide](GLOSSARY.md) as the source of truth.
+- Run `python3 scripts/check-acronyms.py` before polishing a major page.
+
+## Keeping The Community Useful
+
+The wiki should reduce accidental gatekeeping: newcomers should be able to find
+the right runbook, decode acronyms, and reproduce a known-good launch without
+needing tribal knowledge. That does not mean every Discord question can be
+answered from memory.
+
+Use [Newcomer Onboarding](docs/newcomer-onboarding.md) as the support contract:
+bring the model page, Docker image, full launch command, GPU layout, TP/DCP/MTP
+or DSpark settings, client command, and logs. That keeps the server welcoming
+without turning it into an unstructured support queue.
+
+## Common Operational Rules
+
+- Do not launch with `NCCL_GRAPH_FILE=` set to an empty string. Unset it if no
+  real XML graph file is used.
+- Reuse cache directories while debugging; otherwise TileLang, Triton, CuTe,
+  and FlashInfer rebuilds dominate iteration time.
+- For quick smoke tests, use small `MAX_NUM_SEQS` and graph caps. For published
+  tables, use the graph sizes documented in the model page.
+- For DFlash and DSpark, confirm backend markers and acceptance rates before
+  trusting throughput numbers.
+- For GLM-5.2, keep the exact `index_topk_pattern` and DCP policy from the
+  relevant runbook; a truncated pattern can silently degrade output.
+
+## Maintaining The Wiki
+
+When adding a page:
+
+- Link it from the relevant model hub.
+- Start a serving guide with a complete copy-paste launch command and practical
+  hardware requirements. Explain each configurable setting with its exact flag
+  or environment variable, default and example override.
+- Keep source commits, checkpoint revisions, full benchmark commands and review
+  status in a linked technical report. A normal setup guide does not need a
+  qualification-status block.
+- Identify the model, mode, image, hardware and clocks for every speed table.
+  Preserve preceding release recipes in the archive before replacing a model's
+  recommended instructions.
+- Regenerate the full index:
+
+```bash
+python3 scripts/generate-wiki-index.py > INDEX.md
+```
+
+For performance claims, include both the server launch config and the client
+command so results can be reproduced on another PCIe-only Blackwell host.
+
+Measurements retain their hardware, source and sampling conditions; model hubs
+separate reusable deployment instructions from historical release evidence.

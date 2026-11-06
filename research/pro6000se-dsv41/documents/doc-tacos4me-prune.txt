@@ -1,0 +1,227 @@
+---
+license: mit
+base_model: deepseek-ai/DeepSeek-V4.1-Flash
+tags:
+  - deepseek
+  - moe
+  - sglang
+  - blackwell
+  - sm120
+  - rtx-pro-6000
+  - inference-optimization
+  - cuda-kernels
+language:
+  - en
+library_name: sglang
+---
+
+> [!NOTE]
+> **Terminal-Bench results are withheld** pending a clean rerun; 14 of 89 tasks carry results
+> distorted by benchmark pauses during kernel work. Everything else here is validated and deployed.
+
+# DeepSeek-V4.1-Flash — Prune · 2× RTX PRO 6000
+
+**A complete recipe for running the 552B-parameter V4.1-Flash on 192 GB of consumer-workstation VRAM: expert pruning to fit, seven measured SM120 kernel and scheduling optimizations to make it fast, and an honest benchmark report of what it costs.**
+
+No sub-4-bit quantization. The kept experts run at the checkpoint's own FP4 precision.
+
+| Component | Configuration |
+|---|---|
+| **Hardware** | 2 × RTX PRO 6000 Blackwell — SM120, 96 GB, PCIe 5.0 ×16, no NVLink |
+| **Decode** | **141 tok/s** single stream · **288 tok/s** at 3 streams |
+| **Prefill** | ~9,800 tok/s — 910K-token prompt in 93 s |
+| **Context** | 1M tokens, needle-in-haystack verified at 548K |
+| **Engine** | SGLang dsv4.1 branch + 20 local commits, TP2 |
+| **Weights** | 224 of 384 routed experts per layer, native FP4, fully GPU-resident, four-corpus balanced |
+| **Quality** | GSM8K 198/200 · GPQA Diamond **92.9%** · vision 36/42 · needle at 205K |
+
+## What this is
+
+DeepSeek-V4.1-Flash does not fit on two 96 GB cards. The backbone plus all 384 routed experts per layer needs roughly 135 GB per rank; two cards give 95.6 GB each. This repository documents the configuration that makes it fit **and** run fast, with every performance claim measured back-to-back on the same machine.
+
+Two things were tried in order:
+
+1. **Streaming the experts from NVMe with zero CPU compute.** It works and is bit-exact, but it is bandwidth-bound at **8–9 tok/s**. Kept here as a reference implementation and as the unpruned control for quality measurements.
+2. **Pruning to 224 experts per layer**, selected by routing frequency over a domain-weighted corpus,
+   so the whole model is GPU-resident. This is the deployed configuration, and which corpus you profile
+   on turns out to decide which domains survive — see GPQA below.
+
+Everything else in this repo is about closing the gap between "it runs" and "it runs well": the decode step went from 11.8 ms to 6.8 ms through seven independent changes, none of which touch the numerics that matter.
+
+## What this is not
+
+- **Not a new checkpoint.** You supply [deepseek-ai/DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash); this repo supplies keep sets, patches, and launch configuration.
+- **Not lossless, but less lossy than it first appeared.** The first keep set left physics at 94% and
+  chemistry at 45%; rebalancing the corpus mix recovered chemistry to 92.5% with no cost elsewhere. The
+  residual cost of dropping 160 experts per layer is smaller than the cost of choosing them badly.
+- **Not a claim of parity with DeepSeek's published numbers.** It is a measurement of what two workstation cards actually deliver.
+
+---
+
+## Quick start
+
+You need the official checkpoint, the Engram tables, an SGLang image with the dsv4.1 branch, and ~190 GB of free host RAM if you want the pinned-Engram path.
+
+```bash
+# 1. apply the kernel work to your SGLang checkout
+git am patches/*.patch
+
+# 2. serve, with the deployed flag set
+GRAPH=" " KEEPJSON=dsv41-keep224m-d64.json \
+MEMFRAC=0.975 CHUNK=4096 CGBS=3 MAXREQ=3 CTX=1048576 MAXTOT=1100000 \
+EXTRA_ENV="-e SGLANG_DSV41_DECODE_DENSE_GEMV=1 \
+  -e SGLANG_DSV41_LMHEAD_FP8_GEMV=1 \
+  -e SGLANG_DSV41_LINEARS_FP8_GEMV=1 \
+  -e SGLANG_DSV41_FUSE_ELEMENTWISE=1 \
+  -e SGLANG_DSV41_PDL_ALL=1 \
+  -e SGLANG_DSV41_FUSE_TOPK_SLOTS=1 \
+  -e SGLANG_OPT_USE_TOPK_V2=1 \
+  -e SGLANG_DSV41_DENSE_INDEXER_KV_SPLIT=1 \
+  -e SGLANG_DSV41_ENGRAM_PINNED=copy" \
+serve/launch_prune.sh dsv41
+```
+
+Every flag defaults to **off**. The patched tree with no flags behaves exactly like the stock branch, which is how each optimization was A/B tested.
+
+See [`serve/README.md`](serve/README.md) for the llama-swap lane definitions, speculative-decoding variant, and the memory arithmetic behind each number.
+
+---
+
+## The optimizations
+
+Seven changes shipped. Each was measured with an A/B/A on one machine (baseline, change, baseline again) to bound boot-to-boot variance, which is about 10% on this stack and is why single-arm comparisons are not trustworthy here.
+
+| # | Change | Single stream | 3 streams |
+|---|---|---|---|
+| 1 | **Decode-step launch fusion** — Engram host-gather rewrite, router gate-row permutation, dependent launch on the dense GEMV | **+28.5%** | **+22%** |
+| 2 | **`wo_a` grouped FP8 GEMV** — the attention-output absorb ran as 40 bf16 cuBLAS calls per step because the checkpoint's 32×32 block scales did not match the fused path's 128×128 requirement | +4.8% | +2.8% |
+| 3 | **Engram tables pinned in host RAM** with the gather inside the CUDA graph | +4.1% | +2.0% |
+| 4 | **Long-context indexer** — cluster top-k unlocked on SM120, KV-split dense scoring | +1.9% short · **+4.3% at 256K** | — |
+| 5 | **Post-top-k slot chain fused** into one Triton kernel (18 launches → 1, per indexer layer) | +1.6% | +2.3% |
+| 6 | **FP8 LM head** on the streaming GEMV | +1.7% | +1.0% |
+| 7 | **Graph-wide programmatic dependent launch** | +1.1% | +0.4% |
+
+**Cumulative: 82 → 141 tok/s single stream (+72%), 187 → 288 tok/s at 3 streams (+54%).** Decode step 11.8 ms → 6.8 ms.
+
+Quality was re-verified after every change: GSM8K-100 no-think 99–100%, GSM8K-20 thinking 19/20, needle recall correct at 196K and 430K tokens.
+
+### The largest win was not a kernel
+
+The biggest single change, +28.5%, removed **2 ms per step of host-side Python** from the Engram
+pre-gather: a device-to-host sync of the row ids, then ~850 µs of orchestration around a thread pool
+that gathered at most 72 rows, twice per decode step.
+
+Provenance, stated plainly: that host gather came from an earlier experiment in this project, written
+when the Engram tables were disk-backed and a pooled host gather was the right design. It became a
+regression once the tables were resident. Upstream SGLang and vLLM both do this lookup on device and
+always have — the fix converged back to their architecture rather than improving on it.
+
+What generalizes: a change that is correct for one configuration can be a large regression in another,
+and it went unnoticed for hours because the idle-time analysis tool was counting memory nodes *inside*
+the CUDA graph as host gaps. Fixing the measurement came before fixing the code.
+
+### Relationship to upstream
+
+| | vLLM main | SGLang dsv4.1 | This repo |
+|---|---|---|---|
+| Engram hash ids | device kernel | device kernel | device kernel |
+| Table location | HBM, or pinned host + UVA when offloaded | memfd + `cudaHostRegister`, shared per rank group | same as SGLang |
+| Lookup | Triton kernel, fp8 rows dequantized in-kernel | device kernel | in-graph gather |
+| Host round trip per decode step | none | none | none (regression removed) |
+| Table sharding | head-sharded across TP, all-gather after | DP-sharded path available | whole table per rank |
+
+vLLM's asynchronous side-stream prefetch for Engram lookups is, by their own measurements,
+−0.4% to −0.9% on throughput, and the overlap variant is default-off and bounded to one narrow
+workload shape. The device-side in-graph gather is the right default in all three implementations.
+
+Head-sharded lookup is the one upstream idea worth taking: each rank would read only its own heads
+and all-gather ~3 KB afterwards, halving per-rank PCIe traffic for the gather.
+
+Full engineering logs, including the measurements that did not work out, are in [`notes/`](notes/).
+
+### What did not work
+
+Negative results, with the reason, because they are as useful as the wins:
+
+- **Flat persistent MXFP4 MoE kernel** (SM120 block-scaled `mma.sync`, 3 launches per layer instead of 16–19). Reached parity, not a win. Its micro-benchmark had compared against an *untuned* CUTLASS baseline; the autotuned production path already streams at ~1.0 TB/s. At 1–6 tokens per expert the persistent kernel never reaches steady state.
+- **Dense GEMV retuning** (split-K, persistent grids). 10–23% faster per call in isolation, **2.7% slower end to end** at one stream: a persistent grid launched early under dependent launch parks blocks at the dependency wait, holding SM residency while the *preceding* kernels are still running. Wins +4.1% at 3 streams, where the per-call gain outweighs the residency cost.
+
+The dense projections already run at **89–91% of the card's measured 1,636 GB/s streaming ceiling**, so there is little left in the GEMMs themselves.
+
+---
+
+## Benchmarks
+
+### GPQA Diamond — all 198 questions, max reasoning effort
+
+| Keep set | Overall | Physics | Chemistry | Biology |
+|---|---|---|---|---|
+| Text-profiled (first attempt) | 134/198 = 67.7% | 94.2% | 45.2% | 57.9% |
+| **Balanced (deployed)** | **184/198 = 92.9%** | 96.5% | **92.5%** | 78.9% |
+| DeepSeek published | 90.9 | — | — | — |
+
+Zero truncations, zero request errors. The balanced set passes every other gate as well, and improves
+on the set it replaced rather than trading against it:
+
+| Gate | Text-profiled | Balanced | Minimum |
+|---|---|---|---|
+| GSM8K-200, no-think | 196/200 | **198/200** | 196 |
+| GSM8K-20, thinking | 19/20 | 19/20 | 18 |
+| Vision, 42 images | 33/42 | **36/42** | 33 |
+| Needle recall | 196K | 205K | 196K |
+
+> [!IMPORTANT]
+> **Diagnostic, not an independent parity claim.** GPQA chemistry and physics questions were used to
+> profile expert routing when building this keep set, so the evaluation overlaps the selection corpus.
+> The result establishes that the chemistry deficit was caused by expert selection and is fully
+> recoverable; it does not prove this configuration reaches published parity on unseen work.
+> Independent confirmation needs a keep set profiled on chemistry text disjoint from the evaluation.
+
+**The finding this repo exists for: a 47-point chemistry swing came from which 224 experts were kept,
+with no change to weights, kernels, quantization or sampling.** The first keep set was profiled on
+math and agentic text; chemistry was absent from that corpus, and chemistry routed-mass coverage came
+out at 74.8% against 84.9% for physics — a 10-point gap that predicted the 45%-versus-94% quality
+split before any quality measurement was taken.
+
+The replacement is a per-layer constrained-maximin allocation: maximize the worst-served corpus subject
+to every corpus staying at or above its previous coverage, solved as an exact LP over four corpora
+(agentic, vision, chemistry, physics). The floor constraint is what makes the gain free — no domain can
+be traded away to buy another, which an earlier weighted blend did.
+
+**Failure mode worth recording.** When this model is wrong it does not loop degenerately, it
+oscillates. A reproduced case ran 37,828 tokens with only 5% repeated sentences, coherent throughout,
+circling four candidate answers ("Actually" 88×, "Wait" 60×) before guessing from a half-remembered
+claim. Median output was 37,926 tokens when wrong against 4,663 when right. Tightening `top_p` from
+1.0 to the published 0.95 recovered 1 of 9 retried questions — nucleus sampling cannot supply a fact
+the model lacks, which is what redirected the investigation to expert selection.
+
+Results and harness: [benchmarks/gpqa-diamond](benchmarks/gpqa-diamond/). Keep set:
+[keep-sets/dsv41-keep224r2-d64.json](keep-sets/dsv41-keep224r2-d64.json).
+
+## Honest caveats
+
+- **GPQA figures are single-sample**, matching the published pass@1 protocol, but noisy per question at
+  temperature 1.0. The keep set was also profiled partly on GPQA items — see the caveat in that section.
+- **The keep set is workload-shaped, and coverage predicts quality unevenly.** Two 224-expert sets
+  differing on 25–35% of experts per layer converted roughly one extra agentic-coding task in eleven,
+  despite a 17-point coverage difference — so on agentic work, selection is close to saturated. On
+  chemistry the same lever is worth 42 points. Profile on the workloads you actually care about.
+- **Vision is unaffected by the prune.** Paired on 42 chart and document images, the pruned model scores
+  33/42 against 34/42 unpruned — a net cost of one item. Image tokens share the same 384 experts and are
+  masked by the same router bias, so a dropped expert is unreachable rather than mis-selected.
+- **Pinned Engram costs 189 GiB of host RAM** while the model is loaded and stretches boot from 85 s to ~150 s. It is worth 4%; drop the flag if the memory is needed elsewhere.
+- **Speculative decoding** (DSpark, block size 5) is configured on a separate 256K-context lane. Its verify batches reach 24 tokens, above the FP8 GEMV's 8-token crossover, so that lane keeps bf16 weight copies for the fallback.
+
+## Repository layout
+
+```
+patches/      20 commits against the SGLang dsv4.1 branch — the kernel work
+keep-sets/    the deployed 224-expert keep set, an agentic variant, and the builder
+serve/        launch scripts, llama-swap lane definitions, memory arithmetic
+benchmarks/   GPQA Diamond results, throughput A/Bs, and the evaluation scripts
+notes/        engineering logs: attribution tables, predicted-vs-measured, dead ends
+```
+
+## Credits
+
+Built on [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and [SGLang](https://github.com/sgl-project/sglang). Patches are offered under SGLang's Apache 2.0 licence; the checkpoint remains under DeepSeek's.

@@ -23,6 +23,12 @@ research/<slug>/
 | [rtx-pro-6000](./rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **447 来源 / 3002 证据 / 2238 主张（1882 高置信）/ 9 争议** |
 | [cuda-kernel-gen](./cuda-kernel-gen/REPORT.md) | CUDA Kernel 自动生成前沿进展（2025-02 ～ 2026-11，98 篇） | **36 来源 / 19 证据 / 19 主张（15 高置信）/ 0 争议** |
 | [cuda-kernel-rl](./cuda-kernel-rl/REPORT.md) | CUDA Kernel 强化学习：奖励设计的演进（2025-01 ～ 2026-10，13 篇核心） | **20 来源 / 37 证据 / 23 主张（15 高置信）/ 0 争议** |
+| [rsi-model-training](./rsi-model-training/REPORT.md) | 模型训练中的递归自我改进：外部锚点的迁移（2022-03 ～ 2026-11，61 篇编码） | **53 来源 / 63 证据 / 48 主张（25 高置信）/ 0 争议** |
+| [pd-disagg](./pd-disagg/REPORT.md) | Prefill–Decode 分离的收益边界（2023-11 ～ 2026-10，46 篇 + 24 份文档） | **70 来源 / 78 证据 / 9 主张（9 高置信）/ 0 争议** |
+| [rsi-inference](./rsi-inference/REPORT.md) | 推理优化中的递归自我改进：反馈强度才是主坐标（2024-01 ～ 2026-11，45 篇核心 + 12 旁证） | **57 来源 / 74 证据 / 12 主张（11 高置信）/ 0 争议** |
+| [rsi-serving](./rsi-serving/REPORT.md) | 推理优化的递归自我改进：端到端层的判定问题（2025-03 ～ 2026-11，15 篇核心 + 8 旁证） | **23 来源 / 60 证据 / 12 主张（12 高置信）/ 0 争议** |
+| [specpilot](./specpilot/REPORT.md) | SpecPilot 论文与源码审计：把「改进了没有」变成脚本能算的量（arXiv 2611.02501 + 仓库 @78c42af） | **3 来源 / 81 证据 / 33 主张（29 高置信）/ 1 争议** |
+| [pro6000se-dsv41](./pro6000se-dsv41/REPORT.md) | RTX PRO 6000 Server Edition 部署 DeepSeek-V4.1-Flash：几张卡、什么栈、多快 | **26 来源 / 138 证据 / 48 主张（43 高置信）/ 0 争议** |
 
 ## 新建任务
 

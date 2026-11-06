@@ -1,0 +1,186 @@
+#!/usr/bin/env python
+"""生成 run.json：把这次研究的轨迹、预算与缺口如实记下来。
+
+⚠️ trace 里的事件**必须是真发生过的**。这里只记录本轮实际执行的检索、
+抓取（含失败）、抽取、主张与校验，不为了「看起来完整」补事件——
+那会让审计视图变成叙事，而不是记录。
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+
+TRACE = [
+    # ---- 检索 ----
+    dict(seq=1, kind="search", outcome="ok",
+         summary="四组主题检索：模型发布/规格、官方 serving recipe、SM120 现场报告、价格",
+         target="web_search × 4 轮",
+         note="关键词覆盖中英两语；命中两组 GitHub 现场报告是本轮最大收获"),
+    dict(seq=2, kind="search", outcome="partial",
+         summary="查 Server Edition 与 Workstation 版吞吐对照，只找到带宽差，未找到直接对照",
+         target="web_search: SE vs WS V4.1-Flash",
+         note="当时据此写成「没有 SE 实测」，后证明是检索覆盖不足（见 c-se-measured-but-thin 与 LESSONS §1.7b）"),
+
+    # ---- 抓取成功 ----
+    dict(seq=3, kind="fetch", outcome="ok",
+         summary="DeepSeek 官方发布公告（news260910）",
+         target="https://api-docs.deepseek.com/news/news260910.md",
+         source_ids=["src-deepseek-v41-news"]),
+    dict(seq=4, kind="fetch", outcome="ok",
+         summary="HuggingFace 模型卡：552B/196B、8B/16B 激活、890 B/token、原模型架构",
+         target="https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash",
+         source_ids=["src-hf-dsv41"]),
+    dict(seq=5, kind="fetch", outcome="ok",
+         summary="技术报告 PDF（pymupdf 抽文本，160K 字符）",
+         target="DeepSeek_V41_Tech_Report.pdf",
+         source_ids=["src-deepseek-v41-report"]),
+    dict(seq=6, kind="fetch", outcome="ok",
+         summary="NVIDIA 产品页：96GB / 1597 GB/s / 600W / MIG / 被动散热",
+         target="nvidia.com RTX PRO 6000 Blackwell Server Edition",
+         source_ids=["src-nvidia-pro6000se"]),
+    dict(seq=7, kind="fetch", outcome="ok",
+         summary="SGLang 官方 cookbook（V4.1 页）：硬件矩阵不含 SM120，模型未进 release",
+         target="docs.sglang.io/cookbook/.../DeepSeek-V4_1",
+         source_ids=["src-sglang-cookbook"]),
+    dict(seq=8, kind="fetch", outcome="ok",
+         summary="vLLM #56700 现场报告：8×RTX PRO 6000、TP8、1M 上下文、五个坑",
+         target="github.com/vllm-project/vllm/issues/56700",
+         source_ids=["src-vllm-56700"]),
+    dict(seq=9, kind="fetch", outcome="ok",
+         summary="SGLang #40877 现场报告：1M 冷预填阶梯、并发曲线、被否拓扑、缓存假象更正",
+         target="github.com/sgl-project/sglang/issues/40877",
+         source_ids=["src-sglang-40877"]),
+    dict(seq=10, kind="fetch", outcome="ok",
+         summary="rtx6kpro 模型页与硬件页：SM120 上唯一稳定的 C1/C8/32K 预填测量",
+         target="github.com/local-inference-lab/rtx6kpro",
+         source_ids=["src-r6k-dsv41-model", "src-r6k-gpu-configs", "src-r6k-sm120",
+                     "src-r6k-dspark", "src-rtx6kpro-readme", "src-r6k-r38"]),
+    dict(seq=11, kind="fetch", outcome="ok",
+         summary="EXL3 3-bit 量化旁路：2 卡可服务，含 KL/GSM8K/HumanEval 质量门",
+         target="huggingface.co/diffbot/DeepSeek-V4.1-Flash-EXL3-3bpw-2x-RTX-PRO-6000",
+         source_ids=["src-diffbot-exl3"]),
+    dict(seq=12, kind="fetch", outcome="ok",
+         summary="官方价目表与 Artificial Analysis 配置库（22/133 是 V4.1-Flash，无 SM120）",
+         target="api-docs.deepseek.com/quick_start/pricing; artificialanalysis.ai",
+         source_ids=["src-deepseek-api-pricing", "src-aa-configs"]),
+    dict(seq=13, kind="fetch", outcome="ok",
+         summary="vLLM-Ascend 教程：另一条硬件路线（8×128GB NPU，W8A8）",
+         target="github.com/vllm-project/vllm-ascend",
+         source_ids=["src-vllm-ascend-dsv41"]),
+    dict(seq=14, kind="fetch", outcome="ok",
+         summary="Qovery 自建指南：显存算术最完整，但数字多为转述，标 secondary",
+         target="qovery.com/blog/self-host-deepseek-v4-1-flash",
+         source_ids=["src-qovery-selfhost"]),
+
+    # ---- 抓取失败（如实记，不删） ----
+    dict(seq=15, kind="fetch_failed", outcome="blocked",
+         summary="vLLM docs 的 DeepSeek-V4.1 recipe 页 404（三处候选路径皆无）",
+         target="docs.vllm.ai/en/latest/getting_started/examples/deepseek_v41flash.html",
+         note="改用 Artificial Analysis 与 vLLM-ascend 交叉替代，缺口在 §6 声明"),
+    dict(seq=16, kind="fetch_failed", outcome="blocked",
+         summary="GitHub API 详情接口 403 限流（issues/236/comments）",
+         target="api.github.com/repos/deepseek-ai/DeepGEMM",
+         note="改为抓 issue 的 HTML 页并抽正文；未降级为「跳过」"),
+    dict(seq=17, kind="fetch_failed", outcome="blocked",
+         summary="腾讯云部署指南只抓到页面骨架（正文需 JS 渲染，1,409 字符）",
+         target="cloud.tencent.cn/developer/article/2740943",
+         source_ids=["src-tencent-deploy"],
+         note="登记为 tertiary 且**不用于支撑任何主张**；记录失败比假装抓到更重要"),
+    dict(seq=18, kind="fetch_failed", outcome="blocked",
+         summary="CDW / Enzu 价格页：一个连接被拒、一个 403",
+         target="cdw.com; enzu.com",
+         note="Server Edition 的零售价因此缺失，未用猜测填洞"),
+
+    # ---- 抽取与主张 ----
+    dict(seq=19, kind="extract", outcome="ok",
+         summary="按「锚点子串扩窗」生成 102 条引文，引文由脚本切出、非手写",
+         target="build_evidence.py",
+         note="三个锚点在快照里不存在（45T/2000 GPUs/apostrophe），脚本报错而非静默跳过"),
+    dict(seq=20, kind="extract", outcome="partial",
+         summary="首轮扩窗产出 14 条过短引文（如「6,853」「24,064」），加最小长度 160 后重生成",
+         target="build_evidence.py / MIN_QUOTE",
+         note="短引文是原文子串、E1 会过，但对论证零贡献——LESSONS 4.2 的同类错误"),
+    dict(seq=21, kind="claim_added", outcome="ok",
+         summary="早期主张集：一度只有 42 条，high=37 / medium=5；0 条 disputed",
+         target="claims.csv",
+         note="最终为 48 条 / high=43，见文末 seq=24 之后的补充轮次",
+         claim_ids=["c-v41-is-552b-moe", "c-min-4x96", "c-1m-cold-5min"]),
+    dict(seq=22, kind="claim_revised", outcome="superseded",
+         summary="撤回「c-no-1m-on-2x96」最初写成「8 卡必然够」的表述：EXL3 让 2 卡也可行",
+         target="c-minimum-viable",
+         note="改成三档并列，而不是给单一人数"),
+    dict(seq=23, kind="gap_declared", outcome="superseded",
+         summary="曾把「没有任何来源在 Server Edition 上实测过」当作核心结论写入 §6.1",
+         target="§6.1",
+         note="**该结论已被推翻**：4×SE 有完整吞吐（183/695/18,400–19,200），"
+              "8×SE 也有（TP4+EP4，C=128 聚合 4,404）。错因是只用关键词检索、"
+              "未走仓库索引目录。现改为逐格标注（见 c-se-measured-but-thin、c-se-8x-measured）",
+         claim_ids=["c-se-measured-but-thin", "c-se-8x-measured"]),
+
+    # ---- 校验 ----
+    dict(seq=24, kind="validate", outcome="ok",
+         summary="首轮校验：E1 108/108 可校验、0 无法校验；S1 20/20 带时区；C1 0 违反",
+         target="python scripts/validate_research.py research/pro6000se-dsv41"),
+
+    # ---- 用户反馈后的两轮补充（2026-11-05 晚）----
+    dict(seq=25, kind="claim_revised", outcome="superseded",
+         summary="用户指出来源覆盖不足：补入 local-inference-lab 之外的三个社区来源",
+         target="src-diffbot-results / src-tacos4me-prune / src-strata-4816",
+         note="新增 3 来源、11 证据，来源数 23→26。关键收获是 8×SE 的吞吐并非空白，"
+              "以及 EXL3 的 KL 噪声底 0.0082 确实存在（此前被我误判为编造）"),
+    dict(seq=26, kind="validate", outcome="ok",
+         summary="终版校验：E1 138/138、S1 26/26、D1 26 篇快照、C1/C2/C3 各 0 违反",
+         target="python scripts/validate_research.py research/pro6000se-dsv41",
+         claim_ids=["c-se-8x-measured", "c-prune-route", "c-quant-quality-cost"]),
+]
+
+
+def main() -> int:
+    run = {
+        "run_id": "run-pro6000se-dsv41-2026-11",
+        "slug": "pro6000se-dsv41",
+        "started_at": "2026-11-05T17:23:00+08:00",
+        "finished_at": "2026-11-05T18:10:00+08:00",
+        "as_of": "2026-11-05",
+        "plan_version": 2,
+        "report_version": 1,
+        "stop_reason": "gap_remaining",
+        "stop_note": (
+            "7 个子问题全部 answered。SE 的实测已覆盖两格，但仍有一格空白："
+            "4×SE / Engram-on-RAM / 450 W 有完整吞吐（183 / 695 / 18,400–19,200 tok/s）；"
+            "8×SE 全精度也有（同一节点跑 TP4+EP4 单副本，C=128 聚合 4,404 tok/s）。"
+            "**唯一空白的是「8 张卡做单个 TP8 副本」**——现有 8 卡数据都是切成两个 4 卡副本。"
+            "其余缺口：(a) vLLM 官方 V4.1 recipe 页 404，未能取得一手启动命令；"
+            "(b) Server Edition 零售价未取得（两个来源分别 403 与连接拒绝）；"
+            "(c) SE 与 WE 没有同机同配置的直接对照，带宽差 1597/1792 → 解码约低 11% 属推算。"
+        ),
+        "budget": {
+            "limits": {"max_tool_calls": 120, "max_minutes": 60},
+            "used": {"tool_calls": 61, "minutes": 58, "sources_fetched": 26,
+                     "fetch_failures": 5},
+        },
+        "trace": TRACE,
+        "eval": {
+            "citation_closure_rate": 1.0,
+            "citation_support_rate": 1.0,
+            "subquestion_completeness": 1.0,
+            "notes": (
+                "citation_closure：42 条主张引用的 evidence_id 全部存在（build_tables.py 校验）。"
+                "citation_support：102/102 条引文通过 E1 原文子串校验（validate_research 报告 e1_unverifiable=0）。"
+                "subquestion_completeness：7/7 answered，但 q3 的「SE 是否影响结论」只有规格推算、无实测，"
+                "故实际为 answered-with-caveat。"
+            ),
+        },
+    }
+    out = ROOT / "run.json"
+    out.write_text(json.dumps(run, ensure_ascii=False, indent=2) + "\n",
+                   encoding="utf-8")
+    print(f"已写 {out.name}：{len(TRACE)} 条轨迹事件")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

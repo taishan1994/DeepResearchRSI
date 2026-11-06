@@ -60,6 +60,8 @@ python tests/test_schemas.py
 | 任务 | 主题 | 规模 |
 |---|---|---|
 | [rtx-pro-6000](./research/rtx-pro-6000/REPORT.md) | NVIDIA RTX PRO 6000 Blackwell 全系性能分析 | **447 来源 / 3002 证据 / 2238 主张（1882 高置信、9 争议）**，70 个子问题 |
+| [rsi-model-training](./research/rsi-model-training/REPORT.md) | 模型训练中的递归自我改进（RSI）：外部锚点的迁移与证据边界 | **53 来源 / 63 证据 / 48 主张（25 高置信）/ 0 争议**，61 篇编码 + 10 页 LaTeX 论文 |
+| [pro6000se-dsv41](./research/pro6000se-dsv41/REPORT.md) | RTX PRO 6000 Blackwell **Server Edition** 部署 DeepSeek-V4.1-Flash | **26 来源 / 138 证据 / 48 主张（43 高置信）/ 0 争议**，15 页 LaTeX 论文 |
 
 > 📄 **论文**：`research/rtx-pro-6000/paper/` 下有一份 11 页综述
 > [PAPER.pdf](./research/rtx-pro-6000/paper/PAPER.pdf)
@@ -67,6 +69,15 @@ python tests/test_schemas.py
 > `python scripts/build_paper.py research/rtx-pro-6000/paper` 从同一批 CSV 生成。
 > 论文层是 r257 新增的：它不新增事实，只对已有主张做有选择的呈现，
 > 并由 `scripts/audit_paper.py` 校验「每个数字都能回到一条主张及其证据」。
+
+**最新一份**：[在 RTX PRO 6000 Server Edition 上部署 DeepSeek-V4.1-Flash](./research/pro6000se-dsv41/paper/latex/main.pdf)
+（15 页双栏，3 图 12 表，中文，XeLaTeX 编译）。它回答四件事：要几张卡、什么软件栈、
+能跑多快、会踩什么坑——并把「实测 / 推算 / 空白」逐格标注，而不是给一个平均数。
+由 `python research/pro6000se-dsv41/build_all.py` 重建。
+
+上一份是[模型训练中的 RSI](./research/rsi-model-training/paper/latex/main.pdf)
+（10 页双栏，5 图 4 表），它问的不是「能不能自我改进」，而是
+「这些闭环在改什么、证据能不能支撑它们用的词」。
 
 
 该报告的几个结论值得单独一提：

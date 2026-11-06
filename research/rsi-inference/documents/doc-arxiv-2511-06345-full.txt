@@ -1,0 +1,645 @@
+PRAGMA: A Profiling-Reasoned Multi-Agent Framework for Automatic Kernel Optimization 
+
+ Kelun Lei,
+Hailong Yang,
+Huaitao Zhang, Xin You, Kaige Zhang, Zhongzhi Luan,
+Yi Liu, and Depei Qian
+
+ Affiliation:  
+School of Computer Science and Engineering, Beihang University, Beijing, China
+ {kelunlei, hailong.yang, zhanght329, youxin2015@buaa.edu.cn, kaige.zhang@buaa.edu.cn, 07680, yi.liu, depeiq}@buaa.edu.cn
+
+ Abstract 
+
+ Designing high-performance kernels requires expert-level tuning and a deep understanding of hardware characteristics. Recent advances in large language models (LLMs) have enabled automated kernel generation, yet most existing systems rely solely on correctness or execution time feedback, lacking the ability to reason about low-level performance bottlenecks. In this paper, we introduce PRAGMA, a profile-guided AI kernel generation framework that integrates execution feedback and fine-grained hardware profiling into the reasoning loop. PRAGMA enables LLMs to identify performance bottlenecks, preserve historical best versions, and iteratively refine code quality. We evaluate PRAGMA on KernelBench, covering GPU and CPU backends. Results show that PRAGMA consistently outperforms baseline AIKG without profiling enabled and achieves 2.81 × \times and 2.30 × \times averaged speedups against Torch on CPU and GPU platforms, respectively. 
+
+ I Introduction 
+
+ Optimizing computational kernels is fundamental to achieving high performance in modern AI and HPC systems. Traditionally, reaching near-peak efficiency has required extensive manual tuning and deep expertise in architecture-specific optimization, making the development and maintenance of high-performance kernels both labor-intensive and error-prone. Recently, the rapid emergence of large language models (LLMs) has ushered in a new era of AI-assisted code generation, enabling models to automatically synthesize domain-specific compute kernels such as matrix multiplication, convolution, and reduction operators. These advances hold the promise of significantly accelerating the development of optimized kernels across diverse hardware platforms. 
+
+ Manual kernel optimization can achieve high performance through fine-grained tuning. However, the rapid evolution of hardware and proliferative ML architectures  [ 1 ] often invalidates previous optimizations  [ 2 , 3 , 4 ] , requiring repeated manual effort. Recently, LLM-based kernel generation  [ 5 , 6 , 7 , 8 , 9 , 10 , 11 , 12 ] has emerged as a promising alternative. These systems can automatically generate code and iteratively refine it based on compilation and execution feedback. For instance, AIKG  [ 12 ] leverages iteratively orchestrated multiple LLM agents for effective kernel generation. Yet, most existing methods focus on generic, hardware-independent optimization. Their feedback is often restricted to correctness or overall runtime. Such coarse-grained feedback provides limited guidance for performance reasoning and often leads to unstable results. Only a few recent studies attempt to incorporate fine-grained performance metrics. For instance, SwizzlePerf  [ 13 ] leverages L2 cache miss information to guide memory access pattern optimization for AMD MI300x  [ 14 ] disaggregated GPU, yet its profiling scope is narrow. Consequently, enabling LLMs to reason over detailed architectural characteristics and systematically utilize profiling feedback to guide optimization remains an open and underexplored challenge. 
+
+ In this work, we present PRAGMA, a performance-guided multi-agent system for high-performance kernel generation.
+Unlike prior LLM-based approaches that rely solely on execution time or correctness feedback, PRAGMA introduces a profile-guided multi-agent architecture that establishes a closed feedback loop between code generation and performance evaluation.
+To provide detailed and hardware-aware feedback, PRAGMA employs Profiler Agent which gathers low-level metrics with its semantic information from diverse profilers such as Nsight Compute and Linux perf across CPU and GPU platforms.
+Based on these data, PRAGMA leverages a dedicated Conductor Agent to interpret profiling results and perform bottleneck classification, mapping low-level performance metrics to high-level optimization hints. Guided by these insights, the Coder Agent iteratively generates and refines the kernel implementation.
+Note that each iteration preserves the historically best kernel implementation and its corresponding profiling data, enabling the LLM agent to reason about performance bottlenecks in context.
+We evaluate PRAGMA on both GPU and CPU platforms across KernelBench  [ 5 ] , which is a comprehensive benchmark suite of machine learning kernels. Experimental results show that PRAGMA consistently outperforms prior LLM-based systems, achieving a speedup of 2.81 × \times compared to Torch on CPU and speedups of 2.30 × \times and 4.50 × \times over Torch and Caesar  [ 5 ] baselines on GPU. Therefore, PRAGMA can provide interpretable, profiler-driven reasoning that bridges human performance engineering and automated code generation. 
+
+ Our main contributions are as follows: 
+
+ • 
+
+ We propose a performance-guided multi-agent framework PRAGMA that integrates rich profiling feedback into LLM-based kernel optimization. 
+
+ • 
+
+ We design and implement a cross-platform profiling submodule supporting both GPU and CPU backends with unified performance data extraction. 
+
+ • 
+
+ We propose a bottleneck-aware reasoning module that associates performance metrics with concrete optimization strategies, enabling interpretable and architecture-specific kernel improvement through iterative and systematic generation. 
+
+ • 
+
+ We evaluate PRAGMA across KernelBench, demonstrating up to 10.95 × \times performance speedup over baseline LLM-generated kernels. 
+
+ II Background and Motivation 
+
+ Recent studies on program code generation with LLMs have shown a great number of impressive results.
+Evaluations  [ 15 , 16 ] on various benchmarks demonstrate the superior coding ability of LLMs considering different aspects such as correctness, efficiency, and maintainability. Despite these advances, most single-agent systems still exhibit limitations.
+A single LLM must handle problem understanding, algorithm design, code synthesis, verification, and optimization simultaneously. This requires very long prompts and complex in-context reasoning, which often exceed the model’s effective context window.
+To address these limitations, researchers have proposed multi-agent frameworks  [ 17 , 18 , 19 ] that decompose programming tasks into specialized roles coordinated through dialogue and reasoning.
+In particular, many frameworks  [ 5 , 8 , 6 , 7 , 13 ] have further explored the ability of LLMs to write GPU kernels.
+These systems enable collaboration between agents responsible for planning, coding, testing, timing, and refinement.
+However, HPC programs demand a deep understanding of architectural and algorithmic principles such as cache locality, memory hierarchy, vectorization, and multi-threading. General-purpose LLMs, trained predominantly on serial, high-level programming data from public repositories, lack exposure to domain-specific optimization patterns. Consequently, existing works cannot effectively connect code generation with quantitative performance feedback, causing iterative refinements to yield unpredictable or inconsistent performance outcomes.
+This motivates our performance-guided multi-agent system tailored for HPC code generation. 
+
+ III Methodology and Implementation 
+
+ Fig. 1 : Overview of PRAGMA. The code generation and optimization process shows the interaction between the Coder, Verifier, Profiler, and Conductor agents. The system begins with an input task description to Coder. 
+
+ III-A System Overview of PRAGMA 
+
+ At the core of the proposed system lies a multi-agent architecture designed to achieve performance-guided kernel generation and optimization. Each agent in the system is assigned a distinct role and collaborates through structured information exchange under the coordination of a central Conductor Agent. Together, these agents form an adaptive, feedback-driven loop that progressively improves both the correctness and efficiency of automatically generated kernels. 
+
+ Conductor Agent : The Conductor Agent serves as the central orchestrator of the system, responsible for aggregating and interpreting the outputs from all other agents. It collects the source code produced by the Coder Agent, the verification feedback from the Verifier Agent, and the performance profiling data gathered by the Profiler Agent. Based on this comprehensive information, the Conductor Agent synthesizes contextual insights and formulates actionable guidance for subsequent iterations. 
+
+ The Conductor’s prompt is composed of several structured components, including:
+(1) generated source code from the Coder;
+(2) potential causes and remedies for compilation or runtime errors derived from Verifier logs;
+(3) explanatory documentation from the Profiler describing the meaning and interpretation of performance metrics;
+(4) detailed profiling results that capture hardware-level behavior and bottlenecks; and
+(5) historically best-performing code with profiling results. 
+
+ By integrating these heterogeneous inputs, the Conductor Agent acts as a reasoning and decision-making hub, enabling informed instructions to the Coder and other agents. 
+
+ Coder Agent : The Coder Agent is responsible for code synthesis and refinement. Guided by the Conductor’s instructions, it generates kernel implementations that meet the desired functional and performance goals. The Coder incorporates diagnostic feedback, such as compiler errors, profiling reports, or performance optimization hints provided by the Conductor to iteratively improve the generated code. The Coder’s capabilities include both initial code generation from high-level specifications and incremental modification based on feedback, enabling a progressive refinement process similar to that of an expert human developer. 
+
+ Verifier Agent : The Verifier Agent ensures the functional correctness and executability of the generated code. After each iteration, it compiles and runs the Coder’s output, compares execution results against reference outputs, and records any compilation or runtime errors. As verification processes do not need LLM capabilities, we do not use LLM for Verifier. 
+
+ Profiler Agent : The Profiler Agent is responsible for performance data collection and interpretation. It executes the verified kernel on the target hardware and gathers low-level hardware performance metrics.
+The collected data are then structured and provided to the Conductor Agent for identifying bottlenecks and suggesting targeted optimization strategies. 
+
+ Through this tightly coupled interaction between the Coder, Verifier, Profiler, and Conductor Agents, the system forms a closed-loop optimization workflow that iteratively converges toward functionally correct, performance-optimized kernel implementations across heterogeneous hardware platforms. 
+
+ III-B Design of Profiler Agent 
+
+ The Profiler Agent employs NVIDIA Nsight Compute (NCU) on GPU backend and Linux Perf on CPU backend to collect profiling data.
+To ensure the LLM understanding of profiling data and provide a scalable and extensible approach to integrating diverse profilers to PRAGMA, we develop an automated profiling knowledge consolidation module that generates a unified offline compendium of profiling tool features, metric semantics, and diagnosable performance issues. 
+
+ The consolidation process proceeds in two stages.
+In the first stage, raw documentation is automatically crawled from official online sources of major profilers, such as NVIDIA Nsight Compute for GPU backend and Linux Perf for CPU backend. Each raw text segment is independently summarized by an LLM to extract essential content, such as the functional description of profiling metrics, their underlying measurement mechanisms, and the performance bottlenecks they are designed to reveal. 
+
+ In the second stage, these intermediate summaries are fed into a higher-level synthesis process, where the LLM merges and refines the content into a comprehensive and coherent offline document. The resulting corpus standardizes terminology and organizes information across profilers into a common schema that supports both semantic search and performance reasoning. 
+
+ Additionally, profiling tools produce a large number of metrics, many of which are not critical for guiding performance optimization. To address this, we select a subset of metrics that are commonly used by human performance engineers and have direct diagnostic relevance. For GPU workloads, these include kernel execution time, occupancy, thread register usage, shared memory utilization, tensor core active cycles, and memory throughput. For CPU workloads, we focus on metrics derived from top-down microarchitecture analysis  [ 20 ] , such as retired instructions, front-end bound, back-end bound, bad speculation, and overall cycle counts.
+Furthermore, a key feature is that the Conductor Agent can dynamically specify the desired extra metrics. During each profiling run, these requested metrics are merged with the default set, collected, and incorporated into the feedback pipeline.
+By filtering for these key indicators, the Conductor Agent can provide concise, actionable feedback, highlighting critical bottlenecks, and guiding the next round of optimization. 
+
+ In sum, Profiler Agent can provide profiling knowledge and adaptive performance metrics, which not only enhances the Conductor Agent’s ability to interpret performance data but also provides the Coder Agent with explainable feedback regarding kernel inefficiencies and optimization opportunities.
+Additionally, incorporating a new profiler requires only the addition of its documentation URL and the implementation of the profile collection APIs within PRAGMA, which has high extendibility and portability. 
+
+ III-C Profile-guided Iterative Code Refinement 
+
+ Fig. 2 : Profile-guided iterative optimization process. Coder agent leverages the suggestion provided by Conductor agent who receives the feedback from Verifier and Profiler to refine the code iteratively. 
+
+ High-performance code often cannot be generated by LLMs in a single attempt. In frequent cases, the generated code may fail to compile, produce runtime errors, or yield incorrect results. To address these issues, our system adopts an iterative paradigm of code generation, verification, and optimization as shown in Figure  2 . 
+
+ Specifically, in each iteration, the Coder Agent first generates a candidate implementation, which is then passed to the Verifier for compilation, execution, and correctness checking. The Verifier ensures functional correctness by comparing the output of the generated code against reference results. If the correctness validation fails, the error logs and diagnostic information are forwarded to the Conductor Agent, which synthesizes targeted repair suggestions and provides them to the Coder Agent for the next round of generation. 
+
+ Once the correctness check passes, the system invokes the Profiler to collect detailed performance data. These profiling results are then parsed, structured, and embedded into the Conductor’s prompt, allowing the system to reason about performance characteristics and bottlenecks. The Conductor Agent subsequently formulates performance optimization guidance, which directs the Coder Agent to perform targeted code refinements in the following iteration.
+To facilitate performance-aware reasoning across iterations, PRAGMA maintains a persistent record of the historically best-performing code and its corresponding profiling data. During subsequent iterations, the Conductor compares the current candidate’s profiling metrics with those of the best historical version to evaluate improvement or degradation. This comparison allows the system to reason about why performance changes occurred and to generate optimization instructions grounded in measurable performance behavior. 
+
+ Through this closed-loop iterative process, the system progressively enhances both the correctness and performance of the generated code, enabling LLMs to evolve from producing merely functional implementations to highly optimized, hardware-aware kernels. 
+
+ III-D Multi-Backend Support 
+
+ Modern heterogeneous systems encompass a wide spectrum of hardware backends, including CPUs, GPUs from multiple vendors, and emerging AI accelerators. To enable portability and extensibility, PRAGMA is designed with a multi-backend architecture that allows seamless adaptation to new hardware platforms with minimal configuration effort. 
+
+ Adapting PRAGMA to a new backend requires only two types of information:
+(1) hardware specification data, and
+(2) profiler documentation describing available performance metrics and their semantics.
+For CPUs, key parameters such as core count and cache hierarchy are automatically extracted using tools like lscpu .
+For GPUs and accelerators, users provide basic specifications such as the number of compute units, memory bandwidth, and cache hierarchy.
+For code generation on GPUs, PRAGMA adopts Triton  [ 21 ] as a unified programming interface.
+Triton also supports multiple accelerator backends, including NVIDIA GPUs, AMD GPUs, and Huawei Ascend NPU, enabling cross-platform kernel generation with minimal modification.
+For CPU targets, PRAGMA generates standard C++ implementations, which are compiled and executed through the system’s native compiler via PyBind integration.
+Additionally, PRAGMA provides a modular profiler interface.
+Only the corresponding data collection interface needs to be implemented for each platform-specific profiler integrated into the Profiler Agent. 
+
+ IV Evaluation 
+
+ IV-A Evaluation Setup 
+
+ Environments. All experiments are conducted on an Intel Xeon Gold 6230R CPU and a NVIDIA A100 40GB GPU.
+The CPU experiments use gcc 12.3.0 , while the GPU experiments use CUDA 13.0 and driver version 580.95.05 . Meanwhile, the compilation flags are generated by the LLMs. 
+
+ Baselines. 
+We compare our proposed PRAGMA framework with the following baselines: 
+
+ • 
+
+ (1) The reference Torch implementations. 
+
+ • 
+
+ (2) The AIKG system (no performance feedback version of PRAGMA). 
+
+ • 
+
+ (3) Caesar, which adopts a single agent and is used in the multi-turn experiments in KernelBench  [ 5 ] . 
+
+ Additionally, we use DeepSeek-R1  [ 22 ] as the base LLMs for all the methods. 
+
+ Datasets. 
+We evaluate on KernelBench, a recently proposed benchmark primarily designed for assessing LLM-based GPU kernel optimization. We also use it to evaluate the effectiveness for CPU kernel optimization.
+This benchmark contains diverse operator types including matrix multiplication, convolution, element-wise, and reduction kernels, covering various tensor shapes and computation patterns.
+For each task, we let all methods have a maximum of 15 attempts. 
+
+ Metrics. 
+We report both Speedup over the Torch baseline and generation Success rate.
+Speedup is defined as the ratio of execution time between Torch and the generated kernel: 
+
+ | 
+ Speedup = T Torch T Generated . \text{Speedup}=\frac{T_{\text{Torch}}}{T_{\text{Generated}}}. | 
+ | 
+
+ The Success rate measures the fraction of kernels that compile, execute correctly, and pass verification.
+In particular, to ensure stable measurement, runtime is measured using Triton do_bench with 5 warmup runs and 100 repetition runs. 
+
+ IV-B Performance: Speedup Distribution 
+
+ Fig. 3 : Performance of kernels from six KernelBench categories generated by PRAGMA and AIKG on CPU and GPU, with the reported speedup normalized to the Torch baseline. 
+
+ Figure  3 presents the speedup distribution of PRAGMA and AIKG over Torch baseline across the KernelBench dataset.
+The benchmark kernels are grouped into six categories: matrix multiplication (matmul) , activation , normalization , pooling/reduction , convolution (conv) , and others (including loss and cumulative-sum kernels). 
+
+ On the CPU, PRAGMA achieves an average of 2.81 × \times speedup over Torch and 10.95 × \times improvement over AIKG.
+On the GPU, PRAGMA delivers a 2.30 × \times speedup over Torch and a 1.90 × \times improvement compared with AIKG.
+Meanwhile, it can be observed that both PRAGMA and AIKG generate GPU kernels that outperform Torch on average.
+The integration of detailed profiling information allows PRAGMA to achieve a more significant improvement.
+On the CPU, this effect becomes even more pronounced, as profiling data provides richer insights into memory access patterns and cache utilization which have a greater impact on CPU workloads.
+These results confirm the effectiveness of our profile-guided feedback loop and iterative optimization mechanism, which enable the system to progressively refine performance. 
+
+ Additionally, PRAGMA achieves the highest speedup on matrix multiplication kernels on GPU. This is achieved by adopting the Triton’s autotuning mechanism. Coder can generate triton.autotune decorator for the Triton kernel and update the candidate parameters based on the profiling data in each iteration, ensuring steady performance improvement.
+In contrast, using C++ on CPU backend lacks such autotuning support.
+Finding optimal tiling configurations that balance vectorization, parallelism, cache hierarchy, and prefetching becomes challenging.
+Moreover, KernelBench contains matrix kernels with diverse shapes, making it difficult for LLMs to achieve better performance across all cases compared to the BLAS library used by Torch. 
+
+ Although PRAGMA consistently outperforms Torch and AIKG across most categories, we observe limited gains in convolution kernels.
+Convolution operators exhibit substantially higher implementation complexity, involving deeper loop nests and higher-dimensional tensor accesses.
+This complexity increases the risk of suboptimal tiling, layout transformation, and prefetching decisions during code generation.
+As a result, achieving correctness and performance simultaneously often requires multiple iterations, leading to less pronounced acceleration in this category. 
+
+ IV-C Comparison with Caesar 
+
+ TABLE I: Overall performance comparison of LLM Agents on the KernelBench Tasks. Fast 1 represents the percentage of problems for which the agent can generate custom kernels that are correct and as fast as the Torch baseline. Speedup is normalized to the Torch baseline. 
+
+ | 
+ Success (%) ↑ \uparrow | 
+ Torch | 
+
+ Speedup ( × \times ) ↑ \uparrow | 
+ Fast 1 (%) ↑ \uparrow | 
+
+ Caesar | 
+ 49.0 | 
+ 0.51 | 
+ 14.3 | 
+
+ AIKG | 
+ 92.0 | 
+ 1.28 | 
+ 32.2 | 
+
+ PRAGMA | 
+ 92.0 | 
+ 2.30 | 
+ 59.8 | 
+
+ We further compare PRAGMA against the baseline Caesar  [ 5 ] on GPU platform since Caesar only supports CUDA kernels generation.
+Caesar relies on an agent to generate CUDA kernels and integrates them into PyTorch via PyBind.
+However, its feedback loop is limited to correctness checking and coarse-grained runtime measurement at the PyTorch layer.
+As a result, the system often exhibits high error rates and unstable performance, since the agent lacks visibility into hardware-level behaviors such as occupancy, resource utilization, memory throughput, and instruction-level inefficiencies. 
+
+ Table  I summarizes the overall results.
+Caesar achieves a 49.0% Success rate and its generated kernels frequently fail to outperform the original Torch implementations.
+AIKG improves upon this by introducing multi-agent architecture, achieving 92.0% Success rate, 1.28 × \times average speedup, and 32.2% Fast 1 .
+Nevertheless, without profiling-guided insights, AIKG’s optimization remains largely heuristic and insensitive to architectural bottlenecks. 
+
+ In contrast, PRAGMA introduces a performance-guided multi-agent framework that integrates profiling data from Nsight Compute.
+This enables fine-grained bottleneck classification and targeted optimization reasoning.
+As shown in Table  I , PRAGMA achieves 2.30 × \times average speedup with 59.8% Fast 1 , consistently outperforming both Caesar and AIKG. 
+
+ Overall, PRAGMA bridges the gap between correctness-oriented LLM generation and true performance-oriented optimization, delivering faster and more reliable kernel code across diverse workloads. 
+
+ IV-D Case Studies 
+
+ For better understanding of PRAGMA, we provide detailed case studies on max reduction over a dimension task and conv standard 1D task in KernelBench. 
+
+ IV-D 1 Max reduction over a dimension 
+
+ Fig. 4 : Performance changes of PRAGMA and AIKG on KernelBench Max reduction over a dimension task over five consecutive attempts. 
+
+ We further conduct a detailed analysis on KernelBench Max reduction over a dimension task to illustrate the optimization iteration of PRAGMA.
+Figure  4 demonstrates the relative performance change curves over Torch across five consecutive attempts on GPU backend. 
+
+ PRAGMA achieves steady improvement from 31.41% to 120%.
+In contrast, AIKG peaks at 85.97% in the third iteration but later drops to 58.06%.
+The key difference lies in the feedback mechanism.
+AIKG only returns execution time after each iteration, providing coarse-grained guidance.
+PRAGMA, in contrast, integrates fine-grained performance metrics such as memory throughput, arithmetic intensity, and occupancy.
+These metrics enable precise identification of bottlenecks and direct adjustment of reduction strategies.
+Crucially, the retention of historical best code and its profiling record allows the PRAGMA to judge whether each modification
+yields positive or negative performance impact, enabling stable, performance-aware evolution rather than blind trial-and-error. 
+
+ IV-D 2 Conv Standard 1D 
+
+ While most convolution kernels cannot benefit from PRAGMA, a few of them on the CPU backend exhibit significant performance gains, demonstrating the effectiveness of the performance-guided reasoning of PRAGMA.
+To better illustrate how PRAGMA leverages performance feedback for iterative optimization,
+we present a reasoning trace of the Conductor Agent during two consecutive iterations on the
+KernelBench Conv Standard 1D task on CPU backend.
+Each iteration consists of performance comparison, diagnosis, and targeted guidance for code refinement. 
+
+ As shown in Listing  1 , the Conductor Agent analyzes the fine-grained performance counters and provides optimization suggestions.
+In the first iteration, the Conductor detects a performance regression despite a higher IPC as shown in Line 14, correctly identifying
+that conditional checks in the vectorized loop degraded efficiency (Line 16).
+In the next iteration, after targeted refinement, the Conductor confirms improved performance based on detailed profiling data at Line 31.
+It recognizes that the introduction of fused multiply-add (FMA) instructions (Line 33) and reduced instruction count (Line 32) lead to a
+4.71 × \times speedup over the Torch baseline. 
+
+ ⬇ 
+
+ 1 
+
+ Round 1: Performance regression detected 
+
+ 2 
+
+ Historical best : 
+
+ 3 
+
+ Speedup = 2.93 x 
+
+ 4 
+
+ IPC = 1.37 
+
+ 5 
+
+ Frontend_bound = 5.10% 
+
+ 6 
+
+ Backend_bound = 61.76% 
+
+ 7 
+
+ Current code : 
+
+ 8 
+
+ Speedup = 2.54 x 
+
+ 9 
+
+ IPC = 1.49 
+
+ 10 
+
+ Frontend_bound = 7.68% 
+
+ 11 
+
+ Backend_bound = 57.24% 
+
+ 12 
+
+ Analysis : 
+
+ 13 
+
+ - Speedup dropped from 2.93 x to 2.54 x 
+
+ 14 
+
+ - Higher IPC but worse performance due to increased branch conditions 
+
+ 15 
+
+ - High backend bound maybe due to memory or core bound 
+
+ 16 
+
+ - Detected inefficient vectorization and irregular memory access 
+
+ 17 
+
+ Action : 
+
+ 18 
+
+ Suggest loop refactor for better vectorization and removal of conditional checks in SIMD path 
+
+ 19 
+
+ 20 
+
+ Round 2: Performance improvement recognized 
+
+ 21 
+
+ Historical best : 
+
+ 22 
+
+ Speedup = 2.93 x 
+
+ 23 
+
+ IPC = 1.37 
+
+ 24 
+
+ Instructions = 945 K 
+
+ 25 
+
+ Current code : 
+
+ 26 
+
+ Speedup = 4.71 x 
+
+ 27 
+
+ IPC = 0.52 
+
+ 28 
+
+ Instructions = 136 K 
+
+ 29 
+
+ Cycles = 242 K 
+
+ 30 
+
+ Analysis : 
+
+ 31 
+
+ - Significant speedup improvement (+60%) 
+
+ 32 
+
+ - Lower IPC but fewer total instructions and cycles 
+
+ 33 
+
+ - Effective FMA vectorization and better data reuse 
+
+ 34 
+
+ Action : 
+
+ 35 
+
+ - Mark current code as new historical best 
+
+ 36 
+
+ - Optimize memory access via loop reordering or cache blocking 
+
+ Listing 1: Excerpt of Conductor Agent reasoning trace in two consecutive iterations. 
+
+ V Conclusion 
+
+ In this work, we present PRAGMA, a profile-guided multi-agent system for high-performance kernel generation.
+PRAGMA bridges the gap between LLM-based code generation and traditional performance-guided optimization by forming a closed feedback loop between profiling, reasoning, and kernel generation. Through multi-backend profiling on both CPU and GPU platforms, PRAGMA transforms low-level performance metrics into interpretable optimization hints and continuously refines kernel implementations.
+Our experiments on KernelBench demonstrate that PRAGMA significantly outperforms baseline LLM agents in both success rate and performance, achieving up to 10.95 × \times speedup while providing transparent and architecture-aware performance insights.
+We believe PRAGMA represents an important step toward autonomous and high-performance kernel generation. 
+
+ References 
+
+ [1] 
+ Y. Tay, M. Dehghani, D. Bahri, and D. Metzler (2022) 
+
+ Efficient transformers: a survey .
+
+ ACM Comput. Surv. 55 ( 6 ).
+
+ External Links: ISSN 0360-0300 ,
+ Link ,
+ Document 
+
+ Cited by: §I .
+
+ [2] 
+ T. Dao, D. Fu, S. Ermon, A. Rudra, and C. Ré (2022) 
+
+ Flashattention: fast and memory-efficient exact attention with io-awareness .
+
+ Advances in neural information processing systems 35 , pp. 16344–16359 .
+
+ Cited by: §I .
+
+ [3] 
+ T. Dao (2023) 
+
+ Flashattention-2: faster attention with better parallelism and work partitioning .
+
+ arXiv preprint arXiv:2307.08691 .
+
+ Cited by: §I .
+
+ [4] 
+ J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, and T. Dao (2024) 
+
+ Flashattention-3: fast and accurate attention with asynchrony and low-precision .
+
+ Advances in Neural Information Processing Systems 37 , pp. 68658–68685 .
+
+ Cited by: §I .
+
+ [5] 
+ A. Ouyang, S. Guo, S. Arora, A. L. Zhang, W. Hu, C. Ré, and A. Mirhoseini (2025) 
+
+ Kernelbench: can llms write efficient gpu kernels? .
+
+ arXiv preprint arXiv:2502.10517 .
+
+ Cited by: §I ,
+ §I ,
+ §II ,
+ 3rd item ,
+ §IV-C .
+
+ [6] 
+ A. Rahman, V. Cvetkovic, K. Reece, A. Walters, Y. Hassan, A. Tummeti, B. Torres, D. Cooney, M. Ellis, and D. S. Nikolopoulos (2025) 
+
+ Marco: a multi-agent system for optimizing hpc code generation using large language models .
+
+ arXiv preprint arXiv:2505.03906 .
+
+ Cited by: §I ,
+ §II .
+
+ [7] 
+ A. Wei, T. Sun, Y. Seenichamy, H. Song, A. Ouyang, A. Mirhoseini, K. Wang, and A. Aiken (2025) 
+
+ Astra: a multi-agent system for gpu kernel performance optimization .
+
+ arXiv preprint arXiv:2509.07506 .
+
+ Cited by: §I ,
+ §II .
+
+ [8] 
+ Z. Wen, Y. Zhang, Z. Li, Z. Liu, L. Xie, and T. Zhang (2025) 
+
+ MultiKernelBench: a multi-platform benchmark for kernel generation .
+
+ arXiv e-prints , pp. arXiv–2507 .
+
+ Cited by: §I ,
+ §II .
+
+ [9] 
+ Q. Zhou, Y. Wen, R. Chen, K. Gao, W. Xiong, L. Li, Q. Guo, Y. Wu, and Y. Chen (2025) 
+
+ QiMeng-gemm: automatically generating high-performance matrix multiplication code by exploiting large language models .
+
+ In Proceedings of the AAAI Conference on Artificial Intelligence ,
+
+ Vol. 39 , pp. 22982–22990 .
+
+ Cited by: §I .
+
+ [10] 
+ X. Zhang, S. Peng, Q. Zhou, Y. Wen, Q. Guo, R. Chen, X. Zhu, W. Xiong, H. Chen, C. Ma, et al. (2025) 
+
+ Qimeng-tensorop: automatically generating high-performance tensor operators with hardware primitives .
+
+ arXiv preprint arXiv:2505.06302 .
+
+ Cited by: §I .
+
+ [11] 
+ Q. Zhou, S. Peng, W. Xiong, H. Chen, Y. Wen, H. Li, L. Li, Q. Guo, Y. Zhao, K. Gao, et al. (2025) 
+
+ QiMeng-attention: sota attention operator is generated by sota attention algorithm .
+
+ arXiv preprint arXiv:2506.12355 .
+
+ Cited by: §I .
+
+ [12] 
+ (2025) 
+
+ AI-driven kernel generator (aikg) .
+
+ External Links: Link 
+
+ Cited by: §I .
+
+ [13] 
+ A. Tschand, M. Awad, R. Swann, K. Ramakrishnan, J. Ma, K. Lowery, G. Dasika, and V. J. Reddi (2025) 
+
+ SwizzlePerf: hardware-aware llms for gpu kernel performance optimization .
+
+ arXiv preprint arXiv:2508.20258 .
+
+ Cited by: §I ,
+ §II .
+
+ [14] 
+ A. Smith, E. Chapman, C. Patel, R. Swaminathan, J. Wuu, T. Huang, W. Jung, A. Kaganov, H. McIntyre, and R. Mangaser (2024) 
+
+ 11.1 amd instincttm mi300 series modular chiplet package–hpc and ai accelerator for exa-class systems .
+
+ In 2024 IEEE International Solid-State Circuits Conference (ISSCC) ,
+
+ Vol. 67 , pp. 490–492 .
+
+ Cited by: §I .
+
+ [15] 
+ J. Liu, C. S. Xia, Y. Wang, and L. Zhang (2023) 
+
+ Is your code generated by chatgpt really correct? rigorous evaluation of large language models for code generation .
+
+ Advances in Neural Information Processing Systems 36 , pp. 21558–21572 .
+
+ Cited by: §II .
+
+ [16] 
+ N. Nguyen and S. Nadi (2022) 
+
+ An empirical evaluation of github copilot’s code suggestions .
+
+ In Proceedings of the 19th International Conference on Mining Software Repositories ,
+
+ pp. 1–5 .
+
+ Cited by: §II .
+
+ [17] 
+ Q. Wu, G. Bansal, J. Zhang, Y. Wu, B. Li, E. Zhu, L. Jiang, X. Zhang, S. Zhang, J. Liu, et al. (2024) 
+
+ Autogen: enabling next-gen llm applications via multi-agent conversations .
+
+ In First Conference on Language Modeling ,
+
+ Cited by: §II .
+
+ [18] 
+ S. Hong, M. Zhuge, J. Chen, X. Zheng, Y. Cheng, J. Wang, C. Zhang, Z. Wang, S. K. S. Yau, Z. Lin, et al. (2023) 
+
+ MetaGPT: meta programming for a multi-agent collaborative framework .
+
+ In The Twelfth International Conference on Learning Representations ,
+
+ Cited by: §II .
+
+ [19] 
+ C. Qian, W. Liu, H. Liu, N. Chen, Y. Dang, J. Li, C. Yang, W. Chen, Y. Su, X. Cong, et al. (2023) 
+
+ Chatdev: communicative agents for software development .
+
+ arXiv preprint arXiv:2307.07924 .
+
+ Cited by: §II .
+
+ [20] 
+ A. Yasin (2014) 
+
+ A top-down method for performance analysis and counters architecture .
+
+ In 2014 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) ,
+
+ pp. 35–44 .
+
+ Cited by: §III-B .
+
+ [21] 
+ P. Tillet, H. Kung, and D. Cox (2019) 
+
+ Triton: an intermediate language and compiler for tiled neural network computations .
+
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages ,
+
+ pp. 10–19 .
+
+ Cited by: §III-D .
+
+ [22] 
+ D. Guo, D. Yang, H. Zhang, J. Song, R. Zhang, R. Xu, Q. Zhu, S. Ma, P. Wang, X. Bi, et al. (2025) 
+
+ Deepseek-r1: incentivizing reasoning capability in llms via reinforcement learning .
+
+ arXiv preprint arXiv:2501.12948 .
+
+ Cited by: §IV-A .

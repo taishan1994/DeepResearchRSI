@@ -167,21 +167,30 @@ def wrap_measured(pdf, text: str, size: float, max_mm: float) -> list[str]:
             lines.append("")
             continue
         cur: list[str] = []
+        cur_w = 0.0
         for ch in para:
-            trial = "".join(cur) + ch
-            if cur and pdf.get_string_width(trial) > max_mm:
+            # ⚠️ 不要用「拼出整行再测量」的写法（trial = "".join(cur) + ch）。
+            # get_string_width 是 O(n)，逐字重测整行就是 O(n^2)；
+            # 表格单元格动辄两三百字，多行表格会直接把渲染挂死（实测超时 120s）。
+            # 逐字累加宽度是 O(n)，且与整行测量在本字体下等价到 1e-3 mm。
+            w = pdf.get_string_width(ch)
+            if cur and cur_w + w > max_mm:
                 # 禁则：不能起行的字符随上一行留下，不能收尾的字符挪到下一行
                 if ch in NO_LINE_START:
                     moved = cur.pop()
                     lines.append("".join(cur))
                     cur = [moved, ch]
+                    cur_w = pdf.get_string_width(moved) + w
                     continue
                 while cur and cur[-1] in NO_LINE_END:
-                    cur.pop()
+                    moved = cur.pop()
+                    cur_w -= pdf.get_string_width(moved)
                 lines.append("".join(cur))
                 cur = [ch]
+                cur_w = w
             else:
                 cur.append(ch)
+                cur_w += w
         if cur:
             lines.append("".join(cur))
     return lines
@@ -311,7 +320,11 @@ class Paper(FPDF):
             return
         self.set_font("CJK", "", 8)
         self.set_text_color(130, 130, 130)
-        self.cell(0, 6, "RTX PRO 6000 Blackwell 推理性能综述", align="R")
+        # ⚠️ 页眉原先写死为「RTX PRO 6000 Blackwell 推理性能综述」。
+        # 换主题后，新论文的每一页页眉都在宣称自己是另一篇论文——
+        # 而这条错误不会让任何校验器失败：版面正常、引用闭合、编号连续。
+        # 故改为由 paper.json 的 title 提供，写死值只作兜底。
+        self.cell(0, 6, getattr(self, "_running_title", "") or "研究综述", align="R")
         self.ln(2)
         self.set_draw_color(210, 210, 210)
         self.line(20, self.get_y(), 190, self.get_y())
@@ -397,9 +410,11 @@ class Paper(FPDF):
         self.set_text_color(0, 0, 0)
         self.ln(2)
 
-    def table(self, rows: list[list[str]]) -> None:
+    def table(self, rows: list[list[str]], caption: str = "") -> None:
         if not rows:
             return
+        # 表头重复：表格一旦跨页，续页没有表头，读者无法判断哪一列是什么。
+        # 故整张表放不下时分页，并在新页重画表头行。
         ncol = max(len(r) for r in rows)
         avail = 210 - 40
         # 按内容宽度分配列宽
@@ -456,6 +471,15 @@ class Paper(FPDF):
                 self._table_row(ri, r, ncol, widths)
         finally:
             self.set_auto_page_break(prev_auto)
+        # 表格说明放在表体下方，而不是上方——上方的说明会让表与它的
+        # 引出行之间隔一段文字，读者容易把说明误读成上一段的结尾。
+        if caption:
+            self.set_font("CJK", "", 8.6)
+            self.set_text_color(80, 80, 80)
+            for ln in wrap_measured_words(self, caption, 8.6, 210 - 40 - 1):
+                self.set_x(20)
+                self.cell(0, 4.6, ln, new_x="LMARGIN", new_y="NEXT")
+            self.set_text_color(0, 0, 0)
         self.ln(2.5)
 
     def _table_row(self, ri, r, ncol, widths) -> None:
@@ -570,7 +594,16 @@ def parse_blocks(md: str):
                     continue
                 cells = [inline_clean(c) for c in r.strip().strip("|").split("|")]
                 rows.append(cells)
-            yield ("table", rows)
+            # 表格下方的说明行（形如「**表 2　……。** 补充说明」）交给 table()，
+            # 由它排在表体正下方。若交由正文流处理，说明会与表分离到下一页。
+            caption = ""
+            j = i
+            while j < len(lines) and not lines[j].strip():
+                j += 1
+            if j < len(lines) and lines[j].lstrip().startswith("**表 "):
+                caption = inline_clean(lines[j])
+                i = j + 1
+            yield ("table", (rows, caption))
             continue
         if s.startswith("#### "):
             yield ("h3", inline_clean(s[5:]))
@@ -644,10 +677,21 @@ def main(argv: list[str] | None = None) -> int:
     regular, bold = pick_fonts()
     pdf = Paper(regular, bold)
     pdf._figures_dir = paper_dir
-    pdf.set_title("RTX PRO 6000 Blackwell 的推理性能：一次以证据等级为准的综述")
+    # 标题与页眉都来自 paper.json，不再写死。
+    # 顺带把 <!-- ... --> 写作纪律注释从正文里滤掉：fpdf 的 Markdown
+    # 解析器不认识 HTML 注释，会把整段注释原样排进第 1 页。
+    spec = {}
+    spec_path = paper_dir / "paper.json"
+    if spec_path.is_file():
+        import json as _json
+        spec = _json.loads(spec_path.read_text(encoding="utf-8-sig"))
+    title = spec.get("title") or "研究综述"
+    pdf._running_title = title
+    pdf.set_title(title)
     pdf.set_author("DeepResearchRSI")
 
     md = md_path.read_text(encoding="utf-8")
+    md = re.sub(r"<!--.*?-->", "", md, flags=re.S)
     pdf.add_page()
 
     first_h1 = True
@@ -673,7 +717,8 @@ def main(argv: list[str] | None = None) -> int:
         elif kind == "quote":
             pdf.quote(payload)
         elif kind == "table":
-            pdf.table(payload)
+            rows_, cap_ = payload
+            pdf.table(rows_, cap_)
         elif kind == "code":
             pdf.code("\n".join(payload))
         elif kind == "figure":

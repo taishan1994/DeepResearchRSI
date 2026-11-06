@@ -1,0 +1,1619 @@
+RaMP: Runtime-Aware Megakernel Polymorphism for Mixture-of-Experts 
+
+ Vyom Sharma
+
+ Affiliation:  Hippocratic AI 
+ vyom@hippocraticai.com 
+
+ Debajyoti Datta
+
+ Affiliation:  Hippocratic AI 
+ debajyoti@hippocraticai.com 
+
+ Abstract 
+
+ The optimal kernel configuration for Mixture-of-Experts
+(MoE) inference depends on both batch size and the expert routing
+distribution—yet every production system dispatches from batch
+size alone, leaving 10–70% of kernel throughput unrealized.
+We present RaMP, a routing-aware dispatch framework.
+A performance-region analysis derives, from hardware
+constants alone, when each optimization helps—correctly
+predicting all 8 tested architectures, including 3 unseen.
+A four-parameter wave cost model selects the fastest
+configuration from the runtime expert histogram, achieving
+ 0.93 % 0.93\% mean regret versus exhaustive search, fitted from just
+10–24 minutes of one-time profiling per model. Because the model
+depends only on CTA grid geometry, it is kernel-agnostic: applied
+to Alpha-MoE, it delivers 1.14 × 1.14\times with no source modification.
+Paired with a co-designed CuTe DSL kernel exposing 134–268
+polymorphic configurations, RaMP delivers 1.22 × 1.22\times kernel
+speedup over static dispatch and 1.30 × 1.30\times end-to-end speedup
+in vLLM serving over Triton ( 1.41 × 1.41\times over DeepGEMM,
+ 1.13 × 1.13\times over FlashInfer CUTLASS). 
+
+ Index Terms:  mixture-of-experts, kernel dispatch, cost model, GPU optimization,
+inference serving
+
+ I Introduction 
+
+ Mixture-of-Experts (MoE) models activate only a fraction of their
+parameters per token, enabling models with hundreds of billions of
+parameters at manageable inference
+cost  [ 1 , 2 , 3 ] . The fused MoE kernel—executing
+up-projection, activation, and down-projection in a single GPU
+launch—is the critical hot path: on OLMoE-1B-7B, it accounts for
+over 60% of per-token latency. Modern implementations are already
+heavily optimized with TMA loads, WGMMA scheduling, and multi-stage
+pipelines, leaving little room for a single blanket improvement. 
+
+ Fig. 1 : CTA tile allocation under static vs. routing-aware dispatch
+for E = 16 E{=}16 , S = 16 S{=}16 . Horizontal lines within each bar mark tile
+boundaries; each tile maps to one CTA.
+ Top row (static): dispatch always uses bm = 16 \texttt{bm}{=}16 
+(optimal at β = 1.0 \beta{=}1.0 ), incurring excessive padding waste (red)
+as routing becomes skewed ( β = 0.2 \beta{=}0.2 : 60% waste).
+ Bottom row (RaMP): adapts bm to the routing
+distribution, reducing waste to 20% (orange) at β = 0.2 \beta{=}0.2 
+by selecting bm = 4 \texttt{bm}{=}4 (more, smaller tiles).
+At uniform routing ( β = 1.0 \beta{=}1.0 ), both choose the same
+configuration. 
+
+ The deeper problem is that the optimal kernel configuration
+depends on the runtime expert routing distribution, which changes
+at every forward step. Under skewed routing—the norm in
+production, where only 8–14% of experts are active per
+layer (§ III-A )—a small token block
+( bm = 16 \texttt{bm}{=}16 ) minimizes padding waste. Under balanced
+routing, a large block ( bm = 64 \texttt{bm}{=}64 ) reduces wave count.
+The configuration space is substantial: 134–268 valid tile
+configurations per model on H200. Yet every production system we
+examined—vLLM, SGLang, Alpha-MoE, DeepGEMM,
+FlashInfer—dispatches from batch size alone, ignoring routing
+entirely. We show that this leaves 10–70% of kernel
+performance unrealized (§ III ). 
+
+ Our key insight is that a physically grounded cost model—encoding
+startup overhead, wave scheduling, per-CTA memory traffic, and
+sub-wave nonlinearity as four measurable terms—can dispatch MoE
+kernels from the actual expert histogram at runtime. Four
+parameters per configuration, fitted from 25 profiling points in
+10–24 minutes, suffice because the model decomposes performance
+into physically distinct terms. Crucially, the cost model depends
+only on the CTA grid size, not the kernel implementation: applied
+to a third-party kernel (Alpha-MoE) with no source modification, it
+delivers 1.14 × 1.14\times over their own JIT
+dispatch (§ V-C ). The vLLM-specific integration
+is orthogonal engineering; the cost model framework applies to any
+fused MoE kernel that exposes a tunable configuration space. 
+
+ We formalize the conditions under which each kernel optimization
+helps through four performance-region variables 
+(§ IV-A ): compute density ( ρ \rho ), L2
+pressure ( λ \lambda ), wave utilization ( ω \omega ), and K-reduction
+depth ( κ \kappa ). These variables, derived from problem geometry
+and hardware constants alone, correctly predict optimization
+applicability for all 8 architectures tested—including 3 unseen
+models profiled from scratch with no prior knowledge. 
+
+ Contributions. 
+(1) We characterize the static dispatch problem, showing that
+routing variation leaves 1.22 × 1.22\times geomean performance on the
+table and that three natural alternatives each
+fail (§ III ).
+(2) We introduce a performance-region analysis and four-parameter
+wave cost model achieving 0.93 % 0.93\% mean regret versus exhaustive
+search across 8 architectures, generalizing to unseen models and
+third-party kernels (§ IV-A – IV-B ).
+(3) We co-design a CuTe DSL kernel with 134–268 polymorphic
+configurations and validate end-to-end in vLLM, delivering
+ 1.30 × 1.30\times speedup over Triton FP8, 1.41 × 1.41\times over DeepGEMM,
+and 1.13 × 1.13\times over FlashInfer CUTLASS on
+OLMoE (§ IV-C – V-E ). 
+
+ II Background 
+
+ II-A MoE Inference and Expert Routing 
+
+ Mixture-of-Experts (MoE) models partition each feed-forward layer
+into E E independent expert networks. A lightweight gating network
+selects the top- k k experts per token, routing each token to only
+a small fraction of the total parameters. This conditional
+computation enables models with hundreds of billions of parameters
+while activating only a few billion per token: OLMoE  [ 2 ] 
+contains 7B total parameters but activates only 1B, and
+DeepSeek-V3  [ 1 ] contains 671B with 37B active. 
+
+ Crucially, the routing decision is input-dependent :
+different tokens activate different expert subsets, and the
+distribution changes at every forward step. We quantify routing
+skew via entropy-normalized balancedness 
+ β = H ⁡ ( 𝐜 ) / ln ⁡ E \beta=H(\mathbf{c})/\ln E ( β = 1 \beta{=}1 : uniform; lower
+values: skewed). The trend toward fine-grained MoE
+(DeepSeek-V3: E = 256 E{=}256 ; Qwen3: E = 128 E{=}128 ) amplifies this
+variability, making the optimal kernel configuration
+increasingly input-dependent (§ III-A ). 
+
+ II-B Fused MoE Kernel Anatomy 
+
+ A fused MoE kernel executes all three phases of the expert
+computation in a single GPU launch:
+ Phase 1 (up-projection) loads expert weight tiles via TMA
+and computes 𝐇 e = 𝐗 e ​ 𝐖 1 , e \mathbf{H}_{e}=\mathbf{X}_{e}\mathbf{W}_{1,e} 
+through WGMMA matrix-multiply-accumulate instructions;
+ Phase 2 applies the SwiGLU nonlinearity with in-register
+FP8 re-quantization, avoiding any write to HBM;
+ Phase 3 (down-projection) computes the final output and
+scatters it back to the token positions via atomic add.
+By keeping the intermediate activations in registers between
+phases, the fused kernel eliminates two HBM round-trips per expert
+per token that a multi-kernel implementation would incur. 
+
+ On Hopper GPUs, each CTA uses warp specialization: 128 producer
+threads issue TMA weight loads and cp.async activation
+gathers into a multi-stage shared memory pipeline, while
+ wn × 32 \texttt{wn}\times 32 consumer threads drain the pipeline
+through WGMMA instructions that read directly from shared memory
+descriptors. The producer fills the next pipeline stage while the
+consumer computes on the current one, overlapping memory latency
+with compute. 
+
+ The kernel is parameterized by a tile configuration 
+ c = ( bm , bn , wn , stg ) c=(\texttt{bm},\texttt{bn},\texttt{wn},\texttt{stg}) ,
+specifying the token block size (how many tokens each CTA
+processes), weight sub-tile width, consumer warp count, and
+pipeline depth (number of buffered stages), respectively.
+The CTA grid depends on the expert token distribution: 
+
+ | 
+ grid ⁡ ( c ) = ∑ e ⌈ c e / bm ⌉ ⏟ M-tiles (routing-dependent) × ⌈ N / ( bn ⋅ wn ) ⌉ ⏟ N-tiles (config-dependent) \mathrm{grid}(c)=\underbrace{\textstyle\sum_{e}\lceil c_{e}/\texttt{bm}\rceil}_{\text{M-tiles (routing-dependent)}}\times\underbrace{\lceil N/(\texttt{bn}\cdot\texttt{wn})\rceil}_{\text{N-tiles (config-dependent)}} | 
+ | 
+ (1) | 
+
+ Because the M-tiles term depends on the routing distribution,
+different values of β \beta at the same batch size  S S produce
+grids differing by 1.6 − 10 × 1.6{-}10\times 
+(Figure  1 ), which in turn demand different
+configurations. 
+
+ II-C Existing Dispatch Approaches 
+
+ Table  I summarizes the dispatch strategy of
+production MoE systems. All share a fundamental limitation: they
+select configurations from batch size alone, ignoring the routing
+distribution. Moreover, adding a new optimization dimension (e.g.,
+GROUP_M swizzle) doubles the search space, causing autotuning costs
+to scale combinatorially . The next section quantifies the
+performance cost of this static approach. 
+
+ TABLE I : Dispatch strategies of production MoE systems. None uses
+the routing distribution. RA: routing-aware. 
+
+ System | 
+ Cfgs | 
+ RA | 
+ Tune | 
+ Dispatch | 
+
+ vLLM Triton  [ 4 ] | 
+ ∼ {\sim} 2K | 
+ ✗ | 
+ sweep | 
+ nearest- M M | 
+
+ Alpha-MoE  [ 5 ] | 
+ 160 | 
+ ✗ * | 
+ 2 hr | 
+ per- M M | 
+
+ DeepGEMM  [ 6 ] | 
+ 1 | 
+ ✗ | 
+ JIT | 
+ bm=128 | 
+
+ FlashInfer  [ 7 ] | 
+ int. | 
+ ✗ | 
+ int. | 
+ per- M M | 
+
+ SonicMoE  [ 8 ] | 
+ — | 
+ ✗ | 
+ — | 
+ train only | 
+
+ RaMP | 
+ 134–268 | 
+ ✓ | 
+ 10–24 m | 
+ cost model | 
+
+ * Code has RA modules;
+default serving uses per- M M only. | 
+
+ III Challenges and Opportunities 
+
+ Before presenting our solution, we characterize the static dispatch
+problem quantitatively: how much performance do production systems
+leave on the table by ignoring the routing distribution? 
+
+ III-A Routing Variation in Production 
+
+ We instrument OLMoE ( E = 64 E{=}64 ) and Qwen3 ( E = 128 E{=}128 ) with routing
+hooks on four downstream tasks (MMLU, GSM8K, code generation,
+and open-ended chat; 12 prompts per model, yielding 9,728 and
+192,103 per-layer routing observations, respectively). 
+
+ Fig. 2 : Distribution of routing balancedness β \beta measured
+across real inference workloads. Both models concentrate near
+ β ≈ 0.5 \beta\approx 0.5 , far from the uniform β = 1.0 \beta{=}1.0 point
+where static dispatch is tuned (red dashed line). The
+“mismatch” arrow highlights the gap between actual and assumed
+operating regime. 
+
+ Real MoE routing is deeply skewed 
+(Figure  2 ): only 8 − 14 % 8{-}14\% of experts are
+active per layer on both models, and β \beta falls below 0.7 0.7 
+over 96 % 96\% of the time. The distribution is tightly concentrated:
+on OLMoE, 96.9% of 9,728 per-layer observations fall within
+ β ∈ [ 0.50 , 0.60 ) \beta\in[0.50,0.60) (std =  0.06 \,{=}\,0.06 ). This has two
+implications: (1) static dispatch tuned at β = 1.0 \beta{=}1.0 is
+systematically mismatched with the β ≈ 0.5 \beta\approx 0.5 regime that
+dominates production, and (2) a cost model evaluated near
+ β = 0.5 \beta{=}0.5 generalizes to nearly all real traffic. 
+
+ Takeaway 1: Real MoE routing is deeply skewed
+( β ≈ 0.5 \beta\approx 0.5 , only 8–14% of experts active), yet every
+production system dispatches as though routing were uniform
+( β = 1.0 \beta{=}1.0 ). 
+
+ Why skew hurts: wave utilization.  
+Figure  3 reveals the mechanism. For a fixed
+tile size bm , skewed routing produces uneven CTA counts
+across experts, fragmenting the grid into partially filled waves.
+At typical operating points ( β ≈ 0.5 \beta\approx 0.5 ), small batches
+lose 15–30% of SM occupancy compared to the uniform assumption,
+and even large batches see measurable degradation—explaining why
+a single bm tuned at β = 1.0 \beta{=}1.0 under-performs in
+production. 
+
+ Fig. 3 : Wave utilization ω \omega vs. routing balancedness β \beta 
+for OLMoE ( E = 64 E{=}64 , bm = \,{=}\, 16). Skewed routing
+(lower  β \beta ) fragments the CTA grid into partially filled waves,
+reducing SM occupancy by 15–30% for small batches. Shaded bands
+show ± 1 ​ σ \pm 1\sigma over 300 routing samples. The red region marks
+the typical operating range from Figure  2 . 
+
+ III-B Performance Left on the Table 
+
+ To quantify the resulting gap, we profile OLMoE with vLLM’s default
+Triton FP8 config at 24 operating points (6 batch sizes × \times 
+4 balancedness levels) and compare against the best available config
+from our 134-config pool, using 50-iteration median timing per
+config per point. 
+
+ At 22 of the 24 operating points, a different configuration
+outperforms vLLM’s default, by up to 70 % 70\% at decode
+( S = 32 S{=}32 , β = 0.5 \beta{=}0.5 ) and by 10 − 25 % 10{-}25\% at moderate batch
+sizes. The aggregate opportunity amounts to a 1.22 × 1.22\times geomean
+speedup if the correct config could be selected at every point. 
+
+ Fig. 4 : Exhaustive-search best bm at each ( S , β ) (S,\beta) 
+for OLMoE (left) and DSv3-TP8 (right). Each color represents a
+different kernel config. No single config dominates: both batch
+size (horizontal axis) and routing skew (vertical) influence the
+optimal tile shape. 
+
+ Figure  4 visualizes the full
+operating space: OLMoE requires 6 unique configs and DSv3-TP8
+requires 8 to cover all ( S , β ) (S,\beta) points—no single
+configuration dominates. 
+
+ III-C Why Simpler Approaches Fall Short 
+
+ Three natural responses to this problem each prove insufficient: 
+
+ Approach 1: Finer-grained bucket dispatch. 
+Triton’s lookup rounds M M to the nearest power-of-2 anchor.
+Doubling the number of anchors captures batch-size variation more
+precisely, achieving 1.05 × 1.05\times geomean improvement over standard
+buckets. However, this approach still
+misses routing variation within a bucket: two invocations
+with the same M M but different β \beta require different configs. 
+
+ Approach 2: Exhaustive online search. 
+Evaluating all 134 configs at each invocation would cost
+ 134 × 48 ​ μ ​ s = 6.4 ​ ms 134\times 48\,\mu\text{s}=6.4\,\text{ms} , which is orders of
+magnitude larger than the 20 − 300 ​ μ 20{-}300\,\mu s kernel it aims to
+optimize. Runtime exhaustive search is impractical. 
+
+ Approach 3: Simple linear cost model. 
+A 2-parameter model ( T = a + b × grid T=a+b\times\mathrm{grid} )
+captures the gross scaling trend but misses wave
+quantization : kernel time jumps sharply at CTA grid multiples of
+ SM ​ _ ​ COUNT = 132 \mathrm{SM\_COUNT}{=}132 . On DSv3 ( N = 512 N{=}512 , yielding only
+2 N-tiles), this model produces 37.5 % 37.5\% max regret because the
+grid-time relationship is concave in the sub-wave region rather
+than linear. 
+
+ Takeaway 2: An effective dispatch must be
+(a) sub- 50 ​ μ 50\,\mu s for runtime use,
+(b) routing-aware (dispatching from the expert histogram, not
+ M M alone), and
+(c) physically grounded to capture wave quantization. 
+
+ IV RaMP: System Design 
+
+ Fig. 5 : System overview. Offline: enumerate valid configs,
+JIT-compile and profile each at 25 operating points, then fit
+OLS cost coefficients. Online: a single fused Triton
+kernel performs expert bincount, cost evaluation, and argmin;
+the result selects the pre-compiled CuTe DSL kernel binary.
+Total online overhead: < 2.5 ​ μ {<}2.5\,\mu s amortized per MoE layer. 
+
+ RaMP addresses the three shortcomings identified in
+§ III through three components
+(Figure  5 ): a
+performance-region analysis that identifies when each
+optimization helps (§ IV-A ), a wave cost model that
+predicts which config is fastest at runtime
+(§ IV-B ), and a co-designed kernel that provides
+the configuration diversity the cost model requires
+(§ IV-C ). 
+
+ IV-A MoE Performance Regions 
+
+ On a highly-optimized fused MoE kernel, no single optimization
+helps universally. GROUP_M swizzle is essential on Mixtral but
+irrelevant on OLMoE. Split-K fills idle SMs on DSv3 at decode
+batch sizes but degrades performance on Mixtral. Small token
+blocks reduce padding under skewed routing but increase wave count
+under balanced routing. The question, therefore, is not how to
+make the kernel faster in general, but rather when each
+optimization helps and how to select the right combination at
+runtime. 
+
+ We answer this question by identifying four variables from the
+problem geometry ( E , N , K ) (E,N,K) , each targeting a specific hardware
+bottleneck. For each variable, we explain why it captures an
+effect that no simpler metric addresses. 
+
+ Compute density ( ρ \rho ): 
+
+ | 
+ ρ = N ⋅ K ttn ⋅ tile_k \rho=\frac{N\cdot K}{\texttt{ttn}\cdot\texttt{tile\_k}} | 
+ | 
+ (2) | 
+
+ This quantity counts the number of WGMMA tile operations per CTA.
+ Why not use raw FLOPs or arithmetic intensity instead? 
+Raw FLOPs ignore pipeline overhead, which dominates at small grids:
+each CTA pays a fixed startup cost (pipeline fill, mbarrier setup,
+TMA descriptor initialization) regardless of compute volume.
+Arithmetic intensity (FLOPs/byte) captures the balance between
+compute and memory bandwidth, but not between compute and pipeline
+fill. By contrast, ρ \rho captures precisely this ratio. When
+ ρ < ρ c \rho<\rho_{c} , startup overhead exceeds useful compute per CTA,
+and the kernel becomes pipeline-dominated . The critical
+threshold ρ c ≈ 186 \rho_{c}\approx 186 follows from the ratio of
+single-CTA startup cost ( 24 ​ μ 24\,\mu s median on H200) to effective
+WGMMA throughput ( 130 130  ns/tile including pipeline stalls),
+consistent with the empirically observed crossover at
+ ρ c ≈ 200 \rho_{c}\approx 200 . 
+
+ L2 pressure ( λ \lambda , κ \kappa ): 
+
+ | 
+ λ = ⌈ N / ttn ⌉ , κ = K / tile_k \lambda=\lceil N/\texttt{ttn}\rceil,\qquad\kappa=K/\texttt{tile\_k} | 
+ | 
+ (3) | 
+
+ In a fused MoE kernel, the dominant memory pattern is weight
+loading via TMA. When two CTAs processing different M-tiles for the
+same expert execute concurrently, they access the same weight
+column; if it remains in L2, the second CTA avoids an HBM fetch.
+L2 is the only level where inter-CTA weight reuse occurs: L1 is
+per-SM and holds only the current pipeline stage, while registers
+and shared memory hold accumulators and buffers, not prior tiles. 
+
+ GROUP_M swizzle addresses L2 pressure by reordering the CTA grid so that
+groups of adjacent M-tiles share weight columns before advancing.
+The condition is whether the weight footprint exceeds effective L2
+capacity. With L ​ 2 eff = 0.75 × 60 ​ MB = 45 L2_{\mathrm{eff}}=0.75\times 60\,\mathrm{MB}=45  MB (NCU confirms 72–78% of L2 sectors available for
+weights): 
+
+ | 
+ λ ⋅ κ > L ​ 2 eff ttn ⋅ tile_k ⋅ sizeof ⁡ ( FP8 ) = 45 ​ MB 32 ​ KB = 1440 \lambda\cdot\kappa>\frac{L2_{\mathrm{eff}}}{\texttt{ttn}\cdot\texttt{tile\_k}\cdot\mathrm{sizeof(FP8)}}=\frac{45\,\mathrm{MB}}{32\,\mathrm{KB}}=1440 | 
+ | 
+ (4) | 
+
+ This threshold correctly predicts GROUP_M applicability for all
+8 models with zero exceptions (Table  III ):
+Mixtral ( λ ⋅ κ = 6144 \lambda\cdot\kappa=6144 ) and the three Regime-B
+unseen models exceed it, while OLMoE ( 128 128 ) and DSv3 ( 112 112 )
+fall far below. 
+
+ Wave utilization ( ω \omega ): 
+
+ | 
+ ω = grid ⁡ ( c , S , routing ) / SM ​ _ ​ COUNT \omega=\mathrm{grid}(c,S,\text{routing})\;/\;\mathrm{SM\_COUNT} | 
+ | 
+ (5) | 
+
+ Why measure waves rather than SM occupancy? SM occupancy
+(warps per SM) is a per-SM metric that quantifies instruction-level
+parallelism within a single SM. The variable ω \omega captures a
+qualitatively different phenomenon: GPU-wide grid
+quantization . Increasing the grid from 131 CTAs
+( ω = 0.99 \omega{=}0.99 , one nearly-full wave) to 133 CTAs
+( ω = 1.01 \omega{=}1.01 , two waves with the second nearly empty)
+approximately doubles wall-clock time. This quantization cliff
+is invisible to occupancy metrics. Notably, ω \omega is the
+ only routing-dependent variable : different expert
+distributions at the same batch size  S S produce different
+ ω \omega values, which in turn select different configurations. 
+
+ K-reduction depth ( κ \kappa ):
+ κ = K / tile_k \kappa=K/\texttt{tile\_k} .
+ Why treat this separately from ρ \rho ? A deep
+K-dimension creates a qualitatively different opportunity:
+splitting the K-reduction across multiple CTAs (split-K) can fill
+idle SMs at sub-wave operating points. This technique is
+beneficial only when κ ≥ 48 \kappa\geq 48 and ω < 0.2 \omega<0.2 .
+Split-K with sk = 4 \mathrm{sk}{=}4 quadruples the grid, so the
+original grid must contain fewer than 33 CTAs for the expanded grid
+to remain within one wave. At higher ω \omega , the two-launch
+overhead (approximately 10 − 15 ​ μ 10{-}15\,\mu s) outweighs the
+parallelism benefit, causing split-K to degrade performance. The
+threshold κ ≥ 48 \kappa\geq 48 ensures that sufficient reduction work
+exists to amortize this overhead. The distinction from ρ \rho is
+fundamental: ρ \rho measures compute density per CTA , while
+ κ \kappa measures reduction depth across CTAs 
+(Figure  6 ). 
+
+ Fig. 6 : Split-K fills idle SMs at sub-wave operating points.
+(a) Standard kernel: 3 CTAs occupy 3 of 8 SMs ( ω = 0.38 \omega{=}0.38 ,
+62% idle).
+(b) Split-K=4: K-reduction partitioned across 4 CTAs per expert,
+yielding 12 CTAs that fill both waves ( ω = 1.5 \omega{=}1.5 , all SMs active). 
+
+ These four variables are sufficient because they cover the
+hardware axes that vary across operating points: per-CTA compute
+( ρ \rho ), cache pressure ( λ \lambda ), grid-level parallelism
+( ω \omega ), and reduction depth ( κ \kappa ). Register pressure,
+shared memory limits, and TMA alignment constrain which configs
+ exist but do not vary at runtime. 
+
+ Region classification. 
+These variables partition the operating space into distinct regions
+(Table  II ). 
+
+ TABLE II : Performance regions and optimization decisions.
+Top: region classification by ρ \rho and ω \omega .
+Bottom: predicted optimization applicability. 
+
+ | 
+ ω < 1 \omega<1 | 
+ 1 < ω < 8 1<\omega<8 | 
+ ω > 8 \omega>8 | 
+
+ ρ < ρ c \rho<\rho_{c} | 
+ A1: tile shape | 
+ A2: tile shape | 
+ A3: tile shape | 
+
+ ρ ≥ ρ c \rho\geq\rho_{c} | 
+ B1: tile, SK | 
+ B2: tile, ttn | 
+ B3: tile, bm | 
+
+ Opt. conditions: | 
+
+ GROUP_M: λ ​ κ > 1440 \lambda\kappa>1440 | 
+
+ Split-K: κ ≥ 48 ∧ ω < 0.2 \kappa\!\geq\!48\wedge\omega\!<\!0.2 | 
+
+ ttn=512: ω > 1 \omega\!>\!1 | 
+
+ Model classification. 
+Table  III classifies eight production MoE
+architectures, and Figure  7 visualizes them in
+the ( λ , ρ ) (\lambda,\rho) plane.
+The first five were used during development; the
+last three ( italicized ) are completely unseen models,
+profiled from scratch during evaluation with no prior knowledge.
+“Unseen” means no model-specific development or tuning was
+performed; the same profiling recipe (enumerate configs, time at
+25 points, OLS fit) applies to any new architecture in
+10–24 minutes. The cost model form generalizes across
+architectures; per-target profiling calibrates its
+ parameters . 
+
+ TABLE III : Performance-region classification of production MoE models.
+Italicized models are unseen during development. 
+
+ Model | 
+ ρ \rho | 
+ λ \lambda | 
+ κ \kappa | 
+ Region | 
+ Predicted modes | 
+
+ OLMoE | 
+ 128 | 
+ 8 | 
+ 16 | 
+ A | 
+ Tile only | 
+
+ Qwen3 | 
+ 96 | 
+ 6 | 
+ 16 | 
+ A | 
+ Tile only | 
+
+ DSv3-EP8 | 
+ 112 | 
+ 2 | 
+ 56 | 
+ A | 
+ Tile + split-K | 
+
+ Mixtral | 
+ 6144 | 
+ 128 | 
+ 48 | 
+ B | 
+ Tile + GROUP_M | 
+
+ DSv3-TP8 | 
+ 112 | 
+ 2 | 
+ 56 | 
+ A | 
+ Tile + split-K | 
+
+ Phi-3.5-MoE | 
+ 1600 | 
+ 50 | 
+ 32 | 
+ B | 
+ Tile + GROUP_M | 
+
+ Jamba-1.5 | 
+ 2048 | 
+ 64 | 
+ 32 | 
+ B | 
+ Tile + GROUP_M | 
+
+ DBRX | 
+ 4032 | 
+ 84 | 
+ 48 | 
+ B | 
+ Tile + GROUP_M | 
+
+ Fig. 7 : Regime classification of 8 MoE models in the
+ ( λ , ρ ) (\lambda,\rho) plane. Models below ρ c = 200 \rho_{c}{=}200 are
+overhead-dominated (Regime A); models above are compute-scaling
+(Regime B) where GROUP_M swizzle is essential. Blue circles:
+5 known models; orange squares: 3 unseen test models. 
+
+ IV-B Wave-Based Cost Model 
+
+ The performance regions identify which optimizations are
+applicable to a given model. We now construct the cost model that
+selects which specific configuration is fastest for the
+actual routing distribution observed at runtime. 
+
+ Formulation. We decompose a fused MoE kernel’s execution
+time into four terms, each capturing a physically distinct
+component of GPU kernel scheduling: 
+
+ | 
+ T ⁡ ( c ) = a ⁡ ( c ) ⏟ startup + b ⁡ ( c ) ​ g SM ⏟ waves + c ⁡ ( c ) ​ g ⏟ per-CTA + d ⁡ ( c ) ​ log ⁡ ( g + 1 ) ⏟ sub-wave T(c)=\underbrace{a(c)}_{\text{startup}}+\underbrace{b(c)\,\tfrac{g}{\mathrm{SM}}}_{\text{waves}}+\underbrace{c(c)\,g\vphantom{\tfrac{g}{S}}}_{\text{per-CTA}}+\underbrace{d(c)\,\log(g{+}1)\vphantom{\tfrac{g}{S}}}_{\text{sub-wave}} | 
+ | 
+ (6) | 
+
+ where g = grid ⁡ ( c , routing ) g=\mathrm{grid}(c,\text{routing}) is the CTA count from
+Eq.  1 and SM = 132 \mathrm{SM}{=}132 on H200. 
+
+ Term-by-term interpretation. 
+(1)  a ⁡ ( c ) a(c) : the startup cost of one CTA—pipeline fill,
+mbarrier initialization, TMA descriptor setup—independent of
+how many CTAs run.
+(2)  b ⁡ ( c ) × g / SM b(c)\times g/\mathrm{SM} : the cost of wave
+scheduling ; g / SM g/\mathrm{SM} counts how many sequential waves the
+GPU must execute. The continuous ratio g / SM g/\mathrm{SM} (rather
+than ⌈ g / SM ⌉ \lceil g/\mathrm{SM}\rceil ) linearizes the wave count;
+the staircase jumps at wave boundaries are absorbed into the c × g c\times g term during OLS fitting.
+(3)  c ⁡ ( c ) × g c(c)\times g : the cost that scales per CTA, dominated by
+HBM weight traffic. Each CTA loads one weight tile
+( ttn × tile_k \texttt{ttn}\times\texttt{tile\_k} bytes); more CTAs means
+more total traffic when L2 misses.
+(4)  d ⁡ ( c ) × log ⁡ ( g + 1 ) d(c)\times\log(g{+}1) : captures diminishing
+returns of CTA parallelism in the sub-wave regime ( g < SM g<\mathrm{SM} ),
+where adding CTAs to a partially-filled wave provides decreasing
+marginal utilization. 
+
+ Because g g depends on the routing distribution
+(Eq.  1 ), T T becomes a function of both the
+configuration and the runtime expert histogram. 
+
+ Why not merge the wave and CTA terms? 
+The coefficients b / SM b/\mathrm{SM} and c c are fitted independently
+by OLS and capture different physical effects: b b tracks SM
+scheduling overhead (constant per wave), while c c tracks memory
+traffic (proportional to the number of CTAs). Models with high
+ λ \lambda (many N-tiles, high L2 pressure) exhibit large c c but
+small b b ; models with low λ \lambda show the reverse. Merging
+them into a single k × g k\times g term forces a shared coefficient,
+increasing mean regret from 0.93 % 0.93\% to 8.1 % 8.1\% . 
+
+ Progressive refinement. We validate each term’s
+contribution through ablation (§ V-B ).
+The 3-param model separates wave and CTA effects,
+halving mean regret. The 4th term ( log \log ) is critical for
+DSv3’s sub-wave regime ( n tiles = 2 n_{\mathrm{tiles}}{=}2 , grid always
+ < SM <\mathrm{SM} ), where the grid-time curve is concave rather
+than linear; it reduces DSv3’s max regret from 37.5 % 37.5\% to
+ 1.5 % 1.5\% . A 5th term ( g 2 g^{2} ) provides negligible further
+improvement, confirming four terms are sufficient. 
+
+ The log ⁡ ( g + 1 ) \log(g{+}1) term activates adaptively : it is included
+only for configs whose median profiling grid falls below
+ SM ​ _ ​ COUNT \mathrm{SM\_COUNT} (the sub-wave region). Configs with larger
+grids use the 3-parameter base ( d = 0 d{=}0 ). This selective
+activation prevents overfitting on multi-wave models while
+capturing sub-wave concavity on architectures like DSv3. 
+
+ Fitting. Three or four parameters per config are fitted
+via ordinary least squares from profiling at 5 batch sizes
+ × \times 5 balancedness levels = 25 =25  points per config.
+ Why OLS rather than a learned model? We compared OLS
+against a Random Forest (50 trees, max depth 5) and an MLP
+(32 × \times 16 hidden units) trained on the same 25 points per
+config with features [ g / SM , g , log ⁡ ( g + 1 ) ] [g/\mathrm{SM},g,\log(g{+}1)] . On
+held-out test points, the MLP achieves 2.0 % 2.0\% mean regret
+(vs. OLS 6.8 % 6.8\% ), but with 624 parameters per config fitted
+from 25 samples, it is severely overparameterized. OLS wins on
+deployment cost (4 floats per config, no ML framework dependency),
+physical interpretability ( a ≈ a\approx pipeline fill, b ≈ b\approx 
+wave overhead, c ≈ c\approx per-CTA traffic), and
+cross-architecture generalization—the parameters cluster by
+performance region (§ V-D ) because they
+capture hardware physics, not model-specific artifacts. Fitting
+requires a single matrix solve (under 1 ms per config).
+End-to-end profiling takes 10–24 minutes per model. 
+
+ Extensibility. Adding a new optimization dimension
+(e.g., GROUP_M) appends C new C_{\mathrm{new}} configs to the pool
+and profiles them at the same 25 points. The profiling cost grows
+ linearly in the number of dimensions, not multiplicatively
+as in combinatorial autotuning. 
+
+ Runtime dispatch. At serving time, the cost model
+evaluates all configs against the current expert histogram via a
+single fused Triton kernel on GPU that performs a bincount,
+vectorized cost evaluation, and argmin, all in approximately
+ 38 ​ μ 38\,\mu s. The dispatch result is cached per step and keyed on
+total token count M M ; subsequent MoE layers reuse the cached
+config. At each new step, the cache is cleared and the first
+layer re-dispatches from the fresh routing histogram.
+The total memory footprint is
+4 floats × \times 268 configs × \times 4 bytes = 4.3 =4.3  KB per
+model. 
+
+ Fig. 8 : (a) Cost model predicted time for four bm values on
+OLMoE vs. batch size S S . At small S S , bm = 8 \texttt{bm}{=}8 
+achieves the lowest cost (minimal padding); at large S S ,
+ bm = 64 \texttt{bm}{=}64 wins (fewer waves).
+(b) Wave staircase for bm = 16 \texttt{bm}{=}16 : time jumps discretely
+at wave boundaries ( SM = 132 \mathrm{SM}{=}132 ). 
+
+ IV-C Co-Designed Fused MoE Kernel 
+
+ A routing-aware cost model requires a configuration space wide
+enough to exploit routing variation. Alpha-MoE exposes 2 tile
+families; DeepGEMM fixes bm = 128 \texttt{bm}{=}128 . We implement a
+1,738-line CuTe DSL  [ 9 ] fused 3-phase kernel (W8A8 FP8,
+ 128 × 128 128{\times}128 block scales) that exposes 134–268 valid
+configurations per model on H200. 
+
+ The kernel implements the standard fused MoE forward pass: Phase 1
+gathers token activations via cp.async and computes
+up-projection through WGMMA; Phase 2 applies SwiGLU with
+in-register FP8 re-quantization (no HBM write); Phase 3 computes
+down-projection and scatters via cp.reduce.async.bulk .
+Producer-consumer warp specialization with stg -deep
+pipelines hides TMA latency. 
+
+ Configuration diversity. Hardware constraints (shared
+memory ≤ 227 \leq 227  KB, register budgets, WGMMA alignment) yield
+134 valid configs for Regime-A models and 268 for Regime-B
+(GROUP_M variants included). Configs span four tile families
+( ttn ∈ { 256,512 } \texttt{ttn}\in\{256,512\} ), pipeline depths 1–5, and token
+blocks bm ∈ [ 2,104 ] \texttt{bm}\in[2,104] . Two design choices expand the
+space: dynamic register allocation (supporting
+ bm up to 104 vs. 72 in prior work) and grid
+overlaunch (upper-bound grid with early-exit, eliminating GPU-to-CPU
+sync for exact grid computation). 
+
+ Polymorphic modes. GROUP_M swizzle, split-K ( sk = 4 \mathrm{sk}{=}4 
+in grid z-dimension), tile families, and compile variants are all
+selected at compile time but dispatched at runtime by the cost
+model. Split-K partitions Phase 1’s K-reduction across 4 CTAs,
+filling idle SMs at sub-wave operating points
+(Figure  6 ). CuTe DSL compiles each configuration
+in ∼ 5 {\sim}5  s via TVM-FFI JIT. 
+
+ IV-D Runtime Dispatch 
+
+ At serving time (Figure  5 ), a single fused
+Triton kernel performs three operations: (1) expert histogram via
+atomic bincount, (2) vectorized cost evaluation of
+Eq.  6 for all configs, and (3) argmin to select
+the optimal config. Total latency: ∼ 38 ​ μ {\sim}38\,\mu s, amortized to
+ < 2.5 ​ μ {<}2.5\,\mu s per MoE layer via per-step caching. The result is
+transferred to Python via a single .item() call; no
+additional CPU-GPU sync occurs. 
+
+ Both static and routing-aware modes launch the same compiled
+kernel binary —the only difference is config selection. Any
+observed speedup is therefore attributable to better dispatch, not
+kernel implementation differences. 
+
+ The cost model formulation (Eq.  6 ) depends only
+on the CTA grid, not the kernel. Profiling a new backend requires
+only timing its configs at 25  ( S , β ) (S,\beta) points and fitting via
+OLS; no source modification is needed. This kernel-agnostic
+property is validated experimentally in
+Table  VI . 
+
+ Per-step amortization. The dispatch result is cached for
+all MoE layers within a single forward step. This is justified by
+the low cross-layer β \beta variance ( 0.0008 0.0008 , measured across
+9,728 per-layer observations); per-layer dispatch provides only
+ 1.02 − 1.04 × 1.02{-}1.04\times additional gain (§ V-E ).
+The total memory footprint is
+4 floats × \times 268 configs × \times 4 bytes = 4.3 =4.3  KB per
+model. 
+
+ V Evaluation 
+
+ We evaluate RaMP at two levels.
+ Kernel-level evaluation 
+(§ V-B – V-D ) constitutes
+the primary research evaluation: it validates the cost model’s
+accuracy, the routing-aware dispatch thesis, the kernel-agnostic
+property, and the regime theory’s predictions under controlled
+conditions.
+ End-to-end serving (§ V-E ) validates that
+kernel-level gains translate to measurable improvements in a
+production serving stack. 
+
+ V-A Methodology 
+
+ Hardware. Single NVIDIA H200 SXM (132 SMs, 4.8 TB/s
+HBM3e, SM 90a); CUDA 12.8, PyTorch 2.9, CUTLASS 4.0. 
+
+ Protocol. Kernel: CUDA events, 10 warmup + 50 timed
+iterations, median reported (CV < 3 % {<}3\% for 99% of points).
+E2E: vLLM v0.9, --enforce-eager , 80 prompts, sequential
+same-GPU runs with full server restart between backends. 
+
+ Baselines. Exhaustive search : all 134–268 configs
+timed at every point (ceiling). Static dispatch : best config
+at β = 1.0 \beta{=}1.0 . Alpha-MoE   [ 5 ] : JIT-tuned C++
+kernel. vLLM Triton FP8 : production default.
+ FlashInfer CUTLASS   [ 7 ] : integrated
+CUTLASS/TRT-LLM kernels. 
+
+ V-B Cost Model Accuracy 
+
+ TABLE IV : Cost model regret (%) vs. exhaustive search (50-iteration
+median, 24 test points per model). Unseen models were profiled
+from scratch with zero prior knowledge. 
+
+ Model | 
+ Type | 
+ E E | 
+ N N | 
+ K K | 
+ Mean ± \pm SE | 
+ Max | 
+
+ OLMoE | 
+ known | 
+ 64 | 
+ 2048 | 
+ 2048 | 
+ 1.0 ± 0.3 1.0{\pm}0.3 | 
+ 8.2 | 
+
+ Qwen3 | 
+ known | 
+ 128 | 
+ 1536 | 
+ 2048 | 
+ 1.1 ± 0.4 1.1{\pm}0.4 | 
+ 10.2 | 
+
+ Mixtral | 
+ known | 
+ 8 | 
+ 32768 | 
+ 6144 | 
+ 1.0 ± 0.1 1.0{\pm}0.1 | 
+ 2.0 | 
+
+ DSv3-EP8 | 
+ known | 
+ 32 | 
+ 512 | 
+ 7168 | 
+ 0.9 ± 0.1 0.9{\pm}0.1 | 
+ 1.5 | 
+
+ DSv3-TP8 | 
+ known | 
+ 256 | 
+ 512 | 
+ 7168 | 
+ 0.8 ± 0.1 0.8{\pm}0.1 | 
+ 1.4 | 
+
+ Phi-MoE | 
+ unseen | 
+ 16 | 
+ 12800 | 
+ 4096 | 
+ 1.0 ± 0.1 1.0{\pm}0.1 | 
+ 1.9 | 
+
+ Jamba | 
+ unseen | 
+ 16 | 
+ 16384 | 
+ 4096 | 
+ 0.9 ± 0.1 0.9{\pm}0.1 | 
+ 1.6 | 
+
+ DBRX | 
+ unseen | 
+ 16 | 
+ 21504 | 
+ 6144 | 
+ 0.8 ± 0.1 0.8{\pm}0.1 | 
+ 1.6 | 
+
+ Overall | 
+ | 
+ | 
+ | 
+ | 
+ 0.93 ± 0.04 \mathbf{0.93{\pm}0.04} | 
+ 10.2 | 
+
+ Unseen only | 
+ | 
+ | 
+ | 
+ | 
+ 0.91 ± 0.04 \mathbf{0.91{\pm}0.04} | 
+ 1.9 | 
+
+ Table  IV reports cost model regret against
+exhaustive search across 8 architectures (5 known, 3 unseen).
+The model achieves 0.93 % \mathbf{0.93\%} mean regret overall and
+ 0.91 % \mathbf{0.91\%} on unseen models— lower than the
+known-model average, confirming that no model-specific tuning is
+needed. Test points include S = 1024 S{=}1024 (exceeding the profiling
+maximum of 512) and β ∈ { 0.2 , 0.8 } \beta\in\{0.2,0.8\} (absent from
+profiling), demonstrating extrapolation. 
+
+ The max regret ( 10.2 % 10.2\% on Qwen3 at S = 8 S{=}8 , β = 0.8 \beta{=}0.8 )
+occurs at an edge case where each expert receives ≤ 1 \leq 1 token,
+making the CTA grid identical for every bm ; the absolute
+gap is only 6.5 ​ μ 6.5\,\mu s. In practice, β > 0.7 \beta>0.7 occurs in
+only 2.5 % 2.5\% of observations. 
+
+ Progressive refinement. The ablation from 2 to 4
+parameters validates each term’s necessity: 
+
+ Model | 
+ Mean regret | 
+ Max regret | 
+
+ 2-param: a + k ⋅ g a+k\cdot g | 
+ 8.1% | 
+ 42.3% | 
+
+ 3-param: a + b ⋅ g / SM + c ⋅ g a+b\cdot g/\mathrm{SM}+c\cdot g | 
+ 4.0% | 
+ 37.5% | 
+
+ 4-param: + d ⋅ log ( g + 1 ) +\;d\cdot\log(g{+}1) | 
+ 0.93% | 
+ 10.2% | 
+
+ The log ⁡ ( g + 1 ) \log(g{+}1) term alone reduces DSv3’s max regret
+from 37.5 % 37.5\% to 1.5 % 1.5\% . The cost model achieves R 2 ≥ 0.88 R^{2}\geq 0.88 
+on all 8 models, with profiling taking 10–24 minutes per model. 
+
+ V-C Kernel-Level Evaluation 
+
+ This section presents the primary research evaluation: kernel
+throughput under controlled routing conditions. 
+
+ How much does routing-aware dispatch help? 
+Table  V evaluates the central question: does
+adapting to the routing distribution yield improvement over strong
+static policies? Static dispatch is defined as the best config at
+ β = 1.0 \beta{=}1.0 —the policy all existing autotuners produce. 
+
+ TABLE V : Routing-aware (RA) vs. static dispatch. Static selects
+the best config at β = 1.0 \beta{=}1.0 . RA uses the cost model with the
+actual routing histogram. Same kernel binary; only dispatch differs. 
+
+ Model | 
+ S S | 
+ Static ( μ \mu s) | 
+ RA ( μ \mu s) | 
+ Speedup | 
+
+ β = 0.5 \beta=0.5 (mean real routing) | 
+
+ DSv3-TP8 | 
+ 64 | 
+ 244 | 
+ 143 | 
+ 1.70 × \mathbf{1.70\times} | 
+
+ DSv3-TP8 | 
+ 128 | 
+ 277 | 
+ 198 | 
+ 1.40 × \mathbf{1.40\times} | 
+
+ DSv3-TP8 | 
+ 32 | 
+ 155 | 
+ 116 | 
+ 1.33 × \mathbf{1.33\times} | 
+
+ DSv3-TP8 | 
+ 16 | 
+ 91 | 
+ 72 | 
+ 1.27 × 1.27\times | 
+
+ DSv3-TP8 | 
+ 256 | 
+ 315 | 
+ 248 | 
+ 1.27 × 1.27\times | 
+
+ OLMoE | 
+ 64 | 
+ 127 | 
+ 107 | 
+ 1.19 × 1.19\times | 
+
+ OLMoE | 
+ 16 | 
+ 65 | 
+ 55 | 
+ 1.18 × 1.18\times | 
+
+ Geomean ( β = 0.5 \beta{=}0.5 , 7 pts shown) | 
+ 1.22 × \mathbf{1.22\times} | 
+
+ β = 0.8 \beta=0.8 (75th percentile real routing) | 
+
+ DSv3-TP8 | 
+ 64 | 
+ 398 | 
+ 369 | 
+ 1.08 × 1.08\times | 
+
+ DSv3-TP8 | 
+ 256 | 
+ 406 | 
+ 379 | 
+ 1.07 × 1.07\times | 
+
+ OLMoE | 
+ 32 | 
+ 116 | 
+ 109 | 
+ 1.06 × 1.06\times | 
+
+ Geomean ( β = 0.8 \beta{=}0.8 , 3 pts shown) | 
+ 1.03 × \mathbf{1.03\times} | 
+
+ At realistic routing ( β = 0.5 \beta{=}0.5 ), routing-aware dispatch
+provides 1.22 × \mathbf{1.22\times} geomean speedup, reaching
+ 1.70 × 1.70\times on DSv3-TP8 at S = 64 S{=}64 . Even at β = 0.8 \beta{=}0.8 
+(moderate skew), gains persist at 1.03 − 1.08 × 1.03{-}1.08\times . This result
+isolates the value of routing information: same kernel, same
+hardware, only the dispatch strategy differs. 
+
+ Is the cost model kernel-agnostic? 
+To demonstrate that the cost model is not tied to our kernel, we
+profile Alpha-MoE’s C++ kernel through our cost model and compare
+against their JIT dispatch— same kernel binary, different
+config selection (Table  VI ). 
+
+ TABLE VI : Kernel-agnostic dispatch validation. Dispatch: our cost
+model selecting configs for Alpha-MoE’s C++ kernel vs. their JIT
+dispatch ( same kernel binary ). Kernel: our CuTe kernel vs. Alpha-MoE (both with our dispatch). Combined: full RaMP vs. full Alpha-MoE. 92 test points at β ∈ { 0.5 , 0.8 } \beta\in\{0.5,0.8\} . 
+
+ Model | 
+ Dispatch | 
+ Kernel | 
+ Combined | 
+ Losses | 
+
+ OLMoE | 
+ 1.10 × 1.10\times | 
+ 1.19 × 1.19\times | 
+ 1.31 × 1.31\times | 
+ 0/23 | 
+
+ Qwen3 | 
+ 1.22 × 1.22\times | 
+ 1.12 × 1.12\times | 
+ 1.36 × 1.36\times | 
+ 0/23 | 
+
+ DSv3 | 
+ 1.21 × 1.21\times | 
+ 1.08 × 1.08\times | 
+ 1.30 × 1.30\times | 
+ 1/23 | 
+
+ Mixtral | 
+ 1.04 × 1.04\times | 
+ 1.11 × 1.11\times | 
+ 1.15 × 1.15\times | 
+ 0/23 | 
+
+ Overall | 
+ 1.14 × \mathbf{1.14\times} | 
+ 1.12 × 1.12\times | 
+ 1.28 × 1.28\times | 
+ 1/92 | 
+
+ The dispatch column isolates the cost model’s
+contribution on an unmodified third-party kernel : our
+routing-aware dispatch improves Alpha-MoE’s own kernel by
+ 1.14 × \mathbf{1.14\times} geomean, with only 1 loss out of 92 test
+points. This confirms that the cost model framework applies to
+ any fused MoE kernel exposing a tunable config space; the
+vLLM-specific integration details are orthogonal. Profiling a new
+kernel requires only 10–24 min of timing; no source modification
+is needed. 
+
+ Combined kernel + dispatch 
+(Table  VII ).
+The full RaMP system (CuTe kernel + cost model) achieves
+ 1.21 × \mathbf{1.21\times} geomean over Alpha-MoE across 4 models,
+with the largest gain on Mixtral ( 1.45 × 1.45\times ) where GROUP_M
+reduces L2 thrashing. 
+
+ TABLE VII : Geomean kernel speedup: RaMP (CuTe + cost model)
+vs. Alpha-MoE C++ (JIT best), at β = 0.5 \beta{=}0.5 . 
+
+ Per- S S examples | 
+ Geomean | 
+
+ Model | 
+ S S | 
+ RaMP | 
+ Alpha | 
+ Model | 
+ Speedup | 
+
+ OLMoE | 
+ 32 | 
+ 72 | 
+ 87 | 
+ OLMoE | 
+ 1.13 × \mathbf{1.13\times} | 
+
+ | 
+ 1024 | 
+ 319 | 
+ 384 | 
+ Qwen3 | 
+ 1.09 × \mathbf{1.09\times} | 
+
+ DSv3 | 
+ 32 | 
+ 67 | 
+ 77 | 
+ DSv3 | 
+ 1.20 × \mathbf{1.20\times} | 
+
+ | 
+ 512 | 
+ 178 | 
+ 238 | 
+ Mixtral | 
+ 1.45 × \mathbf{1.45\times} | 
+
+ Mixtral | 
+ 32 | 
+ 617 | 
+ 658 | 
+ | 
+ | 
+
+ | 
+ 512 | 
+ 1529 | 
+ 2665 | 
+ | 
+ | 
+
+ V-D Performance-Region Validation 
+
+ The regime theory makes falsifiable predictions from hardware
+constants alone. We validate each via Nsight Compute profiling
+and standalone kernel experiments. 
+
+ TABLE VIII : Nsight Compute validation. TC%: tensor core utilization.
+L2%: L2 hit rate. SM%: achieved occupancy. 
+
+ Model | 
+ Point | 
+ TC% | 
+ L2% | 
+ SM% | 
+ μ \mu s | 
+
+ OLMoE | 
+ decode | 
+ 11.4 | 
+ 2.8 | 
+ 18.7 | 
+ 23 | 
+
+ | 
+ prefill | 
+ 14.3 | 
+ 69.5 | 
+ 36.8 | 
+ 287 | 
+
+ Mixtral | 
+ decode | 
+ 9.3 | 
+ 1.6 | 
+ 18.8 | 
+ 76 | 
+
+ | 
+ prefill | 
+ 18.3 | 
+ 75.6 | 
+ 37.1 | 
+ 1108 | 
+
+ DSv3-EP8 | 
+ decode | 
+ 13.8 | 
+ 2.6 | 
+ 18.8 | 
+ 59 | 
+
+ | 
+ prefill | 
+ 18.1 | 
+ 79.1 | 
+ 35.5 | 
+ 258 | 
+
+ NCU validation (Table  VIII ).
+ ρ \rho predicts TC utilization (below 20% for all models,
+confirming pipeline domination); λ \lambda predicts L2 hit rate
+(models with λ > 8 \lambda>8 show persistent thrashing); ω \omega 
+predicts SM occupancy (DSv3-EP8 at 18.8% through S = 64 S{=}64 ,
+confirming split-K opportunity). 
+
+ Split-K: predicted before implemented. 
+The regime analysis predicted split-K on DSv3 ( κ = 56 \kappa{=}56 ,
+ ω < 0.2 \omega<0.2 ) from geometry alone, before any split-K
+kernel existed . The subsequently implemented kernel confirms:
+ 1.11 − 1.12 × 1.11{-}1.12\times on DSv3 (positive prediction) and
+ 0.83 − 0.88 × 0.83{-}0.88\times on Mixtral/DBRX (negative prediction). Both
+positive and negative confirmations carry equal evidential weight. 
+
+ GROUP_M: threshold-exact. 
+Eq.  4 correctly predicts GROUP_M necessity for
+all 8 models: required on Mixtral ( λ ⋅ κ = 6144 ≫ 1440 \lambda\cdot\kappa=6144\gg 1440 , 1.15 − 1.29 × 1.15{-}1.29\times at S ≥ 128 S\geq 128 ), irrelevant on OLMoE
+( λ ⋅ κ = 128 ≪ 1440 \lambda\cdot\kappa=128\ll 1440 ). 
+
+ V-E End-to-End System Validation 
+
+ To validate that kernel-level gains translate to real serving
+improvements, we deploy RaMP in vLLM and benchmark against all
+available backends. 
+
+ TABLE IX : End-to-end RaMP speedup on OLMoE-1B-7B-FP8 (H200,
+single GPU, 80 prompts per workload, same-GPU sequential runs).
+DG: DeepGEMM; Tri: Triton; FI: FlashInfer CUTLASS.
+TPOT and TTFT are per-request means; higher is better. 
+
+ | 
+ | 
+ TPOT | 
+ TTFT | 
+
+ Work. | 
+ r r | 
+ DG | 
+ Tri | 
+ FI | 
+ DG | 
+ Tri | 
+ FI | 
+
+ Long | 
+ 2 | 
+ 1.43 | 
+ 1.34 | 
+ 1.15 | 
+ 1.04 | 
+ 1.18 | 
+ 1.08 | 
+
+ | 
+ 4 | 
+ 1.48 | 
+ 1.34 | 
+ 1.16 | 
+ 1.12 | 
+ 1.19 | 
+ 1.06 | 
+
+ | 
+ 8 | 
+ 1.24 | 
+ 1.29 | 
+ 1.11 | 
+ 0.95 | 
+ 1.13 | 
+ 1.02 | 
+
+ Share | 
+ 2 | 
+ 1.50 | 
+ 1.30 | 
+ 1.16 | 
+ 1.44 | 
+ 1.21 | 
+ 1.09 | 
+
+ | 
+ 4 | 
+ 1.42 | 
+ 1.21 | 
+ 1.09 | 
+ 1.35 | 
+ 1.15 | 
+ 1.06 | 
+
+ Geo. | 
+ 1.41 | 
+ 1.30 | 
+ 1.13 | 
+ 1.17 | 
+ 1.17 | 
+ 1.06 | 
+
+ Table  IX reports RaMP speedup across two workload
+profiles—long-context (1024-token input, 32-token output) and
+ShareGPT (real conversation traces)—at request rates r = 2 − 8 r{=}2{-}8 .
+Across all 5 configurations, RaMP achieves
+ 1.30 × \mathbf{1.30\times} TPOT geomean over Triton FP8,
+ 1.41 × \mathbf{1.41\times} over DeepGEMM, and
+ 1.13 × \mathbf{1.13\times} over FlashInfer CUTLASS, with
+ 1.17 × \mathbf{1.17\times} TTFT improvement over Triton.
+DeepGEMM’s fixed bm = 128 \texttt{bm}{=}128 is poorly matched to OLMoE’s
+small expert sizes ( 1.24 − 1.50 × 1.24{-}1.50\times ). RaMP outperforms
+FlashInfer on every configuration ( 1.09 − 1.16 × 1.09{-}1.16\times TPOT),
+confirming that routing-aware dispatch provides gains beyond what
+CUTLASS autotuning achieves alone. 
+
+ E2E attribution. The TPOT improvement decomposes into
+ ∼ 1.05 × {\sim}1.05\times from the fused CuTe kernel (eliminating
+inter-phase HBM traffic) and ∼ 1.12 × {\sim}1.12\times from routing-aware
+dispatch. The dispatch contribution—the paper’s primary
+claim—accounts for the majority of the E2E gain. 
+
+ Second model: Qwen3.5-A3B ( E = 256 E{=}256 , top- k = 8 k{=}8 ,
+40 MoE layers). Profiled from scratch in 12 minutes with no
+model-specific tuning, this model achieves 1.10 × \mathbf{1.10\times} 
+geomean TPOT improvement ( 1.08 − 1.11 × 1.08{-}1.11\times across 6 workload
+configurations), confirming generalization to unseen architectures
+in deployment. 
+
+ VI Related Work 
+
+ MoE training systems. 
+MegaBlocks  [ 10 ] , Tutel  [ 11 ] ,
+FasterMoE  [ 12 ] , and ScatterMoE  [ 13 ] 
+optimize communication and compute for MoE training.
+SonicMoE  [ 8 ] achieves near-roofline training throughput
+via IO-overlapping kernels. These address training; our work
+targets single-GPU inference dispatch. 
+
+ MoE inference kernels. 
+Alpha-MoE  [ 5 ] provides a JIT-tuned fused kernel
+( ∼ 2 {\sim}2  hours per model);
+DeepGEMM  [ 6 ] offers JIT-compiled grouped GEMM with
+fixed bm = 128 \texttt{bm}{=}128 ;
+FlashInfer  [ 7 ] integrates CUTLASS kernels with
+autotuning. All use static per- M M dispatch. Our cost model is
+ kernel-agnostic : it improved Alpha-MoE’s own kernel by
+ 1.14 × 1.14\times  (§ V-C ) without source modification. 
+
+ Autotuning and performance modeling. 
+vLLM  [ 4 ] , SGLang  [ 14 ] , and
+Triton  [ 15 ] select configs via offline sweeps;
+TVM/Ansor  [ 16 ] searches via learned cost models.
+All scale combinatorially with optimization dimensions and produce
+static dispatch tables; our wave model adds new dimensions at
+ linear profiling cost.
+The roofline model  [ 17 ] classifies compute- vs. memory-bound kernels; the ECM model  [ 18 ] adds cache hierarchy
+effects. Our region analysis extends this to MoE dispatch: where
+roofline predicts bottleneck type , our variables predict
+which specific optimizations help, with thresholds derived
+from hardware constants. 
+
+ VII Conclusion 
+
+ We presented RaMP, demonstrating that routing-aware kernel
+dispatch is a fundamental missing axis in MoE inference
+optimization. A performance-region analysis derived from hardware
+constants identifies when each optimization helps across all
+8 tested architectures. A four-parameter wave cost model achieves
+ 0.93 % 0.93\% mean regret and 1.22 × 1.22\times kernel speedup over static
+dispatch. Because the model depends only on CTA grid geometry, it
+is kernel-agnostic : applied to Alpha-MoE with no source
+changes, it delivers 1.14 × 1.14\times . Deployed in vLLM, the full
+system achieves 1.30 × 1.30\times end-to-end speedup over Triton FP8,
+ 1.41 × 1.41\times over DeepGEMM, and 1.13 × 1.13\times over FlashInfer
+CUTLASS on OLMoE, and 1.10 × 1.10\times on Qwen3.5-A3B. 
+
+ Limitations. 
+(1) Validated on Hopper W8A8 FP8; extending to Blackwell requires
+re-profiling but not re-derivation.
+(2) Single-GPU scope; expert-parallel communication is orthogonal.
+(3) At S = 1 S{=}1 or under perfectly uniform routing ( β = 1 \beta{=}1 ),
+routing-aware and static dispatch converge by design.
+As MoE architectures continue to scale expert counts and routing
+complexity, we believe routing-aware dispatch will become
+a standard component of inference serving stacks. 
+
+ References 
+
+ [1] 
+ DeepSeek-AI (2024) 
+
+ DeepSeek-V3 technical report .
+
+ arXiv preprint arXiv:2412.19437 .
+
+ Note: https://doi.org/10.48550/arXiv.2412.19437 
+
+ Cited by: §I ,
+ §II-A .
+
+ [2] 
+ N. Muennighoff, L. Soldaini, D. Groeneveld, K. Lo, J. Morrison, S. Min, W. Shi, P. Walsh, O. Tafjord, N. Lambert, Y. Gu, S. Arora, A. Bhagia, D. Schwenk, D. Wadden, A. Wettig, B. Hui, T. Dettmers, D. Kiela, A. Farhadi, N. A. Smith, P. W. Koh, A. Singh, and H. Hajishirzi (2024) 
+
+ OLMoE: open mixture-of-experts language models .
+
+ arXiv preprint arXiv:2409.02060 .
+
+ Note: https://doi.org/10.48550/arXiv.2409.02060 
+
+ Cited by: §I ,
+ §II-A .
+
+ [3] 
+ Qwen Team (2025) 
+
+ Qwen3 technical report .
+
+ arXiv preprint arXiv:2505.09388 .
+
+ Note: https://doi.org/10.48550/arXiv.2505.09388 
+
+ Cited by: §I .
+
+ [4] 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica (2023) 
+
+ Efficient memory management for large language model serving with PagedAttention .
+
+ In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) ,
+
+ pp. 611–626 .
+
+ Note: https://doi.org/10.1145/3600006.3613165 
+
+ Cited by: TABLE I ,
+ §VI .
+
+ [5] 
+ Aleph Alpha (2025) 
+
+ Alpha-moe: fused mixture-of-experts kernel .
+
+ Note: https://github.com/Aleph-Alpha/Alpha-MoE 
+
+ Cited by: TABLE I ,
+ §V-A ,
+ §VI .
+
+ [6] 
+ DeepSeek-AI (2025) 
+
+ DeepGEMM: clean and efficient fp8 gemm kernels .
+
+ Note: https://github.com/deepseek-ai/DeepGEMM 
+
+ Cited by: TABLE I ,
+ §VI .
+
+ [7] 
+ Z. Ye, L. Chen, R. Lai, W. Lin, Y. Zhang, S. Wang, T. Chen, B. Kasikci, V. Grover, A. Krishnamurthy, and L. Ceze (2025) 
+
+ FlashInfer: efficient and customizable attention engine for LLM inference serving .
+
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+
+ Note: https://doi.org/10.48550/arXiv.2501.01005 
+
+ Cited by: TABLE I ,
+ §V-A ,
+ §VI .
+
+ [8] 
+ W. Guo, M. Mishra, X. Cheng, I. Stoica, and T. Dao (2025) 
+
+ SonicMoE: accelerating MoE with IO and tile-aware optimizations .
+
+ arXiv preprint arXiv:2512.14080 .
+
+ Note: https://doi.org/10.48550/arXiv.2512.14080 
+
+ Cited by: TABLE I ,
+ §VI .
+
+ [9] 
+ NVIDIA (2024) 
+
+ CUTLASS: cuda templates for linear algebra subroutines .
+
+ Note: https://github.com/NVIDIA/cutlass 
+
+ Cited by: §IV-C .
+
+ [10] 
+ T. Gale, D. Narayanan, C. Young, and M. Zaharia (2023) 
+
+ MegaBlocks: efficient sparse training with mixture-of-experts .
+
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+
+ Note: https://doi.org/10.48550/arXiv.2211.15841 
+
+ Cited by: §VI .
+
+ [11] 
+ C. Hwang, W. Cui, Y. Xiong, Z. Yang, Z. Liu, H. Hu, Z. Wang, R. Salas, J. Jose, P. Ram, H. Chau, P. Cheng, F. Yang, M. Yang, and Y. Xiong (2023) 
+
+ Tutel: adaptive mixture-of-experts at scale .
+
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+
+ Note: https://doi.org/10.48550/arXiv.2206.03382 
+
+ Cited by: §VI .
+
+ [12] 
+ J. He, J. Zhai, T. Antunes, H. Wang, F. Luo, S. Shi, and Q. Li (2022) 
+
+ FasterMoE: modeling and optimizing training of large-scale dynamic pre-trained models .
+
+ In Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP) ,
+
+ pp. 120–134 .
+
+ Note: https://doi.org/10.1145/3503221.3508418 
+
+ Cited by: §VI .
+
+ [13] 
+ S. Tan, Y. Shen, R. Panda, and A. Courville (2024) 
+
+ Scattered mixture-of-experts implementation .
+
+ arXiv preprint arXiv:2403.08245 .
+
+ Note: https://doi.org/10.48550/arXiv.2403.08245 
+
+ Cited by: §VI .
+
+ [14] 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng (2024) 
+
+ SGLang: efficient execution of structured language model programs .
+
+ In Advances in Neural Information Processing Systems (NeurIPS) ,
+
+ Vol. 37 .
+
+ Note: https://doi.org/10.48550/arXiv.2312.07104 
+
+ Cited by: §VI .
+
+ [15] 
+ P. Tillet, H. T. Kung, and D. Cox (2019) 
+
+ Triton: an intermediate language and compiler for tiled neural network computations .
+
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages (MAPL) ,
+
+ pp. 10–19 .
+
+ Note: https://doi.org/10.1145/3315508.3329973 
+
+ Cited by: §VI .
+
+ [16] 
+ L. Zheng, C. Jia, M. Sun, Z. Wu, C. H. Yu, A. Haj-Ali, Y. Wang, J. Yang, D. Zhuo, K. Sen, J. E. Gonzalez, R. Bodik, and I. Stoica (2020) 
+
+ Ansor: generating high-performance tensor programs for deep learning .
+
+ In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+
+ pp. 863–879 .
+
+ Note: https://doi.org/10.48550/arXiv.2006.06762 
+
+ Cited by: §VI .
+
+ [17] 
+ S. Williams, A. Waterman, and D. Patterson (2009) 
+
+ Roofline: an insightful visual performance model for multicore architectures .
+
+ Communications of the ACM 52 ( 4 ), pp. 65–76 .
+
+ Note: https://doi.org/10.1145/1498765.1498785 
+
+ Cited by: §VI .
+
+ [18] 
+ H. Stengel, J. Treibig, G. Hager, and G. Wellein (2015) 
+
+ Quantifying performance bottlenecks of stencil computations using the Execution-Cache-Memory model .
+
+ In Proceedings of the 29th ACM International Conference on Supercomputing (ICS) ,
+
+ pp. 207–216 .
+
+ Note: https://doi.org/10.1145/2751205.2751240 
+
+ Cited by: §VI .

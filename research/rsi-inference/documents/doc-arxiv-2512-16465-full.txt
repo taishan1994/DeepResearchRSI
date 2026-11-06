@@ -1,0 +1,696 @@
+cuPilot: A Strategy-Coordinated Multi-agent Framework for CUDA Kernel Evolution
+
+ Jinwu Chen
+
+ Note:  These authors contributed equally to this work.
+
+ Affiliation:  Southeast University , Nanjing, China 
+
+ , 
+ Qidie Wu
+
+ Affiliation:  Tsinghua University , Beijing, China 
+
+ , 
+ Bin Li
+
+ Affiliation:  Tsing Micro , Beijing, China 
+
+ , 
+ Lin Ma
+
+ Affiliation:  Tsing Micro , Beijing, China 
+
+ , 
+ Xin Si
+
+ Affiliation:  Southeast University , Beijing, China 
+
+ , 
+ Yang Hu
+
+ Affiliation:  Tsinghua University , Beijing, China 
+
+ , 
+ Shouyi Yin
+
+ Note:  Corresponding authors.
+
+ Affiliation:  Tsinghua University , Beijing, China 
+
+ email: yinsy@tsinghua.edu.cn 
+
+ and 
+ Jun Yang
+
+ Affiliation:  National Center of Technology Innovation for EDA , Nanjing, China 
+
+ email: dragon@seu.edu.cn 
+
+ Abstract. 
+
+ Optimizing CUDA kernels is a challenging and labor-intensive task, given the need for hardware-software co-design expertise and the proprietary nature of high-performance kernel libraries.
+While recent large language models (LLMs) combined with evolutionary algorithms show promise in automatic kernel optimization, existing approaches often fall short in performance due to their suboptimal agent designs and mismatched evolution representations.
+This work identifies these mismatches and proposes cuPilot, a strategy-coordinated multi-agent framework that introduces strategy as an intermediate semantic representation for kernel evolution.
+Key contributions include a strategy-coordinated evolution algorithm, roofline-guided prompting, and strategy-level population initialization.
+Experimental results show that the generated kernels by cuPilot achieve an average speed up of 3.09 × \times over PyTorch on a benchmark of 100 kernels.
+On the GEMM tasks, cuPilot showcases sophisticated optimizations and achieves high utilization of critical hardware units.
+The generated kernels are open-sourced at https://github.com/champloo2878/cuPilot-Kernels.git. 
+
+ Keywords:  GPU Kernel, Multi-agent Framework, Evolution Algorithm
+
+ 1. Introduction 
+
+ The optimization of CUDA kernels, a widely adopted GPU programming model  ( Corporation, 2025 ) , is crucial for achieving peak AI inference/training performance.
+However, optimizing GPU kernels is a labor-intensive and time-consuming task.
+First, it necessitates a thorough understanding of the target GPU architecture, along with meticulous tuning of both computation and memory access. It entails techniques like warp scheduling, fine-grained data layouts, and even PTX-level optimizations.
+Second, the scarcity of open-source kernels further elevates the barrier to high-performance kernel development, which compels designers to devote extensive time to exploring diverse optimization strategies.
+Moreover, the rapid iterative modern GPUs and applications inevitably render kernel optimization a challenging and inherently labor-intensive task. 
+
+ Fortunately, recent emerging LLMs have shown promise in automatic kernel generation. Many efforts have attempted to enhance LLM through reflection  ( Andrews and Witteveen, 2025 ) , Retrieval-Augmented Generation (RAG)  ( Lange et al., 2025 ) , or Reinforcement Learning (RL)  ( Baronio et al., 2025 ; Li et al., 2025b ) .
+However, most existing works remain focused on functional correctness, with significantly lower performance than manually written libraries.
+This limitation stems from their limited agentic flows, which merely rely on one-shot queries or inefficient reflections.
+For better exploitation of LLMs, integrating evolutionary algorithms with LLM agents is considered a viable path toward higher-order intelligence  ( Novikov et al., 2025 ; Li et al., 2022 ; Gurkan et al., 2025 ) .
+For GPU kernel, several works  ( Lange et al., 2025 ; Chen et al., 2025 ) explore crossover prompting techniques to generate new kernels from selected parent kernels, thus evolving kernels’ performance across multiple generations. 
+
+ However, kernels optimized by existing frameworks still remain suboptimal  ( AI, 2025 ) , exhibiting few basic optimization strategies.
+We identify that current kernel evolution frameworks suffer from multi-dimensional mismatches between the high-level evolutionary algorithm and low-level kernel code:
+ (1) Mismatched crossover representation: Conventional crossover prompting is operated at the code level, where optimization strategies are implicitly crossed. Such kernel-to-kernel prompting makes LLM to traverse an extended reasoning chain spanning strategy identification, strategy combination, and kernel synthesis. This often yields ineffective optimizations and drops previously attained gains, especially as the kernel’s complexity grows.
+ (2) Mismatched fitness representation: The fitness function, based solely on performance, exhibits weak semantic correlation with the kernel code. This prevents LLM from accurately pinpointing bottlenecks among numerous profiling reports, thus resulting in trivial optimizations.
+ (3) Mismatched population initialization: The initial population is represented by a sparse collection of kernel codes. It provides inadequate coverage of the entire optimization strategy space. Consequently, the optimization is prone to premature convergence to local optima. 
+
+ To address these challenges, this work introduces Strategy as an intermediate representation and proposes a Strategy-Coordinated multi-agent framework named cuPilot. Key contributions are: 
+
+ • 
+
+ A Strategy-Coordinated Evolution (SCE) algorithm is proposed, which decouples the long reasoning chain of conventional crossover prompting into strategy-level crossover and strategy-to-kernel translation. This enables LLM to optimize under explicit strategy guidance, substantially improving the viability and performance of generated kernels. 
+
+ • 
+
+ A roofline-guided prompting method is applied. By first positioning the target kernel on the GPU’s roofline model, the LLM determines if it is compute-bound, memory-bound, or in a middle-zone, thus guiding the prompting for better strategy generation and kernel refinement. 
+
+ • 
+
+ A strategy-level population initialization method is proposed, which establishes an external strategy pool and learn optimization strategies from the historical data via RAG. It enhances the LLM’s strategy generation capability and achieves a higher rate of evolutionary convergence. 
+
+ • 
+
+ Experiment on the 100 kernels of KernelBench  ( Ouyang et al., 2025 ) , cuPilot achieves 3.09 × 3.09\times speedup over PyTorch. The case study on GEMM tasks showcases sophisticated optimizations with high utilization of critical hardware units. The generated high-performance kernels are open-sourced. 
+
+ 2. Background 
+
+ 2.1. CUDA Programming 
+
+ To achieve general-purpose GPU programming, NVIDIA developed CUDA (Compute Unified Device Architecture) as a parallel computing platform and programming model  ( Corporation, 2025 ) . CUDA extended the C/C++ language to allow developers to leverage the massive parallel computing capabilities of GPUs. CUDA framework unlocks sophisticated control over GPU threads, memory hierarchies, and synchronization. Its programming abstraction also organizes threads into a hierarchical structure of warps, blocks, and grids. This capability renders it indispensable for accelerating computationally intensive tasks involving large-scale matrix and tensor operations  ( Kirk and Wen-Mei, 2016 ) . Furthermore, CUDA’s ecosystem offers highly optimized libraries like cuBLAS and cuDNN  ( Chetlur et al., 2014 ) , which significantly enhance application performance for linear algebra and deep neural networks. Therefore, the optimization of CUDA kernels is pivotal for effectively addressing the demands of complex modern applications. 
+
+ 2.2. LLM-Assisted CUDA Kernel Generation 
+
+ Hand-optimization of CUDA kernels is a challenging and time-consuming task that requires designers to possess deep, multifaceted expertise in algorithms and hardware architecture. During the optimization process, designers rely heavily on extensive feedback to guide subsequent manual adjustments.
+This includes compiler feedback, reports from profiling tools, details of different architectures and instruction sets.
+These effort-intensive tasks significantly hinder the efficiency of kernel development, a challenge that is particularly acute given the rapid iteration of modern GPUs and applications. An example is FlashAttention kernel, whose adaptation to NVIDIA’s Hopper architecture spanned nearly five years  ( Shah et al., 2024 ) . Therefore, there is a pressing need for automated kernel development to reduce migration costs. 
+
+ Advances in code-generation LLMs  ( Campbell et al., 2025 ; Niu et al., 2025 ; Zhao et al., 2025 ; Zhou et al., 2025 ; Tsai et al., 2024 ; Sun et al., 2024 ) have led researchers to leverage them for accelerating GPU kernel development. Some works have sought to improve LLM-generated kernels by integrating reinforcement learning (RL) frameworks  ( Baronio et al., 2025 ; Li et al., 2025b ) , training dedicated models  ( Li et al., 2025a ) , and focusing the optimization objective on specific performance metrics (e.g., SwizzlePerf  ( Tschand et al., 2025 ) utilized L2 cache hit rate to guide LLM). Beyond these efforts, a common and viable strategy employs an evolutionary framework based on multi-agent systems. For instance, CUDA-LLM  ( Chen et al., 2025 ) introduces the FSR framework, which guides LLMs to produce hardware-aware, high-performance CUDA kernels through the joint optimization of compilation and runtime performance.
+Furthermore, AI CUDA Engineer  ( Lange et al., 2025 ) incorporates genetic algorithms into the LLM systems. It treats each kernel as an individual candidate and performs crossover prompting across generations of evolution, making a viable path for deep optimization of CUDA kernels. 
+
+ Figure 1. The impact of parent kernels’ complexity on generated child kernels during conventional crossover prompting. nothing 
+
+ 3. Motivation 
+
+ While existing works focus on enhancing performance through evolutionary frameworks, they nevertheless suffer from a significant oversight:
+the multi-dimensional mismatches between the high-level evolutionary algorithm and the low-level kernel code.
+These mismatches manifest in three dimensions: crossover representation, fitness representation, and population initialization. 
+
+ nothing 
+ Figure 2. Overview of cuPilot multi-agent framework. Three key contributions are illustrated: SCE algorithm, roofline-guided prompting, and strategy-level population initialization. nothing 
+
+ Firstly, conventional crossover prompting is reproduced on the Deepseek-R1, a SOTA reasoning model  ( Guo et al., 2025 ) , and the generated kernels are aggregated.
+As shown in the Figure  1 , the conventional crossover prompting requires the LLM to fuse two kernels directly, necessitating a long reasoning chain spanning strategy identification, strategy combination and kernel synthesis. This results in deteriorating kernel performance as the complexity increases.
+The crossover of A 1 A_{1} and B 1 B_{1} benefits from the low complexity of the source kernels. However, as the complexity of kernel B increases, the problem of representation mismatch becomes apparent.
+With complex strategies integrated into kernel B, the LLM struggles to accurately distinguish each strategy due to the semantic gap between strategies and codes.
+This difficulty leads to a significant degradation of results.
+As the figure shows, when the LLM performs crossover with the B 2 B_{2} or B 3 B_{3} kernels, a majority of the generated kernels contain syntax or function errors.
+Only 8.6% and 5.8%, respectively, successfully retain and combine all the original strategies from parents. Moreover, this success rate drops to a mere 1% for the most complex kernel B 4 B_{4} .
+These results demonstrate that conventional crossover prompting, by working solely on low-level codes, is hard to match the crossover with kernel coding. 
+
+ Furthermore, mismatched fitness representation and population initialization pose critical challenges. The integration of evolutionary algorithms necessitates an appropriate fitness function for LLMs to evaluate generated kernels.
+Existing approaches primarily rely on overall kernel performance as the sole criterion. However, performance is inherently a high-dimensional metric wherein the actual bottlenecks remain implicit. Consequently, the model requires more granular and specific guidance to evolve effectively.
+Similarly, the scarcity of kernel data leads to poor population initialization. This results in an initial population with limited diversity of optimization strategies, which consequently restricts the optimization space and compromises the final quality.
+To solve these issues, proposed cuPilot firstly introduces the SCE algorithm to mitigate the crossover representation mismatch. Then it utilizes the roofline model to guide LLMs prompting, and establishes an external strategy pool to improve the strategy-level population initialization. 
+
+ 4. cuPilot Framework 
+
+ 4.1. Overview of cuPilot 
+
+ For better generating complex kernels and exploring the boundaries of existing LLMs, we propose cuPilot, a strategy-coordinated multi-agent evolutionary framework. Our core philosophy is to decompose the intricate task of kernel evolution into multiple simpler subtasks, enabling each agent to specialize effectively. Furthermore, for each subtask, we perform parallel queries to the LLM multiple times, which in effect boosts the sample population. This approach enables a thorough traversal of the optimization, with the best outcomes selected for subsequent subtasks, thereby improving the overall execution success rate. 
+
+ Algorithm 1 Strategy-Coordinated Evolution Algorithm 
+
+ 1: 
+
+ Initial K init K^{\text{init}} , Epochs E E , Generations G G , 
+
+ 2: 
+
+ Evolving Strategy Number List [ N ​ S 0 , N ​ S 1 , … , N ​ S G ] [NS_{0},NS_{1},...,NS_{G}] , 
+
+ 3: 
+
+ Evolving Kernel Number List [ N ​ K 1 , N ​ K 2 , … , N ​ K G ] . [NK_{1},NK_{2},...,NK_{G}].  
+
+ 4: 
+
+ Optimized Kernel K opt . K^{\text{opt}}. 
+
+ 5: 
+
+ for e = 1 e=1 to E E do 
+
+ 6: 
+
+    S ← StrategyGenerator ​ ( K init , N ​ S 0 ) ; S\leftarrow\textbf{StrategyGenerator}(K^{\text{init}},NS_{0});  
+
+ 7: 
+
+    P ← PopulationInitialization ​ ( K init , S ) ; P\leftarrow\textbf{PopulationInitialization}(K^{\text{init}},S);  
+
+ 8: 
+
+    for g = 1 g=1 to G G do 
+
+ 9: 
+
+     for i = 1 i=1 to N ​ S g − 1 NS_{g-1} do 
+
+ 10: 
+
+       ( K i ′ , S i ) ← StrategyApplication ​ ( P i ) ; (K_{i}^{\prime},S_{i})\leftarrow\textbf{StrategyApplication}(P_{i});  
+
+ 11: 
+
+       P i ← StrategyAlignment ​ ( ( K i ′ , S i ) ) ; P_{i}\leftarrow\textbf{StrategyAlignment}((K_{i}^{\prime},S_{i}));  
+
+ 12: 
+
+     K g , S g ← TournamentElitisim ​ ( P , N ​ K g , N ​ S g ) ; K^{g},S^{g}\leftarrow\textbf{TournamentElitisim}(P,NK_{g},NS_{g});  
+
+ 13: 
+
+     for i = 1 i=1 to N ​ K g NK_{g} do 
+
+ 14: 
+
+       for j = 1 j=1 to N ​ S g NS_{g} do 
+
+ 15: 
+
+        P ← P ∪ { ( K i g , S j g ) } ; P\leftarrow P\cup\{(K_{i}^{g},S_{j}^{g})\};  
+
+ 16: 
+
+    K init ← SelectTopKernels ​ ( P ) ; K^{\text{init}}\leftarrow\textbf{SelectTopKernels}(P);  
+
+ 17: 
+
+ return K opt ← SelectBestKernel ​ ( K init ) ; K^{\text{opt}}\leftarrow\textbf{SelectBestKernel}(K^{\text{init}});  
+
+ Based on this design principle, as illustrated in Figure  2 , we partition the evolution process into three major functional regions, each corresponding to a dedicated agent: the SCE Manager, Strategy Translator, and Kernel Revisor.
+The SCE Manager operates at the high level to oversee the evolutionary population, handling the initialization and crossover of strategies.
+The Kernel Revisor functions at the low level to refine LLM-generated kernels, including corrections for syntax and function, and kernel profiling.
+cuPilot bridges the semantic gap between the evolutionary framework and the kernel code by introducing the Strategy Translator as an intermediary.
+Specifically, the Strategy Translator performs the following tasks: (1) Applying an individual’s strategy to its kernel and forwarding the kernel to the Kernel Revisor; and (2) Aligning the strategy with the revised kernel before passing the individual to the SCE Manager. 
+As a mediator, the Strategy Translator incorporates the strategy as an intermediate semantic abstraction, facilitating a handshake mechanism between the SCE Manager and Kernel Revisors. This ensures that the kernel evolution task is more comprehensible and executable by the LLM. 
+
+ Additionally, we introduce the Roofline Prophet agent atop the overall SCE flow.
+This agent determines the kernel’s position within the GPU’s roofline model based on the kernel description and GPU specifications, subsequently providing optimization guidance to the three evolutionary agents.
+Moreover, we maintain a kernel strategy pool enriched with external strategy knowledge and historical evolving data, employing RAG to enhance the agent’s strategy generation capability.
+For illustration brevity, we omit details on the Kernel Generator agent, which produces functionally correct vanilla kernels and is relatively straightforward to implement. 
+
+ nothing 
+ Figure 3. (a) Kernels positioned in GPU’s roofline model. (b) Prompting examples for compute/memory-bound kernels. nothing 
+
+ 4.2. Strategy-Coordinated Evolution Algorithm 
+
+ Algorithm  1 elaborates on the SCE algorithm.
+First, the population is initialized at the strategy level according to the initial kernel and N ​ S 0 NS_{0} strategies, corresponding to part ❶ in Figure  2 .
+Second, optimized kernels are generated by the Strategy Translators based on the strategies, and subsequently revised by the Kernel Revisor for syntax, function, and performance profiling (❷, ❸, ❹).
+If a single StrategyApplication fails to achieve significant performance improvement, the maximum optimization times can be increased to enable repeated kernel optimization along the same strategy.
+Third, after reaching the maximum optimization times, the StrategyAlignment is performed to update the strategies with the optimized kernels, thereby yielding a parent population with improved performance across strategies.
+Then, for evolutionary convergence, elitism preservation and tournament selection are utilized to select parent kernels and strategies, which are then crossed at the strategy-level to produce the initial population for the subsequent generation (parts ❻, ❼).
+Finally, after completion of multiple generations within one epoch, the top kernels are selected as initial kernels for the next epoch, and the process is repeated multiple times (part ❽) for successive kernel evolution. 
+
+ The core of the SCE is to decompose the kernel crossover into a strategy-coordinated two-step process: strategy-level crossover (lines 8–11) and strategy-kernel translation (lines 5–7).
+By introducing the intermediate strategy semantics, strategy crossover is decoupled from the kernel implementation. This approach increases the success rate of kernel crossover and guides the LLM to generate kernels with more complex optimization strategies. 
+
+ 4.3. Roofline-guided Prompting 
+
+ Kernel optimization is a highly complex task that encompasses numerous optimization strategies.
+Manual kernel optimization requires consulting substantial information, such as algorithm characteristics, data layouts, and profiling reports, to guide improvements step by step.
+To prevent the LLM’s optimization from focusing on unnecessary reflections and wasting effort on ineffective directions, cuPilot employs the target GPU’s roofline model to transform the singular goal of kernel performance into specific objectives of different hardware utilizations. 
+
+ Specifically, as the roofline model shown in Figure  3 (a), based on the task’s data precision, kernels located to the left of the intersection point between the throughput of the lowest-performance hardware unit (e.g., CUDA cores) and the peak memory bandwidth are identified as memory-bound .
+Kernels to the right of the intersection point between throughput of the highest-performance hardware unit (e.g., tensor cores) and the peak memory bandwidth are identified as compute-bound .
+The region between these two kernels is regarded as an middle-zone requiring both computation and memory optimizations.
+The key insight is that computational optimizations should be prioritized for compute-bound kernels, and vice versa for memory-bound kernels.
+As the prompting examples shown in Figure  3 (b), for compute-bound kernels, the agents are guided to generate computation optimization strategies and prioritize improving computation units utilization, with a focus on metrics like SM Throughput, Branch Efficiency, and so on.
+For memory-bound kernels, emphasis is placed on enhancing the utilization of memory bandwidth, with particular attention paid to memory throughput during profiling analysis.
+Furthermore, when selecting parent individuals using a tournament selection strategy, the corresponding hardware utilization also serves as a criterion. 
+
+ nothing 
+ Figure 4. Historical data pair format for StrategyApplication prompt and database construction for RAG. nothing 
+
+ 4.4. Strategy-level Population Initialization 
+
+ Population initialization defines the initial design space for kernel optimization. Coarse population initialization of previous agentic works may yield low-quality or insufficient strategies, which may constrain the upper limit of optimization effectiveness.
+To learn strategies from historical evolution, a historical database is constructed, with RAG for prompt generation. 
+
+ Specifically, as illustrated in Figure  4 , the initial kernel, optimized kernel, and corresponding performance metrics are preserved as components of individuals and iteratively updated throughout the SCE.
+On one hand, during the StrategyApplication of Strategy Translator, these short-term historical records serve as supplementary examples, as the top of Figure  4 shows. On the other hand, at the end of each generation, top kernels’ data pairs are archived into the RAG database.
+For subsequent strategy generation of a new kernel, the similarity between the new initial kernel and historical initial kernels in the database is retrieved, and the associated strategies are employed as prompts to facilitate the initialization. This process, known as RAG, leverages the historical optimizations to bootstrap the optimization and evolve the agentic framework.
+By integrating external and historical knowledge, cuPilot achieves maximally diverse population initialization at the strategy level, thereby enhancing the overall evolutionary convergence. 
+
+ Figure 5. Performance comparison of cuPilot, PyTorch, and AI CUDA Engineer on Kernelbench benchmark. nothing 
+
+ 5. Experiment 
+
+ 5.1. Experiment Setup 
+
+ The cuPilot framework is implemented and evaluated on a server equipped with eight A100 GPUs. The experiments are conducted using CUDA version 12.4.
+For kernel performance evaluation, the testing methodology from KernelBench  ( Ouyang et al., 2025 ) is adopted. Each individual kernel undergoes 10 warm-up runs prior to measurement, followed by 50 timed executions with different random inputs. The average latency is reported as the kernel’s performance.
+The Nsight Compute CLI. (NCU) tool is adopted for kernel profiling.
+To mitigate the impact of thermal variation, the GPU frequency is locked at 1410 MHz throughout the testing process. Note that the performance of our primary baseline kernels, released by AI CUDA Engineer  ( Lange et al., 2025 ) , was also measured under identical hardware conditions.
+The overall framework is implemented in Python 3.10. To manage concurrent requests to LLMs, the asyncio library is used.
+For models, we choose the Deepseek-R1  ( Guo et al., 2025 ) and Gemini-2.5-pro  ( Comanici et al., 2025 ) , as they represent the SOTA ability of thinking and reasoning. 
+
+ Firstly, to validate cuPilot’s capability on kernel optimization, an evaluation is conducted on 100 kernels of KernelBench level-1. Resulting kernels are compared against both PyTorch  ( Ansel et al., 2024 ) and kernels released by AI CUDA Engineer  ( AI, 2025 ) .
+To ensure a fair comparison, Deepseek-R1 is employed, as it is also used by AI CUDA Engineer.
+Subsequently, ablation studies is performed on four representative kernels to analyze the contribution of the proposed roofline-guided prompting and RAG-enhanced population initialization.
+To validate migratability across different models, the experiment is conducted using both Deepseek and Gemini.
+Finally, to better demonstrate the detailed kernel optimizations, GEMM kernels, characterized by their deep optimization potential and broad applicability, are selected as a case study.
+For a fair comparison with the AI CUDA Engineer-generated GEMMs, again, the Deepseek-R1 is employed. 
+
+ Figure 6. Ablation results for roofline-guide prompting on four representative kernels. nothing 
+
+ 5.2. Evaluation on KernelBench 
+
+ As shown in the Figure  5 , which uses a logarithmic scale, cuPilot achieves performance comparable to PyTorch’s highly optimized kernels, and even delivers speedups by several times in some cases. This advantage becomes even more pronounced when compared to AI CUDA Engineer. Notably, these results of cuPilot were produced with less than 3 hours of per-kernel runtime for each epoch. 
+
+ The evaluation begins with the GEMM kernels. KernelBench provides multiple GEMM kernels, covering various matrix shapes and specialized matrix types (e.g., symmetric or upper/lower triangular matrix). In our experiments, cuPilot achieves up to an average 4.06 × 4.06\times speedup over PyTorch in GEMM kernels. This improvement can be attributed to the three optimizations proposed in this work, which enable the LLM to identify bottlenecks and establish relations between high-level strategies and their low-level code implementation. Consequently, the evolutionary algorithm can effectively perform crossover, producing complex kernels that incorporate multiple optimizations. The detailed mechanism enabling these optimizations in cuPilot is further analyzed in the case study (See Section  5.4 ). Similarly, for CONV kernels, cuPilot achieves a 1.18 × 1.18\times speedup over PyTorch. This performance gain stems from cuPilot’s ability to achieve complex optimization strategies, including tiling and double buffering, as well as padding and memory swizzling to reduce bank conflicts. As for other kernels, cuPilot delivers more substantial speedups, achieving performance gains of 4.16 × 4.16\times for activation/normalization, 3.85 × 3.85\times for pooling, and 6.87 × 6.87\times for loss functions. Overall, an average speedup of 3.09 × 3.09\times is achieved. 
+
+ Figure 7. Ablation results for strategy-level population initialization. ESP is for External Strategy Pool. nothing 
+
+ 5.3. Ablation Experiments 
+
+ (1) For roofline-guided prompting , four representative kernels from KernelBench are evaluated. These include two compute-bound kernels: Standard GEMM and Standard 3D Convolution, and two memory-bound kernels: GEMV and Softmax.
+Evolutionary experiments are conducted using both DeepSeek-R1 and Gemini-2.5 Pro, with each configuration repeated three times.
+Each experiment is run for two epochs, with a population size of 50.
+Figure  6 presents the mean and standard deviation of the results. It is evident that kernels employing roofline-guided prompting achieve a faster reduction in latency, observed in both compute-bound and memory-bound kernels. On average, kernel latency is reduced by 44.2% after two epochs.
+The figure also includes the performance of two baselines, demonstrating that even without roofline guidance, cuPilot can achieve better performance than the AI CUDA Engineer.
+
+ (2) For strategy-level population initialization , the same four representative kernels are selected, and comparative experiments are conducted with and without an external strategy pool. The control group relies solely on the LLM’s inherent kernel optimization capability to generate initial strategies.
+Figure  7 presents a comparison of the kernel’s latency after a single epoch of four generations. The results indicate that, with RAG, both DeepSeek-R1 and Gemini-2.5-Pro are able to produce more effective evolutionary strategies, leading to lower latency.
+On average, the latency across the four tasks is reduced by 54.1% after the first epoch. 
+
+ 5.4. Case Study: GEMM Kernels 
+
+ Figure 8. Performance and memory utilization comparison of GEMM kernels from different frameworks. nothing 
+
+ The self-attention in Transformers relies on GEMM to compute the Q/K/V computation, making GEMM a major bottleneck in modern AI and also a primary target for optimization. However, we observe that existing works suffer from illusory optimization. For instance, AI CUDA Engineer’s GEMM kernel merely acts as a wrapper for the cublas library, which bypasses the core development challenge. This case study analyzes the strategies of cuPilot’s GEMM kernels to demonstrate its authentic optimization capability. 
+
+ We have analyzed and compared the strategies employed in all GEMM kernels generated by cuPilot and AI CUDA Engineer, as presented in the Table  1 . In contrast to AI CUDA Engineer, which primarily relies on basic strategies such as tiling and vectorized access, cuPilot demonstrates a superior ability to apply more sophisticated optimizations. Specifically, in computation, cuPilot leverages Tensor Cores for acceleration  ( Yao et al., 2025 ) , while in memory access, it employs techniques like padding and layout swizzling to reduce bank conflicts, along with thread block swizzling to improve L2 cache locality  ( Tang et al., 2025 ) and hit rates. Furthermore, cuPilot optimizes the overall execution pipeline by implementing double buffering or multi-stage strategies to increase throughput further. Most notably, it exhibits the potential for fine-tuning using PTX assembly instructions  ( Wu et al., 2025 ) , underscoring its comprehensive code generation capability. 
+
+ We further validated it by profiling tools. As shown in Figure  8 , we compared latency and memory throughput of the three frameworks across eight GEMM cases. Compared to PyTorch, cuPilot not only maximizes computational resource utilization but also enhances memory access efficiency. The application of swizzling and asynchronous copy techniques improves L2 throughput utilization, while the use of a multi-stage pipeline further increases the throughput of DRAM and L2 cache hit rate. In contrast, AI CUDA Engineer achieves limited gains from vectorized access, and its overall memory utilization is further limited by a preliminary tiling strategy, causing it to underperform PyTorch. 
+
+ 6. Conclusion 
+
+ Table 1. Applied strategies comparison of GEMM kernels generated by cuPilot and CUDA Engineer. 
+
+ Optimization Strategies | 
+ Frameworks | 
+
+ This Work | 
+ CUDA Eng. | 
+
+ Invoking Tensor Core | 
+
+ (14/16) 1 | 
+
+ (0/16) | 
+
+ Tiling Technologies | 
+
+ (15/16) | 
+
+ (14/16) | 
+
+ Vectorized Access | 
+
+ (10/16) | 
+
+ (2/16) | 
+
+ Memory Padding | 
+
+ (12/16) | 
+
+ (1/16) | 
+
+ Layout/Thread Block Swizzle | 
+
+ (5/16) | 
+
+ (0/16) | 
+
+ Double Buffering | 
+
+ (8/16) | 
+
+ (1/16) | 
+
+ Multi-Stage Pipeline | 
+
+ (2/16) | 
+
+ (0/16) | 
+
+ Asynchronous Copy | 
+
+ (5/16) | 
+
+ (0/16) | 
+
+ PTX-Level Optimization | 
+
+ (3/16) | 
+
+ (0/16) | 
+
+ 1 
+
+ The Kernelbench Benchmark includes 16 GEMM cases, covering various types such as Square GEMM, Transposed GEMM, Irregular GEMM, and so on. The notation (14/16) indicates that 14 out of the 16 kernels generated for these cases incorporate the corresponding strategy. 
+
+ cuPilot addresses the limitations of existing kernel evolution frameworks by introducing strategy as an intermediate semantic representation, effectively resolving the mismatches of crossover, fitness function and population initialization.
+Through the SCE algorithm, roofline-guided prompting, and strategy-level population initialization, cuPilot enables LLMs to generate highly optimized CUDA kernels with complex strategies. Experimental results demonstrate an average speedup of 3.09 × \times over PyTorch on a 100 kernels benchmark. The detailed case study on GEMM tasks showcases advanced hardware utilization and optimization strategies. 
+
+ Acknowledgements. 
+We thank Tsing Micro and the National Center of Technology Innovation for EDA for providing experimental facilities and resources.
+
+ References 
+
+ [1] 
+ N. Corporation (2025) 
+
+ CUDA c++ programming guide .
+
+ Note: https://docs.nvidia.com/cuda/cuda-c-programming-guide/ 
+
+ Cited by: §1 ,
+ §2.1 .
+
+ [2] 
+ M. Andrews and S. Witteveen (2025) 
+
+ GPU kernel scientist: an llm-driven framework for iterative kernel optimization .
+
+ arXiv preprint arXiv:2506.20807 .
+
+ Cited by: §1 .
+
+ [3] 
+ R. T. Lange, A. Prasad, Q. Sun, M. Faldor, Y. Tang, and D. Ha (2025) 
+
+ The ai cuda engineer: agentic cuda kernel discovery, optimization and composition .
+
+ Technical report 
+
+ Technical report, Sakana AI, 02 2025 .
+
+ Cited by: §1 ,
+ §2.2 ,
+ §5.1 .
+
+ [4] 
+ C. Baronio, P. Marsella, B. Pan, S. Guo, and S. Alberti (2025) 
+
+ Kevin: multi-turn rl for generating cuda kernels .
+
+ arXiv preprint arXiv:2507.11948 .
+
+ Cited by: §1 ,
+ §2.2 .
+
+ [5] 
+ X. Li, X. Sun, A. Wang, J. Li, and C. Shum (2025) 
+
+ Cuda-l1: improving cuda optimization via contrastive reinforcement learning .
+
+ arXiv preprint arXiv:2507.14111 .
+
+ Cited by: §1 ,
+ §2.2 .
+
+ [6] 
+ A. Novikov, N. Vũ, M. Eisenberger, E. Dupont, P. Huang, A. Z. Wagner, S. Shirobokov, B. Kozlovskii, F. J. Ruiz, A. Mehrabian, et al. (2025) 
+
+ AlphaEvolve: a coding agent for scientific and algorithmic discovery .
+
+ arXiv preprint arXiv:2506.13131 .
+
+ Cited by: §1 .
+
+ [7] 
+ Y. Li, D. Choi, J. Chung, N. Kushman, J. Schrittwieser, R. Leblond, T. Eccles, J. Keeling, F. Gimeno, A. Dal Lago, et al. (2022) 
+
+ Competition-level code generation with alphacode .
+
+ Science 378 ( 6624 ), pp. 1092–1097 .
+
+ Cited by: §1 .
+
+ [8] 
+ C. Gurkan, N. K. Jwalapuram, K. Wang, R. Danda, L. Rasmussen, J. Chen, and U. Wilensky (2025) 
+
+ LEAR: llm-driven evolution of agent-based rules .
+
+ In Proceedings of the Genetic and Evolutionary Computation Conference Companion ,
+
+ pp. 2309–2326 .
+
+ Cited by: §1 .
+
+ [9] 
+ W. Chen, J. Zhu, Q. Fan, Y. Ma, and A. Zou (2025) 
+
+ CUDA-llm: llms can write efficient cuda kernels .
+
+ arXiv preprint arXiv:2506.09092 .
+
+ Cited by: §1 ,
+ §2.2 .
+
+ [10] 
+ S. AI (2025) 
+
+ AI-cuda-engineer-archive .
+
+ Note: https://huggingface.co/datasets/SakanaAI/AI-CUDA-Engineer-Archive 
+
+ Cited by: §1 ,
+ §5.1 .
+
+ [11] 
+ A. Ouyang, S. Guo, S. Arora, A. L. Zhang, W. Hu, C. Ré, and A. Mirhoseini (2025) 
+
+ Kernelbench: can llms write efficient gpu kernels? .
+
+ arXiv preprint arXiv:2502.10517 .
+
+ Cited by: 4th item ,
+ §5.1 .
+
+ [12] 
+ D. B. Kirk and W. H. Wen-Mei (2016) 
+
+ Programming massively parallel processors: a hands-on approach .
+
+ Morgan kaufmann .
+
+ Cited by: §2.1 .
+
+ [13] 
+ S. Chetlur, C. Woolley, P. Vandermersch, J. Cohen, J. Tran, B. Catanzaro, and E. Shelhamer (2014) 
+
+ Cudnn: efficient primitives for deep learning .
+
+ arXiv preprint arXiv:1410.0759 .
+
+ Cited by: §2.1 .
+
+ [14] 
+ J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, and T. Dao (2024) 
+
+ Flashattention-3: fast and accurate attention with asynchrony and low-precision .
+
+ Advances in Neural Information Processing Systems 37 , pp. 68658–68685 .
+
+ Cited by: §2.2 .
+
+ [15] 
+ C. Campbell, H. M. Chen, W. Luk, and H. Fan (2025) 
+
+ Enhancing llm-based quantum code generation with multi-agent optimization and quantum error correction .
+
+ In 2025 62nd ACM/IEEE Design Automation Conference (DAC) ,
+
+ Vol. , pp. 1–7 .
+
+ External Links: Document 
+
+ Cited by: §2.2 .
+
+ [16] 
+ J. Niu, X. Liu, D. Niu, X. Wang, Z. Jiang, and N. Guan (2025) 
+
+ ReChisel: effective automatic chisel code generation by llm with reflection .
+
+ In 2025 62nd ACM/IEEE Design Automation Conference (DAC) ,
+
+ Vol. , pp. 1–7 .
+
+ External Links: Document 
+
+ Cited by: §2.2 .
+
+ [17] 
+ Y. Zhao, H. Zhang, H. Huang, Z. Yu, and J. Zhao (2025) 
+
+ MAGE: a multi-agent engine for automated rtl code generation .
+
+ In 2025 62nd ACM/IEEE Design Automation Conference (DAC) ,
+
+ Vol. , pp. 1–7 .
+
+ External Links: Document 
+
+ Cited by: §2.2 .
+
+ [18] 
+ J. Zhou, Y. Ji, N. Wang, Y. Hu, X. Jiao, B. Yao, X. Fang, S. Zhao, N. Guan, and Z. Jiang (2025) 
+
+ Insights from rights and wrongs: a large language model for solving assertion failures in rtl design .
+
+ In 2025 62nd ACM/IEEE Design Automation Conference (DAC) ,
+
+ Vol. , pp. 1–7 .
+
+ External Links: Document 
+
+ Cited by: §2.2 .
+
+ [19] 
+ Y. Tsai, M. Liu, and H. Ren (2024) 
+
+ Rtlfixer: automatically fixing rtl syntax errors with large language model .
+
+ In Proceedings of the 61st ACM/IEEE Design Automation Conference (DAC) ,
+
+ pp. 1–6 .
+
+ Cited by: §2.2 .
+
+ [20] 
+ H. Sun, Z. Bi, W. Jiang, Y. Lu, C. Yan, F. Yang, W. Hu, S. Wang, D. Zhou, and X. Zeng (2024) 
+
+ EVDMARL: efficient value decomposition-based multi-agent reinforcement learning with domain-randomization for complex analog circuit design migration .
+
+ In Proceedings of the 61st ACM/IEEE Design Automation Conference (DAC) ,
+
+ pp. 1–6 .
+
+ Cited by: §2.2 .
+
+ [21] 
+ S. Li, Z. Wang, Y. He, Y. Li, Q. Shi, J. Li, Y. Hu, W. Che, X. Han, Z. Liu, et al. (2025) 
+
+ Autotriton: automatic triton programming with reinforcement learning in llms .
+
+ arXiv preprint arXiv:2507.05687 .
+
+ Cited by: §2.2 .
+
+ [22] 
+ A. Tschand, M. Awad, R. Swann, K. Ramakrishnan, J. Ma, K. Lowery, G. Dasika, and V. J. Reddi (2025) 
+
+ Swizzleperf: hardware-aware llms for gpu kernel performance optimization .
+
+ arXiv preprint arXiv:2508.20258 .
+
+ Cited by: §2.2 .
+
+ [23] 
+ D. Guo, D. Yang, H. Zhang, J. Song, R. Zhang, R. Xu, Q. Zhu, S. Ma, P. Wang, X. Bi, et al. (2025) 
+
+ Deepseek-r1: incentivizing reasoning capability in llms via reinforcement learning .
+
+ arXiv preprint arXiv:2501.12948 .
+
+ Cited by: §3 ,
+ §5.1 .
+
+ [24] 
+ G. Comanici, E. Bieber, M. Schaekermann, I. Pasupat, N. Sachdeva, I. Dhillon, M. Blistein, O. Ram, D. Zhang, E. Rosen, et al. (2025) 
+
+ Gemini 2.5: pushing the frontier with advanced reasoning, multimodality, long context, and next generation agentic capabilities .
+
+ arXiv preprint arXiv:2507.06261 .
+
+ Cited by: §5.1 .
+
+ [25] 
+ J. Ansel, E. Yang, H. He, N. Gimelshein, A. Jain, M. Voznesensky, B. Bao, P. Bell, D. Berard, E. Burovski, et al. (2024) 
+
+ Pytorch 2: faster machine learning through dynamic python bytecode transformation and graph compilation .
+
+ In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 ,
+
+ pp. 929–947 .
+
+ Cited by: §5.1 .
+
+ [26] 
+ Y. Yao, C. Zhang, C. Qi, R. Chen, J. Wang, Z. Fu, N. Jing, X. Liang, and Z. Song (2025) 
+
+ SynGPU: synergizing cuda and bit-serial tensor cores for vision transformer acceleration on gpu .
+
+ In 2025 62nd ACM/IEEE Design Automation Conference (DAC) ,
+
+ Vol. , pp. 1–7 .
+
+ External Links: Document 
+
+ Cited by: §5.4 .
+
+ [27] 
+ Y. Tang, J. Zhang, S. Ma, T. Li, H. Li, S. Luo, J. Tang, and L. Wu (2025) 
+
+ HIVE: a high-priority victim cache for accelerating gpu memory accesses .
+
+ In 2025 62nd ACM/IEEE Design Automation Conference (DAC) ,
+
+ Vol. , pp. 1–7 .
+
+ External Links: Document 
+
+ Cited by: §5.4 .
+
+ [28] 
+ K. Wu, Z. Lin, M. Xi, Z. Zheng, W. Pan, X. Zhang, and Y. Lu (2025) 
+
+ GoPTX: fine-grained gpu kernel fusion by ptx-level instruction flow weaving .
+
+ In 2025 62nd ACM/IEEE Design Automation Conference (DAC) ,
+
+ Vol. , pp. 1–7 .
+
+ External Links: Document 
+
+ Cited by: §5.4 .

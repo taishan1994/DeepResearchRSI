@@ -1,0 +1,2805 @@
+ 
+ 
+ 
+ 1Introduction 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Skip to main content 
+ 
+ 
+ 
+ Report GitHub Issue
+
+ × 
+ 
+
+ 
+ Title: 
+ 
+
+ Content selection saved. Describe the issue below:
+
+ Description: 
+ 
+ 
+
+ 
+ Submit without GitHub 
+ Submit in GitHub 
+ 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Why HTML? 
+ 
+ Report Issue 
+ 
+ Back to Abstract 
+ 
+ 
+ Download PDF 
+ 
+ Contents 
+ 
+ 
+ Reading mode 
+ 
+ 
+ Colour theme 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ Abstract 
+
+ 1 Introduction 
+
+ 2 Background 
+ 
+ 2.1 MoE Geometry During Inference 
+
+ 2.2 GPU Kernels on This Geometry 
+
+ 2.3 Routing on This Geometry 
+
+ 2.4 Choosing a Configuration 
+
+ 
+
+ 3 RaMP 
+ 
+ 3.1 The Cost Model 
+
+ 3.2 Choosing on the GPU 
+
+ 3.3 The Kernel 
+
+ 
+
+ 4 Evaluation 
+ 
+ 4.1 End-to-End Serving 
+
+ 4.2 Where the Speedup Comes From 
+
+ 
+
+ 5 Related Work 
+
+ 6 Limitations 
+
+ 7 Conclusion 
+
+ References 
+
+ A Additional Results 
+ 
+ A.1 The Cost Model on Held-Out Loads 
+
+ A.2 Tables Given the Cost Model’s Inputs 
+
+ A.3 Choosing on Held-Out Domains 
+
+ A.4 Imbalance and Expert Placement 
+
+ A.5 Choosing Among the Served Configurations 
+
+ A.6 The Choice on a Fixed Menu 
+
+ A.7 Every GPU Holding Every Expert 
+
+ A.8 The Polymorphic Megakernel 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ License: arXiv.org perpetual non-exclusive license
+ 
+ 
+arXiv:2604.26039v2 [cs.LG] 30 Oct 2026
+
+ 
+ 
+ 
+ marginparsep has been altered.
+ topmargin has been altered.
+ marginparwidth has been altered.
+ marginparpush has been altered.
+ 
+
+ 
+ The page layout violates the ICML style. 
+
+ 
+ Please do not change the page layout, or include packages like geometry,
+savetrees, or fullpage, which change it for you.
+
+ 
+ We’re not able to reliably undo arbitrary changes to the style. Please remove
+the offending package(s), or layout-changing commands and try again.
+
+   
+ 
+ RaMP: Runtime-Aware Megakernel Polymorphism
+ for Mixture-of-Experts 
+
+   
+ 
+ Vyom Sharma   1  
+ Debajyoti Datta   1  
+
+ † † footnotetext: 1 Hippocratic AI.
+Correspondence to: Vyom Sharma <vyom@hippocraticai.com>.
+ 
+ Preprint. 
+ Abstract
+
+ 
+ LLM serving systems autotune their GPU kernels offline by timing candidate kernel configurations, like tile sizes, at a range
+of batch sizes. This works when
+the number of tokens determines a kernel’s work, as in dense layers. However, we show that it does not hold for
+Mixture-of-Experts (MoE) layers where the router decides how the tokens are split across experts
+and GPUs. We find that the best kernel configuration depends on this split, and not
+only on the number of tokens—under expert parallelism, choosing the configuration for each GPU’s actual
+token distribution is up to 1.45 × \times faster than the existing choice. The split is not known until the router runs, so it cannot be looked up in advance. Hence, we introduce RaMP, which chooses the kernel configuration at run time from the routing split itself. RaMP compiles top configurations into one polymorphic kernel, and a small cost model on the GPU picks among them in a few microseconds. On serving traffic its cost model was never fit on, the configurations RaMP’s cost model chooses from the kernel’s full configuration space are up to 1.45 × \times faster than those vLLM’s offline autotuner picks for the same kernel on batches of 128 tokens or more (1.27 × \times over all batches), and within 3.5% of an exhaustive search that times every configuration. RaMP’s kernel and choice together make the MoE layer up to 1.84 × \times faster than vLLM’s Triton MoE on batches of 128 tokens or more. In vLLM,
+under both tensor and expert parallelism, RaMP lowers time per output token by up to 1.11 × \times over the fastest stock MoE backend.
+
+ 
+
+ 
+ 1 Introduction
+
+ 
+ Figure 1: Before and after RaMP , on three GPUs of one batch (illustrative loads). Today every GPU runs the tile
+size chosen from the batch size. RaMP chooses per GPU: smaller tiles waste fewer rows where experts
+receive few tokens, and larger tiles halve the tiles where they receive many. 
+ 
+ 
+ Many of the largest recent language models are Mixture-of-Experts (MoE)
+models  ( Shazeer et al., 2017 ; DeepSeek-AI et al., 2024 ; Yang et al., 2025 ; Jiang et al., 2024 ) . Each MoE layer holds many
+experts, and a router sends each token to a few of them, so a megakernel computes all experts’
+matrix multiplications on whatever tokens each one received  ( Kwon et al., 2023 ; Gale et al., 2023 ) . Large MoEs are
+served with tensor parallelism (TP), which splits every expert across the GPUs, or with expert
+parallelism (EP), which places whole experts on different GPUs  ( Shoeybi et al., 2019 ; Lepikhin et al., 2021 ; Rajbhandari et al., 2022 ) .
+
+ 
+ Like any GPU kernel, the MoE kernel is fastest when its configuration, such as its tile sizes, fits
+its work. For a dense layer, the work is set by the batch. For an MoE layer, it is set by the batch
+ and by how balanced the routing is: how evenly the router spreads the batch’s tokens across
+experts and, under EP, across GPUs. Both change throughout serving. Continuous
+batching  ( Yu et al., 2022 ) changes the batch on every forward pass, and a production server receives
+requests from many domains, which the router treats differently. In traces from vLLM serving eight
+MoE models, a few experts often receive several times their even share, and which experts these
+are changes with the requests in the batch.
+
+ 
+ Serving systems nevertheless choose the configuration offline, from the batch size alone:
+vLLM  ( Kwon et al., 2023 ) tunes the kernel at a fixed set of batch sizes on uniformly random routing and
+uses the nearest entry at run time. When routing is unbalanced, that entry is often the wrong one:
+under EP, the best configuration for each GPU is up to 1.45 × \times faster than vLLM’s tuning.
+
+ 
+ The core problem is to choose from each GPU’s expert load in real time. A batch’s routing exists only
+after the router runs, on the GPU, just before the kernel must start. Each configuration is a
+separately compiled kernel chosen before the layer runs, and timing candidates on every batch would
+take far longer than the kernel itself. Systems that adapt MoE execution at run time change the
+parallelism or the expert placement  ( Hwang et al., 2023 ; DeepSeek-AI, 2025b ) , not the kernel configuration.
+
+ 
+ Therefore, we introduce RaMP, which chooses the MoE kernel configuration on every GPU, for every
+forward pass, from the routing that GPU actually receives (Figure  1 ). RaMP compiles many configurations into
+one polymorphic kernel that reads which one to run from GPU memory, so switching between them needs
+no new launch and costs about 1%.
+A small cost model ranks the configurations from the work the GPU’s tokens produce, and
+the GPU picks the best in a few microseconds, so the choice adds almost no latency.
+
+ 
+ On serving traffic the cost model was never fit on, the configurations it chooses from the kernel’s full configuration space are up to
+1.45 × \times faster than those of vLLM’s tuning for the same kernel on batches of 128 tokens or more
+(up to 1.27 × \times over all batches), and within 3.5% of exhaustive search, an oracle that times every
+configuration, on every EP layout we test. Its kernel and choice together make the MoE layer up to 1.84 × \times faster than vLLM’s Triton MoE on batches of 128 tokens or more. Its kernel is also the fastest MoE backend we measure: end to end in
+vLLM, under both TP and EP, RaMP lowers time per output token at every load we test, by up to
+1.11 × \times over the fastest stock backend on DeepSeek-V3, Qwen3-30B, and OLMoE, with unchanged model
+quality.
+
+ 
+ In summary, we make two contributions that rely on each other:
+
+ 
+ • 
+ 
+ A cost model, fit offline, that ranks kernel configurations from each GPU’s current routing
+at run time, cheaply enough to run on the GPU on every forward pass; and
+
+ • 
+ 
+ A polymorphic MoE megakernel that compiles a menu of configurations, drawn from 98–337
+per model, into one kernel and runs whichever one the GPU chooses, written in CuTe
+DSL  ( NVIDIA, 2024 ) .
+
+ 
+
+ 
+ 2 Background
+
+ 
+ 2.1 MoE Geometry During Inference
+
+ 
+ An MoE layer replaces the dense MLP with E E experts, and a router sends each token to k k of
+them  ( Shazeer et al., 2017 ; Lepikhin et al., 2021 ) . Each expert is a gated MLP: it multiplies the tokens
+it receives by a d × 2 ​ h d\times 2h matrix for the gate and up projections and an h × d h\times d matrix for the down projection, where d d is the hidden size and
+ h h the expert’s intermediate size. This geometry varies widely across models: Mixtral-8x22B has 8
+experts with h = 16,384 h=16{,}384 , while Qwen3.5-35B has 256 experts with h = 512 h=512 .
+
+ 
+ How the model is spread over GPUs sets the geometry each GPU sees. On G G GPUs, tensor parallelism
+(TP)  ( Shoeybi et al., 2019 ) gives every GPU all E E experts, each cut to width h / G h/G , and sums the
+partial outputs with an all-reduce. Expert parallelism (EP)  ( Lepikhin et al., 2021 ; Rajbhandari et al., 2022 ) gives every
+GPU E / G E/G whole experts and exchanges tokens with an all-to-all before and after the layer; it has
+become a common way to serve the largest MoEs  ( DeepSeek-AI et al., 2024 ; DeepSeek-AI, 2025b ) . We write EP8 for EP over 8
+GPUs. Either way, each GPU holds a fixed set of experts ℰ g \mathcal{E}_{g} with fixed weight shapes.
+What it does not know in advance is how many tokens each of them will receive.
+
+ 
+ 2.2 GPU Kernels on This Geometry
+
+ 
+ An MoE megakernel computes all of a GPU’s experts in one launch  ( Kwon et al., 2023 ; Gale et al., 2023 ) . Like any
+matrix multiplication on a GPU, it cuts its output into tiles. Each tile goes to a
+thread block on one of the GPU’s streaming multiprocessors (SMs; H200 has 132), which streams
+slices of both inputs from memory into shared memory and accumulates the tile on the tensor
+cores  ( NVIDIA, 2024 ) . The tile sizes decide how well this works. A larger tile reuses every value
+it loads across more of the output, so it reads less memory per operation, but it needs more
+shared memory and registers, fewer tiles fit on an SM at once, and a small product yields too few
+tiles to keep every SM busy. Whether a kernel is limited by memory or by arithmetic depends on how
+many output rows share each loaded weight  ( Williams et al., 2009 ) , so the best tile sizes change with the
+shape of the product, and the wrong ones are costly. Across the eight models we study, the tile
+sizes that are fastest on batches of fewer than 32 tokens run 1.7–6.1 × \times slower than the best ones
+on batches of 512 tokens or more.
+
+ 
+ A configuration c c fixes the rows per tile b c b_{c} , the tile width across the output, the
+pipeline depth, and the order in which tiles launch. In an MoE kernel, the rows of each expert’s
+product are the n e n_{e} tokens routed to expert e e . The kernel cuts them into tiles of b c b_{c} rows
+and pads the last one: an expert with 5 tokens and b c = 16 b_{c}=16 fills one tile and pads 11 rows
+(Figure  2 ). On
+GPU g g , with load 𝐧 g = ( n e ) e ∈ ℰ g \mathbf{n}_{g}=(n_{e})_{e\in\mathcal{E}_{g}} , configuration c c launches T c T_{c} 
+tiles, which run in W c W_{c} waves:
+
+ 
+
+ 
+ 
+ T c ​ ( 𝐧 g ) = q c ​ ∑ e ∈ ℰ g ⌈ n e b c ⌉ , W c ​ ( 𝐧 g ) = ⌈ T c ​ ( 𝐧 g ) S c ⌉ . T_{c}(\mathbf{n}_{g})=q_{c}\sum_{e\in\mathcal{E}_{g}}\left\lceil\frac{n_{e}}{b_{c}}\right\rceil,\qquad W_{c}(\mathbf{n}_{g})=\left\lceil\frac{T_{c}(\mathbf{n}_{g})}{S_{c}}\right\rceil. 
+ 
+ (1) 
+ 
+ 
+ Here q c q_{c} is the number of tiles across the output, which the tile width and the geometry fix,
+and S c S_{c} is the number of tiles that run at once: the number of SMs times the thread blocks of c c 
+that fit on each. If T c T_{c} is slightly more than S c S_{c} ,
+the last wave leaves most SMs idle. Small tiles pad less when experts receive few tokens; large
+tiles need fewer waves. The geometry fixes q c q_{c} and the weights each tile reads. The tokens decide
+the rest.
+
+ (a) Tiles b c b_{c} output width q c = 4 q_{c}=4 tiles across pad n e n_{e} (b) Padding b c = 8 b_{c}{=}8 b c = 16 b_{c}{=}16 5 tokens (c) Waves wave 1 wave 2 S c S_{c} tiles at a time 3 slots idle 
+ Figure 2: A configuration on one expert. (a) Tiles of b c b_{c} rows, q c q_{c} across. (b) The
+last tile is padded. (c) Tiles run S c S_{c} at a time. 
+ 
+
+ 
+ 2.3 Routing on This Geometry
+
+ (a) Uniform routing Router E0 E1 E2 E3 E4 E5 E6 E7 GPU 0 8 GPU 1 8 GPU 2 8 GPU 3 8 (b) Unbalanced experts Router E0 E1 E2 E3 E4 E5 E6 E7 GPU 0 8 GPU 1 8 GPU 2 8 GPU 3 8 (c) Unbalanced experts and GPUs Router E0 E1 E2 E3 E4 E5 E6 E7 GPU 0 20 GPU 1 8 GPU 2 2 GPU 3 2 
+ Figure 3: Routing 32 tokens to 8 experts on 4 GPUs. Bars: tokens per expert; numbers:
+tokens per GPU. (a) Every expert and GPU receives an even share. (b) Experts differ, GPUs do not.
+(c) Experts and GPUs both differ. 
+ 
+ 
+ Serving systems run one forward pass at a time over all active requests, carrying one token for
+every request that is generating output and, with chunked prefill, part of the prompt of newly
+arrived requests  ( Yu et al., 2022 ; Kwon et al., 2023 ; Zheng et al., 2024 ; Agrawal et al., 2024 ) . The batch of B B tokens therefore changes on
+every forward pass, and every MoE layer routes it differently (Figure  3 ). The n e n_{e} 
+sum to B ​ k Bk , so perfectly
+balanced routing gives every expert B ​ k / E Bk/E tokens. Under TP, ℰ g \mathcal{E}_{g} holds every expert, so
+every GPU computes the whole load. Under EP, each GPU computes only its share 𝐧 g \mathbf{n}_{g} , and
+the layer waits for the slowest GPU.
+
+ 
+ Real routing is far from balanced. In the forward pass of Figure  4 , Qwen3-30B
+carries 211 tokens, and a lookup by batch size sees 211 on every GPU; on EP8, the most loaded GPU
+receives up to twice the mean in some layers, and the least loaded under a third of it.
+
+ 
+ Figure 4: Per-GPU load in one forward pass. Qwen3-30B on EP8, 211 tokens. Dots: each GPU’s
+token–expert pairs in each MoE layer; lines: the most and least loaded GPU; dashed: the even share,
+ B ​ k / G Bk/G . A lookup by batch size sees 211 tokens on every GPU. 
+ 
+ 
+ Routing matters to the kernel because it decides how the tokens fill tiles. Consider two GPUs that
+each hold 16 experts and receive 128 tokens. On the first, routing is balanced and every expert
+receives 8 tokens: 8-row tiles are exactly full, while 32-row tiles are three-quarters padding. On
+the second, four experts receive 30 tokens each and eight others receive
+one token each: 8-row tiles now
+cut each busy expert into four tiles, and each tile reads that expert’s weights again, while one
+32-row tile per expert reads them once. Both GPUs have the same number of tokens, and Equation  1 
+favors a different configuration on each. Under EP this happens on every forward pass, on every
+GPU, and the slowest GPU sets the layer’s time.
+Whether a given change in the load moves the best configuration, and by how much, depends on the
+geometry and on the batch.
+
+ 
+ Real serving shows the same effect. In one recorded batch of 256 tokens of Qwen3-30B on EP8, the
+GPUs’ fastest configurations range from 6- to 32-row tiles and grow with the
+tokens each GPU receives, while vLLM’s tuning gives every GPU 24-row tiles. Across
+seven models on EP8, the eight GPUs of a batch with 128 or more tokens need 4–6 different
+configurations on average, and in at most 16% of these batches is a single configuration best on
+every GPU.
+
+ 
+ 2.4 Choosing a Configuration
+
+ 
+ MoE serving systems, like most GPU kernels, choose the configuration offline
+(Section  5 ). vLLM’s tuner times every
+configuration at 18 batch sizes, from 1 to 4,096 tokens, on random router scores that make every
+expert equally likely, and keeps the fastest for each. At run time, vLLM’s tuning uses the
+entry nearest the current batch size, on every GPU. DeepGEMM chooses its tiles with a heuristic over the matrix
+shape, and FlashInfer profiles its kernels over a range of token counts  ( DeepSeek-AI, 2025a ; FlashInfer Team, 2025 ) .
+Each is a function of the batch size alone, shared by every GPU.
+
+ 
+ Let 𝒞 \mathcal{C} be the configurations a kernel supports, and t c ​ ( 𝐧 g ) t_{c}(\mathbf{n}_{g}) the kernel’s time
+under configuration c c on load 𝐧 g \mathbf{n}_{g} . The layer waits for the slowest GPU, and each GPU’s
+configuration affects only its own time, so the layer is fastest when every GPU runs the best
+configuration for its own load:
+
+ 
+
+ 
+ 
+ t layer = max g ⁡ t c g ​ ( 𝐧 g ) , c g ⋆ = arg ​ min c ∈ 𝒞 ⁡ t c ​ ( 𝐧 g ) . t_{\mathrm{layer}}=\max_{g}\,t_{c_{g}}(\mathbf{n}_{g}),\qquad c_{g}^{\star}=\operatorname*{arg\,min}_{c\in\mathcal{C}}\;t_{c}(\mathbf{n}_{g}). 
+ 
+ (2) 
+ 
+ 
+ Timing every configuration on each GPU’s actual load and keeping the fastest finds c g ⋆ c_{g}^{\star} ;
+we call this exhaustive search , the oracle against which every choice in this paper is
+measured. It is a reference, not a method: it runs every candidate on every batch.
+The batch size does not determine 𝐧 g \mathbf{n}_{g} : many loads share one B B , and under EP each GPU
+receives a different one. A function of B B alone therefore cannot follow a change in c g ⋆ c_{g}^{\star} 
+that routing causes. Not every change in the load moves c g ⋆ c_{g}^{\star} , and different configurations
+can take almost the same time, so how much this costs is an empirical question. On batches of 128 tokens or more,
+giving each GPU its own best configuration is up to 1.45 × \times faster than vLLM’s tuning, and the gap
+is largest when each GPU holds few experts (Section  4 ).
+
+ 
+ Solving Equation  2 at run time is constrained in three ways. First, 𝐧 g \mathbf{n}_{g} is
+known only after routing, and only on GPU g g . Second, the choice is made on every forward pass, so
+it must take far less time than the kernel, and t c ​ ( 𝐧 g ) t_{c}(\mathbf{n}_{g}) cannot be measured; it must be
+predicted from 𝐧 g \mathbf{n}_{g} alone. Third, serving systems capture each forward pass in a CUDA graph, which records every kernel and
+its launch parameters once and replays them, so that the CPU does not launch kernels one by
+one  ( Kwon et al., 2023 ) . A configuration chosen after routing therefore cannot be a different kernel; the
+captured kernel itself must be able to run any c ∈ 𝒞 c\in\mathcal{C} .
+
+ 
+ 3 RaMP
+
+ 
+ RaMP solves Equation  2 on every GPU, after routing, inside the captured forward pass. It replaces measurement with a prediction that only has to rank the
+configurations (Section  3.1 ), makes the choice in the kernel that already groups
+tokens by expert (Section  3.2 ), and runs the choice in one kernel that holds every
+candidate (Section  3.3 ). Each part answers one constraint of Section  2.4 :
+the time must be predicted, the load exists only on the GPU, and the captured forward pass fixes the
+kernel.
+
+ 
+ 3.1 The Cost Model
+
+ 
+ Choosing c g ⋆ c_{g}^{\star} exactly requires t c ​ ( 𝐧 g ) t_{c}(\mathbf{n}_{g}) for every configuration, and only
+running the kernel gives it. The obvious substitutes fall short. Timing the candidates on the live
+load would cost more than the kernel itself. A per-GPU table, indexed by each GPU’s token count, is cheap, but
+it treats two loads with the same count as the same work, which Section  2.3 showed
+they are not. It is also tied to one layout: at another EP degree, the same count spreads over a
+different number of experts.
+
+ 
+ Choosing does not need the time, only the order of the times, and that order is set by a few counts
+that the load determines and the configuration fixes. Consider how the kernel spends its time. All
+tiles of a configuration have the same shape, and a padded tile does as much work as a full one, so
+the work is set by the tiles the kernel launches rather than by the tokens it receives. While the GPU
+is full, tiles run S c S_{c} at a time, so the time follows the waves W c W_{c} , and a nearly empty last wave
+costs as much as a full one. Each tile also moves a slice of its expert’s weights and a block of
+token rows, traffic that grows with the tiles T c T_{c} . That traffic has a floor: every expert that
+receives a token must have its weights read at least once, however its tokens are tiled, and this
+floor dominates small batches, where the kernel waits on memory. What remains is the fixed cost of a
+launch. RaMP therefore predicts each configuration’s time as
+
+ 
+
+ 
+ 
+ t ^ c ​ ( 𝐧 g ) = θ c , 0 + θ c , 1 ​ W c ​ ( 𝐧 g ) + θ c , 2 ​ T c ​ ( 𝐧 g ) + θ c , 3 ​ A ​ ( 𝐧 g ) , \hat{t}_{c}(\mathbf{n}_{g})=\theta_{c,0}+\theta_{c,1}\,W_{c}(\mathbf{n}_{g})+\theta_{c,2}\,T_{c}(\mathbf{n}_{g})+\theta_{c,3}\,A(\mathbf{n}_{g}), 
+ 
+ (3) 
+ 
+ 
+ where T c T_{c} and W c W_{c} are the tiles and waves of Equation  1 , and
+ A ⁡ ( 𝐧 g ) = | { e ∈ ℰ g : n e > 0 } | A(\mathbf{n}_{g})=|\{e\in\mathcal{E}_{g}:n_{e}>0\}| is the number of active experts. q c q_{c} 
+includes any split of the reduction dimension (split-K), so T c T_{c} counts every thread block the
+configuration launches.
+
+ 
+ The counts see exactly what the batch size hides. On the two GPUs of Section  2.3 ,
+which both receive 128 tokens, moving from balanced to unbalanced routing raises the row-tiles the 8-row
+configuration launches from 16 to 24 and lowers the 32-row configuration’s from 16 to 12. The
+two move in opposite directions, and a token count sees neither change. The batch size itself does
+not appear in Equation  3 ; it reaches the model only through 𝐧 g \mathbf{n}_{g} , so one set
+of coefficients serves every batch size and every GPU. Each configuration has its own coefficients,
+because its cost per wave, per tile, and per expert depends on its tile shape and pipeline.
+Second-order effects that the counts omit, such as the order in which tiles launch, are left to the
+fit; excluding the configurations whose launch order the model misjudges changes the geometric
+mean by under 0.1%.
+
+ 
+ We fit θ c \theta_{c} offline, from loads 𝐧 ( i ) \mathbf{n}^{(i)} recorded in serving and the measured time
+of c c on each, by non-negative least squares  ( Lawson and Hanson, 1974 ) on the relative error
+ ∑ i ( t ^ c ​ ( 𝐧 ( i ) ) / t c ​ ( 𝐧 ( i ) ) − 1 ) 2 \sum_{i}\big(\hat{t}_{c}(\mathbf{n}^{(i)})/t_{c}(\mathbf{n}^{(i)})-1\big)^{2} . Both choices follow from
+how the model is used. The choice compares configurations on one load, and an error of 2  μ \mu s
+decides it on a 20  μ \mu s kernel but not on a 500  μ \mu s one, so error is measured relative to
+each load’s time. Non-negativity keeps every term a cost, so each prediction grows with every n e n_{e} , a useful bias since the true time almost always does; an
+unconstrained fit gives the correlated wave and tile terms large coefficients of opposite sign that
+cancel only on the training loads.
+
+ 
+ Ranking is also robust to the model’s error. An error shared by every configuration on a load, such
+as the GPU’s clock, the state of its caches, or overhead outside the counts, shifts every prediction
+together and leaves the argmin unchanged. On loads from domains it was not fit on, the model orders
+the configurations with a rank correlation of 0.97–0.99 with the measured order, while the predicted time of the
+configuration it picks is off by a median of 1.4–6.5% (Section  4 ; Figure  6 in the
+appendix).
+
+ 
+ RaMP’s menu ℳ ⊆ 𝒞 \mathcal{M}\subseteq\mathcal{C} holds the top six configurations, chosen greedily
+offline to minimize the recorded workload’s time, all from one occupancy class
+(Section  3.3 ).
+
+ 
+ 3.2 Choosing on the GPU
+
+ 
+ The selection kernel takes the router’s chosen experts and produces two outputs: the index of the
+chosen configuration c ^ g = arg ⁡ min c ∈ ℳ ​ t ^ c ​ ( 𝐧 g ) \hat{c}_{g}=\arg\min_{c\in\mathcal{M}}\hat{t}_{c}(\mathbf{n}_{g}) , written to
+GPU memory, and the tokens grouped by expert and padded
+into that configuration’s tiles (Algorithm  1 ). Serving systems already run a
+kernel before every MoE kernel that produces the second output for a fixed tile size; RaMP replaces it, so the choice needs no extra launch. One thread block counts this GPU’s tokens per
+local expert with shared-memory atomics, ignoring tokens routed to other GPUs, and one warp per menu
+entry evaluates Equation  3 .
+
+ 
+ For 8 to 4,096 token–expert pairs, the selection kernel takes 3.8–6.5  μ \mu s and is faster
+than the grouping kernel it replaces at 7 of the 8 sizes we measured, so the choice adds under
+1  μ \mu s at most. Its launch shape is fixed and it never waits on the CPU, so it is captured in the
+CUDA graph like any other kernel.
+
+ 
+ Algorithm 1 Selection kernel, one thread block per GPU 
+ 
+ 
+ 
+ 
+   Input: top- k k expert ids, local expert map, menu ℳ \mathcal{M} , coefficients θ \theta 
+
+ 
+ 
+ 
+   n e ← 0 n_{e}\leftarrow 0 for each local expert e e // shared memory
+ 
+
+ 
+ 
+ 
+   for each token–expert pair i i (in parallel) do 
+
+ 
+ 
+ 
+    e ← e\leftarrow local id of the expert of pair i i ; if e e is local then atomically n e ← n e + 1 n_{e}\leftarrow n_{e}+1 
+
+ 
+ 
+ 
+   end for 
+
+ 
+ 
+ 
+   for each c ∈ ℳ c\in\mathcal{M} (one warp each) do 
+
+ 
+ 
+ 
+    T c , A ← T_{c},A\leftarrow warp sums of q c ​ ⌈ n e / b c ⌉ q_{c}\lceil n_{e}/b_{c}\rceil and [ n e > 0 ] [n_{e}>0] ; W c ← ⌈ T c / S c ⌉ W_{c}\leftarrow\lceil T_{c}/S_{c}\rceil 
+
+ 
+ 
+ 
+    t ^ c ← θ c , 0 + θ c , 1 ​ W c + θ c , 2 ​ T c + θ c , 3 ​ A \hat{t}_{c}\leftarrow\theta_{c,0}+\theta_{c,1}W_{c}+\theta_{c,2}T_{c}+\theta_{c,3}A 
+
+ 
+ 
+ 
+   end for 
+
+ 
+ 
+ 
+   c ^ g ← arg ⁡ min c ⁡ t ^ c \hat{c}_{g}\leftarrow\arg\min_{c}\hat{t}_{c} ; write c ^ g \hat{c}_{g} to GPU memory
+
+ 
+ 
+ 
+  offsets ← \leftarrow prefix sum of b c ^ g ​ ⌈ n e / b c ^ g ⌉ b_{\hat{c}_{g}}\lceil n_{e}/b_{\hat{c}_{g}}\rceil 
+
+ 
+ 
+ 
+  scatter token ids into padded tiles of b c ^ g b_{\hat{c}_{g}} rows
+
+ 
+
+ 
+ 3.3 The Kernel
+
+ 
+ The captured forward pass fixes which kernel runs after the selection kernel. One way to branch
+anyway is a conditional node, which picks a kernel from a value in GPU memory. Each costs about
+8.4  μ \mu s per layer, or about 0.4 ms per decode forward pass across Qwen3-30B’s 48 MoE layers,
+more than the choice could save on a small batch. But the graph fixes only which kernel runs and its
+launch shape, not what the kernel does.
+
+ 
+ RaMP therefore compiles every menu entry into one polymorphic kernel. Each thread block reads
+ c ^ g \hat{c}_{g} from GPU memory and runs that entry’s code. Holding many entries in one kernel has two
+costs, and both are small. The grid is sized for the largest tile count any entry can produce, and
+blocks beyond the chosen entry’s count exit at once, which costs 0.2%. All entries share one
+shared-memory buffer, so the menu is drawn from one occupancy class; within it, each entry runs at
+1.00 × \times its standalone time on a menu of three and at a median of 1.01 × \times on a menu of six. Six
+entries are enough: they capture nearly all of the choice’s benefit, within 1–2% of a menu of
+twelve at the MoE layer, while keeping every entry’s shared memory and registers close to its own.
+
+ 
+ A choice is only as good as what it can choose from. The kernel is written in CuTe
+DSL  ( NVIDIA, 2024 ) and computes both expert matrix multiplications and the gated activation in one
+launch, in FP8 with 128 × 128 128\times 128 block scaling as used by DeepSeek-V3  ( DeepSeek-AI et al., 2024 ) . Its
+configuration space covers 2 to 64 rows per tile, tile width, pipeline depth, persistent and grouped
+launch orders, and split-K for large reduction dimensions: 98–337 valid configurations per model
+and layout.
+Appendix  A.8 describes its construction, and we will release the kernel at a later date.
+
+ 
+ 4 Evaluation
+
+ 
+ This section evaluates RaMP on real MoE serving traffic, first end to end in vLLM and then down to
+the configuration each GPU chooses. On serving traffic its cost model was never fit on, the configurations it chooses from the full configuration space are up to 1.45 × \times faster than vLLM’s tuning on batches of 128 tokens or more (up to 1.27 × \times over all batches), and within 3.5% of exhaustive search on every EP layout. Its kernel and choice together make the MoE layer up to 1.84 × \times faster than vLLM’s Triton MoE on batches of 128 tokens or more, and in vLLM, under TP and EP, it
+lowers time per output token at every load we test, by up to 1.11 × \times over the fastest stock backend.
+
+ 
+ Testbed. All experiments run on one node with 8 NVIDIA H200 GPUs, connected all-to-all by
+NVLink 4, in FP8 with 128 × 128 128\times 128 block scaling. End-to-end serving uses CUDA graphs; the Measurement
+paragraph gives each microbenchmark’s launch mode. The software is vLLM 0.32.0,
+PyTorch 2.13, CUDA 13.0, CuTe DSL 4.8, Triton 3.7.1, FlashInfer 0.7.0, and DeepGEMM 2.8.2.
+
+ 
+ Models and traffic. Table  1 lists the eight
+models  ( Muennighoff et al., 2024 ; Qwen Team, 2024 ; Yang et al., 2024 ; Yang et al., 2025 ; Qwen Team, 2026 ; Abdin et al., 2024 ; Jiang et al., 2024 ; Mistral AI, 2024 ; DeepSeek-AI et al., 2024 ) ; Qwen1.5-MoE enters the tile-size
+measurements of Section  2.2 . We recorded their
+routing while vLLM served prompts from four domains: chat  ( ShareGPT, 2023 ) , math  ( Cobbe et al., 2021 ) ,
+code  ( Chen et al., 2021 ) , and knowledge questions  ( Hendrycks et al., 2021 ) , at 16, 64, and 256 concurrent
+requests. For seven of the models, we also recorded open-loop traffic, with ShareGPT requests
+arriving at random at a fixed rate. Routing does not depend on the layout, so the same recordings
+drive every layout; under EP, experts are assigned to GPUs in contiguous blocks, as in vLLM.
+
+ 
+ Measurement. To compare configurations, we replay recorded batches and time every
+configuration on every GPU’s actual load, with the cache flushed before each run. The MoE layer’s
+latency is that of its slowest GPU. EP16 and EP32 replay each GPU’s load on the 8 GPUs, without the
+exchange of tokens between GPUs, which costs the same under every policy. Table  3 times the expert kernel with direct
+launches; Table  5 and Figure  5 replay CUDA graphs, and
+Figure  5 also includes RaMP’s activation quantization and selection kernel. Repeated
+measurements differ by 0.2–1.2%.
+
+ 
+ Baselines. End to end, we compare with vLLM’s three FP8 MoE backends: its Triton
+kernel  ( Tillet et al., 2019 ) , FlashInfer’s CUTLASS kernel  ( Ye et al., 2025 ; FlashInfer Team, 2025 ) , and DeepGEMM  ( DeepSeek-AI, 2025a ) ;
+where vLLM ships no tuned table for a model’s shape, its Triton kernel runs its default configuration.
+vLLM’s own CUTLASS FP8 MoE backend does not support these configurations, so it is not compared.
+To isolate the choice from the kernel, we also run RaMP’s kernel under four other policies.
+vLLM’s tuning (Section  2.4 ) is applied to RaMP’s kernel and
+configuration space. The trace-tuned table is the same lookup tuned on real traffic. The per-GPU table is indexed by each GPU’s own token count. And
+exhaustive search (Section  2.4 ) times every configuration on each GPU and keeps the
+fastest. Policies that learn from traffic never see the traffic
+they are scored on.
+
+ 
+ Table 1: Models. Total and active parameters, experts per layer E E , experts per token
+ k k , and expert intermediate size h h . 
+ 
+ 
+ 
+ Model 
+ Params 
+ E E 
+ k k 
+ h h 
+
+ 
+ 
+ 
+ OLMoE 
+ 7B / 1B 
+ 64 
+ 8 
+ 1,024 
+
+ 
+ Qwen1.5-MoE 
+ 14B / 2.7B 
+ 60 
+ 4 
+ 1,408 
+
+ 
+ Qwen2-57B 
+ 57B / 14B 
+ 64 
+ 8 
+ 2,560 
+
+ 
+ Qwen3-30B 
+ 30B / 3B 
+ 128 
+ 8 
+ 768 
+
+ 
+ Qwen3.5-35B 
+ 35B / 3B 
+ 256 
+ 8 
+ 512 
+
+ 
+ Phi-3.5-MoE 
+ 42B / 6.6B 
+ 16 
+ 2 
+ 6,400 
+
+ 
+ Mixtral-8x22B 
+ 141B / 39B 
+ 8 
+ 2 
+ 16,384 
+
+ 
+ DeepSeek-V3 
+ 671B / 37B 
+ 256 
+ 8 
+ 2,048 
+
+ 
+ 
+ 
+ 
+ 4.1 End-to-End Serving
+
+ 
+ We served DeepSeek-V3 and Qwen3-30B on EP8 and OLMoE on EP4, with attention split over the same
+GPUs, and DeepSeek-V3 also on TP8. Requests come from ShareGPT, at a fixed rate or a fixed number of
+concurrent requests. For Qwen3-30B, the menu and cost model were fit without the chat domain, so the
+served traffic is held out.
+
+ 
+ Table 2: End-to-end serving in vLLM. Mean time per output token (ms, median of three runs;
+lower is better) and RaMP’s speedup over each stock MoE backend. Load: request rate or concurrent
+requests. 
+ 
+ 
+ 
+ 
+ Time per output token (ms) 
+ RaMP’s speedup over 
+
+ 
+ Load 
+ Triton 
+ FlashInfer 
+ DeepGEMM 
+ RaMP    
+ Triton 
+ FlashInfer 
+ DeepGEMM 
+
+ 
+ DeepSeek-V3, EP8 
+
+ 
+ 4 req/s 
+ 20.15 
+ 19.98 
+ 23.40 
+ 18.91     
+ 1.07 × \times 
+ 1.06 × \times 
+ 1.24 × \times 
+
+ 
+ 8 req/s 
+ 28.60 
+ 28.93 
+ 32.99 
+ 26.63     
+ 1.07 × \times 
+ 1.09 × \times 
+ 1.24 × \times 
+
+ 
+ 16 req/s 
+ 29.76 
+ 31.89 
+ 32.06 
+ 27.34     
+ 1.09 × \times 
+ 1.17 × \times 
+ 1.17 × \times 
+
+ 
+ 64 conc. 
+ 30.08 
+ 30.07 
+ 31.32 
+ 27.73     
+ 1.08 × \times 
+ 1.08 × \times 
+ 1.13 × \times 
+
+ 
+ 256 conc. 
+ 38.33 
+ 41.71 
+ 40.21 
+ 37.92     
+ 1.01 × \times 
+ 1.10 × \times 
+ 1.06 × \times 
+
+ 
+ DeepSeek-V3, TP8 
+
+ 
+ 64 conc. 
+ 27.79 
+ 40.50 
+ 38.71 
+ 25.83     
+ 1.08 × \times 
+ 1.57 × \times 
+ 1.50 × \times 
+
+ 
+ 256 conc. 
+ 37.54 
+ 57.65 
+ 49.86 
+ 35.75     
+ 1.05 × \times 
+ 1.61 × \times 
+ 1.39 × \times 
+
+ 
+ Qwen3-30B, EP8, held-out domain 
+
+ 
+ 8 req/s 
+ 5.23 
+ 4.87 
+ 5.63 
+ 4.51     
+ 1.16 × \times 
+ 1.08 × \times 
+ 1.25 × \times 
+
+ 
+ 16 req/s 
+ 5.23 
+ 4.89 
+ 5.64 
+ 4.50     
+ 1.16 × \times 
+ 1.09 × \times 
+ 1.25 × \times 
+
+ 
+ 32 req/s 
+ 5.55 
+ 5.35 
+ 6.03 
+ 4.82     
+ 1.15 × \times 
+ 1.11 × \times 
+ 1.25 × \times 
+
+ 
+ 64 conc. 
+ 5.91 
+ 5.79 
+ 6.34 
+ 5.28     
+ 1.12 × \times 
+ 1.10 × \times 
+ 1.20 × \times 
+
+ 
+ 128 conc. 
+ 7.10 
+ 7.05 
+ 7.74 
+ 6.46     
+ 1.10 × \times 
+ 1.09 × \times 
+ 1.20 × \times 
+
+ 
+ OLMoE, EP4 
+
+ 
+ 32 req/s 
+ 2.77 
+ 2.56 
+ 2.98 
+ 2.39     
+ 1.16 × \times 
+ 1.07 × \times 
+ 1.25 × \times 
+
+ 
+ 64 conc. 
+ 3.05 
+ 2.90 
+ 3.16 
+ 2.78     
+ 1.10 × \times 
+ 1.04 × \times 
+ 1.14 × \times 
+
+ 
+ 192 conc. 
+ 3.98 
+ 3.93 
+ 3.99 
+ 3.90     
+ 1.02 × \times 
+ 1.01 × \times 
+ 1.02 × \times 
+
+ 
+ 
+ 
+ 
+ Table  2 shows that RaMP is the fastest MoE backend at every load, against each stock
+backend. On Qwen3-30B, serving a domain its cost model never saw, it is 1.10–1.16 × \times faster than
+Triton, 1.08–1.11 × \times than FlashInfer, and 1.20–1.25 × \times than DeepGEMM. On DeepSeek-V3 it is
+1.01–1.24 × \times faster than every stock backend on EP8 and 1.05–1.61 × \times on TP8, and on OLMoE
+1.01–1.25 × \times .
+Model quality is unchanged: perplexity on 5,000–5,700 tokens of Python standard-library documentation is
+1.124–1.126 on DeepSeek-V3 and 5.50–5.52 on OLMoE across all backends, and, on Qwen3-30B serving the held-out domain, 3.02 with RaMP against 3.05 with FlashInfer.
+
+ 
+ The gain holds even where the MoE layer is a small part of each step. On Qwen3-30B, the experts take
+only 15% of GPU time and communication most of the rest, yet RaMP is 1.08–1.11 × \times faster per output
+token. Part of that communication is GPUs waiting for the slowest GPU’s MoE layer, and it falls from
+62% of the step with FlashInfer to 57% with RaMP.
+
+ 
+ On one node, the room for any choice is bounded: over all batches of the recorded traffic, exhaustive search is 1.04–1.07 × \times faster than vLLM’s tuning on RaMP’s kernel, which caps what a choice can
+add to time per output token at 1–3%. RaMP’s menu is itself chosen from recorded routing, so a
+batch-size table on that menu already carries part of the choice, and RaMP’s live choice is between 2% slower and 5% faster at every point (Table  10 ). The gain from the choice grows with the number of GPUs
+and with the share of large batches, as Section  4.2 shows: on open-loop traffic at
+EP32, RaMP is 1.18–1.22 × \times faster than vLLM’s tuning on the same kernel.
+
+ 
+ 4.2 Where the Speedup Comes From
+
+ 
+ The end-to-end gain has two sources, RaMP’s kernel and the configuration it chooses for each GPU.
+We separate them at the MoE layer, then test the choice on its own.
+
+ 
+ Kernel and choice. Figure  5 builds up RaMP’s MoE layer latency under EP from
+vLLM’s Triton MoE, one change at a time, on batches of 128 tokens or more. RaMP’s kernel under
+vLLM’s tuning is 1.03–1.72 × \times faster than Triton. Choosing its configuration from each GPU’s load
+adds another 1.03–1.29 × \times , for a total of 1.14–1.84 × \times , including the selection kernel. The choice
+is a median of 40% of the total gain, and up to 79% on models with few, large experts such as
+Mixtral-8x22B and Phi-3.5-MoE.
+
+ 
+ Figure 5: MoE layer speedup over vLLM’s Triton MoE under EP , on batches of 128 tokens or more
+from held-out domains. Bars: RaMP’s kernel under vLLM’s tuning, under the trace-tuned table, and
+with RaMP’s choice; ticks: exhaustive search. Latency is the slowest GPU’s, including RaMP’s
+activation quantization and selection kernel, so the ratios are lower than the expert-kernel times of
+Tables  3 and  5 . EP32 bars use a smaller sample of batches than the starred rows of Table  5 . 
+ 
+ 
+ Choosing on serving traffic. Table  3 tests the choice on open-loop serving
+traffic. Every policy is fit on the recorded traffic and scored on batches sampled from open-loop
+serving, which it never saw. On batches of 128 tokens or more, RaMP’s configurations are
+1.03–1.45 × \times faster than vLLM’s tuning; over all batches, 1.01–1.27 × \times , within 0.7–3.5% of
+exhaustive search on all 14 EP layouts and within 2% on 8 of them. Against the trace-tuned table,
+RaMP is 0.99–1.08 × \times over all batches. Table  3 chooses from RaMP’s full
+configuration space. Serving uses the top six configurations, and on them RaMP is 1.06 × \times faster than
+a table tuned on the same six (geometric mean over 21 EP layouts; up to 1.27 × \times ) and on average
+within 0.5% of the best of the six (Table  9 ). Against the full space, the served
+kernel is 1.12 × \times faster than vLLM’s tuning (geometric mean; up to 1.68 × \times ) and on average 7% from exhaustive search over all configurations; what remains is the cost of serving six configurations,
+not of choosing among them.
+
+ 
+ Table 3: Choosing on open-loop serving traffic. Speedup of RaMP over each policy, all on
+RaMP’s kernel and fit on the recorded traffic, over all batches and on batches of 128 tokens or
+more ( ≥ \geq 128); the trace-tuned and per-GPU columns are over all batches. Times are those of the
+expert kernel. Gap: RaMP’s time over exhaustive search, over all batches (%). 
+ 
+ 
+ 
+ 
+ 
+ vLLM’s tuning 
+ 
+ 
+ 
+
+ 
+ Model 
+ Layout 
+ All 
+ ≥ \geq 128 
+ 
+ 
+ 
+ Trace- 
+
+ 
+ tuned 
+
+ 
+ 
+ 
+ 
+ Per-GPU 
+
+ 
+ table 
+
+ 
+ Gap 
+
+ 
+ Qwen3-30B 
+ EP8 
+ 1.10 × \times 
+ 1.24 × \times 
+ 1.04 × \times 
+ 1.03 × \times 
+ 3.5 
+
+ 
+ 
+ EP16 
+ 1.04 × \times 
+ 1.06 × \times 
+ 1.02 × \times 
+ 1.01 × \times 
+ 2.2 
+
+ 
+ 
+ EP32 
+ 1.18 × \times 
+ 1.24 × \times 
+ 1.06 × \times 
+ 1.00 × \times 
+ 2.0 
+
+ 
+ Qwen3.5-35B 
+ EP8 
+ 1.05 × \times 
+ 1.07 × \times 
+ 1.02 × \times 
+ 1.02 × \times 
+ 2.6 
+
+ 
+ 
+ EP32 
+ 1.18 × \times 
+ 1.24 × \times 
+ 1.07 × \times 
+ 1.01 × \times 
+ 2.1 
+
+ 
+ DeepSeek-V3 
+ EP8 
+ 1.01 × \times 
+ 1.03 × \times 
+ 0.99 × \times 
+ 0.99 × \times 
+ 2.9 
+
+ 
+ 
+ EP32 
+ 1.22 × \times 
+ 1.16 × \times 
+ 1.03 × \times 
+ 1.01 × \times 
+ 1.0 
+
+ 
+ OLMoE 
+ EP8 
+ 1.05 × \times 
+ 1.16 × \times 
+ 1.03 × \times 
+ 1.02 × \times 
+ 0.9 
+
+ 
+ 
+ EP16 
+ 1.14 × \times 
+ 1.45 × \times 
+ 1.00 × \times 
+ 1.00 × \times 
+ 2.0 
+
+ 
+ Phi-3.5-MoE 
+ EP8 
+ 1.27 × \times 
+ 1.27 × \times 
+ 1.06 × \times 
+ 1.03 × \times 
+ 1.0 
+
+ 
+ 
+ EP16 
+ 1.20 × \times 
+ 1.34 × \times 
+ 1.08 × \times 
+ 1.01 × \times 
+ 2.9 
+
+ 
+ Qwen2-57B 
+ EP8 
+ 1.04 × \times 
+ 1.04 × \times 
+ 1.01 × \times 
+ 1.01 × \times 
+ 1.2 
+
+ 
+ 
+ EP16 
+ 1.17 × \times 
+ 1.29 × \times 
+ 1.04 × \times 
+ 1.02 × \times 
+ 1.4 
+
+ 
+ Mixtral-8x22B 
+ EP8 
+ 1.14 × \times 
+ 1.14 × \times 
+ 1.03 × \times 
+ 1.00 × \times 
+ 0.7 
+
+ 
+ 
+ 
+ 
+ What pays is choosing from each GPU’s own load, which no policy keyed on the batch size can do. Even the simplest
+such policy, a per-GPU table, needs RaMP’s mechanism, since the count exists only on the GPU after
+routing; at the EP degree it was tuned for, it comes within 3% of RaMP. The cost model adds two
+things a table cannot. How the tokens spread over a GPU’s experts adds up to 1.07 × \times on batches of
+128 tokens or more at EP16 and EP32. And the cost model carries over to new layouts: a per-GPU table
+tuned at a model’s other EP degrees is 1.09 × \times from exhaustive search, against 1.04 × \times at its own
+degree, while the cost model, with the layer’s dimensions added to its terms and fit on seven
+models, is within 1.9% of exhaustive search on the eighth (geometric mean).
+
+ 
+ Why the cost model works. It ranks configurations almost exactly, with a rank correlation of
+0.97–0.99 with the measured order, which is all the choice uses. Its terms matter: a formula built
+from the tile count alone (the tiles, the tiles per SM, and their logarithm, fit by ordinary least
+squares) is 6.7% from exhaustive search on batches of 128 tokens or more, against 1.3% for
+Equation  3 (geometric mean over 18 EP layouts). Nor can a table keyed on the same inputs
+replace it: over the 21 EP layouts of Appendix  A.2 , tables keyed on a GPU’s token
+count and a measure of its balance, such as its padding or active experts, are 3.1–4.8% from
+exhaustive search on these batches, against 1.4% for the cost model,
+because a few buckets lose how each expert’s tokens fill tiles and waves. The model’s rare mispicks fall on GPUs that seldom set the layer’s latency;
+removing them changes the result by under 0.1%.
+
+ 
+ When the choice matters. When every GPU holds every expert, each GPU computes the whole batch’s routing,
+and at a given batch size the best configuration changes little. This is the case offline
+tuning was built for, and RaMP’s choice matches the trace-tuned table to within 2%, while its MoE
+layer is 1.09–1.17 × \times faster than vLLM’s Triton MoE (Table  11 ). Balanced expert placement
+does not remove the imbalance under EP, because the most loaded experts change from batch to batch.
+It lowers the imbalance by at most 11 percentage points, and RaMP’s gain is unchanged, within its 95%
+interval, on all six layouts we test (Table  8 ). Even re-balancing every 128
+forward passes leaves the most loaded GPU 11–56% above the mean on EP8 (Table  7 ).
+
+ 
+ The choice pays most as each GPU holds fewer experts. On Qwen3-30B, the most loaded GPU holds 52% more
+than the mean at EP8 and 188% more at EP32, and RaMP’s gain over the trace-tuned table on held-out
+batches of 128 tokens or more grows from 1.14 × \times to 1.32 × \times ; on DeepSeek-V3, the excess grows from
+45% to 132% and the gain from 1.00 × \times to 1.15 × \times (Tables  6 and  5 ). It also grows with
+the share of large batches, which open-loop traffic carries far more of than the recorded traffic: on
+Qwen3-30B, 14–52% of forward passes carry 128 tokens or more under open-loop arrivals, against
+4%. Weighted by the open-loop mix at 32 requests per second, RaMP’s gain over vLLM’s tuning on the
+MoE layer is 1.16–1.23 × \times on four of six EP layouts, close to that of exhaustive search.
+
+ 
+ 5 Related Work
+
+ 
+ MoE kernels. MoE megakernels and grouped kernels include vLLM’s Triton MoE  ( Kwon et al., 2023 ; Tillet et al., 2019 ) ,
+MegaBlocks  ( Gale et al., 2023 ) , ScatterMoE  ( Tan et al., 2024 ) , DeepGEMM  ( DeepSeek-AI, 2025a ) ,
+FlashInfer’s CUTLASS path  ( FlashInfer Team, 2025 ; NVIDIA, 2024 ) , Alpha-MoE  ( Aleph Alpha, 2025 ) , and
+SonicMoE  ( Guo et al., 2025 ) . They differ in how they gather tokens, fuse the activation, and overlap
+memory with compute; MegaBlocks, for example, casts the layer as a block-sparse product with a
+fixed 128 × 128 128\times 128 block, chosen by benchmarking dense matrix multiplications before any routing
+exists. These works make one kernel faster and choose its configuration
+statically or from the batch size. RaMP instead chooses which configuration to run for each GPU on
+every forward pass, and the same choice applies to any kernel that exposes several configurations.
+
+ 
+ Load balance and placement. Training adds capacity limits and auxiliary losses that push
+the router toward balance  ( Lepikhin et al., 2021 ; Fedus et al., 2022 ) ; FasterMoE replicates popular experts during
+training  ( He et al., 2022 ) , and Tutel switches the parallelism strategy at every iteration to follow
+the changing load  ( Hwang et al., 2023 ) . At serving time, DeepSeek-V3 replicates popular
+experts  ( DeepSeek-AI et al., 2024 ; DeepSeek-AI, 2025b ) , and Huang et al. (2023) buffer and rebalance experts. These methods reduce the imbalance between GPUs by deciding where experts
+and tokens go. RaMP handles what they leave: the imbalance that remains from batch to batch, which
+balanced placement lowers by at most 11 percentage points, and the imbalance among each GPU’s own experts, which no
+placement sees. It runs on whatever placement they produce.
+
+ 
+ Autotuning and run-time kernel selection. Halide, TVM, Ansor, and AutoTVM search
+configuration spaces offline, guided by measurements or a learned cost
+model  ( Ragan-Kelley et al., 2013 ; Chen et al., 2018a ; Zheng et al., 2020 ; Chen et al., 2018b ) ; like
+RaMP’s, AutoTVM’s model needs only to rank candidates. Triton autotunes kernels for each input
+shape  ( Tillet et al., 2019 ) , and DeepGEMM chooses tiles from the matrix shape  ( DeepSeek-AI, 2025a ) .
+DietCode  ( Zheng et al., 2022 ) is the closest: it compiles micro-kernels for dynamic shapes, uses a
+cost model offline to choose among them for each shape, and dispatches at run time with a decision
+tree trained on those choices. In all of these, the input to the choice is a
+shape that the CPU knows before the kernel launches. For an MoE layer, the deciding input is a
+vector, each GPU’s per-expert load, and it exists only on that GPU, after routing, in the middle of
+the captured forward pass. RaMP therefore evaluates a closed-form ranking model on the GPU and
+switches configurations inside one polymorphic kernel, with no CPU involved.
+
+ 
+ Serving and batching. Continuous batching  ( Yu et al., 2022 ) , paged attention  ( Kwon et al., 2023 ) ,
+chunked prefill  ( Agrawal et al., 2024 ) , and structured programs  ( Zheng et al., 2024 ) decide how many tokens each
+forward pass carries. They treat the batch size as the kernel’s problem size; for an MoE layer, the
+router changes the problem again before the kernel runs.
+
+ 
+ 6 Limitations
+
+ 
+ RaMP is evaluated on one node of eight H200 GPUs. EP16 and EP32 replay each GPU’s recorded load
+without the exchange of tokens between GPUs; serving them across nodes, where each GPU holds the
+fewest experts and the choice pays most, is the natural next step. On one node, RaMP’s end-to-end gain comes mostly from its kernel; the
+choice pays most at higher EP degrees, which we evaluate by replay. We evaluate FP8 with 128 × 128 128\times 128 block scaling in
+vLLM; other precisions, GPU generations, and serving systems are left to future work.
+
+ 
+ The cost model counts the tiles, waves, and active experts a configuration produces, but a kernel
+can apply further optimizations whose cost these counts do not capture: the reduction of split-K’s
+partial results, tile orders chosen for L2 reuse, separate tile shapes for the up and down
+projections, and two-CTA matrix multiplications on newer GPUs. How the cost model should account
+for these optimizations, and how they interact with routing, is a direction for future research.
+
+ 
+ 7 Conclusion
+
+ 
+ Serving systems choose an MoE kernel’s configuration from the batch size, but the router decides how
+the batch’s tokens split across experts and GPUs, and the best configuration follows that split.
+RaMP makes the choice where the split is known: on each GPU, after routing, on every forward pass. A
+cost model ranks the configurations from each GPU’s load, and a polymorphic kernel runs whichever
+one it picks. On serving traffic the model was never fit on, the configurations it chooses from the full configuration space are up to 1.45 × \times faster than vLLM’s tuning on batches of 128 tokens or more and within 3.5% of exhaustive search over all batches,
+and in vLLM RaMP lowers time per output token by up to 1.11 × \times over the fastest stock backend under
+both TP and EP. As expert-parallel serving spreads models over more GPUs, each GPU holds fewer
+experts, its share of the batch grows less balanced, and choosing from routing pays more.
+
+ 
+ References
+
+ 
+ Abdin et al. (2024) 
+ M. Abdin, J. Aneja, H. Awadalla, A. Awadallah, A. A. Awan, N. Bach, A. Bahree, A. Bakhtiari, J. Bao, H. Behl, A. Benhaim, M. Bilenko, J. Bjorck, S. Bubeck, M. Cai, Q. Cai, V. Chaudhary, D. Chen, D. Chen, W. Chen, Y. Chen, Y. Chen, H. Cheng, P. Chopra, X. Dai, M. Dixon, R. Eldan, V. Fragoso, J. Gao, M. Gao, M. Gao, A. Garg, A. D. Giorno, A. Goswami, S. Gunasekar, E. Haider, J. Hao, R. J. Hewett, W. Hu, J. Huynh, D. Iter, S. A. Jacobs, M. Javaheripi, X. Jin, N. Karampatziakis, P. Kauffmann, M. Khademi, D. Kim, Y. J. Kim, L. Kurilenko, J. R. Lee, Y. T. Lee, Y. Li, Y. Li, C. Liang, L. Liden, X. Lin, Z. Lin, C. Liu, L. Liu, M. Liu, W. Liu, X. Liu, C. Luo, P. Madan, A. Mahmoudzadeh, D. Majercak, M. Mazzola, C. C. T. Mendes, A. Mitra, H. Modi, A. Nguyen, B. Norick, B. Patra, D. Perez-Becker, T. Portet, R. Pryzant, H. Qin, M. Radmilac, L. Ren, G. de Rosa, C. Rosset, S. Roy, O. Ruwase, O. Saarikivi, A. Saied, A. Salim, M. Santacroce, S. Shah, N. Shang, H. Sharma, Y. Shen, S. Shukla, X. Song, M. Tanaka, A. Tupini, P. Vaddamanu, C. Wang, G. Wang, L. Wang, S. Wang, X. Wang, Y. Wang, R. Ward, W. Wen, P. Witte, H. Wu, X. Wu, M. Wyatt, B. Xiao, C. Xu, J. Xu, W. Xu, J. Xue, S. Yadav, F. Yang, J. Yang, Y. Yang, Z. Yang, D. Yu, L. Yuan, C. Zhang, C. Zhang, J. Zhang, L. L. Zhang, Y. Zhang, Y. Zhang, Y. Zhang, and X. Zhou 
+ 
+ Phi-3 technical report: a highly capable language model locally on your phone .
+ 
+ arXiv preprint arXiv:2404.14219 .
+ 
+ Cited by: §4 .
+ 
+
+ Agrawal et al. (2024) 
+ A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, A. Tumanov, and R. Ramjee 
+ 
+ Taming throughput-latency tradeoff in LLM inference with Sarathi-Serve .
+ 
+ In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+ 
+ Cited by: §2.3 ,
+ §5 .
+ 
+
+ Aleph Alpha (2025) 
+ Aleph Alpha 
+ 
+ Alpha-MoE: fused mixture-of-experts kernel .
+ 
+ Note: https://github.com/Aleph-Alpha/Alpha-MoE 
+ 
+ Cited by: §5 .
+ 
+
+ Chen et al. (2021) 
+ M. Chen, J. Tworek, H. Jun, Q. Yuan, H. P. de Oliveira Pinto, J. Kaplan, H. Edwards, Y. Burda, N. Joseph, G. Brockman, A. Ray, R. Puri, G. Krueger, M. Petrov, H. Khlaaf, G. Sastry, P. Mishkin, B. Chan, S. Gray, N. Ryder, M. Pavlov, A. Power, L. Kaiser, M. Bavarian, C. Winter, P. Tillet, F. P. Such, D. Cummings, M. Plappert, F. Chantzis, E. Barnes, A. Herbert-Voss, W. H. Guss, A. Nichol, A. Paino, N. Tezak, J. Tang, I. Babuschkin, S. Balaji, S. Jain, W. Saunders, C. Hesse, A. N. Carr, J. Leike, J. Achiam, V. Misra, E. Morikawa, A. Radford, M. Knight, M. Brundage, M. Murati, K. Mayer, P. Welinder, B. McGrew, D. Amodei, S. McCandlish, I. Sutskever, and W. Zaremba 
+ 
+ Evaluating large language models trained on code .
+ 
+ arXiv preprint arXiv:2107.03374 .
+ 
+ Cited by: §4 .
+ 
+
+ Chen et al. (2018a) 
+ T. Chen, T. Moreau, Z. Jiang, L. Zheng, E. Yan, M. Cowan, H. Shen, L. Wang, Y. Hu, L. Ceze, C. Guestrin, and A. Krishnamurthy 
+ 
+ TVM: an automated end-to-end optimizing compiler for deep learning .
+ 
+ In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+ 
+ Cited by: §5 .
+ 
+
+ Chen et al. (2018b) 
+ T. Chen, L. Zheng, E. Yan, Z. Jiang, T. Moreau, L. Ceze, C. Guestrin, and A. Krishnamurthy 
+ 
+ Learning to optimize tensor programs .
+ 
+ In Advances in Neural Information Processing Systems (NeurIPS) ,
+ 
+ Cited by: §5 .
+ 
+
+ Cobbe et al. (2021) 
+ K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert, J. Tworek, J. Hilton, R. Nakano, C. Hesse, and J. Schulman 
+ 
+ Training verifiers to solve math word problems .
+ 
+ arXiv preprint arXiv:2110.14168 .
+ 
+ Cited by: §4 .
+ 
+
+ DeepSeek-AI et al. (2024) 
+ DeepSeek-AI, A. Liu, B. Feng, B. Xue, B. Wang, B. Wu, C. Lu, C. Zhao, C. Deng, C. Zhang, C. Ruan, D. Dai, D. Guo, D. Yang, D. Chen, D. Ji, E. Li, F. Lin, F. Dai, F. Luo, G. Hao, G. Chen, G. Li, H. Zhang, H. Bao, H. Xu, H. Wang, H. Zhang, H. Ding, H. Xin, H. Gao, H. Li, H. Qu, J. L. Cai, J. Liang, J. Guo, J. Ni, J. Li, J. Wang, J. Chen, J. Chen, J. Yuan, J. Qiu, J. Li, J. Song, K. Dong, K. Hu, K. Gao, K. Guan, K. Huang, K. Yu, L. Wang, L. Zhang, L. Xu, L. Xia, L. Zhao, L. Wang, L. Zhang, M. Li, M. Wang, M. Zhang, M. Zhang, M. Tang, M. Li, N. Tian, P. Huang, P. Wang, P. Zhang, Q. Wang, Q. Zhu, Q. Chen, Q. Du, R. J. Chen, R. L. Jin, R. Ge, R. Zhang, R. Pan, R. Wang, R. Xu, R. Zhang, R. Chen, S. S. Li, S. Lu, S. Zhou, S. Chen, S. Wu, S. Ye, S. Ye, S. Ma, S. Wang, S. Zhou, S. Yu, S. Zhou, S. Pan, T. Wang, T. Yun, T. Pei, T. Sun, W. L. Xiao, W. Zeng, W. Zhao, W. An, W. Liu, W. Liang, W. Gao, W. Yu, W. Zhang, X. Q. Li, X. Jin, X. Wang, X. Bi, X. Liu, X. Wang, X. Shen, X. Chen, X. Zhang, X. Chen, X. Nie, X. Sun, X. Wang, X. Cheng, X. Liu, X. Xie, X. Liu, X. Yu, X. Song, X. Shan, X. Zhou, X. Yang, X. Li, X. Su, X. Lin, Y. K. Li, Y. Q. Wang, Y. X. Wei, Y. X. Zhu, Y. Zhang, Y. Xu, Y. Xu, Y. Huang, Y. Li, Y. Zhao, Y. Sun, Y. Li, Y. Wang, Y. Yu, Y. Zheng, Y. Zhang, Y. Shi, Y. Xiong, Y. He, Y. Tang, Y. Piao, Y. Wang, Y. Tan, Y. Ma, Y. Liu, Y. Guo, Y. Wu, Y. Ou, Y. Zhu, Y. Wang, Y. Gong, Y. Zou, Y. He, Y. Zha, Y. Xiong, Y. Ma, Y. Yan, Y. Luo, Y. You, Y. Liu, Y. Zhou, Z. F. Wu, Z. Z. Ren, Z. Ren, Z. Sha, Z. Fu, Z. Xu, Z. Huang, Z. Zhang, Z. Xie, Z. Zhang, Z. Hao, Z. Gou, Z. Ma, Z. Yan, Z. Shao, Z. Xu, Z. Wu, Z. Zhang, Z. Li, Z. Gu, Z. Zhu, Z. Liu, Z. Li, Z. Xie, Z. Song, Z. Gao, and Z. Pan 
+ 
+ DeepSeek-V3 technical report .
+ 
+ arXiv preprint arXiv:2412.19437 .
+ 
+ Cited by: §1 ,
+ §2.1 ,
+ §3.3 ,
+ §4 ,
+ §5 .
+ 
+
+ DeepSeek-AI (2025a) 
+ DeepSeek-AI 
+ 
+ DeepGEMM: clean and efficient FP8 GEMM kernels .
+ 
+ Note: https://github.com/deepseek-ai/DeepGEMM 
+ 
+ Cited by: §2.4 ,
+ §4 ,
+ §5 ,
+ §5 .
+ 
+
+ DeepSeek-AI (2025b) 
+ DeepSeek-AI 
+ 
+ EPLB: expert parallelism load balancer .
+ 
+ Note: https://github.com/deepseek-ai/EPLB 
+ 
+ Cited by: §1 ,
+ §2.1 ,
+ §5 .
+ 
+
+ Fedus et al. (2022) 
+ W. Fedus, B. Zoph, and N. Shazeer 
+ 
+ Switch transformers: scaling to trillion parameter models with simple and efficient sparsity .
+ 
+ Journal of Machine Learning Research 23 ( 120 ), pp. 1–39 .
+ 
+ Cited by: §5 .
+ 
+
+ FlashInfer Team (2025) 
+ FlashInfer Team 
+ 
+ flashinfer.fused_moe.cutlass_fused_moe: CUTLASS fused MoE .
+ 
+ Note: https://docs.flashinfer.ai/generated/flashinfer.fused_moe.cutlass_fused_moe.html 
+ 
+ Cited by: §2.4 ,
+ §4 ,
+ §5 .
+ 
+
+ Gale et al. (2023) 
+ T. Gale, D. Narayanan, C. Young, and M. Zaharia 
+ 
+ MegaBlocks: efficient sparse training with mixture-of-experts .
+ 
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+ 
+ Cited by: §1 ,
+ §2.2 ,
+ §5 .
+ 
+
+ Guo et al. (2025) 
+ W. Guo, M. Mishra, X. Cheng, I. Stoica, and T. Dao 
+ 
+ SonicMoE: accelerating MoE with IO and tile-aware optimizations .
+ 
+ arXiv preprint arXiv:2512.14080 .
+ 
+ Cited by: §5 .
+ 
+
+ He et al. (2022) 
+ J. He, J. Zhai, T. Antunes, H. Wang, F. Luo, S. Shi, and Q. Li 
+ 
+ FasterMoE: modeling and optimizing training of large-scale dynamic pre-trained models .
+ 
+ In Proceedings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP) ,
+ 
+ pp. 120–134 .
+ 
+ Cited by: §5 .
+ 
+
+ Hendrycks et al. (2021) 
+ D. Hendrycks, C. Burns, S. Basart, A. Zou, M. Mazeika, D. Song, and J. Steinhardt 
+ 
+ Measuring massive multitask language understanding .
+ 
+ In International Conference on Learning Representations (ICLR) ,
+ 
+ Cited by: §4 .
+ 
+
+ Huang et al. (2023) 
+ H. Huang, N. Ardalani, A. Sun, L. Ke, H. S. Lee, A. Sridhar, S. Bhosale, C. Wu, and B. Lee 
+ 
+ Towards MoE deployment: mitigating inefficiencies in mixture-of-expert (MoE) inference .
+ 
+ arXiv preprint arXiv:2303.06182 .
+ 
+ Cited by: §5 .
+ 
+
+ Hwang et al. (2023) 
+ C. Hwang, W. Cui, Y. Xiong, Z. Yang, Z. Liu, H. Hu, Z. Wang, R. Salas, J. Jose, P. Ram, H. Chau, P. Cheng, F. Yang, M. Yang, and Y. Xiong 
+ 
+ Tutel: adaptive mixture-of-experts at scale .
+ 
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+ 
+ Cited by: §1 ,
+ §5 .
+ 
+
+ Jiang et al. (2024) 
+ A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bamford, D. S. Chaplot, D. de las Casas, E. Bou Hanna, F. Bressand, G. Lengyel, G. Bour, G. Lample, L. Renard Lavaud, L. Saulnier, M. Lachaux, P. Stock, S. Subramanian, S. Yang, S. Antoniak, T. Le Scao, T. Gervet, T. Lavril, T. Wang, T. Lacroix, and W. El Sayed 
+ 
+ Mixtral of experts .
+ 
+ arXiv preprint arXiv:2401.04088 .
+ 
+ Cited by: §1 ,
+ §4 .
+ 
+
+ Kwon et al. (2023) 
+ W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica 
+ 
+ Efficient memory management for large language model serving with PagedAttention .
+ 
+ In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) ,
+ 
+ pp. 611–626 .
+ 
+ Cited by: §1 ,
+ §1 ,
+ §2.2 ,
+ §2.3 ,
+ §2.4 ,
+ §5 ,
+ §5 .
+ 
+
+ Lawson and Hanson (1974) 
+ C. L. Lawson and R. J. Hanson 
+ 
+ Solving least squares problems .
+ 
+ Prentice-Hall .
+ 
+ Cited by: §3.1 .
+ 
+
+ Lepikhin et al. (2021) 
+ D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N. Shazeer, and Z. Chen 
+ 
+ GShard: scaling giant models with conditional computation and automatic sharding .
+ 
+ In International Conference on Learning Representations (ICLR) ,
+ 
+ Cited by: §1 ,
+ §2.1 ,
+ §2.1 ,
+ §5 .
+ 
+
+ Mistral AI (2024) 
+ Mistral AI 
+ 
+ Cheaper, better, faster, stronger .
+ 
+ Note: https://mistral.ai/news/mixtral-8x22b 
+ 
+ Cited by: §4 .
+ 
+
+ Muennighoff et al. (2024) 
+ N. Muennighoff, L. Soldaini, D. Groeneveld, K. Lo, J. Morrison, S. Min, W. Shi, P. Walsh, O. Tafjord, N. Lambert, Y. Gu, S. Arora, A. Bhagia, D. Schwenk, D. Wadden, A. Wettig, B. Hui, T. Dettmers, D. Kiela, A. Farhadi, N. A. Smith, P. W. Koh, A. Singh, and H. Hajishirzi 
+ 
+ OLMoE: open mixture-of-experts language models .
+ 
+ arXiv preprint arXiv:2409.02060 .
+ 
+ Cited by: §4 .
+ 
+
+ NVIDIA (2024) 
+ NVIDIA 
+ 
+ CUTLASS: CUDA templates for linear algebra subroutines .
+ 
+ Note: https://github.com/NVIDIA/cutlass 
+ 
+ Cited by: §A.8 ,
+ 2nd item ,
+ §2.2 ,
+ §3.3 ,
+ §5 .
+ 
+
+ Qwen Team (2024) 
+ Qwen Team 
+ 
+ Qwen1.5-MoE: matching 7B model performance with 1/3 activated parameters .
+ 
+ Note: https://qwenlm.github.io/blog/qwen-moe/ 
+ 
+ Cited by: §4 .
+ 
+
+ Qwen Team (2026) 
+ Qwen Team 
+ 
+ Qwen3.5: towards native multimodal agents .
+ 
+ Note: https://qwen.ai/blog?id=qwen3.5 
+ 
+ Cited by: §4 .
+ 
+
+ Ragan-Kelley et al. (2013) 
+ J. Ragan-Kelley, C. Barnes, A. Adams, S. Paris, F. Durand, and S. Amarasinghe 
+ 
+ Halide: a language and compiler for optimizing parallelism, locality, and recomputation in image processing pipelines .
+ 
+ ACM SIGPLAN Notices 48 ( 6 ), pp. 519–530 .
+ 
+ Cited by: §5 .
+ 
+
+ Rajbhandari et al. (2022) 
+ S. Rajbhandari, C. Li, Z. Yao, M. Zhang, R. Y. Aminabadi, A. A. Awan, J. Rasley, and Y. He 
+ 
+ DeepSpeed-MoE: advancing mixture-of-experts inference and training to power next-generation AI scale .
+ 
+ In International Conference on Machine Learning (ICML) ,
+ 
+ pp. 18332–18346 .
+ 
+ Cited by: §1 ,
+ §2.1 .
+ 
+
+ ShareGPT (2023) 
+ ShareGPT 
+ 
+ ShareGPT_Vicuna_unfiltered .
+ 
+ Note: https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered 
+ 
+ Cited by: §4 .
+ 
+
+ Shazeer et al. (2017) 
+ N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. V. Le, G. E. Hinton, and J. Dean 
+ 
+ Outrageously large neural networks: the sparsely-gated mixture-of-experts layer .
+ 
+ In International Conference on Learning Representations (ICLR) ,
+ 
+ Cited by: §1 ,
+ §2.1 .
+ 
+
+ Shoeybi et al. (2019) 
+ M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B. Catanzaro 
+ 
+ Megatron-LM: training multi-billion parameter language models using model parallelism .
+ 
+ arXiv preprint arXiv:1909.08053 .
+ 
+ Cited by: §1 ,
+ §2.1 .
+ 
+
+ Tan et al. (2024) 
+ S. Tan, Y. Shen, R. Panda, and A. Courville 
+ 
+ Scattered mixture-of-experts implementation .
+ 
+ arXiv preprint arXiv:2403.08245 .
+ 
+ Cited by: §5 .
+ 
+
+ Tillet et al. (2019) 
+ P. Tillet, H. T. Kung, and D. Cox 
+ 
+ Triton: an intermediate language and compiler for tiled neural network computations .
+ 
+ In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages (MAPL) ,
+ 
+ pp. 10–19 .
+ 
+ Cited by: §4 ,
+ §5 ,
+ §5 .
+ 
+
+ Williams et al. (2009) 
+ S. Williams, A. Waterman, and D. Patterson 
+ 
+ Roofline: an insightful visual performance model for multicore architectures .
+ 
+ Communications of the ACM 52 ( 4 ), pp. 65–76 .
+ 
+ Cited by: §2.2 .
+ 
+
+ Yang et al. (2025) 
+ A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu 
+ 
+ Qwen3 technical report .
+ 
+ arXiv preprint arXiv:2505.09388 .
+ 
+ Cited by: §1 ,
+ §4 .
+ 
+
+ Yang et al. (2024) 
+ A. Yang, B. Yang, B. Hui, B. Zheng, B. Yu, C. Zhou, C. Li, C. Li, D. Liu, F. Huang, G. Dong, H. Wei, H. Lin, J. Tang, J. Wang, J. Yang, J. Tu, J. Zhang, J. Ma, J. Yang, J. Xu, J. Zhou, J. Bai, J. He, J. Lin, K. Dang, K. Lu, K. Chen, K. Yang, M. Li, M. Xue, N. Ni, P. Zhang, P. Wang, R. Peng, R. Men, R. Gao, R. Lin, S. Wang, S. Bai, S. Tan, T. Zhu, T. Li, T. Liu, W. Ge, X. Deng, X. Zhou, X. Ren, X. Zhang, X. Wei, X. Ren, X. Liu, Y. Fan, Y. Yao, Y. Zhang, Y. Wan, Y. Chu, Y. Liu, Z. Cui, Z. Zhang, Z. Guo, and Z. Fan 
+ 
+ Qwen2 technical report .
+ 
+ arXiv preprint arXiv:2407.10671 .
+ 
+ Cited by: §4 .
+ 
+
+ Ye et al. (2025) 
+ Z. Ye, L. Chen, R. Lai, W. Lin, Y. Zhang, S. Wang, T. Chen, B. Kasikci, V. Grover, A. Krishnamurthy, and L. Ceze 
+ 
+ FlashInfer: efficient and customizable attention engine for LLM inference serving .
+ 
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+ 
+ Cited by: §4 .
+ 
+
+ Yu et al. (2022) 
+ G. Yu, J. S. Jeong, G. Kim, S. Kim, and B. Chun 
+ 
+ Orca: a distributed serving system for transformer-based generative models .
+ 
+ In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+ 
+ pp. 521–538 .
+ 
+ Cited by: §1 ,
+ §2.3 ,
+ §5 .
+ 
+
+ Zheng et al. (2022) 
+ B. Zheng, Z. Jiang, C. H. Yu, H. Shen, J. Fromm, Y. Liu, Y. Wang, L. Ceze, T. Chen, and G. Pekhimenko 
+ 
+ DietCode: automatic optimization for dynamic tensor programs .
+ 
+ In Proceedings of Machine Learning and Systems (MLSys) ,
+ 
+ Cited by: §5 .
+ 
+
+ Zheng et al. (2020) 
+ L. Zheng, C. Jia, M. Sun, Z. Wu, C. H. Yu, A. Haj-Ali, Y. Wang, J. Yang, D. Zhuo, K. Sen, J. E. Gonzalez, and I. Stoica 
+ 
+ Ansor: generating high-performance tensor programs for deep learning .
+ 
+ In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,
+ 
+ pp. 863–879 .
+ 
+ Cited by: §5 .
+ 
+
+ Zheng et al. (2024) 
+ L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng 
+ 
+ SGLang: efficient execution of structured language model programs .
+ 
+ In Advances in Neural Information Processing Systems (NeurIPS) ,
+ 
+ Vol. 37 .
+ 
+ Cited by: §2.3 ,
+ §5 .
+ 
+
+ 
+
+ 
+ AI Usage Disclosure
+
+ 
+ We used generative AI tools to help check the claims, refine wording, organize the
+experiments, and draft the manuscript. We did not use these tools for translation, transcription, or
+qualitative data analysis. The authors ran all reported experiments and model evaluations, tested the
+code, verified numerical claims against preserved artifacts, manually reviewed the cited literature,
+and reviewed all AI-assisted content. We take responsibility for the final text, claims, code, figures,
+and experimental results.
+
+ 
+
+ 
+ Appendix A Additional Results
+
+ 
+ A.1 The Cost Model on Held-Out Loads
+
+ 
+ Figure  6 shows the cost model of Section  3.1 on loads from a
+domain it was not fit on, for Qwen3-30B on EP8. Its terms account for the measured time across four
+orders of magnitude of load: the waves carry most of the time and set its steps, the tiles add the
+traffic that grows with the load, and the fixed cost and the active experts set the floor at small
+loads (a). Over every configuration, its predictions order the measured times with a rank
+correlation of 0.99 (b). On two GPUs of one batch, it picks the fastest tile size on both: 2-row tiles for the least loaded GPU
+and 32-row tiles for the most loaded one (c).
+
+ 
+ Figure 6: The cost model on held-out loads , Qwen3-30B on EP8. (a) Each term’s share of the
+predicted time for one configuration, and the measured time. (b) Predicted against measured time
+for every configuration. (c) Measured and predicted time of each tile size on the least and most
+loaded GPU of one batch, relative to the best; stars mark the configuration the model picks. 
+ 
+
+ 
+ A.2 Tables Given the Cost Model’s Inputs
+
+ 
+ Table  4 replaces the cost model with tables that see the same per-GPU information:
+the GPU’s token count crossed with a measure of how the tokens spread over its experts. The best
+table, keyed on the token count and the padding, is 3.1% from exhaustive search on batches of 128
+tokens or more and 5.8% on its worst layout, against 1.4% and 2.9% for the cost model. A
+configuration’s time depends on how each expert’s tokens fill tiles and waves, which a few buckets
+lose, and at large batch sizes each bucket holds few recorded batches.
+
+ 
+ Table 4: Tables given the cost model’s inputs. Gap of each per-GPU policy to exhaustive
+search on batches of 128 tokens or more (%; geometric mean over 21 EP layouts, and the worst
+layout), held-out domains, direct launches, full configuration space. Over all batches, where most
+GPUs receive few tokens and the configuration matters little, every policy is within 2.2%. 
+ 
+ 
+ 
+ Policy 
+ Keyed on 
+ Gap 
+ Worst layout 
+
+ 
+ 
+ 
+ Per-GPU table 
+ token count 
+ 4.0 
+ 8.7 
+
+ 
+ 2-D table 
+ token count × \times padding (8 buckets) 
+ 3.1 
+ 5.8 
+
+ 
+ 2-D tables 
+ token count × \times active experts, largest load over mean, 
+ 3.3–4.8 
+ – 
+
+ 
+ 
+    or coefficient of variation (2–8 buckets) 
+ 
+ 
+
+ 
+ 3-D table 
+ token count × \times active experts × \times padding (quartiles) 
+ 3.4 
+ 6.4 
+
+ 
+ 8 nearest neighbors 
+ token count, active experts, padding, largest load over mean 
+ 3.5 
+ 8.6 
+
+ 
+ Cost model 
+ the GPU’s tokens per expert 
+ 1.4 
+ 2.9 
+
+ 
+ 
+ 
+
+ 
+ A.3 Choosing on Held-Out Domains
+
+ 
+ Table  5 complements Table  3 with recorded traffic: every policy is
+fit on three domains and scored on batches of 128 tokens or more from the fourth. RaMP is within
+2% of exhaustive search on every layout, and its gain over the trace-tuned table is largest at
+EP32 on every model we evaluate there.
+
+ 
+ Table 5: Held-out domains. Expert-kernel speedup under EP on batches of 128 tokens or more
+from a domain each policy was not fit on, over vLLM’s tuning and over the trace-tuned table. Latency
+is the slowest GPU’s. Brackets: 95% bootstrap interval. Every policy runs RaMP’s kernel and
+chooses from its full configuration space. ∗ Measured on a 2–2.5 × \times larger sample of batches. Differences under 1% between RaMP and
+exhaustive search are within timing noise. 
+ 
+ 
+ 
+ 
+ 
+ Over vLLM’s tuning 
+ Over trace-tuned table 
+
+ 
+ Model 
+ Layout 
+ Trace-tuned 
+ Per-GPU table 
+ RaMP 
+ Exhaustive 
+ RaMP [95% CI] 
+ Exhaustive 
+
+ 
+ 
+ 
+ OLMoE 
+ EP4 
+ 1.10 
+ 1.11 
+ 1.15 
+ 1.15 
+ 1.04 [1.02, 1.07] 
+ 1.05 
+
+ 
+ 
+ EP8 
+ 1.08 
+ 1.16 
+ 1.24 
+ 1.23 
+ 1.15 [1.11, 1.18] 
+ 1.14 
+
+ 
+ 
+ EP16 ∗ 
+ 1.11 
+ 1.39 
+ 1.40 
+ 1.41 
+ 1.27 [1.20, 1.33] 
+ 1.27 
+
+ 
+ Qwen3-30B 
+ EP8 
+ 1.07 
+ 1.16 
+ 1.22 
+ 1.23 
+ 1.14 [1.11, 1.16] 
+ 1.15 
+
+ 
+ 
+ EP16 ∗ 
+ 0.93 
+ 1.04 
+ 1.06 
+ 1.07 
+ 1.15 [1.10, 1.20] 
+ 1.16 
+
+ 
+ 
+ EP32 ∗ 
+ 1.04 
+ 1.36 
+ 1.38 
+ 1.38 
+ 1.32 [1.24, 1.39] 
+ 1.32 
+
+ 
+ Qwen3.5-35B 
+ EP8 
+ 1.02 
+ 1.01 
+ 1.04 
+ 1.05 
+ 1.01 [1.00, 1.02] 
+ 1.02 
+
+ 
+ 
+ EP16 ∗ 
+ 1.04 
+ 1.05 
+ 1.08 
+ 1.08 
+ 1.03 [1.02, 1.06] 
+ 1.04 
+
+ 
+ 
+ EP32 ∗ 
+ 1.04 
+ 1.13 
+ 1.12 
+ 1.13 
+ 1.08 [1.05, 1.13] 
+ 1.09 
+
+ 
+ DeepSeek-V3 
+ EP8 ∗ 
+ 1.08 
+ 1.09 
+ 1.08 
+ 1.10 
+ 1.00 [0.99, 1.01] 
+ 1.01 
+
+ 
+ 
+ EP16 ∗ 
+ 1.01 
+ 1.01 
+ 1.08 
+ 1.09 
+ 1.07 [1.05, 1.09] 
+ 1.08 
+
+ 
+ 
+ EP32 ∗ 
+ 1.07 
+ 1.18 
+ 1.23 
+ 1.24 
+ 1.15 [1.12, 1.18] 
+ 1.15 
+
+ 
+ Phi-3.5-MoE 
+ EP4 
+ 1.05 
+ 1.08 
+ 1.12 
+ 1.13 
+ 1.07 [1.04, 1.09] 
+ 1.07 
+
+ 
+ 
+ EP8 
+ 1.19 
+ 1.20 
+ 1.25 
+ 1.26 
+ 1.06 [1.04, 1.07] 
+ 1.06 
+
+ 
+ Mixtral-8x22B 
+ EP8 
+ 1.20 
+ 1.24 
+ 1.26 
+ 1.26 
+ 1.05 [1.02, 1.07] 
+ 1.05 
+
+ 
+ 
+ 
+
+ 
+ A.4 Imbalance and Expert Placement
+
+ 
+ Table  6 gives the imbalance behind Section  4.2 : the most loaded
+GPU’s share grows with the number of GPUs on every model. Table  7 shows that
+balancing the placement of experts does not remove it, because the most loaded experts change from
+batch to batch, and Table  8 shows that RaMP’s gain holds on a balanced placement.
+
+ 
+ Table 6: Imbalance by layout. Most loaded GPU’s tokens over the mean on batches of 128
+tokens or more, contiguous placement (median). Table  7 uses batches of 128–511
+tokens, so its contiguous column differs slightly. 
+ 
+ 
+ 
+ Model 
+ EP4 
+ EP8 
+ EP16 
+ EP32 
+
+ 
+ 
+ 
+ OLMoE 
+ 1.22 
+ 1.45 
+ 1.89 
+ – 
+
+ 
+ Qwen3-30B 
+ – 
+ 1.52 
+ 1.95 
+ 2.88 
+
+ 
+ Qwen3.5-35B 
+ – 
+ 1.42 
+ 1.90 
+ 2.69 
+
+ 
+ DeepSeek-V3 
+ – 
+ 1.45 
+ 1.94 
+ 2.32 
+
+ 
+ Phi-3.5-MoE 
+ 1.40 
+ 1.90 
+ – 
+ – 
+
+ 
+ Mixtral-8x22B 
+ – 
+ 1.54 
+ – 
+ – 
+
+ 
+ 
+ 
+ 
+ Table 7: Imbalance under expert placement. Most loaded GPU over the mean on EP8, under four placements, batches
+of 128–511 tokens (median). Offline: balanced on the other domains. Every 128: re-balanced from the previous 128
+forward passes. Uniform: uniformly random routing, for reference. 
+ 
+ 
+ 
+ Model 
+ Uniform 
+ Contiguous 
+ Offline 
+ Every 128 
+
+ 
+ 
+ 
+ Qwen3-30B 
+ 1.10 
+ 1.49 
+ 1.46 
+ 1.21 
+
+ 
+ Qwen3.5-35B 
+ 1.11 
+ 1.39 
+ 1.35 
+ 1.22 
+
+ 
+ DeepSeek-V3 
+ 1.13 
+ 1.40 
+ 1.30 
+ 1.16 
+
+ 
+ OLMoE 
+ 1.10 
+ 1.43 
+ 1.34 
+ 1.16 
+
+ 
+ Phi-3.5-MoE 
+ 1.21 
+ 1.90 
+ 1.91 
+ 1.56 
+
+ 
+ Qwen2-57B 
+ 1.11 
+ 1.17 
+ 1.11 
+ 1.11 
+
+ 
+ 
+ 
+ 
+ Table 8: RaMP on balanced placement. Experts placed per layer to even out each GPU’s
+expected load on the other domains, batches of 128 tokens or more. Imbalance before and after
+balancing, and RaMP’s speedup over the trace-tuned table under each placement (brackets: 95%
+bootstrap interval). EP32 rows use a smaller sample of batches than Table  5 . 
+ 
+ 
+ 
+ 
+ 
+ Imbalance 
+ RaMP over trace-tuned table 
+
+ 
+ Model 
+ Layout 
+ Contiguous 
+ Balanced 
+ Contiguous 
+ Balanced 
+
+ 
+ 
+ 
+ OLMoE 
+ EP8 
+ 1.45 
+ 1.40 
+ 1.15 
+ 1.13 [1.10, 1.16] 
+
+ 
+ Qwen3-30B 
+ EP8 
+ 1.52 
+ 1.53 
+ 1.14 
+ 1.13 [1.10, 1.16] 
+
+ 
+ Qwen3.5-35B 
+ EP8 
+ 1.42 
+ 1.36 
+ 1.01 
+ 1.01 [1.00, 1.02] 
+
+ 
+ DeepSeek-V3 
+ EP8 
+ 1.45 
+ 1.35 
+ 1.00 
+ 0.99 [0.99, 1.00] 
+
+ 
+ Qwen3-30B 
+ EP32 
+ 2.88 
+ 2.77 
+ 1.24 
+ 1.24 [1.11, 1.36] 
+
+ 
+ DeepSeek-V3 
+ EP32 
+ 2.32 
+ 2.22 
+ 1.12 
+ 1.13 [1.10, 1.17] 
+
+ 
+ 
+ 
+
+ 
+ A.5 Choosing Among the Served Configurations
+
+ 
+ Table  9 compares RaMP with a batch-size table on the six configurations RaMP serves.
+On these six, RaMP matches or beats the table on 20 of the 21 EP layouts, by up to 1.27 × \times , and is
+within 0.5% of the best of the six on average and within 3% on every layout. Against the full configuration
+space, the served kernel is 1.12 × \times faster than vLLM’s tuning (geometric mean), faster on 18 of the 21 layouts and by up to 1.68 × \times , and on average 7% from exhaustive search over all configurations.
+
+ 
+ Table 9: Choosing among the six served configurations. Batches of 128 tokens or more from
+held-out domains, direct launches. RaMP’s speedup over a batch-size table tuned on the same six
+configurations, and RaMP’s gap to the best of the six (%). Against the full space: the served
+kernel’s speedup over vLLM’s tuning on all configurations, and its gap to exhaustive search over all
+configurations (%). 
+ 
+ 
+ 
+ 
+ 
+ Among the six 
+ Against the full space 
+
+ 
+ Model 
+ Layout 
+ RaMP over the table 
+ Gap to the best (%) 
+ RaMP over vLLM’s tuning 
+ 
+ 
+ 
+ Gap to exhaustive 
+
+ 
+ search (%) 
+
+ 
+
+ 
+ 
+ 
+ DeepSeek-V3 
+ EP8 
+ 1.01 × \times 
+ 0.1 
+ 1.07 × \times 
+ 3.6 
+
+ 
+ 
+ EP16 
+ 0.99 × \times 
+ 2.8 
+ 1.02 × \times 
+ 7.9 
+
+ 
+ 
+ EP32 
+ 1.12 × \times 
+ 0.3 
+ 1.13 × \times 
+ 8.2 
+
+ 
+ Mixtral-8x22B 
+ EP4 
+ 1.00 × \times 
+ 0.0 
+ 1.03 × \times 
+ 1.4 
+
+ 
+ 
+ EP8 
+ 1.00 × \times 
+ 0.0 
+ 1.23 × \times 
+ 1.9 
+
+ 
+ OLMoE 
+ EP4 
+ 1.02 × \times 
+ 0.6 
+ 1.04 × \times 
+ 10.4 
+
+ 
+ 
+ EP8 
+ 1.16 × \times 
+ 0.0 
+ 1.17 × \times 
+ 5.5 
+
+ 
+ 
+ EP16 
+ 1.03 × \times 
+ 0.1 
+ 1.35 × \times 
+ 8.5 
+
+ 
+ 
+ EP32 
+ 1.27 × \times 
+ 0.4 
+ 1.68 × \times 
+ 4.9 
+
+ 
+ Phi-3.5-MoE 
+ EP4 
+ 1.05 × \times 
+ 0.1 
+ 1.01 × \times 
+ 11.5 
+
+ 
+ 
+ EP8 
+ 1.05 × \times 
+ 0.1 
+ 1.13 × \times 
+ 11.6 
+
+ 
+ 
+ EP16 
+ 1.16 × \times 
+ 0.2 
+ 1.16 × \times 
+ 11.1 
+
+ 
+ Qwen2-57B 
+ EP8 
+ 1.02 × \times 
+ 0.2 
+ 1.00 × \times 
+ 7.4 
+
+ 
+ 
+ EP16 
+ 1.04 × \times 
+ 0.0 
+ 1.18 × \times 
+ 7.3 
+
+ 
+ Qwen3-30B 
+ EP8 
+ 1.10 × \times 
+ 0.0 
+ 1.17 × \times 
+ 6.1 
+
+ 
+ 
+ EP16 
+ 1.02 × \times 
+ 0.1 
+ 1.04 × \times 
+ 3.2 
+
+ 
+ 
+ EP32 
+ 1.09 × \times 
+ 1.5 
+ 1.19 × \times 
+ 10.8 
+
+ 
+ Qwen3.5-35B 
+ EP4 
+ 1.00 × \times 
+ 0.2 
+ 0.98 × \times 
+ 7.7 
+
+ 
+ 
+ EP8 
+ 1.05 × \times 
+ 0.7 
+ 0.97 × \times 
+ 9.7 
+
+ 
+ 
+ EP16 
+ 1.01 × \times 
+ 0.5 
+ 1.01 × \times 
+ 6.6 
+
+ 
+ 
+ EP32 
+ 1.13 × \times 
+ 0.8 
+ 1.13 × \times 
+ 3.4 
+
+ 
+ 
+ 
+
+ 
+ A.6 The Choice on a Fixed Menu
+
+ 
+ Table  10 serves RaMP’s kernel and menu end to end with two ways of choosing from
+the menu: RaMP’s live choice and a batch-size table. Because the menu itself is chosen from recorded
+routing, both carry part of RaMP’s choice, and on one node RaMP is between 2% slower and 5% faster than the table.
+
+ 
+ Table 10: RaMP’s choice end to end. Time per output token (ms, median of three runs) of RaMP and of a vLLM-style batch-size table on RaMP’s menu, which is itself chosen from recorded routing
+(DeepSeek-V3 TP8: the trace-tuned table on that menu). 
+ 
+ 
+ 
+ Model 
+ Load 
+ 
+ 
+ 
+ Table on 
+
+ 
+ RaMP’s menu 
+
+ 
+ RaMP 
+
+ 
+ 
+ 
+ DeepSeek-V3, EP8 
+ 4 req/s 
+ 19.41 
+ 18.91 
+
+ 
+ 
+ 8 req/s 
+ 27.95 
+ 26.63 
+
+ 
+ 
+ 16 req/s 
+ 27.54 
+ 27.34 
+
+ 
+ 
+ 64 conc. 
+ 27.65 
+ 27.73 
+
+ 
+ 
+ 256 conc. 
+ 38.55 
+ 37.92 
+
+ 
+ DeepSeek-V3, TP8 
+ 64 conc. 
+ 25.83 
+ 25.83 
+
+ 
+ 
+ 256 conc. 
+ 35.76 
+ 35.75 
+
+ 
+ Qwen3-30B, EP8 
+ 8 req/s 
+ 4.47 
+ 4.51 
+
+ 
+ 
+ 16 req/s 
+ 4.45 
+ 4.50 
+
+ 
+ 
+ 32 req/s 
+ 4.72 
+ 4.82 
+
+ 
+ 
+ 64 conc. 
+ 5.21 
+ 5.28 
+
+ 
+ 
+ 128 conc. 
+ 6.54 
+ 6.46 
+
+ 
+ OLMoE, EP4 
+ 32 req/s 
+ 2.41 
+ 2.39 
+
+ 
+ 
+ 64 conc. 
+ 2.83 
+ 2.78 
+
+ 
+ 
+ 192 conc. 
+ 4.00 
+ 3.90 
+
+ 
+ 
+ 
+
+ 
+ A.7 Every GPU Holding Every Expert
+
+ 
+ Table  11 builds up the MoE layer’s speedup over vLLM’s Triton MoE when every GPU holds
+every expert, one change at a time. The kernel accounts for the gain, as Section  4.2 
+expects when the batch size largely predicts the best configuration.
+
+ 
+ Table 11: Every GPU holding every expert. MoE layer speedup from vLLM’s Triton MoE to RaMP, one change per
+column, over all batches. TP n n : each expert split over n n GPUs. 
+ 
+ 
+ 
+ Model 
+ Kernel 
+ Trace-tuned 
+ RaMP 
+ Total 
+
+ 
+ 
+ 
+ Qwen3-30B TP1 
+ 1.10 
+ 1.00 
+ 1.00 
+ 1.10 
+
+ 
+ Qwen3-30B TP2 
+ 1.16 
+ 1.01 
+ 1.00 
+ 1.17 
+
+ 
+ Qwen3.5-35B TP1 
+ 1.07 
+ 1.02 
+ 1.00 
+ 1.09 
+
+ 
+ Qwen3.5-35B TP2 
+ 1.16 
+ 1.01 
+ 0.98 
+ 1.14 
+
+ 
+ DeepSeek-V3 TP8 
+ 1.07 
+ 1.03 
+ 0.99 
+ 1.09 
+
+ 
+ 
+ 
+
+ 
+ A.8 The Polymorphic Megakernel
+
+ 
+ RaMP’s kernel is written in CuTe DSL  ( NVIDIA, 2024 ) for Hopper and runs both expert projections of
+a GPU’s experts in one launch.
+
+ 
+ Operand layout. Both projections use FP8 WGMMA instructions with FP32 accumulation. The
+expert’s weights are the A operand, 64 output columns per instruction, and a tile’s tokens are the
+B operand, so the tokens of a tile form the instruction’s N dimension. Both operands are K-major in
+128-byte-swizzled shared memory, and one weight layout serves both projections. A thread block
+covers 256 or 512 output columns with one producer warpgroup, which loads operands, and several
+consumer warpgroups, which compute; setmaxnreg moves registers from the producer to the
+consumers.
+
+ 
+ Fusion. Each tile runs in three phases. In the up-projection, the producer gathers the
+tile’s token rows in the layout the selection kernel wrote and loads the interleaved gate and up
+weights with TMA, and the consumers multiply and apply the 128 × 128 128\times 128 block scales. In
+registers, the consumers then compute the gated activation, quantize it to FP8 with a per-token
+scale that also folds in the router’s weight, and store it to shared memory. In the
+down-projection, TMA loads the down-projection weights, the consumers multiply the FP8
+intermediate, and the BF16 result is added into the layer’s output with bulk asynchronous
+reductions.
+
+ 
+ Polymorphism. Every menu entry is compiled into the same kernel, which branches on the
+index the selection kernel writes. Entries share the thread-block size and may differ in rows per
+tile, pipeline depth, tile width, persistence, and launch order; the served menus use one tile
+width. The grid covers every entry’s tiles, and blocks outside the chosen entry’s grid exit at
+once. All entries share one shared-memory buffer, sized for the largest entry, and one register count
+that covers every entry (Table  12 ).
+
+ 
+ Table 12: Resources of the polymorphic kernel , OLMoE. Shared memory and registers per thread
+of each entry compiled alone, and of every entry inside the polymorphic kernel. 
+ 
+ 
+ 
+ Menu 
+ Entries alone: shared memory (KB) / registers 
+ Inside the kernel 
+
+ 
+ 
+ 
+ 3 entries 
+ 85–103 / 72–126 
+ 103 / 126 
+
+ 
+ 6 entries 
+ 53–103 / 72–126 
+ 103 / 128 
+
+ 
+ 
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+ 
+ Experimental support, please
+ view the build logs 
+ for errors. Generated by
+ 
+ 
+ L
+ A 
+ T
+ E 
+ 
+ xml 
+ 
+ .
+ 
+
+ 
+ Instructions for reporting errors
+
+ We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+ support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+ methods listed below:
+
+ 
+ Click the "Report Issue" ( 
+ 
+ ) button, located in the page header.
+
+ 
+ Tip: You can select the relevant text first, to include it in your report.
+
+ Our team has already identified the following issues . We appreciate your time reviewing and reporting rendering errors we
+ may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+ should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+ all.
+
+ Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion , and welcome developer contributions .
+
+ 
+
+ 
+ 
+ 
+ 
+ We gratefully acknowledge support from our major funders ,
+ member institutions , ,
+ and all contributors.
+ 
+
+ 
+ About &middot; 
+ Help &middot; 
+ Contact &middot; 
+ Subscribe &middot; 
+ Copyright &middot; 
+ Privacy &middot; 
+ Accessibility &middot; 
+ Operational Status (opens in new tab) 
+ 
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 

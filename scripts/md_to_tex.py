@@ -114,8 +114,11 @@ def inline(s: str) -> str:
             # \allowbreak 和 \- 都试过，均不生效（实测仍溢出 59.4pt）。
             # 根因是 \textsuperscript 内部形成一个不可断的 hbox。
             # 故去掉上标，改为正文内的小号等宽标记，并把连字符变成断点。
+            # ⚠️ 方括号必须保留：去掉后相邻两条主张会连成一个词
+            # （实测渲染成 c-object-kernelc-object-serving），读者无法分辨。
+            # pd-disagg 的成品是 \texttt{[c-profile]}，与此一致。
             cid = m.group(1).replace('-', r'-\hspace{0pt}')
-            out.append(r'{\scriptsize\texttt{' + cid + '}}')
+            out.append(r'{\scriptsize\texttt{[' + cid + ']}}')
             i = m.end()
             continue
 

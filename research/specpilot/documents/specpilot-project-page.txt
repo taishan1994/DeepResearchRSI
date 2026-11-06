@@ -1,0 +1,223 @@
+SpecPilot more than doubles stock's speedup in every setting. Speedup over autoregressive (AR) decoding with one request, without training or quality loss. 
+
+## The idea in a minute 
+ Speculative decoding lets a lightweight drafter propose tokens that the target model checks in one forward pass [1,2] . Parallel drafters such as DFlash, DFlash2 and DSpark [3-5] draft a whole block of 8 or 16 tokens per pass. Their released systems ( stock ) still leave much of this speed unused, and the right fix depends on the deployment: its serving regime, drafter, target model and GPU. Tuning each deployment by hand does not scale, so we hand the job to coding agents, as agentic optimizers such as AlphaEvolve [8] do for other programs.
+
+ Find where speed is lost. A cost model compares the measured system with an estimated ceiling and ranks the gaps.
+
+ Search in parallel. Agents explore several directions on separate GPUs, and validated pieces stack into one system, so small gains add up.
+
+ Accept only real, lossless gains. An isolated controller promotes a change only on a significant gain confirmed on unseen requests, and token forcing checks every output token against stock.
+
+ Remember what works. Validated mechanisms become memory entries with replayable code and evidence, reused in later rounds and new deployments.
+
+ Across four target models, three drafters, two GPU platforms and five benchmarks, SpecPilot raises the speedup over AR from stock's 4.46x to 10.87x with one request, and from 1.94x to 3.93x with batching.
+
+ Download the SpecPilot video. 
+
+ 10.87x speedup over AR with one request, up from stock's 4.46x 
+
+ 3.93x speedup over AR with batching, up from stock's 1.94x 
+
+ 12 bits per BF16 weight in W12, a lossless format whose GEMM beats cuBLAS on H100 
+
+## Where speculative decoding loses speed 
+ A cost model writes the speedup over AR decoding as the tokens a step accepts divided by what the step costs:
+
+ S ( N ) = &tau; ( N ) / c ( N ) , c ( N ) = T step ( N ) / T AR 
+
+ Here &tau; is the number of tokens a step accepts when it verifies N rows, and c is the step time relative to one AR step. Both terms leave a lot on the table, and which one matters depends on the serving regime.
+
+## Stock ignores most of its drafter's candidates 
+ Stock verifies only one drafted chain, although its drafter ranks other candidates at each position that often include the target's next token. Replaying recorded drafts offline, stock DFlash2's 8-position chain accepts 4.25 tokens per step. An oracle that keeps accepting the target's token while it stays in the drafter's top 16 would accept 6.42 at 8 positions and 8.20 at 16.
+
+## With one request, the step is a weight stream 
+ Reading the target's weights dominates the step, so verifying more rows is nearly free. GEMM time grew only from 17.88 ms for one row to 18.58 ms for 64. After the first optimization round, weight reads still took 80% of the 23.61 ms step.
+
+## With batching, every row costs time 
+ Each batched request adds its own attention, recurrent-state and prefill work, so weight reads no longer dominate. Stock DFlash2's speedup over AR on Qwen3.8-27B in FP8 falls from 3.40x with one request to 1.89x with 24.
+
+ Three reasons stock falls short. (a) Reading the target weights dominates the single-request step. (b) Stock speedup over AR falls as the batch size grows. (c) Task accuracy change against stock, with 95% CIs, for a lossless system and a faulty one with an injected logit bias. All four intervals include zero, so accuracy cannot flag the faulty systems. 
+
+ To rank these gaps, the cost model computes a ceiling : the speedup a step could reach if it verified the best tree in one exact pass and ran every kernel at its byte floor, the larger of its FLOP time and its byte time at realistic peak rates. The ceiling splits into three factors, for better trees, faster kernels and time outside the profile. Each round, the largest factor tells the agents where to look.
+
+ No universal optimization. Checking drafts with a low-precision target copy speeds up decoding with one request, but with batching on BF16 Qwen3.8-27B the same idea is 13% slower, because the extra check takes nearly a full step.
+
+## The SpecPilot loop 
+ SpecPilot works in rounds. Each round measures where the current system loses speed, lets agents build and time changes, and ends with a sealed test on requests the agents never saw. The next round starts from that result, and a new deployment starts from stock plus what memory already holds.
+
+ One round of the SpecPilot loop. 0: the cost model measures the gap to the ceiling. 1: directions run in parallel, one per GPU. 2: validated pieces stack into one system. 3: a kernel sub-agent tunes the kernels furthest from their byte floors. 4: token forcing checks the sealed final against stock at every teacher-forced token. 
+
+## Agents propose, a controller decides 
+ A master agent plans directions , one idea per GPU, each with an estimated headroom. Sub-agents implement them as patches behind options whose defaults reproduce stock. A controller, made of scripts the agents can call but cannot modify, times each patch against the current best in paired runs on two GPUs. It promotes a patch only if the 95% lower bound of its gain exceeds 1% plus twice the stock-versus-stock noise, which is below 0.1% for one request on H100. Many patches gain too little alone, so an integration sub-agent stacks them and times the stack under the same rule.
+
+## Token forcing catches what accuracy misses 
+ An agent rewarded for speed may adopt a faster numerical shortcut that changes outputs without a visible drop in accuracy. Token forcing feeds the system's outputs back through the target on the stock engine and flags every token that differs from the scorer's argmax. Stock itself mismatches on 0.72% of tokens, almost all near-ties from kernel rounding. A system is rejected if its mismatch rate exceeds stock's by more than 0.5 points at 95% confidence, or if it has more unexplained large-margin mismatches than stock.
+
+ Token forcing separates lossless from faulty systems. Bars give the mismatch rate with 95% CIs, and dashed lines the rate-rule limit. Faulty systems add a logit bias of 2 to every 7th vocabulary id after 2048 tokens. 
+
+ In this test, the lossless systems match stock's mismatch rates (0.73% and 0.52% against 0.72% and 0.53%), while the faulty ones reach 2.0% and 2.4% and are rejected. Task accuracy could not tell them apart: on Qwen3.8-27B it changed by &minus;0.3 points for the lossless system and &minus;1.6 for the faulty one, with overlapping intervals.
+
+## Memory carries mechanisms forward 
+ After each sealed final, every promoted mechanism becomes a memory entry: a code delta against the entries it requires, its options and correctness contract, and a summary of its evidence and limits. An entry is kept only if applying it to stock reproduces its source system's code exactly. Reused entries are re-tuned and re-timed in each new deployment. The memory now holds 140 entries.
+
+ A worked example. In round two the step cost led, so the master opened a direction cutting weight bytes. Byte arithmetic put its headroom at 25% of the 15.30 ms weight read, a microbenchmark ruled out a denser 11-bit variant that decoded 3x slower, and the first 12-bit patch was promoted at 1.076x.
+
+## What the agents discovered 
+ Each mechanism targets a gap the cost model measured. All of them are lossless, because only an exact pass over the target weights accepts tokens.
+
+## W12: a lossless 12-bit weight format 
+ Most BF16 weights in an output channel span only a few powers of two. W12 picks, for each channel, the 16-binade window that covers the most weights and stores each weight as its sign, a 4-bit exponent offset and its seven mantissa bits, 12 bits in total. Weights outside the window go to a sparse escape list that restores them exactly. W12 averages 12.01-12.02 bits per weight on eight dense models and shrinks Qwen3.8-27B's converted layers from 44.67 to 33.58 GB. The server checks every decoded tensor against the checkpoint bit for bit.
+
+ W12. (a) Each BF16 weight becomes three 4-bit planes: A holds the sign and top three mantissa bits, E a 4-bit exponent offset, and B the low mantissa bits. A and E form an 8-bit view. (b) The GEMM decodes W12 records in registers and feeds them straight to the tensor cores. 
+
+ The format alone would not help if decoding cost time. The W12 GEMM decodes in registers, hidden behind the memory stream, and beats cuBLAS on every Qwen3.8-27B projection, by 1.19-1.47x at one row and 1.17-1.35x at 32 rows.
+
+## Best-first trees on hybrid targets 
+ Instead of one chain, SpecPilot verifies a best-first tree of the 32 nodes with the highest path score, scoring each edge given its parent. In offline replay, this raises tokens per step from 4.25 for stock's chain to 5.38 on the same lattice, and to 5.85 when the drafter runs 16 positions. Hybrid targets such as Qwen3.8-27B [9] make trees hard, because 48 of 64 layers carry a Gated DeltaNet [10] recurrent state that stock snapshots at every verified position. SpecPilot instead recomputes the state along each root path. A WY verify kernel, following TreeWY [11] , solves all paths at once on tensor cores and stays within one BF16 ulp of the exact path kernel.
+
+## Two-level verification 
+ With trees near their best and W12 near its byte floor, the remaining headroom lay in an assumption of the ceiling itself: one draft per exact pass. Two-level verification (TLV) first runs a cheap Q pass over the 8-bit view already nested in each W12 record. The Q pass proposes a chain but accepts nothing. The drafter drafts again from the end of that chain, and one exact pass verifies both drafts together. This nearly doubles the tokens accepted per exact pass, and needs no separate low-precision copy of the model.
+
+ Trees and two-level verification. (a) Stock verifies only the greedy chain, which stops at its first miss, while the best-first tree lets another candidate continue. On hybrid targets, each root path recomputes its recurrent state. (b) The Q pass proposes chain C without updating the target's state, and one exact pass over the W12 weights verifies C and the new subtree. 
+
+## Batched serving 
+ With batching, the useful mechanisms are the ones that choose rows carefully. Requests share one node budget sized to a flat stretch of the target GEMM's cost, and since best-first trees are prefix-closed, each request's share is still a valid tree. Each request drafts 16, 12 or 8 positions depending on its recent acceptance. New prompts enter the verify step so that one weight stream serves both, but only when the scheduler would otherwise hold them back.
+
+ The same idea can win or lose. Wide trees, W12 and TLV gained with one request on all three Qwen3.8-27B deployments. With batching, 24-node trees lost 14.9% on the FP8 target and TLV lost 13% on BF16, because extra verify work no longer hides behind the weight stream.
+
+## Results 
+ We evaluate on SGLang [12] with one H100 SXM5 or one RTX PRO 6000 Blackwell GPU, greedy decoding with thinking enabled, and requests from GSM8K, MATH500, HumanEval, MBPP and MT-Bench. Agents are Claude Opus 5.5 in Claude Code [13] . Stock is tuned for each GPU and regime with the fastest upstream options we found. Gains over stock come from sealed finals on unseen requests, and speedups over AR come from interleaved runs on development requests, within &minus;2% to +6% of the sealed gains.
+
+ Speedup over AR, averaged over five benchmarks, and sealed gain over stock 
+ Target Drafter Stock SpecPilot Gain 
+
+ Single request, H100 SXM5 
+
+ Qwen3.8-27B DFlash2 3.95x 8.86x 2.13x 
+
+ Qwen3.8-27B DSpark 3.74x 9.41x 2.38x 
+
+ Single request, RTX PRO 6000 
+
+ Qwen3.8-27B DFlash2 4.46x 10.87x 2.44x 
+
+ Muse-Glimmer-30B DFlash2 4.69x 10.63x 2.21x 
+
+ Batching, H100 SXM5 
+
+ Qwen3.8-27B FP8 DFlash2 2.02x 3.90x 1.85x 
+
+ Qwen3.8-27B FP8 DSpark 1.94x 3.93x 1.94x 
+
+ Qwen3.5-4B DFlash2 1.51x 3.77x 2.39x 
+
+ Gemma-4-12B EAGLE-3 0.68x 2.09x 3.11x 
+
+ With one request, SpecPilot is more than twice as fast as stock everywhere, and on H100 it is also 1.84x faster than a stronger baseline that adds DDTree [7] trees to stock. With batching it beats stock at every batch size. Targets with weaker stock gain the most, including Gemma-4-12B, where stock EAGLE-3 [6] is slower than AR.
+
+ Per-benchmark speedups over AR 
+
+ Model Method GSM8K MATH500 HumanEval MBPP MT-Bench Avg. &tau; 
+
+ Single request, H100 SXM5 
+
+ Qwen3.8-27B DFlash2 4.47x 4.31x 3.86x 3.83x 3.36x 3.95x 4.65 
+
+ +SpecPilot 10.33x 10.00x 8.49x 8.24x 7.55x 8.86x 13.08 
+
+ Qwen3.8-27B DSpark 4.43x 4.15x 3.57x 3.50x 3.17x 3.74x 4.42 
+
+ +SpecPilot 11.01x 10.69x 8.86x 9.02x 7.85x 9.41x 12.85 
+
+ Single request, RTX PRO 6000 
+
+ Qwen3.8-27B DFlash2 5.23x 4.81x 4.47x 4.24x 3.72x 4.46x 5.23 
+
+ +SpecPilot 12.83x 11.99x 10.47x 10.55x 8.93x 10.87x 12.80 
+
+ Muse-Glimmer-30B DFlash2 5.08x 5.64x 4.91x 4.59x 3.50x 4.69x 5.16 
+
+ +SpecPilot 11.47x 12.85x 10.75x 10.25x 8.34x 10.63x 12.64 
+
+ Batching, H100 SXM5 
+
+ Qwen3.8-27B FP8 DFlash2 2.11x 2.19x 2.05x 2.12x 1.69x 2.02x 4.56 
+
+ +SpecPilot 4.39x 4.33x 3.81x 4.07x 3.07x 3.90x 5.39 
+
+ Qwen3.8-27B FP8 DSpark 2.12x 2.16x 1.95x 1.96x 1.56x 1.94x 4.37 
+
+ +SpecPilot 4.60x 4.39x 3.82x 3.97x 3.05x 3.93x 5.42 
+
+ Qwen3.5-4B DFlash2 1.62x 1.88x 1.60x 1.27x 1.25x 1.51x 6.58 
+
+ +SpecPilot 4.04x 4.61x 4.00x 3.30x 3.11x 3.77x 6.97 
+
+ Gemma-4-12B EAGLE-3 0.69x 0.79x 0.66x 0.69x 0.61x 0.68x 2.04 
+
+ +SpecPilot 2.28x 2.41x 2.22x 1.88x 1.74x 2.09x 2.54 
+
+ &tau; is the average number of tokens accepted per exact target pass. Batched results average 16/20/24 requests on Qwen3.8-27B FP8, 24/28/32 on Qwen3.5-4B and 16/32/48 on Gemma-4-12B.
+
+## Three rounds, three different bottlenecks 
+ On H100 with one request, the system went from stock's 184 to 416 tokens/s in three rounds. Each round the cost model re-measured the ceiling, and the agents moved to the factor holding the most speed instead of refining the last gain.
+
+ Single-request Qwen3.8-27B with DFlash2 on H100 over three rounds. Filled points mark steps of the discovered algorithms. 
+
+ Round one built best-first trees and reached 270 tokens/s. Round two attacked the weight reads, which took 80% of the step, with W12. Round three found trees and kernels near their limits, so it removed the one-draft-per-pass assumption with TLV. A single-agent loop without the cost model, run for the same three rounds, reached only 1.34x over stock against SpecPilot's 2.13x. It kept adding to tokens per step, the most visible gap, and never addressed the weight reads.
+
+## Memory carries gains to new deployments 
+ New deployments reuse validated mechanisms and adapt them. DSpark reused the tree, W12 and TLV entries, which one promotion applied together at 2.110x. On the RTX PRO 6000, which lacks Hopper's wgmma instructions, porting the tree and W12 entries alone gave a sealed 1.92x over stock, and the final 2.44x exceeds the 2.12x ceiling that assumes one draft per pass. Muse-Glimmer-30B, a dense model, reused memory except the recurrent-layer entries and reached 2.21x. Even EAGLE-3, a sequential drafter, reimplemented W12 and prompt admission from memory on its way to 3.11x.
+
+## W12 beyond speculative decoding 
+ W12 is useful on its own. Every dense model we encoded, from six families, compresses to about 12 bits per weight without changing any output. Its GEMM speeds up any matrix product bound by weight bytes, including the single row of plain AR decoding.
+
+ W12 beyond speculative decoding, on H100. (a) AR decoding speedup over BF16 weights in SGLang with one request. (b) Weight memory in BF16 and W12. (c) W12 GEMM speedup over cuBLAS on Qwen3.8-27B projections at 1 and 32 rows, with cold L2. 
+
+ In SGLang without speculation, W12 alone speeds up AR decoding by 1.19-1.28x with one request and 1.13-1.20x with 32 requests, on four models from 8B to 30B. It shrinks the weights by 14-22%, which grows the KV cache pool 2.0x on Qwen3.8-27B and 2.5x on Muse-Glimmer-30B. Earlier lossless formats decode weights before the GEMM or do not consistently beat cuBLAS on HBM GPUs. To our knowledge, W12 is the first lossless format whose GEMM beats cuBLAS on H100.
+
+ Lossless speedups, found per deployment. SpecPilot follows the largest measured gap from round to round, verifies every change against stock, and carries what it learns to new drafters, models and GPUs.
+
+## References 
+
+ Leviathan, Kalman and Matias (2023). Fast Inference from Transformers via Speculative Decoding. ICML.
+
+ Chen et al. (2023). Accelerating Large Language Model Decoding with Speculative Sampling . arXiv:2302.01318.
+
+ Chen, Liang and Liu (2026). DFlash: Block Diffusion for Flash Speculative Decoding. ICML.
+
+ Inco AI (2026). DFlash 2: Keep Drafting Parallel .
+
+ Cheng et al. (2026). DSpark: Confidence-Scheduled Speculative Decoding with Semi-Autoregressive Generation . arXiv:2607.05147.
+
+ Li et al. (2025). EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test. NeurIPS.
+
+ Ringel and Romano (2026). Accelerating Speculative Decoding with Block Diffusion Draft Trees . arXiv:2604.12989.
+
+ Novikov et al. (2025). AlphaEvolve: A Coding Agent for Scientific and Algorithmic Discovery . arXiv:2506.13131.
+
+ Qwen Team (2026). Qwen3.8-27B .
+
+ Yang, Kautz and Hatamizadeh (2025). Gated Delta Networks: Improving Mamba2 with Delta Rule. ICLR.
+
+ Ghantasala (2026). TreeWY: Speculative Verification for Gated DeltaNet Hybrids . arXiv:2608.20961.
+
+ Zheng et al. (2024). SGLang: Efficient Execution of Structured Language Model Programs. NeurIPS.
+
+ Anthropic (2025). Claude Code .
+
+## BibTeX 
+
+ @misc{li2026specpilot,
+ title = {SpecPilot: Autonomous Algorithm Discovery and Systems
+ Optimization for Speculative Decoding},
+ author = {Li, Kunjun and Chai, Wenhao and Liang, Yihao and Hu, Yuezhou
+ and Xu, Shuyao and Pan, Yi and Zheng, William X.
+ and Ramchandran, Kannan and Keutzer, Kurt and Jiao, Jiantao},
+ year = {2026},
+ eprint = {2611.02501},
+ archivePrefix = {arXiv},
+ primaryClass = {cs.LG},
+ url = {https://arxiv.org/abs/2611.02501}
+}

@@ -1,0 +1,620 @@
+Self-Hosting DeepSeek V4.1-Flash: The Exact GPU Setup You Need in Your Own Cloud - Qovery Blog
+Nov 7, New York: Romaric speaks at SREday NYC: SRE in the era of AI
+Nov 7, New York: Romaric speaks at SREday NYC: SRE in the era of AI
+
+See the talk
+
+Self-Hosting DeepSeek V4.1-Flash: The Exact GPU Setup You Need in Your Own Cloud
+
+How much GPU memory, which instances, and what it costs to self-host DeepSeek's MIT-licensed V4.1-Flash in your own AWS, GCP, Azure, Scaleway or Kubernetes account - with the VRAM arithmetic, real instance prices, vLLM/SGLang config, and the utilization point where a hosted API still wins.
+
+Romaric Philogene
+
+CEO & Co-founder
+
+OCT 30, 2026
+Â·
+13 MIN
+
+The GPU question for DeepSeek V4.1-Flash-1017 has a boring arithmetic answer, and most teams still get it wrong. They see "16B active parameters" and price a single GPU. On a mixture-of-experts model, active parameters set your compute bill. Total parameters set your memory bill, and every expert has to sit in VRAM whether it fires or not.
+
+So when an engineer drops "can we run this ourselves?" in Slack, here is the answer I give: one 8-GPU H200 node, about $63 an hour on AWS, and a clear-eyed look at whether you need the data control more than you need DeepSeek's very cheap API.
+
+Qovery Â· Infrastructure control plane
+
+Build with Claude Code, Deploy with Qovery
+
+Learn more
+
+Key Points:
+
+Size for total parameters, not active ones.
+V4.1-Flash activates 16B parameters per token at decode but ships roughly 511 GB of weights. That is the number your GPUs must hold.
+
+The default production shape is one 8x H200 node
+(AWS p5en, Azure ND H200 v5, GCP a3-ultragpu-8g). With the Engram tables moved to host RAM, vLLM runs one replica on 4x H200, so one node serves two replicas.
+
+KV cache is almost a rounding error on this model.
+DeepSeek reports 890 bytes per token, so 50 concurrent 128k-token sessions add under 6 GB.
+
+Keep tensor parallelism inside one node
+on NVLink. Only span nodes over EFA or InfiniBand.
+
+The MIT license lets you self-host commercially
+, fine-tune, redistribute and keep every prompt in your own VPC, with no acceptable-use rider.
+
+Self-host for control, not price.
+DeepSeek charges $1.20 per million output tokens at peak, so an 8x H200 node has to sustain about 14,650 output tokens per second just to match it.
+
+What is DeepSeek V4.1-Flash-1017, and what does its MIT license actually let you do?
+
+DeepSeek V4.1-Flash-1017 is an open-weights, multimodal mixture-of-experts model that DeepSeek released on October 17, 2026 (
+DeepSeek news
+). It is a minor update to V4.1-Flash, with a 1M-token context window, and both the code and the weights are under the MIT license (
+Hugging Face model card
+). MIT means you can download the weights, serve them commercially, fine-tune them, redistribute them and keep every prompt inside your own cloud account.
+
+The published specs, straight from DeepSeek:
+
+Parameters:
+552B backbone parameters plus 196B Engram memory parameters. The model activates 16B per token during decode and 8B during prefill (
+DeepSeek-V4.1-Flash technical report
+). Hugging Face's tensor counter shows 763B.
+
+Architecture:
+40 layers, 384 routed experts plus 1 shared expert, 6 routed experts per token (
+config.json
+).
+
+Checkpoint:
+FP8 dense weights with FP4 experts, 48 safetensors shards, about 511 GB on disk (
+vLLM recipe
+).
+
+On the leaderboard side, Artificial Analysis Intelligence Index v5.0 scores DeepSeek V4.1 Flash 1017 (Max) at 32. That puts it tied for first among open-weights models with GLM-5.3 as of October 30, 2026 (
+Artificial Analysis
+). Closed frontier models still score far higher, and the board moves weekly.
+
+The license is the part that matters for regulated teams. Prompts, embeddings, retrieved documents and logs never leave your account, which turns a GDPR or HIPAA review from a vendor negotiation into an architecture review. Demand for that control is real.
+a16z's 2024 enterprise survey
+found 46% of leaders prefer or strongly prefer open-source models, with control and data security outweighing cost. To be fair,
+Menlo Ventures' 2025 report
+measured open-source share of enterprise usage falling from 19% to 11%. Most teams still call APIs.
+
+License
+Commercial use
+Fine-tuning
+Redistribution
+Usage caps / acceptable-use rider
+Weights downloadable
+
+DeepSeek V4.1-Flash (
+MIT
+)
+Yes
+Yes
+Yes, keep the copyright notice
+None
+Yes
+
+Llama 4 (
+Community License
+)
+Yes, below 700M MAU
+Yes
+Yes, with "Built with Llama" attribution
+700M MAU threshold plus an Acceptable Use Policy
+Yes
+
+Gemma (
+Terms of Use
+)
+Yes
+Yes
+Yes, terms flow down
+Prohibited Use Policy; Google reserves the right to restrict usage
+Yes
+
+Qwen3 (
+Apache 2.0
+)
+Yes
+Yes
+Yes, with notices
+None
+Yes
+
+Hosted-API-only models
+Per contract
+Vendor-managed only
+No
+Vendor usage policy and rate limits
+No
+
+One warning: DeepSeek ships fast and renames checkpoints. The API alias
+deepseek-flash
+already points at the 1017 build (
+DeepSeek pricing
+). Re-check the model card before you reserve GPUs.
+
+How much GPU memory does it take to self-host DeepSeek V4.1-Flash?
+
+VRAM needed = (total parameters x bytes per parameter) + KV cache + activation overhead, then add 15-30% headroom. For V4.1-Flash, that comes to roughly 511 GB of weights plus a few GB of KV cache, so you need about 614 GB of GPU memory with everything resident.
+
+Bytes per parameter: BF16 is 2, FP8 is 1, FP4 or INT4 is about 0.5. DeepSeek ships the model already mixed, FP8 for dense layers and FP4 for experts, which works out to about 0.67 bytes per parameter (511 GB / 763B). Upcasting it to BF16 would cost about 1.5 TB of VRAM and buy you nothing. Re-quantizing gains little either, because the experts are already 4-bit.
+
+KV cache usually breaks long-context budgets. The vanilla formula is 2 (K and V) x layers x KV heads x head dim x bytes x tokens. For a dense model like Llama 3.1 70B (80 layers, 8 KV heads, head dim 128, BF16), that is about 320 KB per token, so 50 sessions at 128k tokens need roughly 2 TB. DeepSeek has spent three generations shrinking this number. Multi-head latent attention in V2 cut KV cache by 93.3% versus their 67B dense model (
+DeepSeek-V2 paper
+). V4.1-Flash adds cross-layer KV reuse and FP4 KV caching, which brings global KV to
+890 bytes per token
+, about a quarter of V4-Flash (
+technical report
+).
+
+Worked example: 50 concurrent requests x 131,072 tokens x 890 bytes =
+5.8 GB
+. Even 50 sessions at the full 1M context come to about 47 GB.
+
+The Engram tables are where you can actually save memory. They are 196.6B parameters, about 183 GiB in FP8, and their lookups depend only on the input tokens. That means both vLLM (
+--engram-config '{"cpu_offload":true}'
+) and SGLang (
+--engram-config '{"placement": "cpu"}'
+) can keep them in host RAM (
+vLLM recipe
+,
+SGLang cookbook
+). Offloading the experts themselves is a different story. That works for evaluation and is far too slow for serving.
+
+Configuration
+Weights in VRAM
+KV at 128k x 1
+KV at 128k x 50
+Total + 20% headroom
+Min 80 GB GPUs
+Min 141 GB GPUs
+
+Native FP8/FP4, all on GPU
+~511 GB
+0.12 GB
+5.8 GB
+~620 GB
+8 (tight, undocumented)
+8
+
+Native FP8/FP4, Engram in host RAM
+~315-350 GB (vLLM reports 81.2 GiB per GPU at TP4)
+0.12 GB
+5.8 GB
+~385-425 GB
+8 (TP must divide evenly)
+4 (vLLM default on H200)
+
+BF16 upcast (don't)
+~1,526 GB
+0.12 GB
+5.8 GB
+~1,838 GB
+24+, multi-node
+14+, multi-node
+
+Set vLLM's
+--gpu-memory-utilization
+to leave that headroom on purpose. If you fill HBM with weights and KV pool, the first burst of long agent prompts will OOM.
+
+Which cloud GPU instances can actually run it on AWS, GCP, Azure, Scaleway or your own Kubernetes cluster?
+
+A single 8x H200 node (1,128 GB) is the default production shape on every major cloud. It fits the full model with room to spare, or two Engram-offloaded TP4 replicas. 8x H100 (640 GB) clears the arithmetic, but neither the vLLM recipe nor the SGLang cookbook lists H100, so treat it as unsupported until you benchmark it yourself. Blackwell B200 and B300 run it at TP2 in the vLLM recipe.
+
+Cloud
+Instance
+GPUs x VRAM
+Total VRAM
+Interconnect
+On-demand price
+Fit for V4.1-Flash
+
+AWS
+p5en.48xlarge
+8x H200 141 GB
+1,128 GB
+NVSwitch 900 GB/s, EFA 3,200 Gbps
+$63.30/h (us-east-1)
+Yes, 1 full or 2 TP4 replicas
+
+AWS
+p5.48xlarge
+8x H100 80 GB
+640 GB
+NVSwitch 900 GB/s, EFA 3,200 Gbps
+$55.04/h (us-east-1)
+Arithmetic fits, not in recipes
+
+AWS
+p4de.24xlarge
+8x A100 80 GB
+640 GB
+400 Gbps network
+$27.45/h
+No native FP8, not recommended
+
+AWS
+g6e.48xlarge
+8x L40S 48 GB
+384 GB
+PCIe, 400 Gbps
+$30.13/h
+No
+
+GCP
+a3-ultragpu-8g
+8x H200 141 GB
+1,128 GB
+3,600 Gbps network
+No on-demand (reservations, Spot, Flex-start)
+Yes
+
+GCP
+a3-highgpu-8g
+8x H100 80 GB
+640 GB
+1,000 Gbps network
+~$88.49/h (us-central1)
+Arithmetic fits, not in recipes
+
+Azure
+ND H200 v5
+8x H200 141 GB
+1,128 GB
+NVLink 900 GB/s, 3.2 Tb/s InfiniBand
+$84.80/h
+(East US 2)
+Yes
+
+Azure
+ND H100 v5
+8x H100 80 GB
+640 GB
+NVLink 4.0, 3.2 Tb/s InfiniBand
+$98.32/h
+(East US)
+Arithmetic fits, not in recipes
+
+Scaleway
+B300-SXM-8-288G
+8x B300 288 GB
+2,304 GB
+NVLink
+â¬60/h (fr-par-2)
+Yes, TP2 replicas
+
+Scaleway
+H100-SXM-8-80G
+8x H100 80 GB
+640 GB
+NVLink, 20 Gb/s network
+â¬25.33/h (fr-par-2 only)
+Arithmetic fits, single node only
+
+Hardware specs come from NVIDIA: the H100 SXM has 80 GB at 3.35 TB/s and the H200 SXM has 141 GB at 4.8 TB/s, both with 900 GB/s NVLink (
+H100
+,
+H200
+). Google renders its own GPU price table client-side, so the GCP figure comes from a third-party tracker. I compared these four clouds in more depth in
+our GPU pricing method
+.
+
+On your own Kubernetes cluster, any node pool with the NVIDIA GPU Operator works, as long as the driver, CUDA and runtime versions line up. That matrix breaks first. vLLM needs 0.31.0 or later for this model, and SGLang support exists only in the
+lmsysorg/sglang:dev-dsv41
+image so far.
+
+Two things take longer than the engineering:
+
+Quota.
+AWS's "Running On-Demand P instances" quota starts at 0 vCPUs, and large increases go to manual review (
+AWS EC2 quotas
+).
+EC2 Capacity Blocks for ML
+let you reserve up to eight weeks ahead, for 1 to 182 days, and a block can't be cancelled. Plan in weeks. If the hyperscalers say no,
+this is where we found capacity in 2026
+.
+
+Interconnect.
+Tensor parallelism inside a node runs over NVLink/NVSwitch. Spanning it across nodes needs EFA or InfiniBand. Over standard VPC networking, or Scaleway's 20 Gb/s, tokens per second collapse.
+
+Should you serve it with vLLM, SGLang, or TensorRT-LLM?
+
+Pick vLLM or SGLang. Both support V4.1-Flash today with Engram offload and expert parallelism, while DeepSeek's own inference code is a reference implementation it describes as "not a production serving engine" (
+inference README
+).
+
+vLLM's PagedAttention paper measured 2-4x higher throughput than prior systems at the same latency (
+Kwon et al.
+). SGLang's RadixAttention reports up to 6.4x (
+Zheng et al.
+), and it shines on agent traffic with long shared system prompts. The LMSYS team reports 1.56x faster prefill on 8x H200 from V4.1's decoder bounded replay (
+LMSYS blog
+). I wrote a longer
+vLLM vs TGI vs NIM comparison
+if you need the general case.
+
+A starting point on one H200 node, assembled from the flags in the vLLM recipe (generate the exact command with the recipe's builder for your vLLM version):
+
+BASH
+|
+Replica 1 on GPUs 0-3; run a second copy on GPUs 4-7 with another port
+
+Copy
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 VLLM_ENGINE_READY_TIMEOUT_S=3600 \
+vllm serve deepseek-ai/DeepSeek-V4.1-Flash-1017 \
+--tensor-parallel-size 4 \
+--engram-config '{"cpu_offload":true}' \
+--tokenizer-mode deepseek_v41 \
+--reasoning-parser deepseek_v41 \
+--port 8000
+
+Budget about 183 GiB of host RAM per replica for the Engram tables. Keep
+--tensor-parallel-size
+at or below the GPU count per node. On Blackwell, the recipe also uses expert parallelism (
+--enable-expert-parallel
+) at higher concurrency.
+
+On quantization, leave DeepSeek's native format alone. For models you quantize yourself, Red Hat's half-million-evaluation study found 8-bit and 4-bit Llama 3.1 recovered 99.9% and 98.9% of baseline on HumanEval (
+Red Hat
+). Small, but measurable.
+
+Runtime
+V4.1-Flash support
+Tensor / expert parallelism
+Prefix caching
+Quantization formats
+OpenAI-compatible API
+Setup effort
+
+vLLM
+Yes, 0.31.0+ (
+recipe
+)
+TP, EP, DP
+Yes
+FP8, FP4, AWQ, GPTQ
+Yes
+Low
+
+SGLang
+Yes, dev image only (
+cookbook
+)
+TP, EP, DP attention
+RadixAttention
+FP8, FP4
+Yes
+Medium
+
+TensorRT-LLM
+Not documented for V4.1 at time of writing
+TP, EP
+Yes
+FP8, FP4
+Yes (trtllm-serve)
+High, per-model engine builds
+
+Hugging Face TGI
+Not documented for V4.1 at time of writing
+TP
+Yes
+FP8, AWQ, GPTQ
+Yes
+Low
+
+Before you commit, benchmark tokens per second per GPU, time to first token and p95 latency at your real concurrency. A single-request demo tells you nothing about production.
+
+Ship faster on infrastructure you control.
+
+Qovery gives your team self-service deployments on your own AWS, GCP, Azure, or Scaleway account - or your existing Kubernetes cluster. Start deploying in under 10 minutes.
+
+Try Qovery free
+Talk with us
+
+Is self-hosting DeepSeek cheaper than calling the hosted DeepSeek API?
+
+Usually not on price alone. DeepSeek prices its own API aggressively, and a GPU node costs the same per hour at 10 tokens or 10 million. Cost per million tokens = (hourly instance price / tokens served per hour) x 1,000,000. Compare that with DeepSeek's published price.
+
+DeepSeek charges $0.30 per million input tokens on a cache miss, $0.006 on a cache hit and $1.20 per million output tokens at peak. Off-peak rates are half (
+DeepSeek pricing
+). Together AI lists the same $0.30 / $1.20 (
+Together AI
+).
+
+Worked example: an AWS p5en.48xlarge costs $63.30 per hour on-demand. Assume your benchmark shows the node sustaining 10,000 output tokens per second across two replicas. That is a placeholder, not a published figure, so replace it with your own measurement. 10,000 x 3,600 = 36M tokens per hour, and $63.30 / 36M x 1,000,000 =
+$1.76 per million output tokens at 100% utilization
+. To match DeepSeek's $1.20 peak price, the node must sustain 63.30 / 1.20 = 52.75M tokens per hour, or about
+14,650 output tokens per second, around the clock
+. Capacity Blocks ($63.16/h for p5en) barely move that (
+AWS Capacity Blocks pricing
+). Savings Plans and committed-use discounts move it more.
+
+Self-hosted, 10% util.
+30% util.
+50% util.
+90% util.
+DeepSeek API
+
+Cost per 1M output tokens (p5en at $63.30/h, assumed 10k tok/s at full load)
+$17.58
+$5.86
+$3.52
+$1.95
+$1.20 peak / $0.60 off-peak
+
+Data residency
+Your VPC and region
+Your VPC and region
+Your VPC and region
+Your VPC and region
+DeepSeek's infrastructure
+
+Rate limits
+Your hardware
+Your hardware
+Your hardware
+Your hardware
+Concurrency cap of 2,500
+
+Latency control
+Full
+Full
+Full
+Full
+Shared
+
+Fine-tuning freedom
+Full (MIT)
+Full
+Full
+Full
+None
+
+Ops burden
+High
+High
+High
+High
+None
+
+The hidden costs of self-hosting are idle hours, 511 GB weight pulls, egress, on-call, driver and cluster upgrades, and cold starts measured in minutes. The recipe sets the engine-ready timeout to an hour for a reason. The hidden wins are discounts that stay in your own cloud account, no per-token markup, data residency by default and no surprise deprecation of the alias you depend on.
+
+Most teams land on a hybrid. They self-host the steady, sensitive baseline and burst overflow to a hosted endpoint behind one gateway. If your traffic is spiky, you are still prototyping, you have no compliance requirement, or nobody wants to own GPU nodes, use the API. Together AI, Fireworks AI, Baseten, Modal and Amazon Bedrock are all legitimate answers for hosted open models.
+
+How do you run a self-hosted model in production without a dedicated DevOps engineer?
+
+The GPU is the easy part. The hard part is everything around it: the GPU node pool, drivers, autoscaling, environment isolation, secrets and cluster upgrades. That is where Qovery fits. It deploys your inference service into your own AWS, GCP, Azure or Scaleway account, or your existing Kubernetes cluster, so the GPU bill and the reservations stay in your name.
+
+Production needs a GPU node pool with taints and tolerations, the NVIDIA device plugin, and weights cached on a persistent volume or object storage instead of pulled per pod. It also needs startup probes tuned for model loads that take many minutes, and autoscaling on queue depth instead of CPU. GKE's own docs show how much image pulls alone matter: image streaming pulled a 327 MB image in 1.5 seconds versus almost 24 without it (
+GKE image streaming
+), and vLLM images reach tens of GB.
+
+With Qovery, your vLLM or SGLang container deploys on git push into your own account (BYOC). Prompts never leave your VPC, and your Savings Plans and committed-use discounts still apply. Managed cluster upgrades and per-environment RBAC let the team that owns the endpoint operate it like any other service. Preview environments per pull request let you test prompt, RAG and agent changes against a real endpoint.
+
+Environment auto-stop deserves its own line. An idle GPU staging environment is the most expensive self-hosting mistake I see. A p5en left on 24/7 costs $63.30 x 720 =
+$45,576 a month
+. Run it 10 hours a day on weekdays and it drops to about $13,926, saving roughly $31,650 per environment.
+
+To be fair to the alternatives: if you want someone else to own the GPUs entirely, Together AI, Fireworks AI, Baseten, Modal, RunPod, Amazon Bedrock, Vertex AI Model Garden or Azure AI Foundry are the right call. Qovery is for teams that need the weights and the data inside their own account. For the multi-node case with even larger models, see
+how we size an 800B-parameter open model on Kubernetes
+.
+
+How do I deploy a self-hosted DeepSeek endpoint with Qovery from Claude Code or Cursor?
+
+Install the Qovery Agent Skills once, then ask your coding agent in plain language to deploy the inference container into your own cloud account. It proposes each step and waits for your approval.
+
+Install the skills globally for any compatible agent (Claude Code, Cursor, Codex, OpenCode, Gemini CLI):
+
+BASH
+
+Copy
+
+curl -fsSL https://skill.qovery.com/install.sh | bash
+
+Or scope the install to the current project:
+
+BASH
+
+Copy
+
+curl -fsSL https://skill.qovery.com/install.sh | bash -s -- --project
+
+Add the Qovery MCP Server to Claude Code, read-only by default:
+
+BASH
+
+Copy
+
+claude mcp add --transport http qovery https://mcp.qovery.com/mcp --callback-port 4242
+
+Enable write access only when you want the agent to change infrastructure (this also requires enabling write access in the Qovery Console):
+
+BASH
+
+Copy
+
+claude mcp add --transport http qovery "https://mcp.qovery.com/mcp?read_write=true" --callback-port 4242
+
+The skills deploy (qovery-onboard, qovery-deploy, qovery-troubleshoot, qovery-optimize, qovery-speedup, qovery-preview, qovery-terraform), and the MCP Server operates what already exists. Then ask: "deploy this vLLM container to my AWS account with Qovery on a GPU node pool." The walkthrough is in the
+AI agent quickstart
+and on the
+Claude Code integration page
+.
+
+Frequently asked questions
+
+How many GPUs do I need to self-host DeepSeek V4.1-Flash-1017?
+Four H200s per replica with the Engram tables in host RAM, which is vLLM's documented default, or eight H200s with everything on GPU. The checkpoint is about 511 GB and vLLM's minimum is 614 GB of VRAM. On Blackwell, B200 and B300 run it at TP2.
+
+Can I run DeepSeek V4.1-Flash on a single H100, or on a consumer GPU like an RTX 4090?
+No. Even with Engram offloaded, roughly 315-350 GB of weights must stay in GPU memory, about four times what one H100 holds. An RTX 4090 has 24 GB. For a single-GPU setup, pick a smaller open model.
+
+Does the MIT license let me use DeepSeek V4.1-Flash commercially, fine-tune it, and redistribute it?
+Yes. The model card puts both the code and the weights under MIT, with no user threshold and no acceptable-use policy. Keep the copyright and license notice when you redistribute the weights.
+
+Is self-hosting DeepSeek cheaper than using the hosted DeepSeek API?
+Rarely on price alone. At $1.20 per million output tokens, an 8x H200 node at $63.30/h has to sustain about 14,650 output tokens per second around the clock to match. Self-host for data control, compliance, latency or fine-tuning, and measure your own throughput first.
+
+Should I use vLLM or SGLang to serve DeepSeek models?
+Start with vLLM 0.31.0+, which supports V4.1-Flash in a release build and ships a recipe per GPU type. Benchmark SGLang's dev image if your traffic is agent-heavy with long shared prefixes, where RadixAttention helps most.
+
+Can I deploy a self-hosted DeepSeek endpoint in my own AWS, GCP, Azure, Scaleway or existing Kubernetes cluster?
+Yes. Any cluster with an H200 or Blackwell node pool, the NVIDIA GPU Operator and a compatible driver works. Qovery deploys the container into your own AWS, GCP, Azure or Scaleway account, or your existing Kubernetes cluster, so the bill and the data stay with you.
+
+How long does it take to get H100 or H200 GPU quota from a cloud provider?
+Plan in weeks. AWS starts P-instance quota at zero and sends large requests to manual review without a published turnaround. Capacity Blocks can be booked up to eight weeks ahead. GCP sells a3-ultragpu H200 capacity only through reservations, Spot and Flex-start.
+
+About the author
+
+Romaric Philogene
+Romaric founded Qovery to make Kubernetes accessible to every engineering team. He writes about platform strategy, developer experience, and the future of cloud infrastructure.
+
+Next step
+
+Ship faster on infrastructure you control.
+
+Qovery gives your team self-service deployments on your own AWS, GCP, Azure, or Scaleway account - or your existing Kubernetes cluster. Start deploying in under 10 minutes.
+
+Try Qovery free
+Talk with us
+
+Continue reading
+
+More articles
+
+All articles â
+
+877
+Â·
+Cloud Migration
+13 min
+
+Outgrowing Deno Deploy or Val Town? How to Move to Kubernetes With a Real Database and Persistent State
+
+Alessandro Carrano
+Nov 5, 2026
+
+876
+Â·
+Kubernetes
+20 min
+
+GKE fractional GPU access vs dedicated node pools: which actually cuts inference cost for a small ML team?
+
+MÃ©lanie DallÃ©
+Nov 5, 2026
+
+875
+Â·
+Kubernetes
+15 min
+
+How to Self-Host Any Open-Weight Model with NVIDIA NIM's Model-Free vLLM and SGLang Containers on Kubernetes
+
+Romaric Philogene
+Nov 5, 2026

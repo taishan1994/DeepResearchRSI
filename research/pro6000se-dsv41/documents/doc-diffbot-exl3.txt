@@ -1,0 +1,416 @@
+# DeepSeek-V4.1-Flash-1017 EXL3 3-bit on 2× RTX PRO 6000 Blackwell
+
+This folder serves [DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017) on two RTX PRO 6000
+Blackwell Max-Q cards (sm_120, 96 GB each) with vLLM at tensor-parallel 2. It uses the pack in the parent folder:
+
+- our calibrated EXL3 3-bit routed experts (MUL1 codebook; coolbho3k's calibration method, run by us on the 1017 weights);
+- int4 Engram tables;
+- a DSpark drafter with EXL3 3-bit experts.
+
+The model card has the headline numbers. This file explains the stack; `results/RESULTS.md` has the full measurements.
+
+## Layout
+
+| Path | Contents |
+|---|---|
+| `docker/build.sh` | Builds the serving image `dsv41-flash-1017-exl3-3bpw-sm120` from the vLLM `nightly-5555a2d8` image (vLLM main, 2026-10-13) with `docker run` and `docker commit`. The build container is capped at 64 GB of RAM, so it can run next to a live server. |
+| `patches/vllm/` | Our sm_120 fixes (`sm120-fixes.diff`), our engram-layer memory fix (`v41-engram-post-lifetime.diff`), vLLM PRs #59585 (valid JSON for non-finite tool arguments; test in `test_dsml_nan_args.py`), #61039 (length-aware candidate blocks), #61142 (drifted tool-call openers), #60792 (image placeholder order) and #62196 (`pr62196-v41-1017-encoder.diff`: prompts rendered exactly like the 1017 reference encoder), our replay trim (`v41-replay-final-window.diff`), official-API prompt encoding (`v41-encoder-api.diff`), strict tool-call parsing (`v41-parser-strict-dsml.diff`), tool namespaces and thinking precedence (`v41-namespaces-thinking.diff`) and the 8x profile's chunked indexer decode (`v41-indexer-chunked-decode.diff`, off unless `DS41_IDX_CHUNK=1`), and `sitecustomize.py`, which holds the runtime hooks. `serve/serve.sh` mounts `sitecustomize.py`, so editing it needs no rebuild. |
+| `patches/vllm-exl3/` | Our patch to the vllm-exl3 plugin: host-RAM experts, split launch, side-stream overlap, VRAM cache for host experts, fused routing prep, CPU host-expert glue. AGPL-3.0-only. |
+| `kernels/` | `xmoe`, a rewrite of ExLlamaV3's `exl3_moe` extension for sm_120; `xmoe_do`, the decode-once prefill kernel; `xmoe_do_i8`, its int8 tensor-core build (the default); `fp8ar`, the 8-bit prefill all-reduce; and `rowtopk`, the length-aware indexer top-k. `build.sh` builds all five. For the 8x profile, `build.sh 8x` adds `xmoe_p8k` (xmoe with a larger flat-kernel job table) and `fp8arg` (the graph-capturable 8-bit all-reduce); `ar8tp4/` (the TP4 all-reduce) and `engram4/` (the int4 Engram all-gather) are Triton/Python modules. `sm120_dense.py` and `sm120_dense2.py` are the FP8 GEMV kernels for dense layers at decode sizes, tuned by `sm120_dense_table_v2.json`. |
+| `cpuexp/` | Optional: a CPU runtime that computes the host-RAM experts on the host CPU (`CPU_EXPERTS=1`). Needs a large AVX-512 CPU; `cpuexp/README.md`. |
+| `plans/` | The host-expert plans: which experts stay in pinned host RAM. |
+| `serve/serve.sh` | The server, with every setting documented. `PROFILE=8x` selects the 8x RTX PRO 6000 profile (`serve/profile-8x.env`); `serve/serve-8x.sh` starts both of its replicas. |
+| `bench/` | `validate.sh` runs the synthetic suite; the other files are its benchmarks and probes. `latbench.py`, `codegen_bench.py`, `codeconc.py`, `bulk_decode.py` and `dlogprob.py` are the 8x profile's benchmarks. |
+| `kl/` | KL against the original model: our 1017 reference on AtomicChat's corpora, and kyuz0's short100 panel. |
+| `quantize/` | How the pack was made: calibration capture, expert quantization, drafter, int4 Engram, shard layout. |
+
+## Quick start
+
+```bash
+bash docker/build.sh                      # image dsv41-flash-1017-exl3-3bpw-sm120
+bash kernels/build.sh                     # kernels/build/xmoe, xmoe_do, xmoe_do_i8, fp8ar_ext and rowtopk, about 4 minutes
+API_KEY=change-me bash serve/serve.sh     # OpenAI-compatible API on :8000, model deepseek-v4.1-flash
+```
+
+With a large AVX-512 host CPU (see "Two ways to run the host experts" below), build and check the CPU runtime first and
+start with `CPU_EXPERTS=1`:
+
+```bash
+bash cpuexp/build.sh && bash cpuexp/check_host.sh
+API_KEY=change-me CPU_EXPERTS=1 bash serve/serve.sh
+```
+
+The server is ready about five to seven minutes after start (321 s in our 1M-context test, with warm kernel caches).
+`serve/serve.sh` looks for the pack in the recipe's parent folder; set `PACK=` if it is elsewhere. It also sends a few
+warm-up requests, so the first client requests don't wait on kernel compilation. Before starting it, free the page cache if
+it is large (`sync; echo 1 > /proc/sys/vm/drop_caches` as root). The container is capped at 260 GiB of host RAM
+(`CONTAINER_MEM`), most of it pinned, and a full page cache made our desktop session stall. Every launcher in this folder
+turns vLLM's usage statistics off (`VLLM_NO_USAGE_STATS=1`, `DO_NOT_TRACK=1`).
+
+## Memory: what lives where
+
+The KV cache gets `KV_MEM=4.25 GiB` per GPU: 1,071,558 tokens, enough for one full request at the default 1M-token context
+window. CUDA graphs and activations for 16K-token prefill chunks take most of the rest.
+
+| Component | Where | Notes |
+|---|---|---|
+| Attention, dense layers, shared experts, router | VRAM | FP8 as DeepSeek ships them. The large dense layers keep one FP8 copy (`DS41_DENSE_ONE_COPY`). |
+| 10,064 of 15,360 routed experts (EXL3 3-bit) and all 384 drafter experts | VRAM | the ones not in the host plan |
+| 5,296 routed experts | pinned host RAM | `plans/plan-1017-agent30-c512.json` (see `plans/README.md`), run by the cold-expert kernels over PCIe or by the CPU runtime |
+| VRAM cache for host experts | VRAM, 512 slots per GPU (3.16 GiB) | copies of the host experts that recent decode steps used most (`EXL3_HOST_CACHE=512`) |
+| Engram tables, int4 (111 GB) | pinned host RAM | read over UVA inside CUDA graphs |
+| Embedding table | pinned host RAM | `DS41_EMBED_HOST` |
+| lm_head | VRAM, FP8 | `DS41_FP8_LMHEAD` |
+| Vision encoder (32 layers, 0.77 GiB) | VRAM, bf16 | loaded with `VISION=1` (default); `VISION=0` serves text only |
+
+A fresh 1.04M-token prompt peaked at 96,655 and 97,029 MiB of 97,887 MiB per card in our test, including a ~2.5 GB/GPU side
+process.
+
+## Two ways to run the host experts
+
+About a third of the routed experts stay in pinned host RAM. Each MoE layer runs its VRAM experts on the main stream and
+the host experts next to them, in one of two ways:
+
+- **GPU-only path (default, `CPU_EXPERTS=0`).** A second stream with its own SM budget (`EXL3_HOST_OVERLAP_SMS`: 32 during
+  decode, 64 during prefill) runs the cold-expert kernels, which read the weights over PCIe. The 512-slot VRAM cache serves
+  part of the cold decode routings from VRAM (50-80% once warm on the fixed-prompt bench, 26-37% in the agentic
+  sessions). This works on any host with enough RAM.
+- **CPU host experts (`CPU_EXPERTS=1`).** A pool of CPU cores per GPU computes the host experts next to their weights, so
+  only activations and results cross PCIe. The GPU publishes each layer's cold routes into a pinned mailbox and waits on a
+  flag; the sequence is captured in the decode CUDA graphs. Prefill chunks use the same pool. This needs AVX-512 (VNNI,
+  VBMI, VBMI2), many cores and high memory bandwidth: we tested on a Threadripper PRO 9995WX (96 cores, 8-channel DDR5-4800,
+  two pools of 42 cores). In same-day A/Bs on that host, CPU host experts in decode raised 1-session agentic decode
+  by 17% (243 vs 208 tok/s); adding prefill cut agentic wall time by another 6% (1 session) and 9% (4 sessions) and fresh
+  40K-token prefill went from 9.2K to 10.5K tok/s. The CPU package drew about 85 W more. `cpuexp/build.sh` must run on the serving host (it compiles
+  for the host CPU) and `cpuexp/check_host.sh` gates it; if the check fails, `serve/serve.sh` falls back to the GPU-only path
+  (`CPU_EXPERTS_STRICT=1` stops instead). On another CPU, set the pools with `EXL3_CPU_EXPERTS_CPUS` (the check script
+  suggests a value). `cpuexp/README.md` has the details.
+
+The default plan is tuned for long multi-turn agentic coding sessions. Shorter synthetic prompts route differently, so
+`plans/README.md` explains how to build a plan for other traffic.
+
+## Runtime hooks
+
+`patches/vllm/sitecustomize.py` patches vLLM at import time. Each hook is switched on by an environment variable that
+`serve/serve.sh` sets. The ones that change memory, speed or numerics:
+
+| Variable | Effect |
+|---|---|
+| `DS41_DENSE_ONE_COPY=1` | Large dense layers keep one FP8 copy in the checkpoint layout, with no Marlin repack. Up to 64 rows use the split-K GEMV, up to `DENSE_HYBRID_M` rows use dequant + cuBLAS, and larger calls use FlashInfer MXFP8 on the same tensor. Frees 2.7 GiB per GPU. |
+| `DS41_DENSE_GEMV=1` | Split-K FP8 GEMV (`kernels/sm120_dense*.py`) for dense layers at decode sizes. |
+| `DS41_WOA_FP8=1` | Attention `wo_a` is re-quantized to FP8 exactly (checked at load: max error 0) and served by a grouped GEMV. Frees 0.65 GiB. |
+| `DS41_WOA_ACTQ=32`, `DS41_WOA_ACTQ_TRITON=1` | The attention output is rounded through FP8 (32-element blocks, power-of-two scales) before `wo_a`, as DeepSeek's 1017 reference `inference/model.py` does. One fused Triton pass, in place, bit-identical to the reference rule. |
+| `DS41_EMBED_HOST=1` | The embedding table moves to pinned host RAM. Frees 0.62 GiB. |
+| `DS41_FP8_LMHEAD=1` | FP8 lm_head, including the drafter's head. Frees 0.33 GiB. Measured with and without it, KL does not change. |
+| `DS41_INDEXER_BUF_MULT=8` | The sparse indexer's prefill workspace is `max_model_len × 8` instead of × 40. vLLM's planner already splits larger batches. Frees 2.0 GiB. |
+| `DS41_INDEXER_EXPAND_CAP=1` | The indexer's decode block-table buffer is sized to the decode batch. Frees 1.5 GiB. |
+| `DS41_ROPE_CAP=1` | The rope cos/sin tables cover `max_model_len + 8192` positions instead of 1M. The hook checks at load that the result is bit-identical to the full table. Frees 0.25 GiB. |
+| `DS41_ROUTER_SPLITK=1`, `DS41_MHC_SPLITS=80` | Split-K router GEMM and a higher mHC prenorm split cap for decode. |
+| `DS41_FUSE_ROUTER`, `DS41_FUSE_HCPREP`, `DS41_FUSE_IDX`, `DS41_FUSE_OPROJ` (all 1) | Decode fusions, bit-exact: the router's split-K reduce folded into the top-k kernel, the host-cache hotness count folded into the routing prep, the sparse-MLA decode top-k fused with its pad fix, and the inverse RoPE fused with the FP8 rounding of the attention output. Fewer launches per decode step. |
+| `DS41_CAR=1`, `DS41_CAR_PCIE_IPC=1` | FlashInfer's PCIe IPC all-reduce for the all-reduces inside the decode CUDA graphs (the 8-bit all-reduce or NCCL for the rest). |
+| `DS41_FP8AR=1` | The 8-bit prefill all-reduce (below). `DS41_FP8AR=0` uses vLLM's exact all-reduce for prefill too. |
+| `DS41_ROWTOPK=1` | The sparse indexer's decode top-k runs on `kernels/rowtopk` (`torch.ops.rtx8.rowtopk`), which reads only each row's valid prefix; vLLM's `persistent_topk` works over the padded width (= `max_model_len`). Exact: same top-k set, deterministic index order, graph-safe. With it, the decode candidate mask writes only `[0, row end)` (`DS41_MASK_BOUNDED=0` keeps vLLM's full-width mask). `DS41_ROWTOPK=0` restores vLLM's kernel. |
+
+The vllm-exl3 patch adds the `EXL3_*` settings; `patches/vllm-exl3/README.md` lists them.
+
+## vLLM patch switches
+
+Our four newest vLLM patches are built into the image (`docker/build.sh`). Each behavior change reads its own environment
+variable, which `serve/serve.sh` sets to 1 and passes into the container. `=0` restores the previous behavior.
+
+| Variable | Patch | Effect |
+|---|---|---|
+| `VLLM_DS41_REPLAY_FINAL_WINDOW` | `v41-replay-final-window.diff` | Prefill chunks that the prompt's final window cannot read keep one replay row (below). |
+| `VLLM_DS41_SEGMENT_ENCODE` | `v41-encoder-api.diff` | Control tokens come only from the chat template. Message text is encoded without the added vocabulary, so text that spells a control token stays text. Grounding tokens stay special in assistant content and reasoning, and image placeholders stay special. The renderer hands the engine token IDs. |
+| `VLLM_DS41_EFFORT_ALIASES` | `v41-encoder-api.diff` | `reasoning_effort` `minimal` → `low`, `medium` → `high`, `ultra` → `max` (previously HTTP 400). |
+| `VLLM_DS41_API_TOOLS` | `v41-encoder-api.diff` | Tool schemas render as `{name, description, parameters}`; a null description renders as `""` and null parameters as `{}`. `strict` and other extra fields are not rendered. |
+| `VLLM_DS41_API_SYSTEM` | `v41-encoder-api.diff` | Tools and the response format go to the first message if it is a system message. Otherwise an empty system message is inserted first. Previously they went to the first system message anywhere in the conversation. |
+| `VLLM_DS41_API_SYSTEM_CLEAN` | `v41-encoder-api.diff` | An `x-anthropic-billing-header` prefix is stripped from system messages, and empty system messages are dropped. |
+| `VLLM_DS41_DEVELOPER_AS_SYSTEM` | `v41-encoder-api.diff` | A developer message is rendered as a system message. Previously it was dropped in thinking mode without tools. |
+| `VLLM_DS41_RESPONSE_FORMAT` | `v41-encoder-api.diff` | `response_format` `json_object` or `json_schema` renders its "## Response Format" section. |
+| `VLLM_DS41_TOOL_CHOICE_NONE` | `v41-encoder-api.diff` | `tool_choice: "none"` renders no tools. |
+| `VLLM_DS41_SYSTEM_TURN` | `v41-encoder-api.diff` | A leading system message that ends the conversation, or is followed by an assistant message, gets the assistant generation header (vLLM #62459). |
+| `VLLM_DS41_DSML_STRICT` | `v41-parser-strict-dsml.diff` | Tool-call markup counts only where the model emitted the DSML token (below). |
+| `VLLM_DS41_NAMESPACES` | `v41-namespaces-thinking.diff` | Tool namespaces render as the 1017 reference encoder renders them: a tool's `namespace` (a name or `{name, description}`, on the tool or on its function) or a qualified name `ns::name` renders as `ns::name`, with the namespace description before the tool description; history calls keep their namespace. Responses `type: namespace` tools render the same way (vLLM spells them `ns__name`), and a call the model makes as `ns::name` maps back to the namespaced tool. Previously the namespace was dropped. |
+| `VLLM_DS41_THINKING_PRECEDENCE` | `v41-namespaces-thinking.diff` | An explicit `chat_template_kwargs.thinking` (or `enable_thinking`) wins over the thinking mode vLLM derives from `reasoning_effort`, so `thinking: false` with `reasoning_effort: high` renders a non-thinking prompt, and the response parser reads the reply in the same mode. Previously the effort turned thinking back on. |
+
+## What was needed on sm_120
+
+- **Masked slots in FlashInfer 0.7.** The sparse-MLA kernel masks padded slots out of the softmax but still loads their
+  V. A padded `-1` slot reads outside the cache, and 0 × NaN poisons the row. Any request whose sliding window was not
+  yet full produced NaNs from layer 0. `sm120-fixes.diff` points the padding at a real slot.
+- **Indexer page geometry.** DeepGEMM's FP8 paged MQA kernel on arch 12 needs 64 states per page. V4.1's ratio-2 layers
+  therefore need 128-token indexer pages, matching the MLA page (vLLM #57028). With 64-token pages, top-k indices went
+  out of bounds.
+- **Int4 Engram.** vLLM reads the int4 Engram tables (`DSV41_ENGRAM_INT4=1`) from pinned host memory. That saves 92 GB
+  of host RAM against FP8.
+- **All-reduce in CUDA graphs.** vLLM's custom all-reduce failed graph capture here (`custom_all_reduce.cuh:164`). The cause:
+  ExLlamaV3 turns on PyTorch's expandable segments when `PYTORCH_CUDA_ALLOC_CONF` is unset, so the captured all-reduce
+  inputs live in virtual-memory segments that `cudaIpcGetMemHandle` rejects. vLLM's custom all-reduce stays off (with the
+  hook's fix it measured within noise); the decode graphs use FlashInfer's PCIe IPC all-reduce instead.
+- **Image input.** The sfxnz recipe's hook (kept in `sitecustomize.py`) sets the config's `vision_max_n_token` to 0 so
+  that vLLM's DeepSeek-V4 sparse-attention helpers keep their text-only prefill index width on sm_120. The image
+  preprocessor reads the same field as its per-image token budget, and with 0 vLLM divided by zero while sizing its
+  profiling image and failed to start. The hook keeps the real budget (1,024 tokens per image) aside and the preprocessor
+  reads that, so attention runs exactly as in the validated text-only configuration (`DS41_VISION_BUDGET=0` turns the
+  preprocessor patch off).
+
+## What changed for 1017
+
+- **Prompt encoding.** 1017 ships a new reference encoder (`encoding/encoding.py`). vLLM PR #62196, rebased onto our base,
+  renders byte-identical prompts on every case we checked (40 cases: tool loops, parallel calls, thinking efforts,
+  mid-conversation system messages, images). `v41-encoder-api.diff` then tokenizes them like the official API (above).
+- **FP8 rounding of the attention output.** 1017's reference model rounds the attention output through FP8 before `wo_a`;
+  vLLM does that on SM100 but not on sm_120. `DS41_WOA_ACTQ=32` adds it. On the original checkpoint it moves KL by
+  0.0001-0.0005, about the run-to-run noise.
+- **Pack.** No calibrated 3-bit 1017 experts existed, so we quantized them ourselves (`quantize/README.md`).
+
+## The MoE kernel
+
+`kernels/xmoe` is a drop-in build of ExLlamaV3's `exl3_moe`. `sitecustomize.py` swaps it in when `XMOE_EXT` is set, and
+`kernels/exllamav3-5be8865-exl3_moe.patch` shows every change against upstream.
+
+- **Decode, 64 tokens or fewer.** A flat scheduler runs one block per SM through gather, gate/up GEMM, activation, down
+  GEMM and scatter, splitting (expert, column tile, K tile) evenly across the SMs. The inner loop uses 128-wide K tiles,
+  balanced copies, one barrier per stage and swapped MMA operands (31-36% less MoE kernel time at decode than the previous
+  release's loop), with hand-tuned synchronization and data movement on top (bit-exact; +3% agentic decode).
+- **Prefill.** Each trellis tile is decoded once for 32 rows instead of once per 16. Host experts with more than 32 rows
+  used to cross PCIe once per 32-row pass (zero-copy reads are not cached on the GPU): 2.0× the unique bytes at 6K-token
+  chunks, 3.3× at 16K. The cold prefill kernel now stores each weight tile it reads into the group's own scratch rows on
+  the first pass and reads later passes from there (bit-exact, no extra VRAM): its launch time fell 42% at 4K-token chunks
+  and 61% at 16K.
+- **3-bit.** Instances for K=3 with the MUL1 codebook (the routed experts) and MCG (the drafter).
+- **Host experts.** Negative expert counts mean "skip but keep offsets", so one launch can cover only the VRAM experts
+  while the group kernel runs the host ones. `xmoe_set_sm_budget` and `xmoe_set_force_group` bound and place the host
+  launch.
+
+The flat decode kernel is pathological on host-resident weights: small reads from every SM over PCIe took 12–19 ms per
+layer, against 0.35 ms. Hence the split launch.
+
+## The 8-bit prefill all-reduce
+
+`kernels/fp8ar` (`DS41_FP8AR=1`, default in `serve/serve.sh`) replaces the tensor-parallel all-reduce of eager prefill chunks
+with 256 rows or more. The two cards are connected by PCIe only, so these all-reduces were a large part of prefill time.
+
+- **One-shot push.** One persistent kernel per call: producer warps quantize the card's bf16 partial to int8 with a bf16
+  scale per 32 elements and store it straight into the other card's receive buffer (`cudaMalloc` memory shared by CUDA IPC,
+  written over PCIe P2P), publishing per-tile flags; consumer warps wait for the peer's tiles, dequantize both partials
+  (the card's own one re-quantized with the same codec) and add them in fp32. Both cards add the same bytes in the same
+  order, so the results are bit-identical on the two ranks. That halves the bytes per direction compared with bf16.
+- **Scope.** Decode keeps vLLM's all-reduce inside the CUDA graphs (FlashInfer PCIe IPC); small eager batches, other
+  dtypes and the embedding all-reduce keep the exact path. A 16K-token all-reduce takes 1.8 ms instead of 4.0 ms, about
+  180 ms less all-reduce time on a fresh 34K-token prompt.
+- **Accuracy.** About 0.6% relative RMS error per all-reduce against the exact one. KL to the original model stayed within
+  run-to-run noise of the exact path (0.0519 / 0.0309 / 0.0109 and 0.0341 on short100, against 0.0517 / 0.0309 / 0.0110 and
+  0.0345 for a same-day control). Literal FP8 (e4m3) payloads, also built in (`DS41_FP8AR_FMT=e4m3`), scored higher KL
+  (0.0528 neutral), so int8 is the default.
+- **Speed.** Agentic sessions, CPU runtime, same day: 4-session wall clock 197 → 175 s (-11%), median time to first token
+  1.13 → 0.91 s, 1-session wall clock 232 → 224 s (-3%); fresh 40K-token prefill +4-6%.
+- **Settings.** `DS41_FP8AR_FMT` (int8 / e4m3 / e5m2 / bf16), `DS41_FP8AR_BLK` (32 / 64 / 128), `DS41_FP8AR_SCALE`,
+  `DS41_FP8AR_MIN_TOKENS` (256), `DS41_FP8AR_CHECK=n` (compare the first n calls with the exact path and check that the ranks
+  agree); `kernels/fp8ar/fp8ar_runtime.py` lists them all. The receive buffer is 85 MiB of VRAM per card at 16K-token
+  chunks. If setup fails on either card, both fall back to the exact path.
+
+## Prompt encoding and tool-call parsing
+
+`v41-encoder-api.diff` and `v41-parser-strict-dsml.diff` make vLLM's DeepSeek-V4.1 front end behave like the official
+DeepSeek API. We read the official API's request handling, encoder and output parser in the open-source `deepseek-recipe`
+code and compared that behavior with vLLM's on a CPU regression suite:
+
+- 35 rendering cases: 17 of 35 matched before, 31 after. The 4 left are the behaviors we did not port: `tool_choice`
+  `required` or a named function (vLLM uses guided decoding), double-encoded tool arguments (vLLM accepts them on purpose),
+  prefix continuation, and strict-schema normalization.
+- 9 injection cases (text that spells a control token in a system message, assistant history, reasoning, tool arguments, a
+  tool schema, text blocks, grounding text, a bare BOS, a split marker): 0 of 9 matched before, 9 after.
+- 12 cases for the new behaviors: 2 matched before, 11 after (a system message followed by an assistant message also needs
+  vLLM #62729).
+- 34 parser checks over non-streaming, streaming, and streaming with a 2-token text hold-back: 16 passed before, 34 after.
+
+In the previous release, the tool-call parser had a bug that came from vLLM PR #61142. That PR lets the parser accept
+drifted DSML openers: `<｜DSML｜ parameter name="` in place of the invoke tag, and a bare `<parameter name="` without the
+DSML marker. It matched them by spelling, anywhere. So a reply or its reasoning that merely contained `<parameter
+name="x">`, for example XML in an answer, became a call to a tool named `x` with empty arguments, and the rest of the reply
+was dropped. With `VLLM_DS41_DSML_STRICT`, the parser matches DSML markup only where the model emitted the DSML token ID.
+The same characters spelled with plain tokens are content, in text and inside tool arguments. #61142's drifted openers are
+still accepted after a real DSML token, and the bare opener only inside a DSML calls block. `<｜DSML｜ tool_calls>`, V4's
+wrapper name with V4.1's spacing (vLLM #62051 / #62517), is accepted too. Text that arrives without token IDs is still
+matched by spelling.
+
+On a live server, a probe of 10 checks passed 2 of 10 on the previous behavior (all switches 0) and 10 of 10 on the new one.
+The checks were:
+
+- one `<｜User｜>` token for a message that spells it;
+- no end-of-sentence token from client text;
+- `reasoning_effort` `medium` and `minimal` accepted;
+- `tool_choice: "none"`;
+- `response_format`;
+- a developer message in thinking mode;
+- a real tool call parsed;
+- plain `<parameter name=` content left alone;
+- the tool-call rate on 8 prompts.
+
+The tool-call rate stayed 8/8, and GSM8K / HumanEval went from 98.5 / 95.7 to 99.0 / 97.6, within run-to-run noise.
+
+Segment encoding also tokenizes faster than encoding the rendered prompt as one string. It encodes the plain-text parts
+in one batch, without the added-vocabulary pass. A 942K-token conversation takes 0.18-0.31 s instead of 1.27 s.
+
+## The replay trim
+
+vLLM's decoder-side bounded replay (vLLM #58132, in the base) runs layers 20-39 only for each prefill chunk's last 128 rows,
+because those layers hold only 128-token sliding-window KV. `v41-replay-final-window.diff` trims that replay further:
+
+- **Which chunks are trimmed.** A chunk of more than 128 rows reads no window KV below its own last 128 rows. So an earlier
+  chunk's replay rows are read only through a run of short chunks that reaches the end of the prompt. A trimmed chunk that
+  ends more than 128 positions before the end of the prompt keeps one placeholder row. That row's window starts at itself,
+  so it reads only KV it writes.
+- **What stays exact.** Every chunk that the final window or the decode steps can read keeps its rows, so every row that
+  is read is computed exactly as before.
+- **The one case the worker cannot foresee.** The rest of the prompt may arrive as two or more short chunks. The patch
+  detects this: such a chunk's window starts at the placeholder chunk's end, so it reads no skipped row, and vLLM logs a
+  warning. FIFO scheduling with this configuration does not produce that pattern; we saw 0 such hazards.
+- **Requests that never trim.** Prefix-cache hits rebuild their own last window. Requests that read every prompt row never
+  trim: prompt logprobs, candidate scoring (`prompt_logprob_token_ids`) and returned routed experts (vLLM #62651 / #62652).
+
+The checks:
+
+- **CPU.** An exhaustive check covered all 15,073 chunkings of small prompts, plus 3,000 random large ones. A scheduler
+  model ran 300 requests with prefix-hit replays and image cuts. A Triton-interpreter check confirmed that the gather kernel
+  with the floor off matches the original.
+- **GPU, same configuration with the trim off and on:**
+  - greedy outputs on 70 multi-chunk, prefix-continuation and agentic prompts were within the noise between two runs of
+    the same arm;
+  - teacher-forced argmax mismatches on long prompts: 2.03% off, 1.88% on;
+  - DSpark acceptance on multi-chunk prompts: 3.52 → 3.62;
+  - fresh prefill at 12K / 34K / 70K / 130K tokens: 1.10 / 3.26 / 6.49 / 11.95 s → 1.08 / 3.11 / 6.19 / 11.51 s.
+
+## The decode-once prefill kernel
+
+`kernels/xmoe_do/do_gemm.cu` handles the VRAM experts of every prefill chunk (`EXL3_DO=1`, default in `serve/serve.sh`;
+calls with at least 257 tokens). It is a grouped GEMM over (expert, 128-row job, 128-column tile): each 16×16 trellis tile
+is decoded once per job into registers, and the activations stream through shared memory 16 rows at a time with fp32
+accumulation. A job covers up to 128 rows, so a busy expert's weights are decoded 4× less often than in the fused kernel.
+Batched kernels around it apply the input Hadamard and gather, the SiLU and down-projection Hadamard, and the output Hadamard
+with weighted scatter-add. They use the same device functions as the fused kernel and reuse its scratch buffers, so the
+kernel needs no extra VRAM. Per expert at this model's per-GPU shapes it is 1.3–1.8× faster than the fused kernel at every
+row count from 16 to 1,024. `serve/serve.sh` uses it with `DO_INT8=0`.
+
+## The int8 decode-once kernel
+
+`kernels/xmoe_do_i8/dof_gemm.cu` is the default (`DO_INT8=1`). It is a drop-in for `xmoe_do`, with the same pipeline and
+the same `do_moe()` entry point.
+
+**Why int8.** At 16K-token prefill chunks, `xmoe_do` was limited by the tensor pipe plus the separation of its decode and
+MMA phases: the tensor pipe was 64% active. Int8 MMAs (m16n8k32) cover twice the K per instruction.
+
+**Structure:**
+
+- persistent blocks (one per SM, 8 warps) take (GEMM, job, column tile) items from an atomic queue, with gate and up in one
+  launch;
+- one barrier per 128-deep K slab;
+- each slab's activation rows, the next slab's trellis and the scales arrive by `cp.async` in a 2-3 stage ring that runs
+  across item boundaries;
+- each warp interleaves the MMAs of one 16-row chunk with the trellis decode of the next slab.
+
+**Numerics:**
+
+- activations are int8 with one scale per row and 128-wide slab, written by the gather and activation stages;
+- decoded weights are int8 with a fixed per-codebook scale;
+- each slab's int32 partial sum is dequantized exactly before fp32 accumulation;
+- against an fp64 reference on real decoded weights, the GEMM error is about 1.06% of the output RMS, against 0.02% for
+  the fp16 kernel.
+
+**Variants built and tested, not shipped:**
+
+- an fp16 build of the restructured kernel, bit-identical to `xmoe_do`;
+- an FP8 (e4m3) build, which failed the KL gate (+5.1% on neutral text);
+- int8 with one scale per row.
+
+**Results on our development build** (CPU runtime, same day):
+
+- KL 0.0519 / 0.0311 / 0.0110 and 0.0344 on short100, against 0.0513 / 0.0309 / 0.0111 and 0.0348;
+- fresh 40K-token prefill 10,424-10,684 → 11,038-11,306 tok/s (+6%);
+- agentic wall clock 230.6 → 224.0 s at one session and 185.8 → 170.5 s at four;
+- decode unchanged.
+
+## The 8× RTX PRO 6000 profile
+
+`PROFILE=8x` (`serve/profile-8x.env`) serves the same pack on an 8-GPU PCIe node as two replicas: GPUs 0-3 (`REPLICA=0`,
+port 8000) and GPUs 4-7 (`REPLICA=1`, port 8001), each container pinned to the NUMA node of its GPUs (`DOCKER_EXTRA`
+overrides the pinning, `GPUS=` the GPU list). `serve/serve-8x.sh` starts both and stops both on Ctrl-C. Each replica runs
+tensor-parallel 4 with `--enable-expert-parallel`: 96 whole routed experts per rank, all in VRAM (`PLAN=none.json`,
+`HOST_CACHE=0`). Build:
+
+```bash
+bash docker/build.sh            # the image, with patches/vllm/v41-indexer-chunked-decode.diff
+bash kernels/build.sh 8x        # kernels/build/xmoe_p8k, xmoe_do_i8, fp8ar_ext, fp8arg_ext, rowtopk
+API_KEY=change-me bash serve/serve-8x.sh
+```
+
+What the profile sets on top of `serve/serve.sh`'s defaults (each can be overridden from the environment):
+
+| Variable | Value | Effect |
+|---|---|---|
+| `TP`, `PARALLEL_ARGS` | `4`, `--enable-expert-parallel` | TP4 attention, EP4 routed experts. A hook in `sitecustomize.py` makes vllm-exl3 load whole experts per rank under EP (it acts only with expert parallel on). |
+| `MAX_MODEL_LEN`, `KV_MEM`, `MAX_NUM_SEQS` | 1048576, 18 GiB, 128 | 4,538,321 KV tokens per replica. |
+| `SPEC_K`, `DS41_DRAFTER`, `CAPTURE_SIZES` | 7, `code`, `1 8 16 32 64 128 256 512 1024` | DSpark k=7 with `drafter-code-k7/`; graph sizes up to 128 × 8. |
+| `XMOE_EXT`, `XMOE_FLAT_MAX_BSZ` | `xmoe_p8k`, 1152 | The MoE kernel built with `-DXMOE_FLAT_MAX_JOBS=1536 -DXMOE_FLAT_MAX_PAIRS=8192`, so decode batches up to 1,152 rows stay on the flat kernel. |
+| `VLLM_EXL3_FAT_THRESHOLD` | 1024 | Keeps the plugin's fat-expert path (and its host sync) out of graph capture at 1,024-row batches. |
+| `DS41_AR8_TP4`, `DS41_AR8_HIER` | 1, 1 | `kernels/ar8tp4/ar8_tp4.py`: TP4 all-reduces of 256 rows or more as two stages of the fp8ar pair exchange ({0,1}/{2,3}, then {0,2}/{1,3}); bit-identical on all ranks, two 8-bit roundings. |
+| `DS41_AR8_GRAPH`, `DS41_AR8_GRAPH_MIN_ROWS` | 1, 64 | The same inside the decode CUDA graphs from 64 rows, on `kernels/fp8arg` (fp8ar with per-CTA sequence counters in device memory, so graph replays stay in step; generated from `kernels/fp8ar` by `fp8arg/make_fp8arg.py`). |
+| `DS41_IPC_MAX_ROWS` | 64 | FlashInfer's PCIe IPC all-reduce only up to 64 rows (at TP4 it is slower than the alternatives above that). |
+| `DS41_LMHEAD_REPLICATE` | 1 | Before graph capture the vocab-parallel lm_head (FP8 codes and scales, target and drafter) is all-gathered once, and the per-step logits all-gather is skipped. Same logits. |
+| `DS41_ENGRAM_AG4` | 1 | `kernels/engram4`: the Engram row all-gather moves raw int4 rows plus scales and dequantizes after; bit-identical. |
+| `DS41_WKV_REPLICATE`, `DS41_WKV_MIN_ROWS` | 1, 1024 | Prefill chunks of 1,024 rows or more use a replicated Engram `wkv` instead of computing a shard and all-gathering its output (about 840 MB per 16K-token chunk). Decode keeps the sharded layer. |
+| `DS41_IDX_CHUNK` | 1 | `patches/vllm/v41-indexer-chunked-decode.diff`: decode indexer logits, candidate mask and top-k in chunks of whole sequences when the logits tensor would exceed `DS41_IDX_LOGITS_MB` (1024). Exact (`DS41_IDX_CHUNK_CHECK=n` compares the first n chunked calls with the single call). |
+| `KV_OFFLOAD_GB`, `ALLOC_CONF` | 150, empty | vLLM's native CPU KV offload tier; it needs `expandable_segments` off. |
+| `CONTAINER_MEM` | 400g | Per replica. |
+
+Numbers: the model card and `results/RESULTS.md`. The 2x-only machinery (host-RAM experts, the VRAM cache, the CPU runtime)
+is off in this profile.
+
+## Changing the configuration
+
+- **More context or more streams.** `MAX_MODEL_LEN`, `MAX_NUM_SEQS` and `KV_MEM`. `CAPTURE_SIZES` must reach
+  `MAX_NUM_SEQS × (1 + SPEC_K)`. The 1M default leaves about 1 GB per GPU at peak with a 2.5 GB side process; without one,
+  there is room for a larger `KV_MEM` (5.25 GiB: 1.32M tokens).
+- **Smaller context window.** `MAX_MODEL_LEN=524288 KV_MEM=4294967296` is a 512K setup, about 1.9 GB lighter per GPU.
+- **Different free VRAM.** Use a plan with more or fewer host experts (`plans/README.md`) and pass it with `PLAN=`, or change
+  the VRAM cache with `HOST_CACHE=` (each slot is one expert's weights, 6.6 MB per GPU).
+- **No VRAM cache.** `PLAN=plan-1017-agent30.json HOST_CACHE=0` (same VRAM; the plan keeps 512 more experts in VRAM).
+- **CPU host experts on decode only.** `CPU_EXPERTS=1 CPU_EXPERTS_PREFILL=0`.
+- **Thinking off by default.** `THINKING=off`.
+- **No speculative decoding.** `SPEC=none`.
+- **The code-tuned DSpark head.** `DS41_DRAFTER=code` (needs `drafter-code-k7/` in the pack folder; `DRAFTER_DIR=` for
+  another place under `MODELS_DIR`). On two GPUs use it with `SPEC_K=7`: faster single-stream code, slower 46K multi-stream
+  decode (`drafter-code-k7/README.md`). Without `CAPTURE_SIZES`, `serve.sh` derives the graph sizes from `MAX_NUM_SEQS` and
+  `SPEC_K`.
+- **Stock ExLlamaV3 kernel.** `XMOE_EXT=` (and `EXL3_DO=0`). The host-expert overlap needs xmoe.
+- **Fused prefill kernel.** `EXL3_DO=0` runs prefill on the xmoe fused kernel (about 18% slower on 46K prompts).
+- **fp16 decode-once kernel.** `DO_INT8=0` (no `kernels/build/xmoe_do_i8` needed).
+- **Exact prefill all-reduce.** `DS41_FP8AR=0` (no `kernels/build/fp8ar_ext` needed).
+- **vLLM's indexer top-k.** `DS41_ROWTOPK=0` (no `kernels/build/rowtopk` needed).
+- **No replay trim.** `VLLM_DS41_REPLAY_FINAL_WINDOW=0`.
+- **Previous prompt encoding or tool-call parsing.** Set the matching `VLLM_DS41_*` switch to 0 (table above).
+- **Text only.** `VISION=0` skips the vision encoder (`--language-model-only`) and frees about 1.2 GB per GPU.
+- **vLLM's decoder-replay CUDA graphs.** `CG_REPLAY=true` (vLLM's default) captures the decoder replay in CUDA graphs. It
+  measured at parity on the previous release; the default `false` is the configuration behind the KL and quality numbers.
+
+## Limitations
+
+- The CPU host-expert path was tested on one CPU (Threadripper PRO 9995WX). Its default core pools assume that CPU's layout;
+  other CPUs need `EXL3_CPU_EXPERTS_CPUS`, and a CPU with fewer cores or memory channels may be slower than the GPU-only path.
+- Image input is checked with `bench/test-image.py` (a code word and shapes, colors, two images per message), not an image
+  benchmark suite.
+- The quality evidence is KL, GSM8K-200, HumanEval and needle tests.
+- The int8 decode-once kernel and the 8-bit prefill all-reduce are lossy, though KL stayed within run-to-run noise.
+  `DO_INT8=0 DS41_FP8AR=0` serves the exact prefill path.
+- Some official-API behaviors are not ported: `tool_choice` `required` or a named function, prefix continuation, and
+  strict-schema normalization.
+- Everything is pinned to vLLM `nightly-5555a2d8` + PRs #59585, #61039, #61142, #60792 and #62196 + our patches in
+  `patches/vllm/`, ExLlamaV3 `5be88657`, vllm-exl3 `d3cfd394` and the sfxnz recipe commit in `docker/build.sh`.
+
+## Credits and license
+
+Built on work by DeepSeek, coolbho3k (the calibration method), sfxnz, turboderp (ExLlamaV3), vcruz305 and Mia's AI Lab
+(vllm-exl3), AtomicChat, kyuz0, and the vLLM and FlashInfer teams. Our code is MIT, except `patches/vllm-exl3/`, which is
+AGPL-3.0-only. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

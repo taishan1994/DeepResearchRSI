@@ -1,0 +1,757 @@
+[SM120] Field report: running DeepSeek-V4.1-Flash end-to-end on 8x RTX PRO 6000 — pitfall map + working configuration (1M context verified) · Issue #56700 · vllm-project/vllm · GitHub
+
+Skip to content
+
+You signed in with another tab or window.
+Reload
+to refresh your session.
+
+You signed out in another tab or window.
+Reload
+to refresh your session.
+
+You switched accounts on another tab or window.
+Reload
+to refresh your session.
+
+Dismiss alert
+
+[SM120] Field report: running DeepSeek-V4.1-Flash end-to-end on 8x RTX PRO 6000 — pitfall map + working configuration (1M context verified)
+
+#56700
+
+New issue
+
+Copy link
+
+New issue
+
+Copy link
+
+Open
+
+Open
+
+[SM120] Field report: running DeepSeek-V4.1-Flash end-to-end on 8x RTX PRO 6000 — pitfall map + working configuration (1M context verified)
+#56700
+
+Copy link
+
+Labels
+
+DSv4.1
+Related to DeepSeek-V4.1 models
+Related to DeepSeek-V4.1 models
+deepseek
+Related to DeepSeek models
+Related to DeepSeek models
+
+Description
+
+Lei-010
+
+opened
+on Sep 13, 2026
+
+Issue body actions
+
+Summary
+
+Cross-posting field data from a 3-day bring-up of
+DeepSeek-V4.1-Flash
+(769B total, MXFP4 experts, Engram memory) on
+8x RTX PRO 6000 (SM120, consumer Blackwell)
+, since SM120 users currently have to rediscover all of this from scratch. Related:
+#54929
+(Triton sparse-MLA fallback — we left perf data there),
+#5135
+-tracked flashinfer instantiation gaps.
+
+What works (final configuration)
+
+vLLM
+deepseekv41-flash-0909
+image, TP=8,
+--tokenizer-mode deepseek_v41 --tool-call-parser deepseek_v41 --reasoning-parser deepseek_v41
+
+--kv-cache-dtype fp8 --block-size 128
+,
+--gpu-memory-utilization 0.85
+
+1M context enabled: 950K-token double-needle retrieval
+correct
+, 4584 tok/s prefill throughput (pure-torch logits path, eager mode)
+
+VRAM: ~91GB/96GB per GPU (Engram tables dominate: 2 x ~100GB shards = 189GiB across the TP group)
+
+Pitfall map (in the order we hit them)
+
+DeepGEMM autotune hang on first long-context batch
+— warmup deadlocks at 128K+; needs skip or eager for first bring-up.
+
+flashinfer sparse-MLA SM120 instantiation gaps
+— several
+(num_heads, topk)
+combos (e.g.
+(16, 512)
+) missing from
+_DECODE_DSV4_DISPATCH
+/ prefill dispatch (same family as flashinfer#3828). Vision path hits this too → we ran
+--limit-mm-per-prompt {"image":0}
+until resolved.
+
+FP8 KV-cache scale layout semantics
+— the killer. Block layout is
+[64tok x 128B fp8 | 64tok x 4B fp32 scale]
+(block-appended), NOT per-token interleaved. Wrong interpretation passes short-prompt smoke tests and
+only fails at ≥100K needle retrieval
+— silent numerical corruption. Test with long needles, not perplexity.
+
+CUDA graph capture crash with flashinfer ops in graph
+(>4K tokens) — resolved for us by replacing the ops with pure-torch; graphs now capture cleanly.
+
+MXFP4 expert path falls back to Marlin
+on SM120 (known
+[Bug]: MXFP4 models still fall back to the Marlin kernel for RTX PRO 6000 (Blackwell SM120)
+#30135
+) — works, perf hit acceptable.
+
+Verification methodology (cheap, catches
+#3
+)
+
+Synthetic doc ~1M tokens with two inserted facts at 50% and 80% depth (e.g. meeting-room password + project codename/lead). Single prompt asking both. Catches numerical corruption that short-prompt tests miss. We publish numbers at 190K and 950K this way.
+
+Ask
+
+Would maintainers accept a PR adding the
+pure-torch paged-MQA-logits fallback
+(auto-selected on SM12x when flashinstantiation is missing)? It's ~90 lines, numerically exact, and would have saved us days. Can also serve as golden reference for
+[Attention] Portable Triton sparse-MLA fallback for SM12x (consumer Blackwell)
+#54929
+'s Triton kernels.
+
+Long-needle (≥100K) test cases for SM12x CI would have caught pitfall 3 upstream.
+
+Env: vLLM 0.1.dev20904 (deepseekv41-flash-0909), torch 2.13.0+cu130, CUDA 13.0, 8x RTX PRO 6000 96GB.
+
+Activity
+
+github-actions
+
+added
+DSv4.1
+Related to DeepSeek-V4.1 models
+Related to DeepSeek-V4.1 models
+
+deepseek
+Related to DeepSeek models
+Related to DeepSeek models
+
+on Sep 13, 2026
+
+Lei-010
+
+commented
+
+on
+
+Sep 22, 2026
+
+Lei-010
+
+on Sep 22, 2026
+
+Author
+
+More actions
+
+DeepSeek-V4.1-Flash on 8× RTX PRO 6000 Blackwell (sm_120): SGLang TP8 — starts, serves, then crashes (with working config)
+
+Following up on the excellent discussion in this thread and related issues (
+#56700
+,
+#56892
+), here is our experience running DeepSeek-V4.1-Flash on 8× RTX PRO 6000 Blackwell (96 GB each, sm_120, compute capability 12.0, NVIDIA driver 590.48.01).
+
+What worked (briefly)
+
+We achieved a
+successful startup
+with SGLang (custom build
+deepseek-v41-4x6000:local
+, based on
+lmsysorg/sglang:dev-dsv41
+with TP=8). The server reached
+"The server is fired up and ready to roll!"
+and served requests briefly before crashing during runtime.
+
+Configuration that reached serving state
+
+docker run --gpus all -d --name dsv41 \
+--shm-size=64g --ipc=host --network host \
+--restart unless-stopped \
+-v /ssd/DeepSeek-V4.1-Flash:/model \
+deepseek-v41-4x6000:local \
+python3 -m sglang.launch_server \
+--model-path /model \
+--tp 8 \
+--host 0.0.0.0 --port 8000 \
+--gpu-memory-utilization 0.92 \
+--trust-remote-code
+
+Key server_args from the successful start:
+
+Parameter
+
+Value
+
+tp_size / ep_size
+
+8 / 8
+
+attention_backend
+
+dsv4
+
+kv_cache_dtype
+
+fp8_e4m3
+
+mem_fraction_static
+
+0.72
+
+max_running_requests
+
+8
+
+chunked_prefill_size
+
+2048
+
+page_size
+
+256
+
+c128_page_size
+
+16
+
+context_length
+
+1,048,576
+
+CUDA graph (decode)
+
+full, max_bs=8
+
+CUDA graph (prefill)
+
+disabled
+
+speculative_algorithm
+
+DSPARK (block_size=6, draft=same model)
+
+moe_runner_backend
+
+flashinfer_mxfp4
+
+reasoning_parser
+
+deepseek-v4
+
+sampling_backend
+
+flashinfer
+
+mamba_backend / linear_attn_backend
+
+triton
+
+fp8/fp4 GEMM runner
+
+auto
+
+dsa_topk_backend
+
+sgl-kernel
+
+The failure mode
+
+After reaching serving state, the process crashed at runtime (
+Connection refused
+on internal health-check port →
+boot.py
+timeout → container restart loop). The crash is
+not
+the
+cache_compressor_weight
+AssertionError seen during weight loading (which we also hit with an older SGLang build) — this is a
+runtime serving crash
+, likely related to one of the known SM120 gaps discussed above (MHC kernel, Lightning Indexer integration, or memory pressure under serving load).
+
+Key observations
+
+Weight loading succeeded
+— all 48 shards (511 GB) loaded across 8 GPUs (mem_fraction 0.92 was briefly too high; 0.72 was used for the successful start).
+
+DSPARK speculative decoding initialized
+with
+dspark_block_size=6
+, accepting the config without error at startup.
+
+Engram memory initialization
+(the 183 GiB n-gram hash table) completed — the
+Exact nvme Engram
+setup ran through 14 layers × 4 TP ranks without issue.
+
+The runtime crash after ~30 minutes of idle suggests either a
+memory leak in serving
+, a
+race condition in the DSPARK path on SM120
+, or a
+kernel that only triggers under specific request patterns
+.
+
+What we need to reproduce stably
+
+A SGLang build that resolves the runtime serving crash (we suspect the MHC or indexer path)
+
+Confirmation on whether
+mem_fraction_static=0.72
+is sufficient or if Engram CPU offload (
+--engram-config '{"cpu_offload":true}'
+) is required on 96 GB cards
+
+Whether the DSPARK speculative path is stable on sm_120 or should be disabled
+
+Comparison with GLM-5.3-Flash (same hardware)
+
+For context, GLM-5.3-Flash (321B/18B MoE, NoPE MLA, FP8) runs
+stably on the same hardware
+with vLLM TP=8 via a community patch (
+FLASHINFER_MLA_SPARSE_SM90=1
+pinning): decode ~100 tok/s, prefill ~9K tok/s, 1M context needle-in-haystack all-pass. The contrast highlights that DSV4.1-Flash's architecture (Engram memory + causal encoder-decoder + DSPARK + dual-tier sparse attention) has significantly more SM120 integration surface than GLM's (KDA linear attention + NoPE MLA).
+
+Happy to share more details (full crash stack traces, memory profiles, or the custom Dockerfile) if useful.
+
+Lei-010
+
+commented
+
+on
+
+Sep 23, 2026
+
+Lei-010
+
+on Sep 23, 2026
+
+Author
+
+More actions
+
+Update 2026-09-23 — same hardware, SGLang side: production configuration + measured performance
+
+We have been running V4.1-Flash as a
+production
+SGLang backend on the same 8x RTX PRO 6000 (SM120, PCIe-only) box described in this report. Closing the loop with numbers, since SM120 users still have to rediscover this:
+
+Only layout that starts: TP8/EP8.
+DP, CP, PP and MoE-A2A are rejected by the model itself:
+ValueError: V4.1 vision currently supports TP/EP without DP, CP, PP or MoE A2A
+(both DP replicas die in ~70 s).
+
+Working config:
+
+tp=8, ep=8, dp=1
+,
+chunked_prefill_size=2048
+,
+DSPARK
+speculative decoding at
+block_size=6
+,
+kv_cache_dtype=fp8_e4m3
+,
+mem_fraction_static=0.72
+,
+max_running_requests=16
+, decode CUDA graph
+full
+(max_bs 16),
+prefill CUDA graph disabled
+(crashes even with speculation off).
+
+Cold single-stream prefill:
+6,853 tok/s at 128K (repeat 6,765; chunk 1024/4096 are slower; flashmla/fused-MoE-all-reduce ~equal). ~7K tok/s looks like the PCIe ceiling — util ~87% at 220 W/600 W, i.e. communication-bound, not compute-bound.
+
+Prefix cache is the real multiplier:
+0.34 s for a 112K-token prefix (≈325K tok/s, ≈39x).
+
+Decode:
+94 tok/s prose / 134 tok/s structured, TTFT 143-169 ms, via the client path.
+
+Speculation is not optional:
+with DSPARK off the model flattens to ~36.5 tok/s on
+every
+prompt class (accept len 1.0), vs 76-79 (prose) and 120 (structured) with it on at block_size=2; production keeps block_size=6.
+
+Also worth recording for other SM120 users:
+--enable-expert-parallel
+is the
+vLLM
+spelling (SGLang takes
+ep_size
+);
+TP_SIZE
+/
+DP_SIZE
+/
+EP_SIZE
+must be passed into the container explicitly or it silently serves TP8 defaults;
+ep_size > tp_size
+divides by zero in the MoE rank computation; and MSCCL++, FlashInfer all-reduce fusion and
+flashmla_sparse_q8
+are all unavailable here.
+
+Full write-up with methodology and reproduction artifacts:
+https://github.com/Lei-010/hermes-agent/blob/main/docs/DeepSeek-V4.1-Flash-SM120-Performance-and-Production-Config.md
+
+SGLang-side issue (same data, SGLang framing):
+sgl-project/sglang#40877
+
+Not established: no 24 h soak, and block sizes 4/8/12 were not re-measured after we fixed our sweep tool.
+
+xzwgit
+
+commented
+
+on
+
+Oct 2, 2026
+
+xzwgit
+
+on Oct 2, 2026
+
+Contributor
+
+More actions
+
+Adding FlashInfer CUTLASS MoE route results on the same hardware (8× RTX PRO 6000 SM120, vLLM dev511 nightly) — we got it working end-to-end and measured it against DeepGEMM.
+
+What it takes to run FlashInfer CUTLASS (
+FLASHINFER_CUTLASS_MXFP4_MXFP8
+) on SM120
+
+Three prerequisites, all verified on two machines:
+
+FlashInfer JIT header fix
+— the pip wheel doesn't bundle CUTLASS/CCCL headers, so all SM120 JIT compilation fails (
+cutlass/arch/arch.h
+not found). Fix: symlink the source-tree submodule headers into
+flashinfer/data/
+. Filed as flashinfer#5873 (tagged needs-triage).
+
+Skip autotune
+— FlashInfer's first-boot autotune runs >50 min on SM120, which exceeds NCCL pair timeout; all 8 workers crash with
+Application timeout caused pair closure
+during the subsequent warmup. Fix:
+--no-enable-flashinfer-autotune
+. Filed as flashinfer#5898.
+
+[Bugfix][DSv4.1] Fail fast on SM120 when FlashInfer lacks runtime page sizes
+#57292
+patch
+— SM120 64-token page geometry, still not in main (dev511 confirmed without it:
+block_kv == 32 or block_kv == 64
+assertion on a clean install).
+
+Measured: FlashInfer CUTLASS vs DeepGEMM (same hardware, same config, 1K/1K random)
+
+Conc
+
+DeepGEMM tok/s
+
+FlashInfer CUTLASS tok/s
+
+Diff
+
+c1
+
+149.7
+
+133.7
+
+-11%
+
+c4
+
+343.7
+
+325.7
+
+-5%
+
+c8
+
+512.5
+
+555.8
+
++8%
+
+c16
+
+744.5
+
+833.1
+
++12%
+
+Zero failures, 17×19=323 correct on both routes. Without autotune on the FlashInfer side — on B300 (SM100), autotuned FlashInfer is 30~54% faster than DeepGEMM, so there's likely more headroom if the SM120 autotune timeout is resolved.
+
+Why this matters
+
+vLLM currently defaults to DeepGEMM on SM120 (
+Using 'DEEPGEMM_MXFP4'
+even without
+--kernel-config
+). Our data shows FlashInfer CUTLASS is already better at c8+ without any tuning. If FlashInfer fixes the packaging (
+#5873
+) and autotune timeout (
+#5898
+), FlashInfer CUTLASS could become the preferred MoE backend on SM120 with no manual configuration needed.
+
+The blocker chain is entirely in FlashInfer's court (packaging + autotune) — vLLM's
+--kernel-config '{"moe_backend":"flashinfer_cutlass"}'
+already routes correctly once FlashInfer works.
+
+Full data:
+xzwgit/llm-test/dsv41-flashinfer-cutlass-sm120
+
+Lei-010
+
+commented
+
+on
+
+Oct 13, 2026
+
+Lei-010
+
+on Oct 13, 2026
+
+Author
+
+More actions
+
+Thanks for this — the useful part is not the table, it is the three-prerequisite breakdown. Getting
+FLASHINFER_CUTLASS_MXFP4_MXFP8
+to run at all on SM120 is the hard half, and the three items are all things a reader would otherwise burn a day rediscovering:
+
+the headers not being in the pip wheel (
+cutlass/arch/arch.h
+not found) — filed as flashinfer#5873
+
+autotune exceeding the NCCL pair timeout on first boot, so the workers die in
+warmup
+rather than in autotune — filed as flashinfer#5898
+
+SM120 64-token page geometry still not in main —
+[Bugfix][DSv4.1] Fail fast on SM120 when FlashInfer lacks runtime page sizes
+#57292
+
+We can confirm the third from our side independently: on a clean dev511 install without the patch, the
+block_kv == 32 or block_kv == 64
+assertion fires exactly as you describe.
+
+One caveat worth putting next to the table, for whoever reads it next
+
+The table is only directly transferable if the reader's stack executes the same quant route.
+A MoE backend swap on this model is not a single-variable change: changing the backend also changes
+quant_method
+, because the MXFP4-native route and the block-FP8 (dynamic fp8 +
+weight_block_size [128,128]
+) route are served by different kernel paths. So "FlashInfer CUTLASS vs DeepGEMM" measures a compound variable, and a reader on the other route can see a different — or inverted — crossover and conclude the report did not reproduce.
+
+We say this only because we are that reader: our production V4.1-Flash stack on this exact box is FP8 TP8 with MTP, and we have
+not
+run your c1/c4/c8/c16 ladder on it. So we cannot independently confirm the c8+ crossover yet, and we would rather say that than quote your numbers as if they were ours.
+
+What we will post
+
+The same ladder on our route, with the route stated rather than assumed:
+
+c1 / c4 / c8 / c16, 1K/1K random prompts, ≥3 repeats, median, and no verdict inside a ±2% band
+
+the container's own boot-log lines —
+moe_runner_backend=
+and
+quant_method=
+— so which kernel path was actually exercised is on the record next to the numbers
+
+the same 17×19 correctness check, so the comparison carries the same correctness floor
+
+If our route turns out to be the same one you measured, that is one more independent node for your c8+ result. If it is the other route, then those are two different tables and the community needs both — which is the point of stating the route.
+
+Not established on our side: anything about the B300 autotuned headroom you mention (30–54%). We have no datacenter-Blackwell part to check it on.
+
+Lei-010
+
+commented
+
+on
+
+Oct 26, 2026
+
+Lei-010
+
+on Oct 26, 2026
+
+Author
+
+More actions
+
+Field-report addendum (SM120, 2026-10)
+
+Two more entries for the pitfall map.
+
+1.
+VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1
+works on SM120 and is worth it.
+
+On our 8×RTX PRO 6000 PCIe-only node (TP8, no NVLink) the backend is actually selected —
+Using ['FLASHINFER_PCIE_IPC', 'PYNCCL'] ... group 'tp:0'
+— and at c=8 greedy it moved engine decode from 615.7 to 689.5 tok/s (+12%; batch iteration 30.40 → 25.07 ms) with
+zero KV-capacity cost
+(4.06 M tokens before and after). Full numbers, caveats and the reproducibility check are in
+#56892
+.
+
+2.
+--kv-cache-dtype nvfp4_ds_mla
+is code-complete in this tree but hard-gated to SM100.
+
+The dtype is whitelisted (
+vllm/config/cache.py
+; 352 B/token vs 656 B/token for
+fp8_ds_mla
+) and
+models/deepseek_v41/attention.py
+contains the NVFP4 record paths, so on paper it looks supported on SM120. But
+_use_v41_mxfp8_kv_record()
+returns
+current_platform.is_device_capability_family(100)
+, and
+is_device_capability_family
+compares
+cap // 10
+, so SM120 (
+120 // 10 = 12
+) evaluates
+False
+, and startup dies before any weights load:
+
+ValueError: nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA decodes only on SM100.
+
+(all 8 TP workers, configuration time). So the ~1.86× KV-density gain is not reachable on SM120 without both a predicate change
+and
+an SM120 FlashMLA / V4.1-record decode kernel — the kernel is the real blocker, not the gate. Posting so nobody sizes capacity around
+nvfp4_ds_mla
+on SM120.
+
+Lei-010
+
+commented
+
+on
+
+Nov 2, 2026
+
+Lei-010
+
+on Nov 2, 2026
+
+Author
+
+More actions
+
+Re-verification (2026-11-02): same configuration, same envelope
+
+Short follow-up to the field report. No new pitfalls - just confirmation that the numbers above reproduce after a restart, plus one measurement-discipline item worth adding to the map.
+
+Same image (
+dev253-fi071rc5-dsv41
+), same serve args,
+VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC=1
+still on, same 527 GB / 48-shard weight set. After a container restart the node reproduces the c=8 envelope: engine decode
+791.5 tok/s at c=8
+(accept 70.1 %), 227.7 at c=1, 864.6 at c=12, 1539.8 at c=32; single-stream 202.6 tok/s (n=8, range 185-220); 8K-token prefill 13.9-14.5 k tok/s. Greedy, 512-token outputs, engine-side counters, zero errors.
+
+One caution for the pitfall map:
+do not read a c=8 throughput delta on this stack as an engine delta without normalising for speculative-decoding accept rate. Tokens per step is
+1 + k * accept
+, so at fixed step time accept drift alone moves throughput by roughly 10-15 %.
+
+Today's run looked like +14.8 % against the 10-26 post-IPC baseline, but its accept rate was 70.1 % versus 57.2 %. Normalising gives x1.142 expected versus x1.148 measured - identical engine efficiency, no improvement. The original 10-26 IPC gain is unaffected: that one was obtained with accept 7 pp
+lower
+than its control, so it is a genuine engine gain.
+
+Full tables, the normalisation arithmetic and the concurrency ladder are in
+#56892
+.
+
+Sign up for free
+
+to join this conversation on GitHub.
+
+Already have an account?
+
+Sign in to comment
+
+Metadata
+
+Metadata
+
+Assignees
+
+No one assigned
+
+Labels
+
+DSv4.1
+Related to DeepSeek-V4.1 models
+Related to DeepSeek-V4.1 models
+deepseek
+Related to DeepSeek models
+Related to DeepSeek models
+
+Type
+
+No type
+
+Projects
+
+No projects
+
+Milestone
+
+No milestone
+
+Relationships
+
+None yet
+
+Development
+
+No branches or pull requests
+
+Issue actions
+
+Open in GitHub Copilot app
+
+You can’t perform that action at this time.

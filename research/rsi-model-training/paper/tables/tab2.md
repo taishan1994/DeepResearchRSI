@@ -1,0 +1,6 @@
+| 阶段 | 时间 | 奖励从哪来 | 代表工作 |
+|---|---|---|---|
+| 人写答案 | 2022-2024 | 标准答案与人工偏好 | STaR / ReST / SPIN / V-STaR |
+| 模型当裁判 | 2024-2025 | LLM-as-a-Judge 自评 | Meta-Rewarding / Self-Taught Evaluators |
+| 零数据自举 | 2025-2026 | 环境反馈（测试能否通过） | Absolute Zero / R-Zero / SSR |
+| 统计量替代 | 2025-2026 | 置信度与熵 | LaSeR / Auxiliary Rewards |
