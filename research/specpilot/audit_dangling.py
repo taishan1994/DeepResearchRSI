@@ -32,9 +32,12 @@ import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+import os
 
-REPO = Path(r"D:\github\specpilot")
 HERE = Path(__file__).resolve().parent
+# SpecPilot 是独立仓库，不随本仓库分发。默认取 research/ 上两级的 specpilot/，
+# 可用环境变量 SPECPILOT_REPO 覆盖。
+REPO = Path(os.environ.get("SPECPILOT_REPO", HERE.parents[2] / "specpilot"))
 SNAP = HERE / "documents" / "specpilot-dangling-refs.txt"
 
 # 只认这些前缀：它们是本课题关心的四类组件所在的位置。

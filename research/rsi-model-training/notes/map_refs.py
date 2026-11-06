@@ -1,6 +1,8 @@
 import csv, re
 from pathlib import Path
-root = Path(r"D:\github\DeepResearchRSI\research\rsi-model-training")
+HERE = Path(__file__).resolve().parent
+ARCHIVE = HERE.parent
+root = ARCHIVE
 src = list(csv.DictReader((root/"sources.csv").open(encoding="utf-8-sig")))
 ev  = list(csv.DictReader((root/"evidence.csv").open(encoding="utf-8-sig")))
 cl  = list(csv.DictReader((root/"claims.csv").open(encoding="utf-8-sig")))

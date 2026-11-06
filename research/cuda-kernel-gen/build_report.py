@@ -51,7 +51,7 @@ lines: list[str] = []
 lines.append('# CUDA Kernel 自动生成前沿进展 —— 审计摘要')
 lines.append('')
 lines.append('> 本文件是 DeepResearchRSI 框架的**审计视图**，不是论文本身。')
-lines.append('> 论文见 `D:\\github\\research\\cuda-kernel-gen\\latex\\main.pdf`（14 页）。')
+lines.append('> 论文见 `paper/latex/main.pdf`（14 页）。')
 # ⚠️ 不能在这里写出 [c-xxx] / [e-xxx] 这类占位符：
 # validate.py 的正则是 r"\[(c-[a-z0-9-]+)\]"，会把字面量 xxx 当成真实 id，
 # 报「引用了不存在的 c-xxx」。说明文字必须避开可被匹配的形态。

@@ -32,8 +32,9 @@ import re
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-OUT = Path(r'D:\github\DeepResearchRSI\research\cuda-kernel-gen\paper')
-SRC = Path(r'D:\github\DeepResearchRSI\research\cuda-kernel-gen')
+# 从脚本自身位置推导，而不是写死本机路径——这样任何人 clone 后都能直接跑。
+SRC = Path(__file__).resolve().parent
+OUT = SRC / 'paper'
 
 papers = {p['id'][:10]: p for p in
           json.loads((OUT / 'papers.json').read_text(encoding='utf-8'))}

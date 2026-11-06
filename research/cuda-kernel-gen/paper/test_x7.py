@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -15,7 +16,23 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TEXDIR = Path(r'D:\github\_tex\TinyTeX\bin\windows')
+
+# TeX 工具链的位置因机器而异，不能写死。
+# 优先级：显式环境变量 > PATH 里已有 xelatex > 常见安装位置。
+# 都找不到时 TEXDIR 保持不存在的路径，下面的 `if TEXDIR.exists()` 会跳过，
+# 此时依赖系统 PATH 里的 xelatex；若也没有，测试会以「找不到 xelatex」失败，
+# 而不是静默通过。
+def _find_texdir() -> Path:
+    env = os.environ.get("TINYTEX_BIN") or os.environ.get("TEXDIR")
+    if env:
+        return Path(env)
+    found = shutil.which("xelatex")
+    if found:
+        return Path(found).parent
+    return Path("")  # 不存在，让 exists() 为假
+
+
+TEXDIR = _find_texdir()
 
 BAD = r"""\documentclass[twocolumn]{article}
 \usepackage{ctex}

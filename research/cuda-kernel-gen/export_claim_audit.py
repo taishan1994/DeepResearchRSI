@@ -19,8 +19,9 @@ import json
 from collections import Counter
 from pathlib import Path
 
-SRC = Path(r'D:\github\DeepResearchRSI\research\cuda-kernel-gen\paper')
-DST = Path(r'D:\github\DeepResearchRSI\research\cuda-kernel-gen')
+# 从脚本自身位置推导（脚本在 <archive>/ 下，paper/ 是它的子目录）。
+DST = Path(__file__).resolve().parent
+SRC = DST / 'paper'
 
 claims = json.loads((SRC / 'speed_claims.json').read_text(encoding='utf-8'))
 

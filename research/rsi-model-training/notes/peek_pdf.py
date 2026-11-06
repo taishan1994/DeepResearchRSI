@@ -1,5 +1,8 @@
+from pathlib import Path
 import pymupdf
-d = pymupdf.open(r"D:\github\DeepResearchRSI\research\rsi-model-training\paper\PAPER.pdf")
+HERE = Path(__file__).resolve().parent
+ARCHIVE = HERE.parent
+d = pymupdf.open(ARCHIVE / "paper" / "latex" / "main.pdf")
 print("pages", d.page_count)
 for i in range(d.page_count):
     t = d[i].get_text()

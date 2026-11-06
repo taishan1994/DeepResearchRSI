@@ -61,7 +61,7 @@ CRITERION_8 = """### 判据八：检索的盲区不会被检查发现
 
 def get_counts() -> dict[str, tuple[int, int]]:
     """从 validate 取每个归档的 (evidence, e1_checked)。"""
-    env = {"PYTHONPATH": r"D:\github\DeepResearchRSI\packages\schemas\python"}
+    env = {"PYTHONPATH": str(HERE / "packages" / "schemas" / "python")}
     import os
     e = dict(os.environ)
     e.update(env)

@@ -14,7 +14,10 @@
 记忆库文件），因为**「未交付」是一个需要证据的判断，不是一句印象**。
 
 用法：
-    python audit_repo.py [--repo D:\\github\\specpilot] [--out analysis.json]
+    python audit_repo.py [--repo <SpecPilot 仓库路径>] [--out analysis.json]
+
+--repo 也可用环境变量 SPECPILOT_REPO 指定；默认取 DeepResearchRSI 的同级目录
+../specpilot。SpecPilot 是独立仓库，不随本仓库分发，故必须从外部指定。
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -66,7 +70,12 @@ def count_lines(p: Path) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--repo", default=r"D:\github\specpilot")
+    # SpecPilot 是独立仓库：默认取 research/specpilot/ 上三级的 specpilot/，
+    # 也可用环境变量 SPECPILOT_REPO 覆盖。
+    _default_repo = os.environ.get(
+        "SPECPILOT_REPO",
+        str(Path(__file__).resolve().parents[3] / "specpilot"))
+    ap.add_argument("--repo", default=_default_repo)
     ap.add_argument("--out", default="repo_audit.json")
     a = ap.parse_args()
     repo = Path(a.repo)
@@ -169,8 +178,18 @@ def main() -> int:
     except (OSError, subprocess.CalledProcessError):
         head = ""
 
+    # 记录被审计仓库的身份。绝对路径是本机事实，写进 JSON 会让他人 clone 后
+    # 看到无意义的盘符；故写相对本仓库同级树的形式，并附仓库名。
+    # 真正的身份标识是下面的 commit（head），不是路径。
+    try:
+        repo_rel = repo.resolve().relative_to(
+            Path(__file__).resolve().parents[3]).as_posix()
+    except ValueError:
+        repo_rel = ""          # 不在同级树下，没有可移植形式
+
     out = {
-        "repo": str(repo),
+        "repo": repo_rel or repo.name,
+        "repo_name": repo.name,
         "head": head.split("\t"),
         "files_total": len(files),
         "by_extension": dict(sorted(by_ext.items(), key=lambda kv: -kv[1])),
