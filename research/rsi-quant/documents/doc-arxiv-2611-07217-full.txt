@@ -1,0 +1,7295 @@
+ 
+ 
+ 
+ TileQuant: Tile as the Precision-Allocation Unit for LLM Mixed-Precision Post-Training Quantization 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Skip to main content 
+ 
+ 
+ 
+ Report GitHub Issue
+
+ × 
+ 
+
+ 
+ Title: 
+ 
+
+ Content selection saved. Describe the issue below:
+
+ Description: 
+ 
+ 
+
+ 
+ Submit without GitHub 
+ Submit in GitHub 
+ 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Why HTML? 
+ 
+ Report Issue 
+ 
+ Back to Abstract 
+ 
+ 
+ Download PDF 
+ 
+ Contents 
+ 
+ 
+ Reading mode 
+ 
+ 
+ Colour theme 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ Abstract 
+
+ 1 Introduction 
+
+ 2 Related Work 
+
+ 3 Preliminaries 
+ 
+ 3.1 PTQ for Transformer Linear Layers 
+
+ 3.2 Tile-Wise Linear Projection 
+
+ 
+
+ 4 TileQuant 
+ 
+ 4.1 TileQuant Overview 
+
+ 4.2 Calibration-Driven Tile Map Construction 
+
+ 4.3 Mixed-Precision Reconstruction and Execution 
+
+ 
+
+ 5 Experiments 
+ 
+ 5.1 Experimental Setup 
+
+ 5.2 Inference Efficiency 
+
+ 5.3 General Tasks 
+
+ 5.4 Long Context Tasks 
+
+ 
+
+ 6 Conclusion 
+
+ References 
+
+ A Notation and Reading Guide 
+
+ B Calibration Procedure 
+ 
+ B.1 Calibration Inputs and Target Projections 
+
+ B.2 Input-Activation Statistics 
+
+ B.3 Gradient-Informed Score Accumulation 
+
+ 
+
+ C Score Interpretation and Precision Selection 
+ 
+ C.1 Activation-Weighted Magnitudes 
+
+ C.2 First-Order Weight Sensitivity 
+
+ C.3 Per-Layer Retention and Decision Maps 
+
+ 
+
+ D Numerical Representation and Load-Time Reconstruction 
+ 
+ D.1 Tile Coordinates and Padding 
+
+ D.2 Integer Quantization and Weight Scales 
+
+ D.3 Decision Archives and Packed Tile Layout 
+
+ D.4 Loading the Mixed-Precision Model 
+
+ 
+
+ E Mixed-Precision GPU Execution 
+ 
+ E.1 Activation Preparation 
+
+ E.2 Tile Products and Scaled Accumulation 
+
+ E.3 Output-Tile Scheduling 
+
+ E.4 Shared Projection Inputs 
+
+ E.5 Repeated Generation and Runtime Reuse 
+
+ 
+
+ F Additional Experiments 
+ 
+ F.1 Experimental Setup 
+
+ F.2 Inference Efficiency 
+ 
+ F.2.1 GPU Memory Results 
+
+ 
+
+ F.3 General Tasks 
+
+ F.4 Long Context Tasks 
+
+ 
+
+ G Calibration and Allocation Analysis 
+ 
+ G.1 Matched-Budget Tile Selection 
+
+ G.2 Allocation Geometry and Execution 
+
+ G.3 Tile-Size Sensitivity 
+
+ G.4 Calibration Cost 
+
+ G.5 Retained-Set Stability 
+
+ G.6 GI/IAA Retained-Set Overlap 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ License: CC BY 4.0
+ 
+ 
+arXiv:2611.07217v1 [cs.LG] 04 Nov 2026
+
+ 
+ 
+ TileQuant : Tile as the Precision-Allocation Unit 
+ for LLM Mixed-Precision Post-Training Quantization
+
+ 
+ 
+ Hanzhi Zhang
+ 
+ Affiliation:  LLaVi Lab, Computer Science & Engineering, University of North Texas
+ 
+ Email:  hanzhi.zhang@unt.edu 
+ 
+    
+ Qiao Zhang
+ 
+ Affiliation:  Computer Science, Saint Louis University;
+ 
+ Email:  heng.fan@unt.edu 
+ 
+    
+ Qinglei Cao
+ 
+ Affiliation:  Computer Science, Saint Louis University;
+ 
+ Email:  yan.huang@unt.edu 
+ 
+    
+ Heng Fan
+ 
+ Affiliation:  LLaVi Lab, Computer Science & Engineering, University of North Texas
+ 
+ Email:  kewei.sha@unt.edu 
+ 
+    
+ Yan Huang
+ 
+ Affiliation:  LLaVi Lab, Computer Science & Engineering, University of North Texas
+ 
+ Email:  yunhe.feng@unt.edu 
+ 
+    
+ Kewei Sha
+ 
+ Affiliation:  Data Science, University of North Texas
+ 
+ Email:  qiao.zhang@slu.edu 
+ 
+    
+ Yunhe Feng
+ 
+ Affiliation:  LLaVi Lab, Computer Science & Engineering, University of North Texas
+ 
+ Email:  qinglei.cao@slu.edu 
+ 
+
+ Abstract
+
+ 
+ Post-training quantization (PTQ) reduces large language model (LLM) deployment costs, but preserving quality requires accounting for uneven weight sensitivity. Uniform PTQ uses one weight bit-width, importance-aware PTQ adjusts scales or reconstructs weights within that width, and column-wise mixed precision retains selected columns at higher precision. However, sensitivity varies within columns, so whole-column retention also protects less sensitive weights, while runtime outlier detection adds decoding overhead. We therefore introduce TileQuant , a training-free framework that assigns precision to hardware-aligned 2D weight tiles. Offline calibration provides input-activation-aware scoring from forward statistics for lower calibration cost and gradient-informed scoring from loss sensitivity for stronger quality preservation. Within each projection’s retention budget, the highest-scoring tiles remain at 16-bit and the rest use 8-bit. The resulting map guides reconstruction into compact weight buffers, which the kernel reuses for native integer and 16-bit computation with local accumulation to reduce memory traffic. Experiments show that TileQuant reaches 2.66 × 2.66\times the original model’s generation throughput. Across language modeling, reasoning, long-context retrieval, and question answering, it preserves quality and surpasses quantized and original models on multiple tasks. These results support selecting precision units that capture local sensitivity while enabling efficient hardware execution. The implementation is: https://github.com/HanzhiZhang-Ulrica/TileQuant 
+
+ 
+
+ 
+ 
+
+ 
+ 1 Introduction
+
+ 
+ Efficient large language model (LLM) deployment requires reducing storage and inference costs while preserving quality in long-context understanding  Liu et al. (2024a) ; An et al. (2024) , retrieval-augmented generation  Lewis et al. (2020) ; Li et al. (2024) , and multi-document reasoning  Bai et al. (2024) . Post-training quantization (PTQ) reduces these costs by lowering numerical precision without retraining  Yao et al. (2022) ; Xiao et al. (2023) ; Frantar et al. (2022) . However, quantization sensitivity varies across regions within each weight matrix, so a matrix-wide precision choice cannot selectively protect the most sensitive weights.
+
+ 
+ Figure  1 compares three PTQ designs. Uniform PTQ   Yao et al. (2022) assigns one weight bit-width across a matrix, while importance-aware PTQ   Xiao et al. (2023) ; Lin et al. (2024) ; Frantar et al. (2022) adjusts channel scales or reconstructs weights using calibration data within that width. Protected-subset PTQ   Dettmers et al. (2022) ; Lee et al. (2024) instead retains selected columns at higher precision. However, sensitivity varies even within columns, so whole-column retention also protects less sensitive weights. When selection relies on runtime activation outliers, repeated detection and processing further increase decoding latency  Dettmers et al. (2022) . This motivates our research question: Which precision-allocation unit captures within-column sensitivity while supporting efficient tile computation? 
+
+ 
+ Figure 1: 
+Comparison of PTQ precision-allocation units for LLMs.
+Colors denote precision: blue indicates 16-bit, and green indicates 8-bit.
+ Uniform PTQ uses one weight bit-width.
+ Importance-aware PTQ adjusts scales or reconstructs weights at the same bit-width, with green shades illustrating calibrated scaling.
+ Protected-subset PTQ illustrates channel-wise 16-bit retention.
+ TileQuant assigns precision to 2D tiles by local sensitivity.
+ 
+ 
+ 
+ Our key insight is to use hardware-aligned 2D weight tiles for local precision allocation. Each tile covers a local region along both matrix dimensions, allowing precision to vary within a column while preserving a regular tile for GPU matrix multiplication  Guide (2020) ; Choquette et al. (2021) ; Kerr et al. (2017) . However, turning these choices into efficient inference presents two coupled challenges. First, importance-based selection can retain tiles at different matrix locations, so their layout must combine compact storage with regular access to both precision formats. Second, prefill processes multiple prompt tokens, whereas decode processes one new token per sequence. The same stored layer must therefore exploit weight reuse in prefill and expose sufficient parallel work in decode while limiting intermediate memory traffic.
+
+ 
+ Building on this insight, we introduce TileQuant , a training-free tile-level mixed-precision PTQ framework for LLM linear layers. Two offline calibration routes address different resource and quality needs: input-activation-aware (IAA) scoring combines forward activation statistics with weight magnitudes for lower calibration cost, while gradient-informed (GI) scoring uses loss gradients for stronger quality preservation. Each projection retains its highest-scoring tiles at 16-bit under a prescribed budget and quantizes the rest to 8-bit. The resulting decision map guides load-time reconstruction into separate compact buffers organized for dense tile loading. Prefill and decode reuse these buffers while the kernel adjusts parallel execution to each input shape. It rescales integer products and locally accumulates contributions from both precision paths, writing each completed output tile once to reduce memory traffic.
+
+ 
+ On Llama-3.2-3B, TileQuant reaches 2.66 × 2.66\times the generation throughput of the original 16-bit model while preserving quality across language modeling, reasoning, long-context retrieval, and question answering. For example, GI with 20% tile retention exceeds Original in 26 of the 27 displayed LV-Eval dataset–length settings. Together, these results show that local precision retention supports broad model capabilities alongside faster end-to-end generation.
+
+ 
+ We summarize our contributions as follows:
+
+ 
+ 1. 
+ 
+ Tile as the Precision-Allocation Unit. 
+We assign 16-bit or 8-bit precision to hardware-aligned weight tiles, allowing selected regions within a column to retain higher precision.
+
+ 2. 
+ 
+ Calibration-Driven Tile Decision Maps. 
+We develop IAA and GI calibration routes that prioritize tiles under per-layer retention budgets, with distinct cost and quality profiles.
+
+ 3. 
+ 
+ Executable Mixed-Precision Reconstruction. 
+We convert tile decision maps into executable mixed-precision linear layers through compact metadata and load-time reconstruction, with dense tile computation and local accumulation reducing memory traffic.
+
+ 
+
+ 
+ 2 Related Work
+
+ 
+ We review uniform PTQ, importance-aware PTQ, and protected-subset PTQ through their choices of weight bit-width, calibration criterion, and high-precision retention. They describe how weights are represented, how quantization error is controlled, and where additional precision is allocated.
+
+ 
+ Uniform PTQ applies a single weight bit-width to all weights within a chosen unit, producing a homogeneous low-precision representation for the target tensor  Gholami et al. (2022) ; Lang et al. (2024) ; Zhao et al. (2025) ; Sharify et al. (2024) . Representative examples include rounding and reconstruction methods  Yao et al. (2022) ; Chee et al. (2025) ; Kogan (2025) ; Gong et al. (2024) and scaling- or transformation-based methods  Xiao et al. (2023) ; Pan et al. (2023) ; Wei et al. (2022b) ; Shao et al. (2023) ; Liu et al. (2023) ; Ashkboos et al. (2024b) ; Liu et al. (2024b) ; Sun et al. (2024) that reduce quantization error in weights and activations.
+A homogeneous weight format simplifies deployment, while its shared bit-width couples the precision assigned to sensitive and less sensitive regions.
+
+ 
+ Importance-aware PTQ addresses these sensitivity differences by estimating which weights or channels are sensitive to quantization error and adjusting scaling factors or reconstruction objectives accordingly  Li and Panda (2024) ; Zhang et al. (2025) ; Arai and Ichikawa (2025) . Calibration-based methods leverage activation or sensitivity statistics to pinpoint salient weights  Lin et al. (2024) ; Kim et al. (2023) ; Kim et al. (2024) ; Xue et al. (2025) , while reconstruction-based approaches optimize the quantized tensor to better match original outputs  Nagel et al. (2020) ; Li et al. (2021) ; Wei et al. (2022a) ; Frantar et al. (2022) ; Wei et al. (2025) ; Yvinec et al. (2023) .
+These approaches show that quantization quality depends on where error occurs, and they provide useful signals for protecting important model components. However, in fixed-bit formulations, the resulting tensor retains a single weight bit-width within the target unit.
+
+ 
+ Protected-subset PTQ further introduces non-uniform precision by preserving selected substructures in higher precision while quantizing the remaining weights  Dettmers et al. (2022) ; Ashkboos et al. (2024a) ; Dettmers et al. (2023) ; Guo et al. (2023) ; Shang et al. (2023) ; Yu et al. (2024) . Methods protect groups  Huang et al. (2024) ; Li et al. (2023b) ; Guan et al. (2024) ; Lee et al. (2025) , channels  Chen et al. (2024) ; Nrusimha et al. (2024) , or columns and output features  Lee et al. (2024) ; Zheng et al. (2024) ; Wang et al. (2024) ; Yuan et al. (2023) .
+These methods demonstrate that non-uniform precision can recover accuracy under quantization  Li et al. (2023b) ; Saxena et al. (2024) ; Xie et al. (2025) ; Xiao et al. (2025) . Their protected units are usually tied to predefined structural axes or sparse outlier subsets, making them effective for axis-aligned or outlier-driven protection. However, whole-structure retention also protects less sensitive weights, while sparse protection adds indexing and sparse-computation costs. Mixed precision also supports fine-tuning  Zhou et al. (2024) and KV-cache compression  Liao and Wen (2026) .
+
+ 
+ 3 Preliminaries
+
+ 
+ We first review quantized linear projections and then introduce their tile-wise decomposition to support local precision allocation.
+
+ 
+ 3.1 PTQ for Transformer Linear Layers
+
+ 
+ During LLM inference, a linear layer computes Y = X ​ W ⊤ Y=XW^{\top} , where X ∈ ℝ N × K X\in\mathbb{R}^{N\times K} , W ∈ ℝ M × K W\in\mathbb{R}^{M\times K} , and Y ∈ ℝ N × M Y\in\mathbb{R}^{N\times M} . Here, N N is the number of activation rows, and K K and M M are the input and output feature dimensions. PTQ reduces storage by replacing 16-bit weights with lower-precision formats.
+
+ 
+ For a positive quantization scale Δ \Delta , the 8-bit integer weights are W ^ = clip [ − 127,127 ] ⁡ ( ⌊ W / Δ ⌉ ) \widehat{W}=\operatorname{clip}_{[-127,127]}(\lfloor W/\Delta\rceil) , with Δ ​ W ^ ≈ W \Delta\widehat{W}\approx W . Here, ⌊ ⋅ ⌉ \lfloor\cdot\rceil rounds to the nearest integer, and clipping keeps the result within the quantization range. When activations are also quantized, the projection is approximated as Y ≈ ( Δ X ​ Δ W ) ​ ( X ^ ​ W ^ ⊤ ) Y\approx(\Delta_{X}\Delta_{W})(\widehat{X}\widehat{W}^{\top}) for shared operand scales Δ X \Delta_{X} and Δ W \Delta_{W} . With tile-wise scales, each tile product is rescaled before accumulation.
+
+ 
+ 3.2 Tile-Wise Linear Projection
+
+ 
+ To support local precision allocation, we partition W W into a regular grid of fixed-size 2D tiles after any necessary padding. Let W ( r , c ) W^{(r,c)} denote a tile, where r = 1 , … , n tr r=1,\dots,n_{\mathrm{tr}} indexes output-feature tiles and c = 1 , … , n tc c=1,\dots,n_{\mathrm{tc}} indexes input-feature tiles. Their index set is denoted by 𝒯 ⁡ ( W ) \mathcal{T}(W) .
+
+ 
+ Since each weight-tile column uses the same input-feature range, we partition X X into corresponding tiles X ( c ) X^{(c)} . The output-feature tile Y ( r ) Y^{(r)} is then computed as
+
+ 
+
+ 
+ 
+ Y ( r ) = \displaystyle Y^{(r)}={} 
+ ∑ c = 1 n tc X ( c ) ​ ( W ( r , c ) ) ⊤ , r = 1 , … , n tr . \displaystyle\sum_{c=1}^{n_{\mathrm{tc}}}X^{(c)}\big(W^{(r,c)}\big)^{\top},\qquad r=1,\dots,n_{\mathrm{tr}}. 
+ 
+ 
+ 
+ Each term is a dense tile product, allowing different weight tiles to use different precisions while contributing to the same output tile.
+
+ 
+ We define ℱ ⁡ ( W ) \mathcal{F}(W) and 𝒬 ⁡ ( W ) \mathcal{Q}(W) as the tile-index sets assigned 16-bit and 8-bit precision, respectively. They partition 𝒯 ⁡ ( W ) \mathcal{T}(W) , satisfying ℱ ⁡ ( W ) ∪ 𝒬 ⁡ ( W ) = 𝒯 ⁡ ( W ) \mathcal{F}(W)\cup\mathcal{Q}(W)=\mathcal{T}(W) and ℱ ⁡ ( W ) ∩ 𝒬 ⁡ ( W ) = ∅ \mathcal{F}(W)\cap\mathcal{Q}(W)=\emptyset . Section  4 determines these assignments from calibration scores.
+
+ 
+ Figure 2: 
+ TileQuant framework for calibration-driven mixed-precision linear layers.
+The input-activation-aware route (top left) combines forward activation statistics with weight magnitudes, while the gradient-informed route (bottom left) accumulates weight-gradient importance over calibration batches.
+Per-layer top- k k selection converts either tile-score map into a 16-bit/8-bit decision map.
+Retained tile IDs and grid metadata guide load-time reconstruction (right).
+The reconstructed layer supplies the selected weights to two arithmetic paths, whose tile products are combined through output-local 32-bit floating-point accumulation.
+ 
+ 
+
+ 
+ 4 TileQuant 
+
+ 
+ 4.1 TileQuant Overview
+
+ 
+ Building on the tile-wise projection in Section  3 , TileQuant converts attention and feed-forward linear projections into mixed-precision layers. The method must identify local regions worth retaining at 16-bit and organize their computation with the remaining 8-bit weights. Figure  2 shows how calibration choices reach the deployed layer.
+
+ 
+ Offline calibration assigns an importance score to every tile using input-activation-aware (IAA) statistics or gradient-informed (GI) sensitivity. A common rule retains the highest-scoring tiles within each projection’s budget and records their locations in a binary decision map (Section  4.2 ). During loading, this map identifies the regions to retain and those to quantize. The resulting weight buffers and scales supply the mixed-precision kernel (Section  4.3 ), so the same offline choices govern arithmetic across inference inputs.
+
+ 
+ 4.2 Calibration-Driven Tile Map Construction
+
+ 
+ Calibration ranks local weight regions for each projection’s 16-bit retention budget. With pretrained weights fixed, IAA scores activation-weighted contribution magnitudes, while GI scores first-order loss sensitivity on the same calibration data. These scores provide retention priorities, and the prescribed budget determines how many tiles are selected. Both routes therefore produce score maps for the common selection rule below.
+
+ 
+ Input-activation-aware route. 
+IAA estimates tile importance from contribution magnitudes observed in forward passes. A weight’s contribution depends on both its magnitude and the activations multiplied by it. We therefore combine weight magnitudes with input-channel activation statistics.
+
+ 
+ For each input channel j j , let a j = 𝔼 ⁡ [ | x j | ] a_{j}=\mathbb{E}[|x_{j}|] denote the mean absolute activation magnitude gathered from the calibration data. We define the entry-level and aggregated tile-level importance as
+
+ 
+
+ 
+ 
+ I i ​ j act \displaystyle I_{ij}^{\mathrm{act}} 
+ = | W i ​ j | ⋅ a j , S t act \displaystyle=|W_{ij}|\cdot a_{j},\quad S_{t}^{\mathrm{act}} 
+ = ∑ ( i , j ) ∈ t | W i ​ j | ⋅ a j , \displaystyle=\sum_{(i,j)\in t}|W_{ij}|\cdot a_{j}, 
+ 
+ 
+ 
+ where t ∈ 𝒯 ⁡ ( W ) t\in\mathcal{T}(W) identifies a weight tile. The sum prioritizes regions containing large weights connected to channels with large mean absolute inputs. During calibration, IAA collects these channel means through forward passes and per-channel sums and counts, providing importance scores with a small persistent statistics buffer.
+
+ 
+ Gradient-informed route. 
+For loss-sensitive selection, GI relates weight importance to the model’s next-token prediction objective. For calibration batch b b , a forward pass computes the next-token cross-entropy loss ℒ b \mathcal{L}_{b} , and backward computation obtains gradients with respect to the target weights. The entry-level importance is I i ​ j , b grad = | W i ​ j ​ ∂ ℒ b ∂ W i ​ j | I_{ij,b}^{\mathrm{grad}}=\left|W_{ij}\frac{\partial\mathcal{L}_{b}}{\partial W_{ij}}\right| . The batch-level and accumulated tile scores are
+
+ 
+
+ 
+ 
+ S t , b grad \displaystyle S_{t,b}^{\mathrm{grad}} 
+ = ∑ ( i , j ) ∈ t I i ​ j , b grad , S t grad \displaystyle=\sum_{(i,j)\in t}I_{ij,b}^{\mathrm{grad}},\quad S_{t}^{\mathrm{grad}} 
+ = ∑ b S t , b grad . \displaystyle=\sum_{b}S_{t,b}^{\mathrm{grad}}. 
+ 
+ 
+ 
+
+ 
+ The weight-gradient product measures first-order sensitivity to a relative weight change under the prediction objective. Taking magnitudes before summation prevents positive and negative terms from canceling within a tile or across calibration inputs. The accumulated score therefore ranks tiles by loss sensitivity over the calibration data. Appendix  C.2 derives this interpretation, and both routes use the precision-selection rule below.
+
+ 
+ Per-layer precision selection. 
+The resulting scores determine retention priority, and a prescribed ratio controls the retained capacity. Here, each layer denotes one target linear projection. Given a target 16-bit retention ratio ρ ∈ ( 0 , 1 ] \rho\in(0,1] , that projection retains
+ k = max ⁡ ( 1 , ⌈ ρ ​ | 𝒯 ⁡ ( W ) | ⌉ ) k=\max\!\left(1,\left\lceil\rho\,|\mathcal{T}(W)|\right\rceil\right) 
+tiles. The k k highest-scoring tiles form ℱ ⁡ ( W ) \mathcal{F}(W) , and the others form 𝒬 ⁡ ( W ) \mathcal{Q}(W) for 8-bit quantization.
+
+ 
+ For a fixed tile grid and ρ \rho , IAA and GI retain the same number of 16-bit weights, while their scores determine the retained locations. Since scoring precedes budget selection, one completed score map can support several retention ratios. Each resulting decision map records the chosen precision assignments, whose retained indices guide load-time reconstruction.
+
+ 
+ 4.3 Mixed-Precision Reconstruction and Execution
+
+ 
+ The decision map specifies which regions receive each precision. To turn this allocation into storage and execution benefits, the reconstructed layer keeps the selected weight formats in GPU memory and supplies them directly to their arithmetic paths. We first describe how the map becomes a stored layer, then explain how its tile products are computed and combined with a single writeback per output tile.
+
+ 
+ Load-time reconstruction. 
+For each target projection, TileQuant stores retained tile IDs and tile-grid metadata. During checkpoint loading, these IDs locate the 16-bit weights, and their complement identifies the weights to quantize to 8-bit. The loader packs the two precision sets into separate contiguous buffers, grouping tiles by output-tile row. This layout places the weights contributing to the same output tile together for traversal by the kernel. Weight scales accompany the integer tiles, and non-target tensors keep their original format.
+
+ 
+ The scales recover the magnitudes represented by integer weights, and the tile IDs identify their corresponding input-feature tiles. IAA also uses its collected channel statistics to select weight scales, as detailed in Appendix  D.2 . These weights, scales, and indices remain resident across inference calls, so each call begins by preparing activations.
+
+ 
+ Tile-wise arithmetic. 
+Native 8-bit integer general matrix multiplication (INT8 GEMM) requires both operands in integer form. Therefore, the runtime quantizes each input-feature tile X ( c ) X^{(c)} to X ^ ( c ) \widehat{X}^{(c)} using a scale Δ X ( c ) \Delta_{X}^{(c)} shared across its activation rows. Every 8-bit weight tile in column c c reuses this prepared tile, together with its stored weights W ^ ( r , c ) \widehat{W}^{(r,c)} and scale Δ W ( r , c ) \Delta_{W}^{(r,c)} . The retained tiles multiply the current 16-bit inputs directly. Thus, the saved map determines weight precision, and input preparation supplies the operands for both paths.
+
+ 
+ For weight-tile row r r , let 𝒬 r ​ ( W ) \mathcal{Q}_{r}(W) and ℱ r ​ ( W ) \mathcal{F}_{r}(W) denote the corresponding column-tile indices in the two sets. Within the current activation-row tile, the mixed-precision projection approximates the original output as
+
+ 
+
+ 
+ 
+ Y ( r ) ≈ \displaystyle Y^{(r)}\approx{} 
+ ∑ c ∈ 𝒬 r ​ ( W ) Δ X ( c ) ​ Δ W ( r , c ) ​ X ^ ( c ) ​ ( W ^ ( r , c ) ) ⊤ \displaystyle\sum_{c\in\mathcal{Q}_{r}(W)}\Delta_{X}^{(c)}\Delta_{W}^{(r,c)}\widehat{X}^{(c)}\big(\widehat{W}^{(r,c)}\big)^{\top} 
+ 
+ 
+ 
+ 
+ 
+ + ∑ c ∈ ℱ r ​ ( W ) X ( c ) ( W ( r , c ) ) ⊤ . \displaystyle}{\displaystyle+\sum_{c\in\mathcal{F}_{r}(W)}X^{(c)}\big(W^{(r,c)}\big)^{\top}. 
+ 
+ 
+ 
+ Each integer tile product first accumulates in 32-bit integers and is then converted to floating point for rescaling. The activation and weight scales are applied before summation because they can differ across tiles. This restores all products to the output’s numerical units, allowing both precision paths to update a common accumulator.
+
+ 
+ Output-stationary execution. 
+The tile-wise projection sums contributions from multiple weight tiles into each output tile. To reduce memory traffic during this sum, our Triton kernel accumulates successive tile products in registers. Each output tile covers a group of activation rows and the output features associated with one weight-tile row. The kernel loads the corresponding inputs and weights as dense tiles for Tensor Core multiplication  Guide (2020) ; Choquette et al. (2021) ; Kerr et al. (2017) . Products from both precision paths enter a 32-bit floating-point (FP32) accumulator, allowing each program to combine its assigned tile contributions within its registers.
+
+ 
+ Output tiles also provide independent work for parallel execution. When enough tiles are available, one program completes each tile. With fewer output tiles, the kernel distributes the weight tiles contributing to one output tile across multiple programs, exposing additional parallel work along the input dimension. Each program accumulates its assigned products locally, and their partial sums are then combined within the same kernel. Both schedules write each completed output tile once, preserving local accumulation while adapting the available parallel work to the output shape. Appendix  E.3 provides the indexing, scheduling, and partial-sum reduction details.
+
+ 
+ Prefill and decode. 
+The same stored layer must support the different input shapes encountered during generation. Prefill processes multiple prompt-token rows through GEMM, allowing a loaded weight tile to contribute to several rows within an output tile. During decode, each sequence contributes one new activation row, giving general matrix-vector multiplication (GEMV) for a single sequence or a small GEMM for a batch.
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 3: 
+Generation-throughput speedup relative to BF16 on Llama-3.2-3B. Rows vary batch size over 1, 2, 4, and 8, and columns vary prompt length over 128, 2K, 8K, and 16K tokens. Each panel varies output length over 128, 256, 512, and 1024 tokens. Throughput includes the complete request and is normalized to BF16 at the same request shape. Values use the median of five measured runs after two warm-up runs. OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ Accordingly, row tiling and launch parameters adapt to the number of activation rows, while both phases reuse the precision map, packed weights, scales, and tile indices. The mapping from weight-tile rows to output features remains unchanged, and the runtime selects the parallel schedule for the current input shape. This organization keeps importance estimation and precision selection outside token generation while reusing the same mixed-precision representation throughout the request.
+
+ 
+ 5 Experiments
+
+ 
+ 5.1 Experimental Setup
+
+ 
+ Table 1: 
+General language-modeling and reasoning results on Llama-3.2-3B . GI and IAA denote gradient-informed and input-activation-aware tile retention, with subscripts indicating the percentage of tiles retained in floating point. ↑ \uparrow / ↓ \downarrow indicate higher/lower is better. Accuracy is reported in percent, while WikiText-2 uses word perplexity. Bold marks the best result per row. Relative to Original (gray), green indicates equal or better performance and blue indicates worse performance.
+ 
+ 
+ 
+ 
+ 
+ 
+ Benchmark 
+ Metric 
+ Original 
+ Ours 
+ Uniform 
+ 
+ 
+ GPTQ 
+ 
+ 
+ 
+ SmoothQ 
+ 
+ 
+ 
+ LLM.int8 
+ 
+ 
+ GI 1 
+ IAA 1 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ WikiText-2 ↓ \downarrow 
+ PPL 
+ 12.487 
+ 12.518 
+ 12.537 
+ 12.403 
+ 12.438 
+ 12.453 
+ 12.630 
+ 12.515 
+ 12.609 
+ 12.639 
+ 
+ WinoGrande ↑ \uparrow 
+ Acc. 
+ 71.43 
+ 71.38 
+ 70.98 
+ 71.46 
+ 71.30 
+ 70.88 
+ 70.64 
+ 71.43 
+ 71.59 
+ 71.11 
+ 
+ PIQA ↑ \uparrow 
+ Acc. 
+ 77.31 
+ 76.61 
+ 77.09 
+ 77.42 
+ 77.15 
+ 76.61 
+ 76.55 
+ 76.82 
+ 76.55 
+ 76.82 
+ 
+ LAMBADA ↑ \uparrow 
+ Acc. 
+ 64.23 
+ 65.62 
+ 65.07 
+ 65.78 
+ 65.49 
+ 64.41 
+ 63.96 
+ 64.43 
+ 63.98 
+ 64.31 
+ 
+ ARC-Challenge ↑ \uparrow 
+ Acc. 
+ 52.56 
+ 52.82 
+ 52.30 
+ 53.69 
+ 52.88 
+ 52.30 
+ 51.79 
+ 52.73 
+ 51.71 
+ 51.88 
+ 
+ HellaSwag ↑ \uparrow 
+ Acc. 
+ 73.65 
+ 73.25 
+ 73.09 
+ 72.95 
+ 72.50 
+ 73.59 
+ 73.53 
+ 73.55 
+ 73.47 
+ 73.48 
+ 
+ MMLU ↑ \uparrow 
+ Acc. 
+ 60.47 
+ 60.64 
+ 60.78 
+ 61.10 
+ 60.54 
+ 60.51 
+ 60.80 
+ 60.46 
+ 60.48 
+ 60.89 
+ 
+ 
+
+ 
+
+ 
+ 
+ We evaluate efficiency and model quality on Llama-3.2-3B-Instruct  AI (2024) . Appendix  F.2 extends the system measurements, while Appendices  F.3 and  F.4 report additional quality results.
+
+ 
+ Datasets and Metrics. 
+To assess general capabilities, we report WikiText-2 word perplexity  Merity et al. (2016) and accuracy on HellaSwag  Zellers et al. (2019) , MMLU  Hendrycks et al. (2020) , ARC-Challenge  Clark et al. (2018) , LAMBADA  Paperno et al. (2016) , PIQA  Bisk et al. (2020) , and WinoGrande  Sakaguchi et al. (2021) . For long contexts, LongEval  Li et al. (2023a) measures line-retrieval exact-match accuracy over 2.7K–43.4K tokens, while LV-Eval  Yuan et al. (2024) evaluates question answering across 9 datasets. We report LV-Eval at 16K, 32K, and 64K; Appendix  F.4 includes 128K and 256K.
+
+ 
+ Configuration and Hardware. 
+Experiments use NVIDIA A100 GPUs with 40 GB memory. TileQuant employs 64 × 64 64\times 64 weight tiles, retaining selected tiles at 16-bit and quantizing the rest to INT8. The main tables report 1% and 20% retention, while LongEval and Appendix  F additionally cover 5% and 10%.
+
+ 
+ Quality Comparisons. 
+We compare against the original BF16 model and 5 quantized baselines: Uniform W8, Uniform W8A8, GPTQ  Frantar et al. (2022) , LLM.int8  Dettmers et al. (2022) , and SmoothQuant  Xiao et al. (2023) . Uniform W8 uses channel-wise 8-bit weights with 16-bit activations, whereas W8A8 quantizes activations per token. GPTQ uses 8-bit weights and 16-bit activations, while SmoothQuant uses simulated W8A8 quantization. To ensure consistent quality comparisons, methods share the checkpoint, prompts, decoding settings, and evaluation protocol within each benchmark. Configurations and measurement details are provided in Appendix  F.1 .
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 4: 
+Line-level retrieval on Llama-3.2-3B across 2.7K–43.4K prompt tokens. Lines (left axis) show exact-match accuracy, while stacked bar segments (right axis) show each configuration’s accuracy difference from Original. Top: TileQuant with GI maps (left) and IAA maps (right), both retaining 1%, 5%, 10%, or 20% of tiles in floating point (keep01, keep05, keep10, keep20). Bottom: uniform INT8 weight-only, uniform W8A8, GPTQ, SmoothQuant, and LLM.int8 (left); representative comparison of the strongest TileQuant and baseline configurations (right).
+ 
+ 
+
+ 
+ 5.2 Inference Efficiency
+
+ 
+ We measure complete-request generation throughput to evaluate the practical speed benefit of mixed-precision execution. BF16 denotes the original bfloat16 model with scaled dot-product attention (SDPA), while Torch uses Hugging Face half-precision (FP16) generation with eager attention. Both GI 1 and GI 20 exceed the displayed baselines across all 64 settings on Llama-3.2-3B in Figure  3 . With a 128-token prompt and 512 generated tokens at batch size 1, GI 1 reaches 154.98 tokens/s, 2.66 × 2.66\times BF16 and 5.87 × 5.87\times GPTQ throughput . GI 20 retains 96.7–98.6% of GI 1 throughput across the grid with 20% of target tiles in BF16. Separate geometry controls report lower prefill and decode latency for tiles than for full-column and compact-strip implementations at matched retention (Appendix  G.2 ).
+
+ 
+ The relative benefit varies with the balance between prompt processing and token generation. For long prompts, longer continuations strengthen the throughput advantage : with 16K input tokens at batch size 8, GI 20 improves from 1.07 × 1.07\times to 1.91 × 1.91\times BF16 throughput as output length increases from 128 to 1024 tokens. Longer continuations spread prompt-processing cost over more generated tokens, giving repeated decoding a larger role in the complete request. During decoding, TileQuant reuses its calibrated precision map and stored tiles in mixed-precision arithmetic.
+
+ 
+   
+ 
+ FINDINGS 
+ 
+ 
+ Tile execution speeds up tested generation workloads, preserving nearly all GI throughput from 1% to 20% retention. 
+ 
+
+ 
+ Table 2: 
+Long-context question answering results for Llama-3.2-3B on LV-Eval at the 16K, 32K, and 64K length levels. Dataset IDs 1–9 denote CMRC, DuReader, HotpotWikiQA, LIC, LooGLE-CR, LooGLE-MIR, LooGLE-SD, English and Chinese MultiFieldQA, respectively. Cell colors are relative to Original, with green for higher scores and blue for lower scores.
+ 
+ 
+ 
+ 
+ 
+ 
+ Dataset 
+ Len 
+ Original 
+ Ours 
+ Uniform 
+ GPTQ 
+ SmoothQ 
+ LLM.int8 
+ 
+ GI 1 
+ IAA 1 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ 1 
+ 16k 
+ 21.41 
+ 23.82 
+ 24.21 
+ 24.06 
+ 23.87 
+ 21.15 
+ 21.39 
+ 21.53 
+ 20.15 
+ 20 
+ 
+ 32k 
+ 16.86 
+ 18.16 
+ 18.23 
+ 18.38 
+ 18.23 
+ 17.95 
+ 17.05 
+ 17.39 
+ 16.06 
+ 16.31 
+ 
+ 64k 
+ 7.5 
+ 8.48 
+ 8 
+ 8.59 
+ 8.04 
+ 7.46 
+ 6.93 
+ 7.58 
+ 7.24 
+ 6.47 
+ 
+ 2 
+ 16k 
+ 16.46 
+ 16.45 
+ 17.37 
+ 16.64 
+ 16.5 
+ 16.54 
+ 17.33 
+ 16.07 
+ 17.47 
+ 17.88 
+ 
+ 32k 
+ 17.1 
+ 16.48 
+ 16.88 
+ 16.39 
+ 17.03 
+ 16.6 
+ 16.88 
+ 15.83 
+ 16.64 
+ 16.37 
+ 
+ 64k 
+ 15.52 
+ 15.4 
+ 14.72 
+ 15.76 
+ 15.47 
+ 14.55 
+ 14.97 
+ 15.04 
+ 14.77 
+ 14.84 
+ 
+ 3 
+ 16k 
+ 24.49 
+ 25.29 
+ 24.22 
+ 25.56 
+ 24.37 
+ 24.33 
+ 20.71 
+ 24.74 
+ 23.15 
+ 23.52 
+ 
+ 32k 
+ 19.23 
+ 18.43 
+ 17.28 
+ 19.48 
+ 19.15 
+ 17.82 
+ 19.12 
+ 18.35 
+ 20.74 
+ 17.7 
+ 
+ 64k 
+ 15.86 
+ 13.61 
+ 17.02 
+ 16.1 
+ 15.96 
+ 15.89 
+ 14.24 
+ 15.08 
+ 15.73 
+ 15.82 
+ 
+ 4 
+ 16k 
+ 11.23 
+ 14.08 
+ 14.05 
+ 14.21 
+ 14.09 
+ 11.17 
+ 11.99 
+ 10.76 
+ 11.74 
+ 12.39 
+ 
+ 32k 
+ 11.39 
+ 12.68 
+ 10.17 
+ 12.83 
+ 11.34 
+ 10.84 
+ 11.6 
+ 10.72 
+ 11.17 
+ 12.17 
+ 
+ 64k 
+ 3.45 
+ 5.22 
+ 5.3 
+ 5.27 
+ 5.24 
+ 4.29 
+ 4.43 
+ 4.04 
+ 3.93 
+ 4.36 
+ 
+ 5 
+ 16k 
+ 22.39 
+ 24.12 
+ 24.04 
+ 24.37 
+ 24.11 
+ 22.98 
+ 24.01 
+ 22.37 
+ 23.01 
+ 22.68 
+ 
+ 32k 
+ 23.02 
+ 24.32 
+ 24.63 
+ 24.61 
+ 24.41 
+ 23.61 
+ 23.6 
+ 23.12 
+ 23.51 
+ 22.39 
+ 
+ 64k 
+ 15.49 
+ 15.6 
+ 15.67 
+ 15.84 
+ 15.7 
+ 16.68 
+ 16.49 
+ 15.54 
+ 17.08 
+ 15.24 
+ 
+ 6 
+ 16k 
+ 17.88 
+ 19.77 
+ 19.65 
+ 19.97 
+ 19.71 
+ 18.61 
+ 19.21 
+ 18.62 
+ 18.85 
+ 18.26 
+ 
+ 32k 
+ 15.77 
+ 16.13 
+ 15.77 
+ 16.33 
+ 15.83 
+ 15.91 
+ 16.13 
+ 15.3 
+ 16.39 
+ 16.01 
+ 
+ 64k 
+ 11.77 
+ 12.48 
+ 12.01 
+ 12.66 
+ 12.07 
+ 12.45 
+ 11.52 
+ 11.63 
+ 12.39 
+ 11.97 
+ 
+ 7 
+ 16k 
+ 52.61 
+ 51.86 
+ 53.73 
+ 52.89 
+ 52.67 
+ 52.64 
+ 51.64 
+ 52.84 
+ 53.19 
+ 52.69 
+ 
+ 32k 
+ 37.75 
+ 37.72 
+ 37.97 
+ 38.07 
+ 37.85 
+ 36.52 
+ 36.64 
+ 36.98 
+ 35.57 
+ 38.03 
+ 
+ 64k 
+ 24.31 
+ 26.22 
+ 23.7 
+ 26.59 
+ 24.24 
+ 24.64 
+ 24.14 
+ 24.69 
+ 26.24 
+ 25.66 
+ 
+ 8 
+ 16k 
+ 33.81 
+ 34.28 
+ 36.01 
+ 34.56 
+ 34.34 
+ 33.98 
+ 34.1 
+ 32.69 
+ 35.75 
+ 34.64 
+ 
+ 32k 
+ 25.95 
+ 27.51 
+ 25.08 
+ 27.83 
+ 25.85 
+ 25.14 
+ 26.03 
+ 25.84 
+ 26.5 
+ 25.74 
+ 
+ 64k 
+ 21.24 
+ 20.22 
+ 21.27 
+ 21.56 
+ 21.38 
+ 21.39 
+ 20.01 
+ 21.58 
+ 20.89 
+ 21.42 
+ 
+ 9 
+ 16k 
+ 19.05 
+ 23.38 
+ 17.99 
+ 23.59 
+ 18.96 
+ 20.91 
+ 19.41 
+ 18.84 
+ 20.2 
+ 22.97 
+ 
+ 32k 
+ 13.48 
+ 15.95 
+ 15.37 
+ 16.12 
+ 15.42 
+ 14.77 
+ 15.62 
+ 14.19 
+ 18.02 
+ 14.35 
+ 
+ 64k 
+ 13.71 
+ 13.85 
+ 11.61 
+ 14.06 
+ 13.67 
+ 13.51 
+ 13.72 
+ 13.95 
+ 14.49 
+ 12.57 
+ 
+ 
+
+ 
+
+ 
+
+ 
+ 5.3 General Tasks
+
+ 
+ Having established generation speedups, we evaluate quality under the same tile-retention settings. GI 20 leads five of the seven benchmarks in Table  1 . Its LAMBADA accuracy is 65.78%, compared with 64.43% for GPTQ and 64.23% for Original, while WikiText-2 perplexity is 12.403 versus 12.487 for Original. The same loss-guided maps therefore support language modeling and several downstream tasks beyond the calibration inputs.
+
+ 
+ With only 1% tile retention, GI 1 and IAA 1 achieve perplexities of 12.518 and 12.537, respectively, within 0.05 of Original while 99% of target tiles use 8-bit weights. Appendix  F.3 reports complete retention sweeps, and Appendix  G.1 compares IAA, magnitude-based, and random retention at equal high-precision capacity.
+
+ 
+   
+ 
+ FINDINGS 
+ 
+ 
+ 1% tile retention preserves near-original language-modeling quality; GI improves accuracy on several downstream tasks. 
+ 
+
+ 
+ 5.4 Long Context Tasks
+
+ 
+ Beyond general benchmarks, we examine whether the same offline-selected tiles preserve evidence retrieval and question answering as inputs grow.
+
+ 
+ Long-context Retrieval. 
+LongEval requires locating a queried line and returning its content. Figure  4 shows that GI generally follows Original closely across the length sweep, with GI 20 improving accuracy at multiple longer-input settings. At 43.4K tokens, GI 20 reaches 51% accuracy, compared with 47% for Original and 44% for GPTQ. At matched retention, the GI and IAA comparison further shows how the choice of calibration route affects retrieval quality.
+
+ 
+   
+ 
+ FINDINGS 
+ 
+ 
+ A single calibrated map supports retrieval across lengths. GI 20 exceeds Original and GPTQ at the longest tested context. 
+ 
+
+ 
+ Long-context Question Answering. 
+Beyond line retrieval, LV-Eval tests question answering from long input contexts across nine datasets, identified in Table  2 . We use keyword-recall-based F1, with blacklist-based F1 for CMRC and blacklist-based ROUGE-L for DuReader.
+
+ 
+ GI 20 exceeds Original in 26 of the 27 displayed dataset–length settings. On LooGLE-SD at 64K, it scores 26.59, compared with 24.69 for GPTQ and 24.31 for Original. The improvements across datasets and lengths show that a map calibrated once remains useful across long-context tasks.
+
+ 
+ The forward-only route preserves strong performance with limited retention. On HotpotWikiQA at 64K, IAA 1 scores 17.02, compared with 15.86 for Original and 15.89 for Uniform W8. Appendix  F.4 reports more models and length levels.
+
+ 
+   
+ 
+ FINDINGS 
+ 
+ 
+ Both GI and IAA maintain question-answering quality across datasets and input lengths with maps calibrated once. 
+ 
+
+ 
+ 6 Conclusion
+
+ 
+ TileQuant uses 2D tiles to connect local precision allocation with executable mixed-precision inference. Calibration scores determine which weight regions retain 16-bit precision, and the resulting maps guide compact storage and dense tile computation. Experiments show faster generation alongside strong language-modeling, reasoning, retrieval, and question-answering quality. These results suggest aligning precision-allocation granularity with hardware-aligned weight tiles for GPU computation. This alignment allows high precision to follow local sensitivity while preserving regular memory access and dense computation.
+
+ 
+
+ 
+ Limitations
+
+ 
+ TileQuant studies training-free mixed-precision inference with 8-bit weights and retained 16-bit tiles. Precision maps are calibrated offline and reused across inference inputs. Input- or task-adaptive allocation would require an additional runtime decision mechanism. Extending the framework to training requires corresponding treatment of gradients, optimizer states, and forward-backward numerical consistency.
+
+ 
+ References
+
+ 
+ AI (2024) 
+ M. AI 
+ 
+ Llama 3.2 model card .
+ 
+ External Links: Link 
+ 
+ Cited by: §5.1 .
+ 
+
+ An et al. (2024) 
+ C. An, S. Gong, M. Zhong, X. Zhao, M. Li, J. Zhang, L. Kong, and X. Qiu 
+ 
+ L-eval: instituting standardized evaluation for long context language models .
+ 
+ In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,
+ 
+ pp. 14388–14411 .
+ 
+ Cited by: §1 .
+ 
+
+ Arai and Ichikawa (2025) 
+ Y. Arai and Y. Ichikawa 
+ 
+ Quantization error propagation: revisiting layer-wise post-training quantization .
+ 
+ arXiv preprint arXiv:2504.09629 .
+ 
+ Cited by: §2 .
+ 
+
+ Ashkboos et al. (2024a) 
+ S. Ashkboos, I. Markov, E. Frantar, T. Zhong, X. Wang, J. Ren, T. Hoefler, and D. Alistarh 
+ 
+ Quik: towards end-to-end 4-bit inference on generative large language models .
+ 
+ In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing ,
+ 
+ pp. 3355–3371 .
+ 
+ Cited by: §2 .
+ 
+
+ Ashkboos et al. (2024b) 
+ S. Ashkboos, A. Mohtashami, M. L. Croci, B. Li, P. Cameron, M. Jaggi, D. Alistarh, T. Hoefler, and J. Hensman 
+ 
+ Quarot: outlier-free 4-bit inference in rotated llms .
+ 
+ Advances in Neural Information Processing Systems 37 , pp. 100213–100240 .
+ 
+ Cited by: §2 .
+ 
+
+ Bai et al. (2024) 
+ Y. Bai, X. Lv, J. Zhang, H. Lyu, J. Tang, Z. Huang, Z. Du, X. Liu, A. Zeng, L. Hou, et al. 
+ 
+ Longbench: a bilingual, multitask benchmark for long context understanding .
+ 
+ In Proceedings of the 62nd annual meeting of the association for computational linguistics (volume 1: Long papers) ,
+ 
+ pp. 3119–3137 .
+ 
+ Cited by: §1 .
+ 
+
+ Bisk et al. (2020) 
+ Y. Bisk, R. Zellers, J. Gao, Y. Choi, et al. 
+ 
+ Piqa: reasoning about physical commonsense in natural language .
+ 
+ In Proceedings of the AAAI conference on artificial intelligence ,
+ 
+ Vol. 34 , pp. 7432–7439 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Chee et al. (2025) 
+ J. Chee, A. Backurs, R. Heck, L. Zhang, J. Kulkarni, T. Rothvoss, and S. Gopi 
+ 
+ DiscQuant: a quantization method for neural networks inspired by discrepancy theory .
+ 
+ arXiv preprint arXiv:2501.06417 .
+ 
+ Cited by: §2 .
+ 
+
+ Chen et al. (2024) 
+ Z. Chen, B. Xie, J. Li, and C. Shen 
+ 
+ Channel-wise mixed-precision quantization for large language models .
+ 
+ arXiv preprint arXiv:2410.13056 .
+ 
+ Cited by: §2 .
+ 
+
+ Choquette et al. (2021) 
+ J. Choquette, W. Gandhi, O. Giroux, N. Stam, and R. Krashinsky 
+ 
+ Nvidia a100 tensor core gpu: performance and innovation .
+ 
+ IEEE Micro 41 ( 2 ), pp. 29–35 .
+ 
+ Cited by: §1 ,
+ §4.3 .
+ 
+
+ Clark et al. (2018) 
+ P. Clark, I. Cowhey, O. Etzioni, T. Khot, A. Sabharwal, C. Schoenick, and O. Tafjord 
+ 
+ Think you have solved question answering? try arc, the ai2 reasoning challenge .
+ 
+ arXiv preprint arXiv:1803.05457 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Dettmers et al. (2022) 
+ T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer 
+ 
+ Gpt3. int8 (): 8-bit matrix multiplication for transformers at scale .
+ 
+ Advances in neural information processing systems 35 , pp. 30318–30332 .
+ 
+ Cited by: §1 ,
+ §2 ,
+ §5.1 .
+ 
+
+ Dettmers et al. (2023) 
+ T. Dettmers, R. Svirschevski, V. Egiazarian, D. Kuznedelev, E. Frantar, S. Ashkboos, A. Borzunov, T. Hoefler, and D. Alistarh 
+ 
+ Spqr: a sparse-quantized representation for near-lossless llm weight compression .
+ 
+ arXiv preprint arXiv:2306.03078 .
+ 
+ Cited by: §2 .
+ 
+
+ Frantar et al. (2022) 
+ E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh 
+ 
+ Gptq: accurate post-training quantization for generative pre-trained transformers .
+ 
+ arXiv preprint arXiv:2210.17323 .
+ 
+ Cited by: §1 ,
+ §1 ,
+ §2 ,
+ §5.1 .
+ 
+
+ Gholami et al. (2022) 
+ A. Gholami, S. Kim, Z. Dong, Z. Yao, M. W. Mahoney, and K. Keutzer 
+ 
+ A survey of quantization methods for efficient neural network inference .
+ 
+ In Low-power computer vision ,
+ 
+ pp. 291–326 .
+ 
+ Cited by: §2 .
+ 
+
+ Gong et al. (2024) 
+ Z. Gong, J. Liu, J. Wang, X. Cai, D. Zhao, and R. Yan 
+ 
+ What makes quantization for large language model hard? an empirical study from the lens of perturbation .
+ 
+ In Proceedings of the AAAI Conference on Artificial Intelligence ,
+ 
+ Vol. 38 , pp. 18082–18089 .
+ 
+ Cited by: §2 .
+ 
+
+ Guan et al. (2024) 
+ Z. Guan, H. Huang, Y. Su, H. Huang, N. Wong, and H. Yu 
+ 
+ APTQ: attention-aware post-training mixed-precision quantization for large language models .
+ 
+ In Proceedings of the 61st ACM/IEEE Design Automation Conference ,
+ 
+ pp. 1–6 .
+ 
+ Cited by: §2 .
+ 
+
+ Guide (2020) 
+ D. Guide 
+ 
+ Cuda c++ programming guide .
+ 
+ NVIDIA, July .
+ 
+ Cited by: §1 ,
+ §4.3 .
+ 
+
+ Guo et al. (2023) 
+ C. Guo, J. Tang, W. Hu, J. Leng, C. Zhang, F. Yang, Y. Liu, M. Guo, and Y. Zhu 
+ 
+ Olive: accelerating large language models via hardware-friendly outlier-victim pair quantization .
+ 
+ In Proceedings of the 50th Annual International Symposium on Computer Architecture ,
+ 
+ pp. 1–15 .
+ 
+ Cited by: §2 .
+ 
+
+ Hendrycks et al. (2020) 
+ D. Hendrycks, C. Burns, S. Basart, A. Zou, M. Mazeika, D. Song, and J. Steinhardt 
+ 
+ Measuring massive multitask language understanding .
+ 
+ arXiv preprint arXiv:2009.03300 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Huang et al. (2024) 
+ W. Huang, H. Qin, Y. Liu, Y. Li, Q. Liu, X. Liu, L. Benini, M. Magno, S. Zhang, and X. Qi 
+ 
+ SliM-llm: salience-driven mixed-precision quantization for large language models .
+ 
+ arXiv preprint arXiv:2405.14917 .
+ 
+ Cited by: §2 .
+ 
+
+ Kerr et al. (2017) 
+ A. Kerr, D. Merrill, J. Demouth, and J. Tran 
+ 
+ Cutlass: fast linear algebra in cuda c++ .
+ 
+ NVIDIA Developer Blog 2 , pp. 10 .
+ 
+ Cited by: §1 ,
+ §4.3 .
+ 
+
+ Kim et al. (2024) 
+ J. Kim, H. Kim, E. Cho, C. Lee, J. Kim, and Y. Jeon 
+ 
+ Boa: attention-aware post-training quantization without backpropagation .
+ 
+ arXiv preprint arXiv:2406.13474 .
+ 
+ Cited by: §2 .
+ 
+
+ Kim et al. (2023) 
+ S. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer 
+ 
+ Squeezellm: dense-and-sparse quantization .
+ 
+ arXiv preprint arXiv:2306.07629 .
+ 
+ Cited by: §2 .
+ 
+
+ Kogan (2025) 
+ A. Kogan 
+ 
+ Is (selective) round-to-nearest quantization all you need? .
+ 
+ arXiv preprint arXiv:2505.15909 .
+ 
+ Cited by: §2 .
+ 
+
+ Lang et al. (2024) 
+ J. Lang, Z. Guo, and S. Huang 
+ 
+ A comprehensive study on quantization techniques for large language models .
+ 
+ In 2024 4th International conference on artificial intelligence, robotics, and communication (ICAIRC) ,
+ 
+ pp. 224–231 .
+ 
+ Cited by: §2 .
+ 
+
+ Lee et al. (2024) 
+ C. Lee, J. Jin, T. Kim, H. Kim, and E. Park 
+ 
+ Owq: outlier-aware weight quantization for efficient fine-tuning and inference of large language models .
+ 
+ In Proceedings of the AAAI Conference on Artificial Intelligence ,
+ 
+ Vol. 38 , pp. 13355–13364 .
+ 
+ Cited by: §1 ,
+ §2 .
+ 
+
+ Lee et al. (2025) 
+ S. Lee, S. Woo, J. Jin, C. Lee, and E. Park 
+ 
+ Amq: enabling automl for mixed-precision weight-only quantization of large language models .
+ 
+ In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing ,
+ 
+ pp. 35520–35538 .
+ 
+ Cited by: §2 .
+ 
+
+ Lewis et al. (2020) 
+ P. Lewis, E. Perez, A. Piktus, F. Petroni, V. Karpukhin, N. Goyal, H. Küttler, M. Lewis, W. Yih, T. Rocktäschel, et al. 
+ 
+ Retrieval-augmented generation for knowledge-intensive nlp tasks .
+ 
+ Advances in neural information processing systems 33 , pp. 9459–9474 .
+ 
+ Cited by: §1 .
+ 
+
+ Li et al. (2023a) 
+ D. Li, R. Shao, A. Xie, Y. Sheng, L. Zheng, J. Gonzalez, I. Stoica, X. Ma, and H. Zhang 
+ 
+ How long can context length of open-source llms truly promise? .
+ 
+ In NeurIPS 2023 Workshop on Instruction Tuning and Instruction Following ,
+ 
+ Cited by: §5.1 .
+ 
+
+ Li et al. (2023b) 
+ S. Li, X. Ning, K. Hong, T. Liu, L. Wang, X. Li, K. Zhong, G. Dai, H. Yang, and Y. Wang 
+ 
+ Llm-mq: mixed-precision quantization for efficient llm deployment .
+ 
+ In The Efficient Natural Language and Speech Processing Workshop with NeurIPS ,
+ 
+ Vol. 9 , pp. 3 .
+ 
+ Cited by: §2 .
+ 
+
+ Li et al. (2021) 
+ Y. Li, R. Gong, X. Tan, Y. Yang, P. Hu, Q. Zhang, F. Yu, W. Wang, and S. Gu 
+ 
+ Brecq: pushing the limit of post-training quantization by block reconstruction .
+ 
+ arXiv preprint arXiv:2102.05426 .
+ 
+ Cited by: §2 .
+ 
+
+ Li and Panda (2024) 
+ Y. Li and P. Panda 
+ 
+ Tesseraq: ultra low-bit llm post-training quantization with block reconstruction .
+ 
+ arXiv preprint arXiv:2410.19103 .
+ 
+ Cited by: §2 .
+ 
+
+ Li et al. (2024) 
+ Z. Li, C. Li, M. Zhang, Q. Mei, and M. Bendersky 
+ 
+ Retrieval augmented generation or long-context llms? a comprehensive study and hybrid approach .
+ 
+ In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing: Industry Track ,
+ 
+ pp. 881–893 .
+ 
+ Cited by: §1 .
+ 
+
+ Liao and Wen (2026) 
+ C. Liao and Z. Wen 
+ 
+ Channel-aware mixed-precision quantization for efficient long-context inference .
+ 
+ In The Fourteenth International Conference on Learning Representations ,
+ 
+ Cited by: §2 .
+ 
+
+ Lin et al. (2024) 
+ J. Lin, J. Tang, H. Tang, S. Yang, W. Chen, W. Wang, G. Xiao, X. Dang, C. Gan, and S. Han 
+ 
+ Awq: activation-aware weight quantization for on-device llm compression and acceleration .
+ 
+ Proceedings of machine learning and systems 6 , pp. 87–100 .
+ 
+ Cited by: §1 ,
+ §2 .
+ 
+
+ Liu et al. (2023) 
+ J. Liu, R. Gong, X. Wei, Z. Dong, J. Cai, and B. Zhuang 
+ 
+ Qllm: accurate and efficient low-bitwidth quantization for large language models .
+ 
+ arXiv preprint arXiv:2310.08041 .
+ 
+ Cited by: §2 .
+ 
+
+ Liu et al. (2024a) 
+ N. F. Liu, K. Lin, J. Hewitt, A. Paranjape, M. Bevilacqua, F. Petroni, and P. Liang 
+ 
+ Lost in the middle: how language models use long contexts .
+ 
+ Transactions of the association for computational linguistics 12 , pp. 157–173 .
+ 
+ Cited by: §1 .
+ 
+
+ Liu et al. (2024b) 
+ Z. Liu, C. Zhao, I. Fedorov, B. Soran, D. Choudhary, R. Krishnamoorthi, V. Chandra, Y. Tian, and T. Blankevoort 
+ 
+ Spinquant: llm quantization with learned rotations .
+ 
+ arXiv preprint arXiv:2405.16406 .
+ 
+ Cited by: §2 .
+ 
+
+ Merity et al. (2016) 
+ S. Merity, C. Xiong, J. Bradbury, and R. Socher 
+ 
+ Pointer sentinel mixture models .
+ 
+ arXiv preprint arXiv:1609.07843 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Nagel et al. (2020) 
+ M. Nagel, R. A. Amjad, M. Van Baalen, C. Louizos, and T. Blankevoort 
+ 
+ Up or down? adaptive rounding for post-training quantization .
+ 
+ In International conference on machine learning ,
+ 
+ pp. 7197–7206 .
+ 
+ Cited by: §2 .
+ 
+
+ Nrusimha et al. (2024) 
+ A. Nrusimha, M. Mishra, N. Wang, D. Alistarh, R. Panda, and Y. Kim 
+ 
+ Mitigating the impact of outlier channels for language model quantization with activation regularization .
+ 
+ arXiv preprint arXiv:2404.03605 .
+ 
+ Cited by: §2 .
+ 
+
+ Pan et al. (2023) 
+ J. Pan, C. Wang, K. Zheng, Y. Li, Z. Wang, and B. Feng 
+ 
+ Smoothquant+: accurate and efficient 4-bit post-training weightquantization for llm .
+ 
+ arXiv preprint arXiv:2312.03788 .
+ 
+ Cited by: §2 .
+ 
+
+ Paperno et al. (2016) 
+ D. Paperno, G. Kruszewski, A. Lazaridou, N. Pham, R. Bernardi, S. Pezzelle, M. Baroni, G. Boleda, and R. Fernández 
+ 
+ The lambada dataset: word prediction requiring a broad discourse context .
+ 
+ In Proceedings of the 54th annual meeting of the association for computational linguistics (volume 1: Long papers) ,
+ 
+ pp. 1525–1534 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Sakaguchi et al. (2021) 
+ K. Sakaguchi, R. L. Bras, C. Bhagavatula, and Y. Choi 
+ 
+ Winogrande: an adversarial winograd schema challenge at scale .
+ 
+ Communications of the ACM 64 ( 9 ), pp. 99–106 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Saxena et al. (2024) 
+ U. Saxena, S. Sharify, K. Roy, and X. Wang 
+ 
+ Resq: mixed-precision quantization of large language models with low-rank residuals .
+ 
+ arXiv preprint arXiv:2412.14363 .
+ 
+ Cited by: §2 .
+ 
+
+ Shang et al. (2023) 
+ Y. Shang, Z. Yuan, Q. Wu, and Z. Dong 
+ 
+ Pb-llm: partially binarized large language models .
+ 
+ arXiv preprint arXiv:2310.00034 .
+ 
+ Cited by: §2 .
+ 
+
+ Shao et al. (2023) 
+ W. Shao, M. Chen, Z. Zhang, P. Xu, L. Zhao, Z. Li, K. Zhang, P. Gao, Y. Qiao, and P. Luo 
+ 
+ Omniquant: omnidirectionally calibrated quantization for large language models .
+ 
+ arXiv preprint arXiv:2308.13137 .
+ 
+ Cited by: §2 .
+ 
+
+ Sharify et al. (2024) 
+ S. Sharify, U. Saxena, Z. Xu, I. Soloveychik, X. Wang, et al. 
+ 
+ Post training quantization of large language models with microscaling formats .
+ 
+ arXiv preprint arXiv:2405.07135 .
+ 
+ Cited by: §2 .
+ 
+
+ Sun et al. (2024) 
+ Y. Sun, R. Liu, H. Bai, H. Bao, K. Zhao, Y. Li, J. Hu, X. Yu, L. Hou, C. Yuan, et al. 
+ 
+ Flatquant: flatness matters for llm quantization .
+ 
+ arXiv preprint arXiv:2410.09426 .
+ 
+ Cited by: §2 .
+ 
+
+ Wang et al. (2024) 
+ H. Wang, B. Liu, H. Shao, B. Xiao, K. Zeng, G. Wan, and Y. Qian 
+ 
+ Claq: pushing the limits of low-bit post-training quantization for llms .
+ 
+ arXiv preprint arXiv:2405.17233 .
+ 
+ Cited by: §2 .
+ 
+
+ Wei et al. (2025) 
+ M. Wei, Y. Yan, and D. Wang 
+ 
+ MPPQ: enhancing post-training quantization for llms via mixed supervision, proxy rounding, and pre-searching .
+ 
+ In Proceedings of the Thirty-Fourth International Joint Conference on Artificial Intelligence ,
+ 
+ pp. 8277–8285 .
+ 
+ Cited by: §2 .
+ 
+
+ Wei et al. (2022a) 
+ X. Wei, R. Gong, Y. Li, X. Liu, and F. Yu 
+ 
+ Qdrop: randomly dropping quantization for extremely low-bit post-training quantization .
+ 
+ arXiv preprint arXiv:2203.05740 .
+ 
+ Cited by: §2 .
+ 
+
+ Wei et al. (2022b) 
+ X. Wei, Y. Zhang, X. Zhang, R. Gong, S. Zhang, Q. Zhang, F. Yu, and X. Liu 
+ 
+ Outlier suppression: pushing the limit of low-bit transformer language models .
+ 
+ Advances in Neural Information Processing Systems 35 , pp. 17402–17414 .
+ 
+ Cited by: §2 .
+ 
+
+ Xiao et al. (2023) 
+ G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han 
+ 
+ Smoothquant: accurate and efficient post-training quantization for large language models .
+ 
+ In International conference on machine learning ,
+ 
+ pp. 38087–38099 .
+ 
+ Cited by: §1 ,
+ §1 ,
+ §2 ,
+ §5.1 .
+ 
+
+ Xiao et al. (2025) 
+ H. Xiao, Y. Sung, E. Stengel-Eskin, and M. Bansal 
+ 
+ Task-circuit quantization: leveraging knowledge localization and interpretability for compression .
+ 
+ arXiv preprint arXiv:2504.07389 .
+ 
+ Cited by: §2 .
+ 
+
+ Xie et al. (2025) 
+ X. Xie, L. Wang, L. Xiao, M. Han, L. Sun, S. Zheng, and X. Xu 
+ 
+ Fineq: software-hardware co-design for low-bit fine-grained mixed-precision quantization of llms .
+ 
+ In 2025 Design, Automation & Test in Europe Conference (DATE) ,
+ 
+ pp. 1–7 .
+ 
+ Cited by: §2 .
+ 
+
+ Xue et al. (2025) 
+ Y. Xue, Y. Huang, J. Shao, and J. Zhang 
+ 
+ Vlmq: efficient post-training quantization for large vision-language models via hessian augmentation .
+ 
+ arXiv preprint arXiv:2508.03351 .
+ 
+ Cited by: §2 .
+ 
+
+ Yao et al. (2022) 
+ Z. Yao, R. Yazdani Aminabadi, M. Zhang, X. Wu, C. Li, and Y. He 
+ 
+ Zeroquant: efficient and affordable post-training quantization for large-scale transformers .
+ 
+ Advances in neural information processing systems 35 , pp. 27168–27183 .
+ 
+ Cited by: §1 ,
+ §1 ,
+ §2 .
+ 
+
+ Yu et al. (2024) 
+ M. Yu, D. Wang, Q. Shan, C. J. Reed, and A. Wan 
+ 
+ The super weight in large language models .
+ 
+ arXiv preprint arXiv:2411.07191 .
+ 
+ Cited by: §2 .
+ 
+
+ Yuan et al. (2024) 
+ T. Yuan, X. Ning, D. Zhou, Z. Yang, S. Li, M. Zhuang, Z. Tan, Z. Yao, D. Lin, B. Li, et al. 
+ 
+ Lv-eval: a balanced long-context benchmark with 5 length levels up to 256k .
+ 
+ arXiv preprint arXiv:2402.05136 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Yuan et al. (2023) 
+ Z. Yuan, L. Niu, J. Liu, W. Liu, X. Wang, Y. Shang, G. Sun, Q. Wu, J. Wu, and B. Wu 
+ 
+ Rptq: reorder-based post-training quantization for large language models .
+ 
+ arXiv preprint arXiv:2304.01089 .
+ 
+ Cited by: §2 .
+ 
+
+ Yvinec et al. (2023) 
+ E. Yvinec, A. Dapogny, and K. Bailly 
+ 
+ Gradient-based post-training quantization: challenging the status quo .
+ 
+ arXiv preprint arXiv:2308.07662 .
+ 
+ Cited by: §2 .
+ 
+
+ Zellers et al. (2019) 
+ R. Zellers, A. Holtzman, Y. Bisk, A. Farhadi, and Y. Choi 
+ 
+ Hellaswag: can a machine really finish your sentence? .
+ 
+ In Proceedings of the 57th annual meeting of the association for computational linguistics ,
+ 
+ pp. 4791–4800 .
+ 
+ Cited by: §5.1 .
+ 
+
+ Zhang et al. (2025) 
+ S. Zhang, H. Zhang, I. Colbert, and R. Saab 
+ 
+ Qronos: correcting the past by shaping the future… in post-training quantization .
+ 
+ arXiv preprint arXiv:2505.11695 .
+ 
+ Cited by: §2 .
+ 
+
+ Zhao et al. (2025) 
+ J. Zhao, M. Wang, M. Zhang, Y. Shang, X. Liu, Y. Wang, M. Zhang, and L. Nie 
+ 
+ Benchmarking post-training quantization in llms: comprehensive taxonomy, unified evaluation, and comparative analysis .
+ 
+ arXiv preprint arXiv:2502.13178 .
+ 
+ Cited by: §2 .
+ 
+
+ Zheng et al. (2024) 
+ Z. Zheng, X. Song, and C. Liu 
+ 
+ Mixllm: llm quantization with global mixed-precision between output-features and highly-efficient system design .
+ 
+ arXiv preprint arXiv:2412.14590 .
+ 
+ Cited by: §2 .
+ 
+
+ Zhou et al. (2024) 
+ C. Zhou, S. Zhang, Y. Zhou, Z. Liu, and S. Weng 
+ 
+ AutoMixQ: self-adjusting quantization for high performance memory-efficient fine-tuning .
+ 
+ arXiv preprint arXiv:2411.13814 .
+ 
+ Cited by: §2 .
+ 
+
+ 
+
+ 
+ Appendix A Notation and Reading Guide
+
+ 
+ Table  summarizes the notation used for tile-wise precision allocation, calibration, and mixed-precision execution.
+Appendix  B details calibration, and Appendix  C explains the importance scores and per-layer selection.
+Appendix  D describes numerical representation and load-time reconstruction, followed by GPU execution in Appendix  E .
+Appendix  F follows the main-text evaluation sequence, beginning with the detailed generation protocol and inference-efficiency measurements in Appendix  F.1 and Appendix  F.2 . Extended general-task results appear in Appendix  F.3 , followed by long-context retrieval and question answering in Appendix  F.4 . Appendix  G examines calibration and allocation choices through controls.
+
+ 
+ Within a weight-tile row, r r identifies the output-feature tile, while c c traverses the corresponding input-feature tiles.
+The retained and quantized tile sets therefore determine which 16-bit and 8-bit products contribute to the same output tile.
+
+ 
+ Appendix B Calibration Procedure
+
+ 
+ Calibration converts model observations into one importance map per target weight matrix. This section describes the observations collected by input-activation-aware (IAA) and gradient-informed (GI) scoring. The resulting maps enter the common selection rule in Appendix  C.3 , while IAA channel statistics also guide the weight-scale construction in Appendix  D.2 .
+
+ 
+ B.1 Calibration Inputs and Target Projections
+
+ 
+ The calibration builder uses 8,192 document-summary records from the Multi-News training split in dataset order. Each document is placed in a summarization prompt, followed by its reference summary. The prompt and summary are tokenized separately with limits of 4,096 and 256 tokens, respectively. The tokenizer’s beginning-of-sequence token is prepended when available, and its end-of-sequence token is appended to the summary. Each calibration batch b b contains one concatenated sequence. Both routes therefore process the same records in dataset order.
+
+ 
+ The target set 𝒫 \mathcal{P} contains the query, key, value, and attention-output projections, together with the gate, up, and down projections in each decoder layer. Calibration runs the pretrained model in evaluation mode with key/value caching disabled. Its parameters remain fixed throughout observation collection. IAA collects the inputs to these projections, while GI differentiates the mean next-token cross-entropy over the concatenated sequence. Thus, the two routes share the model and records while extracting different information for local precision placement.
+
+ 
+ B.2 Input-Activation Statistics
+
+ 
+ IAA needs the mean absolute input magnitude of each channel. For a target projection, let X b ∈ ℝ N b × K X_{b}\in\mathbb{R}^{N_{b}\times K} contain the activation rows observed in calibration batch b b , and let 𝒟 \mathcal{D} index these batches. Input hooks accumulate channel sums and the number of observed rows, giving
+
+ 
+
+ 
+ 
+ a j = ∑ b ∈ 𝒟 ∑ n = 1 N b | X b , n ​ j | ∑ b ∈ 𝒟 N b . a_{j}=\frac{\sum_{b\in\mathcal{D}}\sum_{n=1}^{N_{b}}|X_{b,nj}|}{\sum_{b\in\mathcal{D}}N_{b}}. 
+ 
+ (1) 
+ 
+ 
+ Weighting by the observed row count makes every activation row contribute equally, including when records have different lengths.
+
+ 
+ Per-record channel reductions use 32-bit floating point (FP32), and their running totals use 64-bit floating point (FP64). The collected means are stored in FP32 and combined with fixed weights:
+
+ 
+
+ 
+ 
+ S t act = ∑ ( i , j ) ∈ t | W i ​ j | ​ a j . S_{t}^{\mathrm{act}}=\sum_{(i,j)\in t}|W_{ij}|a_{j}. 
+ 
+ (2) 
+ 
+ 
+ Each input hook immediately reduces its observations to channel statistics, so the persistent calibration state consists of sums and counts. The final tile scores determine retention priority, and the channel means accompany the IAA decision artifacts for load-time scale selection.
+
+ 
+ B.3 Gradient-Informed Score Accumulation
+
+ 
+ GI identifies weights whose relative changes influence prediction loss. For calibration batch b b with sequence ( z b , 1 , … , z b , T b ) (z_{b,1},\ldots,z_{b,T_{b}}) , the loss is
+
+ 
+
+ 
+ 
+ ℒ b = − 1 T b − 1 ∑ τ = 1 T b − 1 log p θ ( z b , τ + 1 ∣ z b , 1 : τ ) . \mathcal{L}_{b}=-\frac{1}{T_{b}-1}\sum_{\tau=1}^{T_{b}-1}\log p_{\theta}(z_{b,\tau+1}\mid z_{b,1:\tau}). 
+ 
+ (3) 
+ 
+ 
+ The shifted prediction targets cover the concatenated prompt and summary. Backpropagation gives g i ​ j , b = ∂ ℒ b / ∂ W i ​ j g_{ij,b}=\partial\mathcal{L}_{b}/\partial W_{ij} , so the entry score is I i ​ j , b grad = | W i ​ j ​ g i ​ j , b | I_{ij,b}^{\mathrm{grad}}=|W_{ij}g_{ij,b}| .
+
+ 
+ The collector forms the absolute weight-gradient products in FP32, reduces them within each tile, and adds the resulting tile scores across records:
+
+ 
+ 
+ 
+ 
+ S t , b grad \displaystyle S_{t,b}^{\mathrm{grad}} 
+ = ∑ ( i , j ) ∈ t I i ​ j , b grad , \displaystyle=\sum_{(i,j)\in t}I_{ij,b}^{\mathrm{grad}}, 
+ 
+ (4) 
+
+ 
+ 
+ S t grad \displaystyle S_{t}^{\mathrm{grad}} 
+ = ∑ b ∈ 𝒟 S t , b grad . \displaystyle=\sum_{b\in\mathcal{D}}S_{t,b}^{\mathrm{grad}}. 
+ 
+ 
+ 
+ Taking magnitudes before aggregation prevents cancellation between positive and negative weight-gradient terms within a tile or across records. Gradients are cleared before the next record, while accumulated FP32 tile maps remain on the host. The completed maps enter the common retention rule, as summarized in Algorithm  1 .
+
+ 
+ Algorithm 1 Collecting calibration statistics and tile scores 
+ 
+ 
+ 0: 
+ 
+ 
+  Fixed pretrained model θ \theta , target projections 𝒫 \mathcal{P} , ordered one-record batches 𝒟 \mathcal{D} , route ∈ { IAA , GI } \in\{\mathrm{IAA},\mathrm{GI}\} 
+
+ 
+ 0: 
+ 
+ 
+  One tile-score map per target projection; channel means for IAA
+
+ 
+ 1: 
+ 
+ 
+   if route is IAA then 
+
+ 
+ 2: 
+ 
+ 
+   Initialize a channel-sum vector and row count for each projection in 𝒫 \mathcal{P} 
+
+ 
+ 3: 
+ 
+ 
+    for all calibration batches b ∈ 𝒟 b\in\mathcal{D} do 
+
+ 
+ 4: 
+ 
+ 
+    Run the model with gradient recording disabled
+
+ 
+ 5: 
+ 
+ 
+    Input hooks add channel-wise absolute activation sums and row counts
+
+ 
+ 6: 
+ 
+ 
+    end for 
+
+ 
+ 7: 
+ 
+ 
+    for all projections in 𝒫 \mathcal{P} do 
+
+ 
+ 8: 
+ 
+ 
+    Compute a j a_{j} using Eq. ( 1 )
+
+ 
+ 9: 
+ 
+ 
+    Compute S t act S_{t}^{\mathrm{act}} using Eq. ( 2 ); save channel means
+
+ 
+ 10: 
+ 
+ 
+    end for 
+
+ 
+ 11: 
+ 
+ 
+   else 
+
+ 
+ 12: 
+ 
+ 
+   Initialize each target projection’s tile-score map to zero
+
+ 
+ 13: 
+ 
+ 
+    for all calibration batches b ∈ 𝒟 b\in\mathcal{D} do 
+
+ 
+ 14: 
+ 
+ 
+    Clear parameter gradients and evaluate ℒ b \mathcal{L}_{b} using Eq. ( 3 )
+
+ 
+ 15: 
+ 
+ 
+    Backpropagate ℒ b \mathcal{L}_{b} through the fixed model
+
+ 
+ 16: 
+ 
+ 
+     for all target weights W W and tiles t ∈ 𝒯 ⁡ ( W ) t\in\mathcal{T}(W) do 
+
+ 
+ 17: 
+ 
+ 
+      S t grad ← S t grad + ∑ ( i , j ) ∈ t | W i ​ j ​ g i ​ j , b | S_{t}^{\mathrm{grad}}\leftarrow S_{t}^{\mathrm{grad}}+\sum_{(i,j)\in t}|W_{ij}g_{ij,b}| 
+
+ 
+ 18: 
+ 
+ 
+     end for 
+
+ 
+ 19: 
+ 
+ 
+    end for 
+
+ 
+ 20: 
+ 
+ 
+   Clear parameter gradients
+
+ 
+ 21: 
+ 
+ 
+   end if 
+
+ 
+ 22: 
+ 
+ 
+  Save the tile-score maps for the retention rule in Appendix  C.3 
+
+ 
+
+ 
+ Appendix C Score Interpretation and Precision Selection
+
+ 
+ The collected statistics provide two complementary views of local weight importance. We first relate IAA to activation-weighted contributions and GI to first-order loss sensitivity. We then show how a fixed per-layer retention count turns either score into a precision map.
+
+ 
+ C.1 Activation-Weighted Magnitudes
+
+ 
+ For a fixed weight W i ​ j W_{ij} and an observed activation row x x , the corresponding multiply contribution is W i ​ j ​ x j W_{ij}x_{j} . Taking its magnitude and averaging over calibration rows gives | W i ​ j | ​ 𝔼 ​ [ | x j | ] |W_{ij}|\mathbb{E}[|x_{j}|] . Therefore, the total expected magnitude of the multiply contributions inside tile t t is
+
+ 
+ 
+ 
+ 
+ 𝔼 ⁡ [ ∑ ( i , j ) ∈ t | W i ​ j ​ x j | ] \displaystyle\mathbb{E}\!\left[\sum_{(i,j)\in t}|W_{ij}x_{j}|\right] 
+ = ∑ ( i , j ) ∈ t | W i ​ j | ​ 𝔼 ​ [ | x j | ] \displaystyle=\sum_{(i,j)\in t}|W_{ij}|\mathbb{E}[|x_{j}|] 
+ 
+ (5) 
+
+ 
+ 
+ 
+ = S t act . \displaystyle=S_{t}^{\mathrm{act}}. 
+ 
+ 
+ 
+ The identity gives the IAA score a direct interpretation as the sum of expected absolute multiplication contributions within a tile. At a fixed weight magnitude, a larger mean absolute input increases the score. Summing these contributions lets IAA rank local regions using the channel statistics collected during forward computation.
+
+ 
+ C.2 First-Order Weight Sensitivity
+
+ 
+ GI connects local weight importance to the full model’s prediction loss. Consider a relative change W i ​ j ↦ ( 1 + ϵ ) ​ W i ​ j W_{ij}\mapsto(1+\epsilon)W_{ij} , with all other parameters fixed. Let E i ​ j E_{ij} be a matrix with one at ( i , j ) (i,j) and zeros elsewhere. At a differentiable calibration state,
+
+ 
+
+ 
+ 
+ d d ​ ϵ ​ ℒ b ​ ( W + ϵ ​ W i ​ j ​ E i ​ j ) | ϵ = 0 = W i ​ j ​ ∂ ℒ b ∂ W i ​ j . \left.\frac{\mathrm{d}}{\mathrm{d}\epsilon}\mathcal{L}_{b}(W+\epsilon W_{ij}E_{ij})\right|_{\epsilon=0}=W_{ij}\frac{\partial\mathcal{L}_{b}}{\partial W_{ij}}. 
+ 
+ (6) 
+ 
+ 
+ Thus, | W i ​ j ​ g i ​ j , b | |W_{ij}g_{ij,b}| measures the magnitude of the first-order loss response to a relative change of that weight. Summing these magnitudes within a tile and across calibration records yields Eq. ( 4 ).
+
+ 
+ The gradient carries the effect of the target projection through downstream model computation. Consequently, GI prioritizes regions that are important under the prediction objective, while IAA prioritizes regions with large activation-weighted contributions. Both interpretations lead to the same capacity-constrained selection below.
+
+ 
+ C.3 Per-Layer Retention and Decision Maps
+
+ 
+ Here, a layer denotes one target linear projection with weight matrix W W . Let T = | 𝒯 ⁡ ( W ) | T=|\mathcal{T}(W)| and let S t S_{t} be the completed IAA or GI score for tile t t . For a retention ratio ρ ∈ ( 0 , 1 ] \rho\in(0,1] , the selected count is
+
+ 
+
+ 
+ 
+ k = max ⁡ ( 1 , ⌈ ρ ​ T ⌉ ) . k=\max\!\left(1,\left\lceil\rho T\right\rceil\right). 
+ 
+ (7) 
+ 
+ 
+ The count is applied independently to each target projection. Equal-sized tiles make k k a direct control over the number of stored 16-bit weight elements on that tile grid. The zero-retention execution control sets ℱ ⁡ ( W ) = ∅ \mathcal{F}(W)=\emptyset and assigns every target tile to 𝒬 ⁡ ( W ) \mathcal{Q}(W) .
+
+ 
+ At fixed scores and k k , retaining the highest-scoring tiles solves
+
+ 
+
+ 
+ 
+ max ⁡ ∑ t ∈ ℱ ⁡ ( W ) ℱ ⁡ ( W ) ⊆ 𝒯 ⁡ ( W ) , | ℱ ⁡ ( W ) | = k ⁡ S t . \max_{\mathcal{F}(W)\subseteq\mathcal{T}(W),\ |\mathcal{F}(W)|=k}\sum_{t\in\mathcal{F}(W)}S_{t}. 
+ 
+ (8) 
+ 
+ 
+ To see this, consider a feasible set that retains a lower-scoring tile while excluding a higher-scoring tile. Exchanging the two increases its retained score. Repeating these exchanges produces a top- k k set, which attains the maximum. Equal scores permit equally valued selections under this objective.
+
+ 
+ The implementation identifies the top- k k positions through an array-partition operation and saves the concrete selected tile IDs. Their complement defines 𝒬 ⁡ ( W ) \mathcal{Q}(W) , and the pair ( ℱ ⁡ ( W ) , 𝒬 ⁡ ( W ) ) (\mathcal{F}(W),\mathcal{Q}(W)) determines the layer’s binary precision map. Multiple retention ratios can therefore be constructed from the same completed score map. The saved IDs preserve each chosen allocation through loading and inference, using the representation described next.
+
+ 
+ Appendix D Numerical Representation and Load-Time Reconstruction
+
+ 
+ The precision map identifies locations, and reconstruction associates those locations with values, scales, and addresses that the kernel can use. We first define tile coordinates and integer quantization, then describe how the decision archive becomes packed weight buffers. Execution of the mixed-precision modules follows Appendix  E .
+
+ 
+ D.1 Tile Coordinates and Padding
+
+ 
+ We retain the convention X ∈ ℝ N × K X\in\mathbb{R}^{N\times K} and W ∈ ℝ M × K W\in\mathbb{R}^{M\times K} , with N N activation rows and M M output features. Let b M b_{M} and b K b_{K} be the weight-tile dimensions. The deployed configuration uses b M = b K = 64 b_{M}=b_{K}=64 . Zero padding completes the weight grid to
+
+ 
+
+ 
+ 
+ M ′ = b M ​ ⌈ M / b M ⌉ , K ′ = b K ​ ⌈ K / b K ⌉ , M^{\prime}=b_{M}\left\lceil M/b_{M}\right\rceil,\qquad K^{\prime}=b_{K}\left\lceil K/b_{K}\right\rceil, 
+ 
+ (9) 
+ 
+ 
+ with n tr = M ′ / b M n_{\mathrm{tr}}=M^{\prime}/b_{M} and n tc = K ′ / b K n_{\mathrm{tc}}=K^{\prime}/b_{K} .
+
+ 
+ With one-based tile coordinates t = ( r , c ) t=(r,c) , the zero-based stored identifier is
+
+ 
+
+ 
+ 
+ id ⁡ ( r , c ) = ( r − 1 ) ​ n tc + ( c − 1 ) . \operatorname{id}(r,c)=(r-1)n_{\mathrm{tc}}+(c-1). 
+ 
+ (10) 
+ 
+ 
+ Consequently, integer division and remainder recover the output-tile row and input-tile column. Boundary tiles contain zeros outside the original matrix. The kernel masks activation accesses beyond K K and output writes beyond M M , preserving the original linear-layer interface while processing complete weight tiles.
+
+ 
+ D.2 Integer Quantization and Weight Scales
+
+ 
+ Each quantized tile needs integer values and a scale that restores their numerical magnitude. For an array V V and positive scale Δ \Delta , define
+
+ 
+
+ 
+ 
+ Q ⁡ ( V , Δ ) = clip [ − 127,127 ] ⁡ ( round even ⁡ ( V / Δ ) ) , Q(V;\Delta)=\operatorname{clip}_{[-127,127]}\left(\operatorname{round}_{\mathrm{even}}(V/\Delta)\right), 
+ 
+ (11) 
+ 
+ 
+ where nearest-integer rounding resolves ties to even. The zero point is zero; reconstruction gives Δ ​ Q ​ ( V , Δ ) \Delta Q(V;\Delta) . For a weight tile W t = W ( r , c ) W_{t}=W^{(r,c)} , the base scale is
+
+ 
+
+ 
+ 
+ Δ 0 , t = { max ( i , j ) ∈ t ⁡ | W i ​ j | / 127 , W t ≠ 0 , 1 , otherwise . \Delta_{0,t}=\begin{cases}\displaystyle\max_{(i,j)\in t}|W_{ij}|/127,&W_{t}\neq 0,\\
+1,&\text{otherwise}.\end{cases} 
+ 
+ (12) 
+ 
+ 
+ The GI path uses this absmax scale. The maximum is obtained from the original 16-bit values, and the scale is computed and stored in FP32.
+
+ 
+ IAA additionally reuses its channel means to select scales for the tiles assigned to 8-bit. For each such tile, it tests Δ α , t = max ⁡ { α ​ Δ 0 , t , 10 − 12 } \Delta_{\alpha,t}=\max\{\alpha\Delta_{0,t},10^{-12}\} for α ∈ { 0.75 , 1.00 , 1.25 } \alpha\in\{0.75,1.00,1.25\} and minimizes the activation-weighted reconstruction error
+
+ 
+ 
+ 
+ 
+ E t ​ ( Δ ) = \displaystyle E_{t}(\Delta)={} 
+ 1 b M ​ b K ​ ∑ ( i , j ) ∈ t max ⁡ { a j , 10 − 8 } \displaystyle\frac{1}{b_{M}b_{K}}\sum_{(i,j)\in t}\max\{a_{j},10^{-8}\} 
+ 
+ (13) 
+
+ 
+ 
+ 
+ × ( Δ ​ Q ​ ( W t , Δ ) i ​ j − W i ​ j ) 2 . \displaystyle}{\displaystyle\times\left(\Delta Q(W_{t};\Delta)_{ij}-W_{ij}\right)^{2}. 
+ 
+ 
+ 
+ Reducing the scale gives finer quantization steps and a narrower representable range. The weighted error therefore accounts for rounding and clipping while emphasizing channels with larger observed inputs. Candidates are evaluated in FP32 in the listed order, with the first retained in a tie.
+
+ 
+ The chosen scale Δ W ( r , c ) \Delta_{W}^{(r,c)} accompanies the signed INT8 tile W ^ ( r , c ) \widehat{W}^{(r,c)} throughout execution. Retained tiles preserve their deployment values in bfloat16 (BF16) or half precision (FP16). Thus, calibration determines the protected locations, while scale construction supplies the numerical representation of the remaining weights.
+
+ 
+ D.3 Decision Archives and Packed Tile Layout
+
+ 
+ The decision archive records each target projection’s name, tile-grid shape, and retained IDs. It stores IDs as unsigned 16-bit integers for grids containing at most 2 16 − 1 2^{16}-1 tiles and as unsigned 32-bit integers for larger grids. Loading recovers ℱ ⁡ ( W ) \mathcal{F}(W) from these IDs and constructs 𝒬 ⁡ ( W ) \mathcal{Q}(W) from the complementary grid positions.
+
+ 
+ For GPU execution, the two precision sets occupy separate contiguous tile buffers. Each buffer is sorted by the identifier in Eq. ( 10 ), so tiles belonging to the same output-tile row are contiguous and ordered by input-tile column. Let R p ​ ( r ) R_{p}(r) count the precision- p p tiles in rows preceding r r , for p ∈ { 8 , 16 } p\in\{8,16\} . Row r r occupies positions
+
+ 
+
+ 
+ 
+ [ R p ​ ( r ) , R p ​ ( r + 1 ) ) . [R_{p}(r),R_{p}(r+1)). 
+ 
+ (14) 
+ 
+ 
+ At buffer position u u , the kernel reads the weight tile and, for the integer path, its scale. The tile ID supplies the corresponding input-feature tile. The kernel can therefore traverse weights contiguously while using their IDs to select activations.
+
+ 
+ The packed layer stores T 8 = | 𝒬 ⁡ ( W ) | T_{8}=|\mathcal{Q}(W)| integer tiles of shape [ T 8 , b M , b K ] [T_{8},b_{M},b_{K}] and T 16 = | ℱ ⁡ ( W ) | T_{16}=|\mathcal{F}(W)| retained tiles of shape [ T 16 , b M , b K ] [T_{16},b_{M},b_{K}] . Integer tiles use INT8; retained tiles and the optional bias of shape [ M ] [M] use BF16 or FP16. An FP32 scale array of shape [ T 8 ] [T_{8}] restores weight magnitudes.
+
+ 
+ Each precision set has INT32 tile-ID and row-order arrays of length T 8 T_{8} or T 16 T_{16} . IDs identify the corresponding input-tile columns, while row-order indices record the packing permutations. Two INT32 row-pointer arrays of shape [ n tr + 1 ] [n_{\mathrm{tr}}+1] delimit each output-tile row’s contiguous range.
+
+ 
+ The packed representation separates numerical payload from indexing. With realized retained fraction ρ real = T 16 / ( T 8 + T 16 ) \rho_{\mathrm{real}}=T_{16}/(T_{8}+T_{16}) , the weight values require 8 + 8 ​ ρ real 8+8\rho_{\mathrm{real}} bits per padded weight element. Including these scales and indexing arrays, the packed tensor storage before bias is
+
+ 
+ 
+ 
+ 
+ S pack = \displaystyle S_{\mathrm{pack}}={} 
+ b M ​ b K ​ ( T 8 + 2 ​ T 16 ) + 4 ​ T 8 \displaystyle b_{M}b_{K}(T_{8}+2T_{16})+4T_{8} 
+ 
+ (15) 
+
+ 
+ 
+ 
+ + 8 ​ ( T 8 + T 16 ) + 8 ​ ( n tr + 1 ) bytes . \displaystyle+8(T_{8}+T_{16})+8(n_{\mathrm{tr}}+1)\quad\text{bytes}. 
+ 
+ 
+ 
+ The terms account for weight values, integer-tile scales, tile IDs plus row-order indices, and the two row-pointer arrays. Activation buffers, outputs, and execution workspace have input-dependent lifetimes and are described separately in Appendix  E .
+
+ 
+ D.4 Loading the Mixed-Precision Model
+
+ 
+ The loader constructs the deployed representation directly from the pretrained checkpoint and decision archive. It initializes the model structure, checks each target projection’s saved grid against its weight shape, and reads checkpoint tensors on the host. As each target weight becomes available, the loader gathers the retained tiles, quantizes the complementary tiles using Appendix  D.2 , builds their row schedules, and installs the resulting mixed-precision module on the GPU.
+
+ 
+ The original biases and non-target tensors retain their roles in the model. Compatible projection modules are subsequently grouped using the procedure in Appendix  E.4 . After loading, the selected weights, scales, and indices remain resident across requests. Runtime work therefore begins with preparing the current activations and consuming the already constructed tile representation.
+
+ 
+ Appendix E Mixed-Precision GPU Execution
+
+ 
+ The packed layer supplies persistent weights and their numerical interpretation. Execution must prepare the current input, evaluate both precision paths, and combine their contributions into the model’s output format. We describe this data flow first, then explain how output scheduling, shared projection inputs, and repeated-generation state reuse the same selected model.
+
+ 
+ E.1 Activation Preparation
+
+ 
+ The integer path requires 8-bit activations, while retained tiles use the current 16-bit input. The runtime therefore preserves X X and prepares an integer copy grouped by the weight tiles’ input-feature ranges. For column group c c , let
+
+ 
+
+ 
+ 
+ m c = max 1 ≤ n ≤ N , j ∈ c ⁡ | X n ​ j | . m_{c}=\max_{1\leq n\leq N,\ j\in c}|X_{nj}|. 
+ 
+ (16) 
+ 
+ 
+ Here, j ∈ c j\in c denotes the original input features covered by that tile column. The maximum covers all activation rows of the current projection input, so one scale is shared across its output-tile rows.
+
+ 
+ For a nonzero group, the fused GPU quantizer computes m c / 127 m_{c}/127 in FP32, rounds the result to the input’s 16-bit datatype, and stores that value in FP32 as Δ X ( c ) \Delta_{X}^{(c)} . An all-zero group uses scale one. Division and nearest-integer rounding then produce
+
+ 
+
+ 
+ 
+ X ^ ( c ) = Q ⁡ ( X ( c ) , Δ X ( c ) ) , \widehat{X}^{(c)}=Q(X^{(c)};\Delta_{X}^{(c)}), 
+ 
+ (17) 
+ 
+ 
+ using the integer range in Eq. ( 11 ). The prepared integer values and scales supply every quantized weight tile consuming those input features.
+
+ 
+ For inputs with at most 128 rows, maximum reduction and quantization are fused. Larger inputs first compute the shared scales and then quantize row tiles. Above 4,096 rows, the runtime applies quantization and mixed GEMM in chunks of at most 4,096 rows using scales computed over the complete input. Each chunk writes directly into its assigned rows of one output tensor. Consequently, row chunking bounds the temporary integer-activation allocation while retaining the same scale definition.
+
+ 
+ E.2 Tile Products and Scaled Accumulation
+
+ 
+ Let ℬ \mathcal{B} denote the activation rows assigned to an output tile, and let r r identify its output-feature tile. The integer path reads X ^ ℬ ( c ) \widehat{X}_{\mathcal{B}}^{(c)} and the stored W ^ ( r , c ) \widehat{W}^{(r,c)} as signed INT8 operands for Tensor Core matrix multiplication. Their tile product accumulates in a signed 32-bit integer (INT32) result,
+
+ 
+
+ 
+ 
+ D ℬ , r , c = X ^ ℬ ( c ) ​ ( W ^ ( r , c ) ) ⊤ . D_{\mathcal{B},r,c}=\widehat{X}_{\mathcal{B}}^{(c)}\big(\widehat{W}^{(r,c)}\big)^{\top}. 
+ 
+ (18) 
+ 
+ 
+ The kernel converts this result to FP32 and multiplies it by Δ X ( c ) ​ Δ W ( r , c ) \Delta_{X}^{(c)}\Delta_{W}^{(r,c)} before adding it to the output accumulator. Applying the scales per tile allows differently scaled integer products to contribute in the same numerical units.
+
+ 
+ The retained path instead multiplies X ℬ ( c ) X_{\mathcal{B}}^{(c)} by the stored 16-bit weights, with FP32 accumulation. Within each assigned range, the kernel evaluates integer tiles in ascending input-column order, followed by retained tiles in ascending input-column order. Both paths consequently share a local partial sum while preserving their operand formats.
+
+ 
+ Once all contributions are combined, the result is cast to the deployment datatype. The original bias is added in that datatype when present, and valid output elements are stored. The module restores the input’s leading batch and sequence dimensions, completing the linear-layer interface.
+
+ 
+ E.3 Output-Tile Scheduling
+
+ 
+ Prefill provides multiple activation rows that can reuse a loaded weight tile, whereas decode provides fewer rows and benefits from additional parallel work across the weight grid. The kernel therefore chooses its activation-row tile size from the current call’s shape, while keeping the weight tiles and precision assignments unchanged. Let N call N_{\mathrm{call}} be the rows passed to one GEMM invocation, including a row chunk when chunking is active.
+
+ 
+ Each output tile spans 64 output features. The kernel uses 16 activation rows per tile for N call ≤ 16 N_{\mathrm{call}}\leq 16 and 32 rows for 16 < N call ≤ 32 16<N_{\mathrm{call}}\leq 32 . For N call > 64 N_{\mathrm{call}}>64 with n tr ≥ 4 ​ n tc n_{\mathrm{tr}}\geq 4n_{\mathrm{tc}} , it uses 128 rows; all remaining shapes use 64 rows. Every configuration uses four warps and three loop-pipeline stages.
+
+ 
+ The split count balances the number of parallel programs against the tile work assigned to each. With activation-row tile size b N b_{N} , the grid contains n tr ​ ⌈ N call / b N ⌉ n_{\mathrm{tr}}\lceil N_{\mathrm{call}}/b_{N}\rceil output tiles before splitting. The target is four times the GPU’s streaming-multiprocessor count. Once the output grid reaches this target, one program handles each tile. Otherwise, the kernel rounds the target-to-output-tile ratio up to a power of two and caps the split count S S at 16. It then halves S S while S > 1 S>1 and ⌊ n tc / S ⌋ < 4 \lfloor n_{\mathrm{tc}}/S\rfloor<4 , limiting splitting when few input tiles are available.
+
+ 
+ Each split receives a contiguous range from both precision-specific tile lists. For precision p p , let h p , r = R p ​ ( r + 1 ) − R p ​ ( r ) h_{p,r}=R_{p}(r+1)-R_{p}(r) be its tile count in row r r . Split s ∈ { 0 , … , S − 1 } s\in\{0,\ldots,S-1\} processes the buffer positions in
+
+ 
+
+ 
+ 
+ [ R p ( r ) + ⌊ h p , r ​ s S ⌋ , R p ( r ) + ⌊ h p , r ​ ( s + 1 ) S ⌋ ) . \left[R_{p}(r)+\left\lfloor\frac{h_{p,r}s}{S}\right\rfloor,R_{p}(r)+\left\lfloor\frac{h_{p,r}(s+1)}{S}\right\rfloor\right). 
+ 
+ (19) 
+ 
+ 
+ These ranges cover each stored tile exactly once. Sequential positions provide contiguous weight addresses, and the three-stage loop pipeline schedules tile loads alongside multiplication.
+
+ 
+ For S = 1 S=1 , the program keeps its complete FP32 sum in registers and writes the final output tile. For S > 1 S>1 , each program publishes its FP32 partial to a reusable workspace and increments an integer completion counter with acquire-release ordering. The last arriving program loads the partials in ascending split order, combines them inside the same kernel, and writes the completed output once. The fixed combination order makes the accumulation order independent of program completion order for a given schedule.
+
+ 
+ The workspace has active FP32 partial slices of shape [ S , N call , M ] [S,N_{\mathrm{call}},M] and one INT32 counter per output tile. Buffers are cached per device and CUDA stream, and the completing program resets its counter for reuse. Algorithm  2 summarizes the arithmetic and completion steps.
+
+ 
+ Algorithm 2 Mixed-precision projection with output-tile scheduling 
+ 
+ 
+ 0: 
+ 
+ 
+  Current input X X ; packed weight tiles, scales, IDs, and row pointers; optional bias
+
+ 
+ 0: 
+ 
+ 
+  Output in the deployment datatype with the original feature dimensions
+
+ 
+ 1: 
+ 
+ 
+  Prepare X ^ \widehat{X} and { Δ X ( c ) } c \{\Delta_{X}^{(c)}\}_{c} as in Appendix  E.1 
+
+ 
+ 2: 
+ 
+ 
+  Select row-tile size and split count S S ; obtain workspace with reusable zeroed counters
+
+ 
+ 3: 
+ 
+ 
+   for all output tiles ( ℬ , r ) (\mathcal{B},r) and splits s s in parallel do 
+
+ 
+ 4: 
+ 
+ 
+   Initialize register accumulator A ← 0 A\leftarrow 0 in FP32
+
+ 
+ 5: 
+ 
+ 
+    for all positions u u in the assigned 8-bit range from Eq. ( 19 ) do 
+
+ 
+ 6: 
+ 
+ 
+    Recover input-tile column c c from its stored ID
+
+ 
+ 7: 
+ 
+ 
+    Compute INT32 product D ℬ , r , c D_{\mathcal{B},r,c} using Eq. ( 18 )
+
+ 
+ 8: 
+ 
+ 
+     A ← A + FP32 ⁡ ( D ℬ , r , c ) ​ ( Δ X ( c ) ​ Δ W ( r , c ) ) A\leftarrow A+\operatorname{FP32}(D_{\mathcal{B},r,c})\big(\Delta_{X}^{(c)}\Delta_{W}^{(r,c)}\big) 
+
+ 
+ 9: 
+ 
+ 
+    end for 
+
+ 
+ 10: 
+ 
+ 
+    for all positions u u in the assigned 16-bit range from Eq. ( 19 ) do 
+
+ 
+ 11: 
+ 
+ 
+    Recover c c and accumulate X ℬ ( c ) ​ ( W ( r , c ) ) ⊤ X_{\mathcal{B}}^{(c)}(W^{(r,c)})^{\top} into A A 
+
+ 
+ 12: 
+ 
+ 
+    end for 
+
+ 
+ 13: 
+ 
+ 
+    if S = 1 S=1 then 
+
+ 
+ 14: 
+ 
+ 
+    Cast A A , add bias when present, and write valid output elements
+
+ 
+ 15: 
+ 
+ 
+    else 
+
+ 
+ 16: 
+ 
+ 
+    Publish A A to the workspace slot for ( s , ℬ , r ) (s,\mathcal{B},r) 
+
+ 
+ 17: 
+ 
+ 
+    Atomically increment the output tile’s integer completion counter
+
+ 
+ 18: 
+ 
+ 
+     if this program is the last to arrive then 
+
+ 
+ 19: 
+ 
+ 
+     Combine FP32 workspace partials in split order 0 , … , S − 1 0,\ldots,S-1 
+
+ 
+ 20: 
+ 
+ 
+     Cast the result, add bias when present, and write valid output elements
+
+ 
+ 21: 
+ 
+ 
+     Reset the completion counter to zero
+
+ 
+ 22: 
+ 
+ 
+     end if 
+
+ 
+ 23: 
+ 
+ 
+    end if 
+
+ 
+ 24: 
+ 
+ 
+   end for 
+
+ 
+
+ 
+ E.4 Shared Projection Inputs
+
+ 
+ Query, key, and value projections consume the same attention input, while gate and up projections consume the same feed-forward input. For members sharing input width and tile geometry, with tile-aligned output widths and compatible device and bias configuration, the loader stacks their packed weight rows along the output dimension. A member preceded by δ ​ r \delta r output-tile rows receives a tile-ID offset of δ ​ r ​ n tc \delta r\,n_{\mathrm{tc}} , following Eq. ( 10 ). Its row pointers are offset by the preceding tile count in the corresponding precision buffer. Weight values and scales stay with their original tiles.
+
+ 
+ When the first projection in a group is invoked, the runtime prepares the shared input once and computes the combined output. Subsequent projections read their feature slices from that result. The group therefore shares activation preparation and one mixed-GEMM invocation while preserving each projection’s precision choices and output features. With row chunking, all grouped projections follow the same chunk sequence.
+
+ 
+ The runtime checks input identity and layout before reusing a grouped output and releases that output after every projection has consumed its slice. Separately invoked projections also reuse prepared integer activations through an inference-only, per-stream cache for compatible inputs of at least 32 rows. Both mechanisms reuse input preparation across projections sharing the same activations.
+
+ 
+ E.5 Repeated Generation and Runtime Reuse
+
+ 
+ Successive token steps invoke the same projection operations with new inputs, allowing the runtime to reuse model data and execution state. Weight buffers, scales, and row schedules remain resident. Compiled launcher handles are cached for repeated argument specializations, and device- and stream-local workspaces serve successive split reductions. Reusing these launchers and buffers reduces recurring setup across generation steps.
+
+ 
+ For fixed request shapes, the runtime prepares CUDA Graphs for prefill and one-token decode. It allocates the key/value cache, input-token storage, position state, and generated-token buffer before replay. Prefill initializes the cache and produces the first greedy token. Each decode replay consumes the current token, updates the cache, selects the next token on the GPU, and advances the GPU-resident position. Attention uses the valid cache prefix indicated by the current position.
+
+ 
+ Prefill capture is used for requests with at most 16,384 prompt activation rows across the batch. Larger prefills execute eagerly into the same preallocated cache, while the repeated decode body remains captured. This reserves graph-owned activation storage for the phases in which replay is used. Across both paths, the runtime continues to consume the same selected mixed-precision weights, while input values, cache contents, and token positions evolve with generation.
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 5: 
+Generation-throughput speedup relative to BF16 on Llama-3.2-3B for gradient-informed (GI) TileQuant variants.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel varies output length and compares GI retention ratios; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 6: 
+Generation-throughput speedup relative to BF16 on Llama-3.2-3B for input-activation-aware (IAA) TileQuant variants.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel varies output length and compares IAA retention ratios; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 7: 
+Generation-throughput speedup relative to BF16 on Llama-3.2-3B for baseline inference methods .
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel varies output length and compares the baseline methods; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 8: 
+Time-per-output-token (TPOT) comparison on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares inference methods across output lengths of 128, 256, 512, and 1024 tokens; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 9: 
+Time-per-output-token (TPOT) comparison for gradient-informed (GI) TileQuant variants on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares GI retention configurations across output lengths; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 10: 
+Time-per-output-token (TPOT) comparison for input-activation-aware (IAA) TileQuant variants on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares IAA retention ratios across output lengths; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 11: 
+Time-per-output-token (TPOT) comparison for baseline inference methods on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares the baseline configurations across output lengths; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 12: 
+Generation-energy comparison on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares inference methods across output lengths of 128, 256, 512, and 1024 tokens; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 13: 
+Generation-energy comparison for gradient-informed (GI) TileQuant variants on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares GI retention configurations across output lengths; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 14: 
+Generation-energy comparison for input-activation-aware (IAA) TileQuant variants on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares IAA retention configurations across output lengths; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 15: 
+Generation-energy comparison for baseline inference methods on Llama-3.2-3B.
+Rows vary batch size over 1, 2, 4, and 8; columns vary prompt length over 128, 2K, 8K, and 16K tokens.
+Each panel compares the baseline configurations across output lengths; OOM denotes an out-of-memory run.
+ 
+ 
+ 
+ Table 3: Prefill peak VRAM (GB) across prompt lengths for Llama-3.2-3B, Qwen2.5-7B, and Qwen2.5-14B. GI denotes gradient-informed tile retention; subscripts give the target 16-bit tile-retention percentage. 
+ 
+ 
+ 
+ 
+ 
+ Model 
+ Len 
+ GI 1 
+ GI 5 
+ GI 10 
+ GI 20 
+ 
+ 
+ 
+ 
+ 
+ 
+ Llama-3.2-3B 
+ 
+ 
+ 1K 
+ 3.68 
+ 3.91 
+ 3.96 
+ 4.31 
+ 
+ 4K 
+ 4.64 
+ 4.82 
+ 4.87 
+ 5.09 
+ 
+ 8K 
+ 5.26 
+ 5.44 
+ 5.50 
+ 5.71 
+ 
+ 16K 
+ 6.89 
+ 7.07 
+ 7.12 
+ 7.34 
+ 
+ 32K 
+ 10.64 
+ 10.82 
+ 10.87 
+ 11.09 
+ 
+ 
+ 
+ 
+ Qwen2.5-7B 
+ 
+ 
+ 1K 
+ 8.56 
+ 8.82 
+ 9.26 
+ 9.72 
+ 
+ 4K 
+ 9.68 
+ 9.94 
+ 10.38 
+ 10.84 
+ 
+ 8K 
+ 10.12 
+ 10.37 
+ 10.82 
+ 11.27 
+ 
+ 16K 
+ 12.43 
+ 12.69 
+ 13.13 
+ 13.58 
+ 
+ 32K 
+ 15.90 
+ 16.15 
+ 16.60 
+ 17.05 
+ 
+ 
+ 
+ 
+ Qwen2.5-14B 
+ 
+ 
+ 1K 
+ 16.12 
+ 16.74 
+ 17.35 
+ 18.29 
+ 
+ 4K 
+ 17.65 
+ 18.27 
+ 18.88 
+ 19.82 
+ 
+ 8K 
+ 18.49 
+ 19.32 
+ 19.72 
+ 20.66 
+ 
+ 16K 
+ 21.65 
+ 22.48 
+ 22.88 
+ 23.82 
+ 
+ 32K 
+ 27.96 
+ 27.95 
+ 29.19 
+ 30.13 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 4: 
+GPU memory comparison on the Llama-3.2-3B model.
+We compare the original model, representative PTQ baselines, and tile-level mixed-precision configurations across retained floating-point tile ratios.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+Values are in GB. Prefill peak VRAM is measured at a prompt length of 32K.
+ 
+ 
+ 
+ 
+ 
+ 
+ Metric 
+ Original 
+ Ours 
+ Uniform 
+ GPTQ 
+ LLM.int8 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ Storage 
+ 5.98 
+ 3.39 
+ 3.39 
+ 3.50 
+ 3.50 
+ 3.63 
+ 3.63 
+ 3.89 
+ 3.89 
+ 3.36 
+ 3.36 
+ 3.42 
+ 3.36 
+ 
+ Post-load VRAM 
+ 5.99 
+ 3.51 
+ 3.51 
+ 3.64 
+ 3.64 
+ 3.69 
+ 3.69 
+ 4.02 
+ 4.02 
+ 5.99 
+ 5.99 
+ 3.55 
+ 3.46 
+ 
+ Peak VRAM 
+ 20.15 
+ 16.14 
+ 16.14 
+ 16.32 
+ 16.32 
+ 16.38 
+ 16.38 
+ 16.59 
+ 16.59 
+ 16.75 
+ 21.00 
+ 17.59 
+ 19.15 
+ 
+ Prefill Peak VRAM 
+ 12.64 
+ 10.64 
+ 10.64 
+ 10.82 
+ 10.82 
+ 10.87 
+ 10.87 
+ 11.09 
+ 11.09 
+ 10.24 
+ 12.24 
+ 10.09 
+ 11.40 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 5: 
+GPU memory comparison on the Qwen2.5-7B model.
+We compare the original model, representative PTQ baselines, and tile-level mixed-precision configurations across retained floating-point tile ratios.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+Values are in GB. Prefill peak VRAM is measured at a prompt length of 32K.
+ 
+ 
+ 
+ 
+ 
+ 
+ Metric 
+ Original 
+ Ours 
+ Uniform 
+ GPTQ 
+ LLM.int8 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ Storage 
+ 14.19 
+ 8.18 
+ 8.18 
+ 8.42 
+ 8.42 
+ 8.73 
+ 8.73 
+ 9.33 
+ 9.33 
+ 8.11 
+ 8.11 
+ 8.25 
+ 8.11 
+ 
+ Post-load VRAM 
+ 14.19 
+ 8.25 
+ 8.25 
+ 8.52 
+ 8.52 
+ 8.97 
+ 8.97 
+ 9.40 
+ 9.40 
+ 13.20 
+ 13.20 
+ 8.35 
+ 8.44 
+ 
+ Peak VRAM 
+ 28.27 
+ 22.83 
+ 22.83 
+ 23.09 
+ 23.09 
+ 23.54 
+ 23.54 
+ 23.99 
+ 23.99 
+ 24.82 
+ 38.70 
+ 22.34 
+ 26.86 
+ 
+ Prefill Peak VRAM 
+ 21.33 
+ 15.90 
+ 15.90 
+ 16.15 
+ 16.15 
+ 16.60 
+ 16.60 
+ 17.05 
+ 17.05 
+ 17.88 
+ 24.82 
+ 15.40 
+ 17.61 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 6: 
+GPU memory comparison on the Qwen2.5-14B model.
+We compare the original model, representative PTQ baselines, and tile-level mixed-precision configurations across retained floating-point tile ratios.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+Values are in GB. Prefill peak VRAM is measured at a prompt length of 32K.
+ 
+ 
+ 
+ 
+ 
+ 
+ Metric 
+ Original 
+ Ours 
+ Uniform 
+ GPTQ 
+ LLM.int8 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ Storage 
+ 27.51 
+ 15.35 
+ 15.35 
+ 15.85 
+ 15.85 
+ 16.46 
+ 16.46 
+ 17.69 
+ 17.69 
+ 15.21 
+ 15.21 
+ 15.50 
+ 15.21 
+ 
+ Post-load VRAM 
+ 27.51 
+ 15.67 
+ 15.67 
+ 16.26 
+ 16.26 
+ 16.90 
+ 16.90 
+ 17.85 
+ 17.85 
+ 27.52 
+ 27.52 
+ 15.75 
+ 15.95 
+ 
+ Peak VRAM 
+ 40.10 
+ 27.96 
+ 27.99 
+ 27.95 
+ 27.95 
+ 29.19 
+ 29.19 
+ 30.13 
+ 30.13 
+ 38.47 
+ 34.28 
+ 27.68 
+ 28.92 
+ 
+ Prefill Peak VRAM 
+ 40.10 
+ 27.96 
+ 27.99 
+ 27.95 
+ 27.95 
+ 29.19 
+ 29.19 
+ 30.13 
+ 30.13 
+ 29.22 
+ 34.28 
+ 27.68 
+ 28.92 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 7: 
+General benchmark results for Llama-3.2-3B across language modeling and downstream reasoning tasks.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+Arrows next to benchmark names indicate the preferred metric direction: ↓ \downarrow means lower is better and ↑ \uparrow means higher is better.
+Accuracy values are reported as percentages, while WikiText-2 is reported with word perplexity.
+Bold values indicate the best result in each row.
+Cell colors are relative to the row-wise Original model under the corresponding metric direction: green for better than or equal to Original, blue for worse than Original, and gray for the Original column.
+ 
+ 
+ 
+ 
+ 
+ 
+ Benchmark 
+ Metric 
+ Original 
+ Ours 
+ Uniform 
+ 
+ 
+ GPTQ 
+ 
+ 
+ 
+ SmoothQ 
+ 
+ 
+ 
+ LLM.int8 
+ 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ WikiText-2 ↓ \downarrow 
+ PPL 
+ 12.487 
+ 12.518 
+ 12.537 
+ 12.473 
+ 12.531 
+ 12.456 
+ 12.494 
+ 12.403 
+ 12.438 
+ 12.453 
+ 12.630 
+ 12.515 
+ 12.609 
+ 12.639 
+ 
+ WinoGrande ↑ \uparrow 
+ Acc. 
+ 71.43 
+ 71.38 
+ 70.98 
+ 72.01 
+ 70.67 
+ 70.98 
+ 71.30 
+ 71.46 
+ 71.30 
+ 70.88 
+ 70.64 
+ 71.43 
+ 71.59 
+ 71.11 
+ 
+ PIQA ↑ \uparrow 
+ Acc. 
+ 77.31 
+ 76.61 
+ 77.09 
+ 77.04 
+ 76.61 
+ 76.93 
+ 76.61 
+ 77.42 
+ 77.15 
+ 76.61 
+ 76.55 
+ 76.82 
+ 76.55 
+ 76.82 
+ 
+ LAMBADA ↑ \uparrow 
+ Acc. 
+ 64.23 
+ 65.62 
+ 65.07 
+ 65.49 
+ 65.58 
+ 65.64 
+ 65.66 
+ 65.78 
+ 65.49 
+ 64.41 
+ 63.96 
+ 64.43 
+ 63.98 
+ 64.31 
+ 
+ ARC-Challenge ↑ \uparrow 
+ Acc. 
+ 52.56 
+ 52.82 
+ 52.30 
+ 52.82 
+ 52.47 
+ 53.56 
+ 52.71 
+ 53.69 
+ 52.88 
+ 52.30 
+ 51.79 
+ 52.73 
+ 51.71 
+ 51.88 
+ 
+ HellaSwag ↑ \uparrow 
+ Acc. 
+ 73.65 
+ 73.25 
+ 73.09 
+ 73.22 
+ 72.72 
+ 73.10 
+ 72.50 
+ 72.95 
+ 72.50 
+ 73.59 
+ 73.53 
+ 73.55 
+ 73.47 
+ 73.48 
+ 
+ MMLU ↑ \uparrow 
+ Acc. 
+ 60.47 
+ 60.64 
+ 60.78 
+ 60.90 
+ 60.74 
+ 60.89 
+ 60.71 
+ 61.10 
+ 60.54 
+ 60.51 
+ 60.80 
+ 60.46 
+ 60.48 
+ 60.89 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 8: 
+General benchmark results for Qwen2.5-7B across language modeling and downstream reasoning tasks.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+Arrows next to benchmark names indicate the preferred metric direction: ↓ \downarrow means lower is better and ↑ \uparrow means higher is better.
+Accuracy values are reported as percentages, while WikiText-2 is reported with word perplexity.
+Bold values indicate the best result in each row.
+Cell colors are relative to the row-wise Original model under the corresponding metric direction: green for better than or equal to Original, blue for worse than Original, and gray for the Original column.
+ 
+ 
+ 
+ 
+ 
+ 
+ Benchmark 
+ Metric 
+ Original 
+ Ours 
+ Uniform 
+ 
+ 
+ GPTQ 
+ 
+ 
+ 
+ SmoothQ 
+ 
+ 
+ 
+ LLM.int8 
+ 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ WikiText-2 ↓ \downarrow 
+ PPL 
+ 9.407 
+ 9.542 
+ 9.576 
+ 9.466 
+ 9.519 
+ 9.434 
+ 9.502 
+ 9.353 
+ 9.408 
+ 9.420 
+ 9.719 
+ 9.413 
+ 9.753 
+ 9.464 
+ 
+ WinoGrande ↑ \uparrow 
+ Acc. 
+ 75.53 
+ 75.40 
+ 75.51 
+ 75.17 
+ 75.14 
+ 75.24 
+ 74.80 
+ 75.32 
+ 75.80 
+ 75.30 
+ 74.59 
+ 75.22 
+ 74.66 
+ 75.37 
+ 
+ PIQA ↑ \uparrow 
+ Acc. 
+ 80.58 
+ 80.44 
+ 80.32 
+ 80.33 
+ 80.88 
+ 80.55 
+ 81.01 
+ 81.15 
+ 80.66 
+ 80.58 
+ 79.05 
+ 80.30 
+ 78.84 
+ 80.20 
+ 
+ LAMBADA ↑ \uparrow 
+ Acc. 
+ 69.49 
+ 69.14 
+ 68.99 
+ 69.37 
+ 69.11 
+ 69.56 
+ 69.07 
+ 69.89 
+ 69.22 
+ 69.47 
+ 67.30 
+ 69.38 
+ 64.41 
+ 69.71 
+ 
+ ARC-Challenge ↑ \uparrow 
+ Acc. 
+ 67.06 
+ 66.90 
+ 66.47 
+ 67.33 
+ 66.81 
+ 67.33 
+ 67.75 
+ 67.58 
+ 67.58 
+ 66.89 
+ 67.15 
+ 66.89 
+ 65.96 
+ 67.06 
+ 
+ HellaSwag ↑ \uparrow 
+ Acc. 
+ 81.39 
+ 81.10 
+ 81.24 
+ 81.49 
+ 81.24 
+ 81.35 
+ 81.30 
+ 81.15 
+ 81.54 
+ 81.26 
+ 80.85 
+ 81.40 
+ 80.38 
+ 81.33 
+ 
+ MMLU ↑ \uparrow 
+ Acc. 
+ 74.23 
+ 75.37 
+ 75.09 
+ 75.26 
+ 75.19 
+ 75.55 
+ 75.22 
+ 75.39 
+ 75.51 
+ 75.22 
+ 74.73 
+ 74.23 
+ 73.56 
+ 75.29 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 9: 
+General benchmark results for Qwen2.5-14B across language modeling and downstream reasoning tasks.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+Arrows next to benchmark names indicate the preferred metric direction: ↓ \downarrow means lower is better and ↑ \uparrow means higher is better.
+Accuracy values are reported as percentages, while WikiText-2 is reported with word perplexity.
+Bold values indicate the best result in each row.
+Cell colors are relative to the row-wise Original model under the corresponding metric direction: green for better than or equal to Original, blue for worse than Original, and gray for the Original column.
+ 
+ 
+ 
+ 
+ 
+ 
+ Benchmark 
+ Metric 
+ Original 
+ Ours 
+ Uniform 
+ 
+ 
+ GPTQ 
+ 
+ 
+ 
+ SmoothQ 
+ 
+ 
+ 
+ LLM.int8 
+ 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ WikiText-2 ↓ \downarrow 
+ PPL 
+ 6.661 
+ 6.776 
+ 6.774 
+ 6.725 
+ 6.740 
+ 6.685 
+ 6.695 
+ 6.611 
+ 6.637 
+ 6.667 
+ 7.721 
+ 6.661 
+ 6.928 
+ 6.751 
+ 
+ WinoGrande ↑ \uparrow 
+ Acc. 
+ 79.16 
+ 79.28 
+ 79.80 
+ 80.45 
+ 79.73 
+ 79.71 
+ 79.80 
+ 80.42 
+ 80.67 
+ 79.48 
+ 80.58 
+ 79.48 
+ 79.48 
+ 79.16 
+ 
+ PIQA ↑ \uparrow 
+ Acc. 
+ 81.77 
+ 81.83 
+ 81.54 
+ 81.59 
+ 81.31 
+ 81.48 
+ 81.35 
+ 81.97 
+ 81.68 
+ 81.83 
+ 81.83 
+ 81.66 
+ 81.34 
+ 81.56 
+ 
+ LAMBADA ↑ \uparrow 
+ Acc. 
+ 73.10 
+ 72.76 
+ 72.75 
+ 72.93 
+ 72.79 
+ 72.97 
+ 72.94 
+ 73.06 
+ 72.79 
+ 72.46 
+ 72.07 
+ 72.95 
+ 72.21 
+ 72.99 
+ 
+ ARC-Challenge ↑ \uparrow 
+ Acc. 
+ 72.70 
+ 71.16 
+ 71.42 
+ 71.59 
+ 71.33 
+ 71.76 
+ 71.50 
+ 71.25 
+ 70.99 
+ 72.35 
+ 71.67 
+ 72.61 
+ 71.16 
+ 71.93 
+ 
+ HellaSwag ↑ \uparrow 
+ Acc. 
+ 85.07 
+ 84.94 
+ 84.78 
+ 85.05 
+ 84.42 
+ 86.38 
+ 85.19 
+ 86.49 
+ 86.06 
+ 85.28 
+ 85.06 
+ 85.03 
+ 84.80 
+ 85.24 
+ 
+ MMLU ↑ \uparrow 
+ Acc. 
+ 79.77 
+ 80.39 
+ 80.67 
+ 80.57 
+ 80.76 
+ 80.92 
+ 80.66 
+ 80.81 
+ 80.81 
+ 80.56 
+ 80.46 
+ 80.40 
+ 80.42 
+ 80.51 
+ 
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 16: 
+Line-level retrieval for Qwen2.5-7B across prompt lengths from 3.2K to 52.9K tokens.
+ Line plots (left y-axis) report exact-match accuracy, while bar plots (right y-axis) show accuracy differences relative to the original baseline.
+Top-left: TileQuant with gradient-informed maps, where keep01, keep05, keep10, and keep20 retain 1%, 5%, 10%, and 20% of tiles in the deployment floating-point dtype.
+Top-right: TileQuant with input-activation-aware maps under the same keep ratios.
+Bottom-left: baseline PTQ methods, including uniform INT8 weight-only quantization, uniform W8A8 quantization, GPTQ, SmoothQuant, and LLM.int8.
+Bottom-right: representative cross-family comparison between the strongest TileQuant configurations and strongest baseline methods.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Figure 17: 
+Line-level retrieval accuracy for Qwen2.5-14B on LongEval across prompt lengths from 3.2K to 52.9K tokens. Line plots (left y-axis) report exact-match retrieval accuracy, while bar plots (right y-axis) show accuracy differences relative to the Original floating-point model.
+ 
+ 
+ 
+ Table 10: 
+Full long-context question answering results for Llama-3.2-3B on LV-Eval across 9 datasets and context lengths from 16K to 256K.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+We follow the LV-Eval metric protocol: keyword-recall F1 by default, blacklist-based F1 for cmrc_mixup , and blacklist-based ROUGE-L for dureader_mixup .
+Cell colors are relative to the row-wise Original reference: green and blue indicate higher and lower scores, respectively, while gray marks Original and values within the neutral comparison range.
+ 
+ 
+ 
+ 
+ 
+ 
+ Dataset 
+ Len 
+ Original 
+ Ours 
+ Uniform 
+ 
+ 
+ GPTQ 
+ 
+ 
+ 
+ SmoothQ 
+ 
+ 
+ 
+ LLM.int8 
+ 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ 1 
+ 16k 
+ 21.41 
+ 23.82 
+ 24.21 
+ 24.01 
+ 23.82 
+ 23.92 
+ 23.76 
+ 24.06 
+ 23.87 
+ 21.15 
+ 21.39 
+ 21.53 
+ 20.15 
+ 20 
+ 
+ 32k 
+ 16.86 
+ 18.16 
+ 18.23 
+ 18.34 
+ 18.19 
+ 18.26 
+ 18.13 
+ 18.38 
+ 18.23 
+ 17.95 
+ 17.05 
+ 17.39 
+ 16.06 
+ 16.31 
+ 
+ 64k 
+ 7.5 
+ 8.48 
+ 8 
+ 8.58 
+ 8.03 
+ 8.54 
+ 8.02 
+ 8.59 
+ 8.04 
+ 7.46 
+ 6.93 
+ 7.58 
+ 7.24 
+ 6.47 
+ 
+ 128k 
+ 3.08 
+ 4.11 
+ 3.63 
+ 4.16 
+ 3.64 
+ 4.14 
+ 3.64 
+ 4.16 
+ 3.65 
+ 3.23 
+ 3.99 
+ 3.16 
+ 3.57 
+ 3.58 
+ 
+ 256k 
+ 2.37 
+ 2.68 
+ 2.52 
+ 2.72 
+ 2.53 
+ 2.71 
+ 2.53 
+ 2.73 
+ 2.54 
+ 2.43 
+ 2.61 
+ 2.38 
+ 2.43 
+ 2.47 
+ 
+ 2 
+ 16k 
+ 16.46 
+ 16.45 
+ 17.37 
+ 16.6 
+ 16.46 
+ 16.54 
+ 16.42 
+ 16.64 
+ 16.5 
+ 16.54 
+ 17.33 
+ 16.07 
+ 17.47 
+ 17.88 
+ 
+ 32k 
+ 17.1 
+ 16.48 
+ 16.88 
+ 16.35 
+ 17.02 
+ 16.29 
+ 16.17 
+ 16.39 
+ 17.03 
+ 16.6 
+ 16.88 
+ 15.83 
+ 16.64 
+ 16.37 
+ 
+ 64k 
+ 15.52 
+ 15.4 
+ 14.72 
+ 15.72 
+ 15.46 
+ 15.64 
+ 15.43 
+ 15.76 
+ 15.47 
+ 14.55 
+ 14.97 
+ 15.04 
+ 14.77 
+ 14.84 
+ 
+ 128k 
+ 11.1 
+ 11 
+ 11.4 
+ 11.27 
+ 11.13 
+ 11.2 
+ 11.08 
+ 11.3 
+ 11.15 
+ 11.6 
+ 11.04 
+ 11.15 
+ 11.26 
+ 10.92 
+ 
+ 256k 
+ 7.43 
+ 6.66 
+ 7.07 
+ 7.56 
+ 7.41 
+ 7.51 
+ 7.4 
+ 7.58 
+ 7.42 
+ 6.87 
+ 6.6 
+ 6.88 
+ 6.61 
+ 6.6 
+ 
+ 3 
+ 16k 
+ 24.49 
+ 25.29 
+ 24.22 
+ 25.51 
+ 24.36 
+ 25.41 
+ 24.33 
+ 25.56 
+ 24.37 
+ 24.33 
+ 20.71 
+ 24.74 
+ 23.15 
+ 23.52 
+ 
+ 32k 
+ 19.23 
+ 18.43 
+ 17.28 
+ 19.43 
+ 19.14 
+ 19.35 
+ 19.11 
+ 19.48 
+ 19.15 
+ 17.82 
+ 19.12 
+ 18.35 
+ 20.74 
+ 17.7 
+ 
+ 64k 
+ 15.86 
+ 13.61 
+ 17.02 
+ 16.06 
+ 15.92 
+ 15.98 
+ 15.86 
+ 16.1 
+ 15.96 
+ 15.89 
+ 14.24 
+ 15.08 
+ 15.73 
+ 15.82 
+ 
+ 128k 
+ 16.15 
+ 13.41 
+ 16.78 
+ 15.82 
+ 15.68 
+ 15.74 
+ 15.62 
+ 15.86 
+ 15.72 
+ 14.21 
+ 14.03 
+ 14.85 
+ 16.12 
+ 15.58 
+ 
+ 256k 
+ 10.44 
+ 9.46 
+ 11.12 
+ 10.62 
+ 10.49 
+ 10.55 
+ 10.44 
+ 10.65 
+ 10.52 
+ 10.31 
+ 9.93 
+ 10.65 
+ 9.57 
+ 10.66 
+ 
+ 4 
+ 16k 
+ 11.23 
+ 14.08 
+ 14.05 
+ 14.18 
+ 14.08 
+ 14.13 
+ 14.05 
+ 14.21 
+ 14.09 
+ 11.17 
+ 11.99 
+ 10.76 
+ 11.74 
+ 12.39 
+ 
+ 32k 
+ 11.39 
+ 12.68 
+ 10.17 
+ 12.8 
+ 11.33 
+ 12.75 
+ 11.32 
+ 12.83 
+ 11.34 
+ 10.84 
+ 11.6 
+ 10.72 
+ 11.17 
+ 12.17 
+ 
+ 64k 
+ 3.45 
+ 5.22 
+ 5.3 
+ 5.26 
+ 5.23 
+ 5.25 
+ 5.22 
+ 5.27 
+ 5.24 
+ 4.29 
+ 4.43 
+ 4.04 
+ 3.93 
+ 4.36 
+ 
+ 128k 
+ 3.43 
+ 3.48 
+ 3.97 
+ 3.53 
+ 3.49 
+ 3.51 
+ 3.47 
+ 3.54 
+ 3.5 
+ 3.07 
+ 3.75 
+ 3.06 
+ 3.45 
+ 3.37 
+ 
+ 256k 
+ 2.37 
+ 2.5 
+ 2.92 
+ 2.54 
+ 2.51 
+ 2.53 
+ 2.5 
+ 2.55 
+ 2.52 
+ 2.37 
+ 2.1 
+ 2.5 
+ 2.71 
+ 2.25 
+ 
+ 5 
+ 16k 
+ 22.39 
+ 24.12 
+ 24.04 
+ 24.32 
+ 24.1 
+ 24.23 
+ 24.06 
+ 24.37 
+ 24.11 
+ 22.98 
+ 24.01 
+ 22.37 
+ 23.01 
+ 22.68 
+ 
+ 32k 
+ 23.02 
+ 24.32 
+ 24.63 
+ 24.56 
+ 24.36 
+ 24.46 
+ 24.29 
+ 24.61 
+ 24.41 
+ 23.61 
+ 23.6 
+ 23.12 
+ 23.51 
+ 22.39 
+ 
+ 64k 
+ 15.49 
+ 15.6 
+ 15.67 
+ 15.8 
+ 15.66 
+ 15.72 
+ 15.6 
+ 15.84 
+ 15.7 
+ 16.68 
+ 16.49 
+ 15.54 
+ 17.08 
+ 15.24 
+ 
+ 128k 
+ 14.98 
+ 13.99 
+ 13.75 
+ 15.21 
+ 14.93 
+ 15.12 
+ 14.9 
+ 15.24 
+ 14.95 
+ 15.06 
+ 14.53 
+ 15.2 
+ 14.29 
+ 15.47 
+ 
+ 256k 
+ 10.47 
+ 10.34 
+ 11.95 
+ 10.65 
+ 10.52 
+ 10.58 
+ 10.47 
+ 10.68 
+ 10.55 
+ 10.62 
+ 11.58 
+ 10.81 
+ 11.46 
+ 11.09 
+ 
+ 6 
+ 16k 
+ 17.88 
+ 19.77 
+ 19.65 
+ 19.93 
+ 19.7 
+ 19.86 
+ 19.68 
+ 19.97 
+ 19.71 
+ 18.61 
+ 19.21 
+ 18.62 
+ 18.85 
+ 18.26 
+ 
+ 32k 
+ 15.77 
+ 16.13 
+ 15.77 
+ 16.29 
+ 15.82 
+ 16.22 
+ 15.8 
+ 16.33 
+ 15.83 
+ 15.91 
+ 16.13 
+ 15.3 
+ 16.39 
+ 16.01 
+ 
+ 64k 
+ 11.77 
+ 12.48 
+ 12.01 
+ 12.63 
+ 12.06 
+ 12.57 
+ 12.04 
+ 12.66 
+ 12.07 
+ 12.45 
+ 11.52 
+ 11.63 
+ 12.39 
+ 11.97 
+ 
+ 128k 
+ 7.52 
+ 7.91 
+ 7.84 
+ 8.02 
+ 7.88 
+ 7.98 
+ 7.86 
+ 8.04 
+ 7.89 
+ 7.55 
+ 7.91 
+ 7.31 
+ 6.89 
+ 7.12 
+ 
+ 256k 
+ 6.13 
+ 5.61 
+ 6.83 
+ 6.24 
+ 6.16 
+ 6.2 
+ 6.13 
+ 6.25 
+ 6.17 
+ 6.18 
+ 6.84 
+ 6.25 
+ 7.03 
+ 6.24 
+ 
+ 7 
+ 16k 
+ 52.61 
+ 51.86 
+ 53.73 
+ 52.83 
+ 52.61 
+ 52.73 
+ 52.55 
+ 52.89 
+ 52.67 
+ 52.64 
+ 51.64 
+ 52.84 
+ 53.19 
+ 52.69 
+ 
+ 32k 
+ 37.75 
+ 37.72 
+ 37.97 
+ 38.01 
+ 37.79 
+ 37.9 
+ 37.71 
+ 38.07 
+ 37.85 
+ 36.52 
+ 36.64 
+ 36.98 
+ 35.57 
+ 38.03 
+ 
+ 64k 
+ 24.31 
+ 26.22 
+ 23.7 
+ 26.53 
+ 24.21 
+ 26.41 
+ 24.18 
+ 26.59 
+ 24.24 
+ 24.64 
+ 24.14 
+ 24.69 
+ 26.24 
+ 25.66 
+ 
+ 128k 
+ 14.61 
+ 16.16 
+ 16.97 
+ 16.38 
+ 16.2 
+ 16.3 
+ 16.14 
+ 16.42 
+ 16.23 
+ 14.83 
+ 15.7 
+ 15.2 
+ 16.69 
+ 14.92 
+ 
+ 256k 
+ 10.93 
+ 10.93 
+ 10.74 
+ 11.12 
+ 10.9 
+ 11.05 
+ 10.88 
+ 11.15 
+ 10.92 
+ 10.56 
+ 10.65 
+ 10.87 
+ 10.83 
+ 11.24 
+ 
+ 8 
+ 16k 
+ 33.81 
+ 34.28 
+ 36.01 
+ 34.5 
+ 34.28 
+ 34.4 
+ 34.22 
+ 34.56 
+ 34.34 
+ 33.98 
+ 34.1 
+ 32.69 
+ 35.75 
+ 34.64 
+ 
+ 32k 
+ 25.95 
+ 27.51 
+ 25.08 
+ 27.77 
+ 25.83 
+ 27.66 
+ 25.8 
+ 27.83 
+ 25.85 
+ 25.14 
+ 26.03 
+ 25.84 
+ 26.5 
+ 25.74 
+ 
+ 64k 
+ 21.24 
+ 20.22 
+ 21.27 
+ 21.51 
+ 21.32 
+ 21.4 
+ 21.24 
+ 21.56 
+ 21.38 
+ 21.39 
+ 20.01 
+ 21.58 
+ 20.89 
+ 21.42 
+ 
+ 128k 
+ 12.21 
+ 12.65 
+ 14.08 
+ 12.84 
+ 12.68 
+ 12.76 
+ 12.63 
+ 12.86 
+ 12.71 
+ 14.13 
+ 12.95 
+ 13.04 
+ 13.5 
+ 12.98 
+ 
+ 256k 
+ 7.65 
+ 7.97 
+ 7.21 
+ 8.1 
+ 7.63 
+ 8.05 
+ 7.62 
+ 8.12 
+ 7.64 
+ 7.99 
+ 8.01 
+ 8.24 
+ 8.04 
+ 7.73 
+ 
+ 9 
+ 16k 
+ 19.05 
+ 23.38 
+ 17.99 
+ 23.55 
+ 18.95 
+ 23.47 
+ 18.93 
+ 23.59 
+ 18.96 
+ 20.91 
+ 19.41 
+ 18.84 
+ 20.2 
+ 22.97 
+ 
+ 32k 
+ 13.48 
+ 15.95 
+ 15.37 
+ 16.09 
+ 15.41 
+ 16.03 
+ 15.4 
+ 16.12 
+ 15.42 
+ 14.77 
+ 15.62 
+ 14.19 
+ 18.02 
+ 14.35 
+ 
+ 64k 
+ 13.71 
+ 13.85 
+ 11.61 
+ 14.03 
+ 13.65 
+ 13.95 
+ 13.63 
+ 14.06 
+ 13.67 
+ 13.51 
+ 13.72 
+ 13.95 
+ 14.49 
+ 12.57 
+ 
+ 128k 
+ 6.6 
+ 8.44 
+ 6.79 
+ 8.54 
+ 6.82 
+ 8.5 
+ 6.81 
+ 8.56 
+ 6.83 
+ 6.93 
+ 6.94 
+ 6.96 
+ 6.98 
+ 7.31 
+ 
+ 256k 
+ 4.78 
+ 5.35 
+ 4.84 
+ 5.43 
+ 4.87 
+ 5.4 
+ 4.86 
+ 5.45 
+ 4.87 
+ 5.73 
+ 4.96 
+ 5.37 
+ 5.51 
+ 5.48 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 11: 
+Full long-context question answering results for Qwen2.5-7B on LV-Eval across 9 datasets and context lengths from 16K to 256K.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+We follow the LV-Eval metric protocol: keyword-recall F1 by default, blacklist-based F1 for cmrc_mixup , and blacklist-based ROUGE-L for dureader_mixup .
+Cell colors are relative to the row-wise Original reference: green and blue indicate higher and lower scores, respectively, while gray marks Original and values within the neutral comparison range.
+ 
+ 
+ 
+ 
+ 
+ 
+ Dataset 
+ Len 
+ Original 
+ Ours 
+ Uniform 
+ 
+ 
+ GPTQ 
+ 
+ 
+ 
+ SmoothQ 
+ 
+ 
+ 
+ LLM.int8 
+ 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ 1 
+ 16k 
+ 24.6 
+ 22.38 
+ 22.18 
+ 23.4 
+ 23.33 
+ 23.85 
+ 23.81 
+ 24.63 
+ 24.66 
+ 23.99 
+ 24.26 
+ 23.33 
+ 22.63 
+ 23.35 
+ 
+ 32k 
+ 23.19 
+ 19.17 
+ 20.18 
+ 21.66 
+ 21.6 
+ 22.32 
+ 22.35 
+ 23.46 
+ 23.49 
+ 22.51 
+ 22.16 
+ 21.91 
+ 21.01 
+ 23.41 
+ 
+ 64k 
+ 11.83 
+ 11.13 
+ 10.06 
+ 11.88 
+ 11.85 
+ 12.22 
+ 12.19 
+ 12.81 
+ 12.8 
+ 12.63 
+ 11.77 
+ 12.76 
+ 11.79 
+ 12.12 
+ 
+ 128k 
+ 7.41 
+ 6.5 
+ 5.69 
+ 6.97 
+ 6.95 
+ 7.18 
+ 7.16 
+ 7.54 
+ 7.56 
+ 7.51 
+ 6.87 
+ 7.33 
+ 6.12 
+ 7.46 
+ 
+ 256k 
+ 4.01 
+ 3.72 
+ 3.84 
+ 4.17 
+ 4.16 
+ 4.31 
+ 4.32 
+ 4.56 
+ 4.57 
+ 4.36 
+ 4.13 
+ 4.32 
+ 3.98 
+ 4.54 
+ 
+ 2 
+ 16k 
+ 20.89 
+ 17.05 
+ 17.82 
+ 19.22 
+ 19.16 
+ 19.84 
+ 19.87 
+ 20.94 
+ 20.92 
+ 20.13 
+ 20.16 
+ 20.22 
+ 20.24 
+ 19.85 
+ 
+ 32k 
+ 19.06 
+ 16.79 
+ 17.47 
+ 18.82 
+ 18.76 
+ 19.26 
+ 19.21 
+ 20.05 
+ 20.03 
+ 19.37 
+ 19.99 
+ 18.35 
+ 18.39 
+ 18.89 
+ 
+ 64k 
+ 17.57 
+ 16.38 
+ 18.01 
+ 18.28 
+ 18.27 
+ 18.41 
+ 18.41 
+ 18.61 
+ 18.63 
+ 16.9 
+ 16.52 
+ 17.15 
+ 18.55 
+ 16.4 
+ 
+ 128k 
+ 14.66 
+ 12.95 
+ 13.17 
+ 14.15 
+ 14.11 
+ 14.58 
+ 14.61 
+ 15.36 
+ 15.33 
+ 15.03 
+ 14.35 
+ 15.27 
+ 13.26 
+ 14.48 
+ 
+ 256k 
+ 8.69 
+ 8.0 
+ 8.31 
+ 8.55 
+ 8.53 
+ 8.66 
+ 8.66 
+ 8.85 
+ 8.84 
+ 8.79 
+ 8.6 
+ 8.58 
+ 8.27 
+ 8.74 
+ 
+ 3 
+ 16k 
+ 5.06 
+ 4.53 
+ 4.57 
+ 4.09 
+ 4.99 
+ 5.22 
+ 5.23 
+ 5.57 
+ 5.56 
+ 4.93 
+ 5.47 
+ 5 
+ 5.56 
+ 5.39 
+ 
+ 32k 
+ 3.4 
+ 2.72 
+ 2.4 
+ 2.82 
+ 2.87 
+ 3.25 
+ 3.15 
+ 3.53 
+ 3.51 
+ 3.22 
+ 3 
+ 3.3 
+ 3.52 
+ 3.22 
+ 
+ 64k 
+ 2.61 
+ 2.47 
+ 2.44 
+ 2.36 
+ 2.8 
+ 3 
+ 3 
+ 3.29 
+ 3.28 
+ 2.81 
+ 2.93 
+ 2.71 
+ 2.69 
+ 3.28 
+ 
+ 128k 
+ 2.21 
+ 1.88 
+ 1.97 
+ 2.12 
+ 2.12 
+ 2.19 
+ 2.2 
+ 2.31 
+ 2.3 
+ 2.17 
+ 2.02 
+ 2.17 
+ 2.09 
+ 2.3 
+ 
+ 256k 
+ 1.42 
+ 1.52 
+ 1.28 
+ 1.53 
+ 1.52 
+ 1.53 
+ 1.52 
+ 1.53 
+ 1.51 
+ 1.36 
+ 1.3 
+ 1.41 
+ 1.47 
+ 1.42 
+ 
+ 4 
+ 16k 
+ 18.89 
+ 18.86 
+ 18.04 
+ 19.49 
+ 19.44 
+ 19.77 
+ 19.72 
+ 20.27 
+ 20.25 
+ 19.57 
+ 20.2 
+ 19.77 
+ 20.22 
+ 18.68 
+ 
+ 32k 
+ 20.54 
+ 18.41 
+ 17.77 
+ 20.08 
+ 20.02 
+ 19.47 
+ 19.42 
+ 19.97 
+ 19.95 
+ 19.28 
+ 19.9 
+ 19.47 
+ 20.13 
+ 18.4 
+ 
+ 64k 
+ 13.8 
+ 13.05 
+ 11.54 
+ 13.7 
+ 13.66 
+ 13.98 
+ 13.95 
+ 14.48 
+ 14.49 
+ 14.43 
+ 13.3 
+ 14.15 
+ 13.73 
+ 13.68 
+ 
+ 128k 
+ 5.39 
+ 5.07 
+ 5.4 
+ 5.71 
+ 5.69 
+ 5.85 
+ 5.85 
+ 6.09 
+ 6.08 
+ 5.24 
+ 6.06 
+ 5.45 
+ 4.86 
+ 5.5 
+ 
+ 256k 
+ 2.97 
+ 3.47 
+ 2.74 
+ 3.48 
+ 3.47 
+ 3.48 
+ 3.48 
+ 3.49 
+ 3.49 
+ 2.91 
+ 3.46 
+ 3.32 
+ 3.24 
+ 2.9 
+ 
+ 5 
+ 16k 
+ 14.67 
+ 13.74 
+ 13.82 
+ 14.35 
+ 14.32 
+ 14.59 
+ 14.6 
+ 15.01 
+ 14.99 
+ 14.97 
+ 13.92 
+ 14.41 
+ 14.79 
+ 14.26 
+ 
+ 32k 
+ 13.21 
+ 13.13 
+ 12.24 
+ 13.38 
+ 13.34 
+ 13.49 
+ 13.46 
+ 13.68 
+ 13.67 
+ 12.77 
+ 13.21 
+ 13.19 
+ 12.98 
+ 13.64 
+ 
+ 64k 
+ 10.69 
+ 10.17 
+ 10.05 
+ 10.59 
+ 10.56 
+ 10.78 
+ 10.75 
+ 11.1 
+ 11.11 
+ 11.06 
+ 10.96 
+ 10.84 
+ 10.66 
+ 10.9 
+ 
+ 128k 
+ 10.52 
+ 9.51 
+ 9.79 
+ 10.14 
+ 10.12 
+ 10.3 
+ 10.31 
+ 10.59 
+ 10.56 
+ 10.22 
+ 10.12 
+ 10.1 
+ 10.15 
+ 10.15 
+ 
+ 256k 
+ 9.87 
+ 8.63 
+ 8.75 
+ 9.28 
+ 9.25 
+ 9.52 
+ 9.53 
+ 9.94 
+ 9.92 
+ 9.41 
+ 9.44 
+ 9.44 
+ 8.41 
+ 9.47 
+ 
+ 6 
+ 16k 
+ 10.41 
+ 10.13 
+ 9.37 
+ 10.55 
+ 10.52 
+ 10.74 
+ 10.71 
+ 11.05 
+ 11.07 
+ 11 
+ 11.04 
+ 10.83 
+ 10.39 
+ 10.84 
+ 
+ 32k 
+ 9.2 
+ 8.34 
+ 7.98 
+ 9.09 
+ 9.06 
+ 9.42 
+ 9.39 
+ 9.99 
+ 10 
+ 9.32 
+ 8.98 
+ 9.51 
+ 9.97 
+ 9.7 
+ 
+ 64k 
+ 7.15 
+ 6.97 
+ 6.6 
+ 7.3 
+ 7.28 
+ 7.44 
+ 7.43 
+ 7.7 
+ 7.69 
+ 7.21 
+ 7.47 
+ 7.36 
+ 7.33 
+ 7.67 
+ 
+ 128k 
+ 5.96 
+ 5.46 
+ 5.38 
+ 5.72 
+ 5.7 
+ 5.84 
+ 5.82 
+ 6.04 
+ 6.05 
+ 5.72 
+ 5.75 
+ 6.01 
+ 6 
+ 5.78 
+ 
+ 256k 
+ 5.59 
+ 5.35 
+ 5.27 
+ 5.66 
+ 5.64 
+ 5.8 
+ 5.78 
+ 6.03 
+ 6.04 
+ 5.52 
+ 5.71 
+ 5.83 
+ 6 
+ 5.77 
+ 
+ 7 
+ 16k 
+ 26.3 
+ 21.84 
+ 22.36 
+ 24.61 
+ 24.54 
+ 25.6 
+ 25.65 
+ 27.37 
+ 27.34 
+ 25.81 
+ 25.19 
+ 27.3 
+ 25.47 
+ 25.67 
+ 
+ 32k 
+ 19.84 
+ 17.87 
+ 17.81 
+ 19.05 
+ 18.99 
+ 19.57 
+ 19.58 
+ 20.5 
+ 20.47 
+ 19.84 
+ 19.31 
+ 19.72 
+ 20.43 
+ 19.35 
+ 
+ 64k 
+ 13.23 
+ 12.21 
+ 12.36 
+ 12.88 
+ 12.85 
+ 13.12 
+ 13.13 
+ 13.51 
+ 13.53 
+ 13.44 
+ 12.53 
+ 13.46 
+ 13.47 
+ 12.29 
+ 
+ 128k 
+ 9.55 
+ 8.85 
+ 8.61 
+ 9.55 
+ 9.53 
+ 9.86 
+ 9.83 
+ 10.42 
+ 10.4 
+ 9.58 
+ 10.06 
+ 9.82 
+ 10.36 
+ 9.4 
+ 
+ 256k 
+ 7.14 
+ 7.49 
+ 6.78 
+ 7.6 
+ 7.58 
+ 7.65 
+ 7.63 
+ 7.74 
+ 7.73 
+ 7.49 
+ 7.69 
+ 7.11 
+ 7.2 
+ 7.06 
+ 
+ 8 
+ 16k 
+ 18.05 
+ 16.62 
+ 16.97 
+ 17.51 
+ 17.47 
+ 17.75 
+ 17.76 
+ 18.16 
+ 18.18 
+ 17.49 
+ 16.5 
+ 18.13 
+ 18.01 
+ 17.96 
+ 
+ 32k 
+ 14.24 
+ 12.57 
+ 12.9 
+ 14.3 
+ 14.26 
+ 14.93 
+ 14.96 
+ 16.01 
+ 16.03 
+ 14.49 
+ 14.42 
+ 13.72 
+ 15.98 
+ 14.43 
+ 
+ 64k 
+ 12.1 
+ 11.69 
+ 11.77 
+ 11.97 
+ 11.95 
+ 12.05 
+ 12.06 
+ 12.22 
+ 12.2 
+ 11.93 
+ 11.64 
+ 11.45 
+ 11.63 
+ 12.16 
+ 
+ 128k 
+ 9.86 
+ 9.66 
+ 9.87 
+ 10.4 
+ 10.37 
+ 10.63 
+ 10.64 
+ 11.03 
+ 11.05 
+ 9.62 
+ 10.87 
+ 9.97 
+ 10.99 
+ 9.48 
+ 
+ 256k 
+ 8.52 
+ 8.6 
+ 8.74 
+ 9.18 
+ 9.16 
+ 9.38 
+ 9.39 
+ 9.72 
+ 9.73 
+ 9.67 
+ 9.04 
+ 8.56 
+ 9.67 
+ 9.01 
+ 
+ 9 
+ 16k 
+ 14.57 
+ 15.29 
+ 14.91 
+ 15.3 
+ 15.26 
+ 15.31 
+ 15.28 
+ 15.33 
+ 15.31 
+ 14.69 
+ 14.65 
+ 15.11 
+ 13.65 
+ 14 
+ 
+ 32k 
+ 13.51 
+ 13.88 
+ 13.69 
+ 14.09 
+ 14.05 
+ 14.18 
+ 14.15 
+ 14.35 
+ 14.33 
+ 13.11 
+ 14.16 
+ 13.77 
+ 12.87 
+ 14.3 
+ 
+ 64k 
+ 9.98 
+ 9.94 
+ 10.56 
+ 10.8 
+ 10.79 
+ 10.91 
+ 10.92 
+ 11.09 
+ 11.11 
+ 10.94 
+ 9.88 
+ 10.82 
+ 11.06 
+ 10.74 
+ 
+ 128k 
+ 7.15 
+ 7.17 
+ 7.61 
+ 7.63 
+ 7.63 
+ 7.63 
+ 7.63 
+ 7.65 
+ 7.64 
+ 6.47 
+ 6.92 
+ 6.87 
+ 7.26 
+ 7.58 
+ 
+ 256k 
+ 5.21 
+ 4.46 
+ 4.99 
+ 5.34 
+ 5.32 
+ 5.49 
+ 5.5 
+ 5.77 
+ 5.76 
+ 4.9 
+ 4.11 
+ 4.49 
+ 5.73 
+ 5.03 
+ 
+ 
+
+ 
+
+ 
+ 
+ Table 12: 
+Full long-context question answering results for Qwen2.5-14B on LV-Eval across 9 datasets and context lengths from 16K to 256K.
+GI and IAA denote Gradient-informed and Input-activation-aware tile-retention policies, with subscripts indicating the retained floating-point tile ratio in percent.
+We follow the LV-Eval metric protocol: keyword-recall F1 by default, blacklist-based F1 for cmrc_mixup , and blacklist-based ROUGE-L for dureader_mixup .
+Cell colors are relative to the row-wise Original reference: green and blue indicate higher and lower scores, respectively, while gray marks Original and values within the neutral comparison range.
+ 
+ 
+ 
+ 
+ 
+ 
+ Dataset 
+ Len 
+ Original 
+ Ours 
+ Uniform 
+ 
+ 
+ GPTQ 
+ 
+ 
+ 
+ SmoothQ 
+ 
+ 
+ 
+ LLM.int8 
+ 
+ 
+ GI 1 
+ IAA 1 
+ GI 5 
+ IAA 5 
+ GI 10 
+ IAA 10 
+ GI 20 
+ IAA 20 
+ W8 
+ W8A8 
+ 
+ 
+ 
+ 1 
+ 16k 
+ 27.62 
+ 26.61 
+ 25.96 
+ 28.26 
+ 28.18 
+ 29.25 
+ 29.17 
+ 30.28 
+ 30.2 
+ 28.11 
+ 28.77 
+ 27.79 
+ 26.69 
+ 30.12 
+ 
+ 32k 
+ 26.84 
+ 25.51 
+ 24.79 
+ 26.57 
+ 26.49 
+ 27.21 
+ 27.13 
+ 27.87 
+ 27.79 
+ 27.19 
+ 27.68 
+ 26.75 
+ 25.59 
+ 25.84 
+ 
+ 64k 
+ 12.82 
+ 12.01 
+ 13.23 
+ 14.3 
+ 14.26 
+ 14.95 
+ 14.9 
+ 15.61 
+ 15.57 
+ 12.19 
+ 15.5 
+ 11.48 
+ 12.57 
+ 12.8 
+ 
+ 128k 
+ 8.86 
+ 7.25 
+ 7.63 
+ 8.24 
+ 8.2 
+ 8.6 
+ 8.57 
+ 8.98 
+ 8.94 
+ 8.7 
+ 8.88 
+ 8.63 
+ 8.1 
+ 8.57 
+ 
+ 256k 
+ 4.41 
+ 4.95 
+ 4.51 
+ 5.19 
+ 5.17 
+ 5.33 
+ 5.31 
+ 5.48 
+ 5.46 
+ 4.61 
+ 5.42 
+ 4.67 
+ 4.88 
+ 4.82 
+ 
+ 2 
+ 16k 
+ 20.59 
+ 19.4 
+ 19.22 
+ 19.99 
+ 19.93 
+ 20.35 
+ 20.29 
+ 20.72 
+ 20.66 
+ 20.45 
+ 19.13 
+ 20.37 
+ 20.2 
+ 19.91 
+ 
+ 32k 
+ 20.2 
+ 17.47 
+ 19.22 
+ 20.15 
+ 20.09 
+ 20.71 
+ 20.65 
+ 21.29 
+ 21.23 
+ 20.26 
+ 19.02 
+ 20.06 
+ 20.06 
+ 20.36 
+ 
+ 64k 
+ 19.09 
+ 17.13 
+ 17.24 
+ 18.25 
+ 18.19 
+ 18.85 
+ 18.79 
+ 19.48 
+ 19.42 
+ 18.98 
+ 18.27 
+ 19.31 
+ 18.39 
+ 18.13 
+ 
+ 128k 
+ 15.17 
+ 14.59 
+ 14.39 
+ 15.34 
+ 15.27 
+ 15.79 
+ 15.72 
+ 16.26 
+ 16.19 
+ 15.44 
+ 14.83 
+ 15.39 
+ 15.98 
+ 16.08 
+ 
+ 256k 
+ 8.26 
+ 10.48 
+ 9.51 
+ 10.53 
+ 10.49 
+ 10.56 
+ 10.52 
+ 10.59 
+ 10.55 
+ 8.66 
+ 8.76 
+ 8.23 
+ 8.21 
+ 8.72 
+ 
+ 3 
+ 16k 
+ 4.21 
+ 4.03 
+ 3.54 
+ 4.21 
+ 4.2 
+ 4.27 
+ 4.23 
+ 4.37 
+ 4.35 
+ 4.23 
+ 4.33 
+ 4.34 
+ 4.24 
+ 4.09 
+ 
+ 32k 
+ 2.76 
+ 2.53 
+ 2.9 
+ 3.35 
+ 3.22 
+ 3.36 
+ 3.22 
+ 3.37 
+ 3.36 
+ 2.83 
+ 3.18 
+ 2.78 
+ 3.33 
+ 3.07 
+ 
+ 64k 
+ 2.54 
+ 2.3 
+ 2.19 
+ 2.41 
+ 2.39 
+ 2.52 
+ 2.39 
+ 2.6 
+ 2.59 
+ 2.48 
+ 2.58 
+ 2.5 
+ 2.48 
+ 2.45 
+ 
+ 128k 
+ 2.2 
+ 2.36 
+ 2.01 
+ 2.12 
+ 2.12 
+ 2.38 
+ 2.3 
+ 2.39 
+ 2.38 
+ 2.3 
+ 2.04 
+ 2.24 
+ 2.18 
+ 2.32 
+ 
+ 256k 
+ 1.62 
+ 1.94 
+ 1.75 
+ 1.78 
+ 1.78 
+ 1.96 
+ 1.92 
+ 1.97 
+ 1.96 
+ 1.68 
+ 1.85 
+ 1.69 
+ 1.76 
+ 1.59 
+ 
+ 4 
+ 16k 
+ 21.18 
+ 22.6 
+ 22.63 
+ 23.21 
+ 23.15 
+ 23.56 
+ 23.5 
+ 23.93 
+ 23.86 
+ 22.07 
+ 23.79 
+ 21.07 
+ 23.16 
+ 22.73 
+ 
+ 32k 
+ 24.51 
+ 22.32 
+ 21.52 
+ 23.39 
+ 23.31 
+ 24.03 
+ 23.95 
+ 24.7 
+ 24.62 
+ 21.74 
+ 23.42 
+ 20.75 
+ 22.81 
+ 22.75 
+ 
+ 64k 
+ 13.2 
+ 13.53 
+ 14.03 
+ 14.42 
+ 14.37 
+ 14.65 
+ 14.6 
+ 14.89 
+ 14.84 
+ 13.28 
+ 14.49 
+ 12.77 
+ 14.77 
+ 14 
+ 
+ 128k 
+ 6.11 
+ 7.1 
+ 6.65 
+ 7.13 
+ 7.11 
+ 7.15 
+ 7.12 
+ 7.17 
+ 7.14 
+ 6.57 
+ 6.94 
+ 6.25 
+ 6.21 
+ 6.62 
+ 
+ 256k 
+ 4.62 
+ 4.89 
+ 4.56 
+ 5.07 
+ 5.05 
+ 5.17 
+ 5.15 
+ 5.28 
+ 5.26 
+ 4.67 
+ 4.62 
+ 4.62 
+ 5.22 
+ 4.65 
+ 
+ 5 
+ 16k 
+ 13.99 
+ 14.05 
+ 13.52 
+ 14.21 
+ 14.17 
+ 14.31 
+ 14.26 
+ 14.41 
+ 14.36 
+ 14.32 
+ 14.2 
+ 13.69 
+ 13.69 
+ 14.29 
+ 
+ 32k 
+ 14.18 
+ 12.9 
+ 13.32 
+ 13.76 
+ 13.71 
+ 14.02 
+ 13.97 
+ 14.29 
+ 14.24 
+ 13.72 
+ 13.62 
+ 13.59 
+ 13.99 
+ 13.28 
+ 
+ 64k 
+ 10.26 
+ 10.26 
+ 10.85 
+ 10.96 
+ 10.93 
+ 11.02 
+ 10.99 
+ 11.09 
+ 11.06 
+ 10.27 
+ 10.14 
+ 10.63 
+ 10.36 
+ 11 
+ 
+ 128k 
+ 10.89 
+ 10.2 
+ 10.03 
+ 10.59 
+ 10.54 
+ 10.82 
+ 10.77 
+ 11.06 
+ 11.01 
+ 10.12 
+ 9.99 
+ 10.56 
+ 10.29 
+ 10.36 
+ 
+ 256k 
+ 8.56 
+ 8.72 
+ 8.85 
+ 8.9 
+ 8.88 
+ 8.93 
+ 8.9 
+ 8.96 
+ 8.93 
+ 8.71 
+ 8.75 
+ 8.83 
+ 8.33 
+ 8.19 
+ 
+ 6 
+ 16k 
+ 11.56 
+ 10.44 
+ 10.36 
+ 10.98 
+ 10.94 
+ 11.3 
+ 11.26 
+ 11.63 
+ 11.6 
+ 11.12 
+ 10.03 
+ 10.86 
+ 9.9 
+ 10.55 
+ 
+ 32k 
+ 9.84 
+ 9.35 
+ 9.34 
+ 9.6 
+ 9.57 
+ 9.76 
+ 9.73 
+ 9.91 
+ 9.88 
+ 9.73 
+ 8.91 
+ 9.39 
+ 8.74 
+ 9.07 
+ 
+ 64k 
+ 7.53 
+ 7.52 
+ 7.72 
+ 7.97 
+ 7.95 
+ 8.12 
+ 8.1 
+ 8.28 
+ 8.25 
+ 8.21 
+ 7.94 
+ 7.81 
+ 8.17 
+ 7.73 
+ 
+ 128k 
+ 6.29 
+ 5.67 
+ 5.83 
+ 6.07 
+ 6.04 
+ 6.21 
+ 6.19 
+ 6.36 
+ 6.34 
+ 6.19 
+ 5.69 
+ 6 
+ 5.95 
+ 6.06 
+ 
+ 256k 
+ 4.94 
+ 4.91 
+ 4.95 
+ 5.13 
+ 5.11 
+ 5.24 
+ 5.22 
+ 5.36 
+ 5.33 
+ 4.88 
+ 5.11 
+ 5.02 
+ 5.29 
+ 5.07 
+ 
+ 7 
+ 16k 
+ 28.85 
+ 23.05 
+ 22.8 
+ 22.01 
+ 21.99 
+ 27.34 
+ 22.68 
+ 29.01 
+ 28.93 
+ 27.39 
+ 25.34 
+ 28.62 
+ 25.94 
+ 24.8 
+ 
+ 32k 
+ 24.0 
+ 17.82 
+ 18.25 
+ 21.14 
+ 21.06 
+ 22.87 
+ 22.79 
+ 24.66 
+ 24.59 
+ 23.58 
+ 22.82 
+ 24.48 
+ 22 
+ 22.3 
+ 
+ 64k 
+ 14.74 
+ 12.59 
+ 13.49 
+ 14.25 
+ 14.2 
+ 14.7 
+ 14.65 
+ 15.17 
+ 15.12 
+ 15.04 
+ 14.99 
+ 14.42 
+ 13.79 
+ 14.32 
+ 
+ 128k 
+ 10.93 
+ 8.94 
+ 8.69 
+ 10.16 
+ 10.11 
+ 10.9 
+ 10.85 
+ 11.66 
+ 11.61 
+ 11 
+ 11.53 
+ 10.8 
+ 10.08 
+ 9.79 
+ 
+ 256k 
+ 8.03 
+ 7.5 
+ 7.58 
+ 7.95 
+ 7.92 
+ 8.17 
+ 8.14 
+ 8.41 
+ 8.37 
+ 7.65 
+ 8.26 
+ 8.3 
+ 7.19 
+ 7.35 
+ 
+ 8 
+ 16k 
+ 16.43 
+ 17.3 
+ 16.74 
+ 17.35 
+ 17.29 
+ 17.38 
+ 17.32 
+ 17.41 
+ 17.35 
+ 16.1 
+ 16.55 
+ 16.4 
+ 16.83 
+ 17.1 
+ 
+ 32k 
+ 14.92 
+ 12.76 
+ 14.39 
+ 14.68 
+ 14.63 
+ 14.85 
+ 14.81 
+ 15.03 
+ 14.99 
+ 14.16 
+ 14.35 
+ 14.73 
+ 13.38 
+ 14.7 
+ 
+ 64k 
+ 11.95 
+ 11.4 
+ 11.98 
+ 12.05 
+ 12.02 
+ 12.08 
+ 12.05 
+ 12.13 
+ 12.09 
+ 11.73 
+ 12.02 
+ 11.72 
+ 11.45 
+ 11.76 
+ 
+ 128k 
+ 9.75 
+ 9.33 
+ 9.39 
+ 9.74 
+ 9.69 
+ 9.95 
+ 9.9 
+ 10.16 
+ 10.12 
+ 10.05 
+ 9.72 
+ 9.72 
+ 9.74 
+ 9.93 
+ 
+ 256k 
+ 7.27 
+ 7.73 
+ 7.86 
+ 8.16 
+ 8.13 
+ 8.34 
+ 8.31 
+ 8.53 
+ 8.49 
+ 7.66 
+ 8.43 
+ 7.89 
+ 8.07 
+ 7.71 
+ 
+ 9 
+ 16k 
+ 16.9 
+ 15.65 
+ 18.54 
+ 19.23 
+ 19.17 
+ 19.64 
+ 19.59 
+ 20.07 
+ 20.01 
+ 16.41 
+ 15.9 
+ 16 
+ 19.96 
+ 17.9 
+ 
+ 32k 
+ 16.3 
+ 14.85 
+ 15.0 
+ 15.96 
+ 15.91 
+ 16.54 
+ 16.49 
+ 17.14 
+ 17.09 
+ 15.73 
+ 13.55 
+ 15.34 
+ 17.02 
+ 16.72 
+ 
+ 64k 
+ 14.27 
+ 14.07 
+ 13.59 
+ 14.63 
+ 14.58 
+ 14.97 
+ 14.92 
+ 15.32 
+ 15.27 
+ 14.2 
+ 13.35 
+ 14.25 
+ 14.36 
+ 14.56 
+ 
+ 128k 
+ 7.54 
+ 7.59 
+ 6.83 
+ 8.51 
+ 8.48 
+ 9.06 
+ 9.03 
+ 9.64 
+ 9.6 
+ 8.67 
+ 9.13 
+ 8.57 
+ 9.55 
+ 8.51 
+ 
+ 256k 
+ 5.56 
+ 5.49 
+ 6.35 
+ 6.38 
+ 6.37 
+ 6.4 
+ 6.38 
+ 6.42 
+ 6.4 
+ 5.55 
+ 6.13 
+ 5.51 
+ 5.36 
+ 5.17 
+ 
+ 
+
+ 
+
+ 
+
+ 
+ Appendix F Additional Experiments
+
+ 
+ This appendix extends the main-text evaluation in the same order: inference efficiency, general tasks, and long-context tasks. We first detail the generation protocol and examine throughput, decoding latency, energy, and GPU memory. We then report complete quality results across model scales, retention ratios, and context lengths.
+
+ 
+ F.1 Experimental Setup
+
+ 
+ Generation workloads. 
+End-to-end efficiency is evaluated on Llama-3.2-3B-Instruct using an NVIDIA A100 GPU with 40 GB memory. Each model instance runs on one GPU, with four independent processes per node assigned separate GPUs and corresponding CPU/NUMA resources. We vary batch size B ∈ { 1 , 2 , 4 , 8 } B\in\{1,2,4,8\} , prompt length P ∈ { 128 , 2048 , 8192 , 16384 } P\in\{128,2048,8192,16384\} , and generated length O ∈ { 128,256,512 , 1024 } O\in\{128,256,512,1024\} , producing 64 request configurations per method. All methods receive identical synthetic token sequences constructed from a repeated text pattern. Greedy decoding generates exactly O O tokens for each request, even if an end-of-sequence token is produced.
+
+ 
+ Execution configurations. 
+The BF16 reference uses the original model with scaled dot-product attention (SDPA). Torch FP16 uses Hugging Face generation with eager attention. Uniform 8-bit weight-only quantization uses torchao’s Int8WeightOnlyConfig through Hugging Face TorchAoConfig , while uniform 8-bit weight-and-activation quantization uses Int8DynamicActivationInt8WeightConfig with cuBLAS INT8 GEMM. GPTQ uses GPTQModel with 8-bit weights, group size 128, and the torch backend. LLM.int8 uses bitsandbytes with an outlier threshold of 6.0. For TileQuant , both GI and IAA are evaluated at 1%, 5%, 10%, and 20% retention. A pure 8-bit configuration using the same TileQuant execution implementation provides the zero-retention control.
+
+ 
+ Measurement protocol. 
+Each configuration uses two warm-up runs followed by five measured runs. We report median timing measurements and maximum observed GPU memory, retaining out-of-memory (OOM) and execution-failure statuses. Time to first token (TTFT) measures the interval from request submission to the first generated token, while time per output token (TPOT) averages the generation time after the first token. Output throughput is B ​ O / T total BO/T_{\mathrm{total}} , where T total T_{\mathrm{total}} is the complete request duration. Energy is measured through NVIDIA Management Library (NVML) accumulated GPU energy and normalized to joules per 1,000 generated tokens, including idle power during the measured request. Throughput, latency, and energy comparisons use these definitions.
+
+ 
+ F.2 Inference Efficiency
+
+ 
+ The main text establishes the generation-throughput advantage of TileQuant across request shapes. Here, we examine how the two calibration routes and their retention budgets affect throughput, per-token latency, and energy. These measurements use the same 64 request configurations, allowing each metric to be compared under identical generated workloads.
+
+ 
+ Generation throughput. 
+Figures  5 , 6 , and  7 expand the main throughput comparison into separate GI, IAA, and baseline groups. The GI and IAA panels include all four retention ratios, showing how additional 16-bit capacity affects complete-model generation. The baseline panels provide the corresponding executable-method comparisons across batch sizes, prompt lengths, and output lengths.
+
+ 
+ The throughput profiles show that increasing the retained fraction produces a modest change in execution efficiency. With batch size 1, a 128-token prompt, and 512 generated tokens, GI 1 and GI 20 achieve 154.98 and 150.17 tokens/s, respectively. At batch size 8 with 16K prompt tokens and 1024 generated tokens, they achieve 306.20 and 301.93 tokens/s. IAA exhibits closely matched throughput at the corresponding retention ratios. These results show that the common tile-native execution structure accommodates different calibration maps and retained capacities with efficient generation.
+
+ 
+ Time per output token. 
+Complete-request throughput includes both prompt processing and repeated decoding. We therefore examine time per output token (TPOT) after the first generated token. Figures  8 , 9 , 10 , and  11 report TPOT speedup relative to BF16, defined as TPOT BF16 / TPOT method \mathrm{TPOT}_{\mathrm{BF16}}/\mathrm{TPOT}_{\mathrm{method}} at matched request shapes. Higher values indicate lower decoding latency. Both GI 1 and GI 20 exceed the BF16 reference throughout the displayed grid, showing that the generation gains extend to repeated decoding.
+
+ 
+ Generation energy. 
+We further measure GPU energy per 1,000 generated tokens over the complete request, including prompt processing and decoding. Figures  12 , 13 , 14 , and  15 report energy efficiency relative to BF16, defined as E BF16 / E method E_{\mathrm{BF16}}/E_{\mathrm{method}} for the same request shape. Higher values therefore indicate lower energy consumption per generated token. Across the displayed grid, GI 1 achieves higher throughput and lower measured energy consumption than BF16.
+
+ 
+ F.2.1 GPU Memory Results
+
+ 
+ We further examine how the retained-tile budget controls the memory footprint of reconstructed models across three model scales. These measurements cover checkpoint storage, post-load VRAM, peak VRAM, and prefill peak VRAM under the model-scale evaluation protocol. The end-to-end generation measurements follow the separate workload protocol in Appendix  F.1 .
+
+ 
+ Table  3 reports prefill peak VRAM across prompt lengths from 1K to 32K. Tables  4 , 5 , and 6 provide the complete memory profiles for Llama-3.2-3B, Qwen2.5-7B, and Qwen2.5-14B.
+
+ 
+ The results show that the retention ratio provides direct control over the persistent memory footprint. On Llama-3.2-3B, increasing retention from 1% to 20% changes post-load memory from 3.51 to 4.02 GB, compared with 5.99 GB for Original. The corresponding values are 8.25 to 9.40 GB on Qwen2.5-7B and 15.67 to 17.85 GB on Qwen2.5-14B. GI and IAA have identical or closely matched memory usage at the same retention ratio because the number and format of retained weights remain the same, while their selected locations differ.
+
+ 
+ Prefill measurements further show how the compact representation carries into longer inputs. At 32K prompt tokens, GI 20 uses 11.09 GB on Llama-3.2-3B, 17.05 GB on Qwen2.5-7B, and 30.13 GB on Qwen2.5-14B, compared with 12.64, 21.33, and 40.10 GB for their respective original models. The retention ratio controls persistent weight storage, while longer prompts additionally require activation and attention memory. Together with the quality evaluations, these measurements support selecting the retained capacity and calibration route jointly for deployment memory and accuracy.
+
+ 
+ F.3 General Tasks
+
+ 
+ After evaluating execution efficiency, we extend the general-task quality analysis to three model scales and the complete set of retention ratios. Tables  7 , 8 , and  9 report WikiText-2 perplexity and six downstream benchmarks for Llama-3.2-3B, Qwen2.5-7B, and Qwen2.5-14B. Both GI and IAA are evaluated with 1%, 5%, 10%, and 20% of target weight tiles retained at 16-bit, extending the main text’s 1% and 20% configurations.
+
+ 
+ Across the three models, the full retention sweep shows that locally preserving a limited number of sensitive tiles maintains strong general-task performance. On Qwen2.5-7B, GI 20 achieves 9.353 WikiText-2 perplexity, compared with 9.407 for Original. On Qwen2.5-14B, the corresponding values are 6.611 and 6.661. The improvements extend to selected downstream tasks: GI 10 reaches 75.55% MMLU accuracy on Qwen2.5-7B versus 74.23% for Original, while GI 20 reaches 86.49% HellaSwag accuracy on Qwen2.5-14B versus 85.07% for Original. These results extend the quality preservation observed on Llama-3.2-3B to larger models using the same tile allocation rule.
+
+ 
+ The two calibration routes also provide different quality profiles at the same retained capacity. On Qwen2.5-14B at 20% retention, IAA reaches 80.67% WinoGrande accuracy, compared with 80.42% for GI and 79.16% for Original. On HellaSwag, GI reaches 86.49%, compared with 86.06% for IAA and 85.07% for Original. These task-dependent rankings show how calibration affects quality with retained capacity and mixed-precision execution held fixed.
+
+ 
+ F.4 Long Context Tasks
+
+ 
+ We further examine whether calibration-derived local precision choices preserve retrieval and question-answering capabilities as context length increases. Following the main text, LongEval evaluates evidence localization across input lengths, while LV-Eval extends the analysis to question answering over multiple documents and datasets.
+
+ 
+ Long-context retrieval. 
+The main text evaluates Llama-3.2-3B on LongEval from 2.7K to 43.4K tokens. Figures  16 and  17 extend the same retrieval analysis to Qwen2.5-7B and Qwen2.5-14B, covering input lengths from 3.2K to 52.9K tokens. Each figure compares GI and IAA retention sweeps with the quantization baselines, using exact-match accuracy to measure successful line retrieval.
+
+ 
+ The Qwen results extend the retrieval evaluation to larger models and prompts up to 52.9K tokens. Within each model, the retention sweep examines how high-precision capacity affects line retrieval, while the matched-budget GI and IAA comparison evaluates the two calibration routes. Each resulting map is reused throughout the length sweep, connecting offline calibration to retrieval under changing input lengths.
+
+ 
+ Long-context question answering. 
+LV-Eval extends the retrieval analysis to answering questions from long input contexts. Tables  10 , 11 , and  12 report complete results for Llama-3.2-3B, Qwen2.5-7B, and Qwen2.5-14B at five context-length levels: 16K, 32K, 64K, 128K, and 256K. Each model includes all four retention ratios for IAA and GI.
+
+ 
+ The nine datasets follow the numbering in Table  2 : 1 cmrc_mixup , 2 dureader_mixup , 3 hotpotwikiqa_mixup , 4 lic_mixup , 5 loogle_CR_mixup , 6 loogle_MIR_mixup , 7 loogle_SD_mixup , 8 multifieldqa_en_mixup , and 9 multifieldqa_zh_mixup . We follow the LV-Eval protocol, reporting keyword-recall-based F1 by default, blacklist-based F1 for cmrc_mixup , and blacklist-based ROUGE-L for dureader_mixup .
+
+ 
+ The 128K and 256K LV-Eval levels extend the main-text question-answering evaluation to longer contexts. On Qwen2.5-14B, GI 20 scores 11.66 on LooGLE-SD at 128K, compared with 10.93 for Original. On Qwen2.5-7B, it scores 9.72 on English MultiFieldQA at 256K, compared with 8.52 for Original. Each model reuses its calibrated maps across these length levels, showing that the selected local regions remain useful for answering questions in longer contexts.
+
+ 
+ Across the full LV-Eval evaluation, the retention ratio sets the available 16-bit capacity, and the calibration route determines its allocation and the associated quantization parameters. The 20% configurations frequently achieve strong results across datasets and lengths, while lower-retention variants provide additional operating points with smaller weight representations. Each model uses its own calibration-derived maps, which are reused across that model’s retrieval and question-answering tasks and input lengths.
+
+ 
+ Table 13: 
+Matched-budget tile-selection controls on Qwen2.5-7B with 64 × 64 64\times 64 tiles. Matched-control PPL uses the fixed subset of 62 WikiText-2 test documents.
+The target-linear payload is shared by all selection rules within each budget.
+Random PPL is reported as mean ± \pm sample standard deviation over five draws.
+Bold marks the best displayed value in each row.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Retention 
+ (%) 
+ 
+ 
+ 
+ 
+ 
+ 
+ Target-linear 
+ (GiB) 
+ 
+ 
+ 
+ 
+ Metric 
+ 
+ Controls 
+ 
+ 
+ Ours 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ Random 
+ 
+ 
+ 
+ Magnitude 
+ 
+ 
+ 
+ IAA 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 5 
+ 
+ 
+ 
+ 6.39 
+ 
+ 
+ 
+ Retained saliency mass (%) ↑ \uparrow 
+ 
+ 
+ 
+ 5.00 
+ 
+ 
+ 
+ 5.34 
+ 
+ 
+ 
+ 7.05 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Matched-control PPL ↓ \downarrow 
+ 
+ 
+ 
+ 9.92 ± 0.03 9.92\pm 0.03 
+ 
+ 
+ 
+ 9.93 
+ 
+ 
+ 
+ 9.85 
+ 
+
+ 
+ 
+ 
+ 20 
+ 
+ 
+ 
+ 7.30 
+ 
+ 
+ 
+ Retained saliency mass (%) ↑ \uparrow 
+ 
+ 
+ 
+ 20.00 
+ 
+ 
+ 
+ 20.76 
+ 
+ 
+ 
+ 23.90 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Matched-control PPL ↓ \downarrow 
+ 
+ 
+ 
+ 9.82 ± 0.03 9.82\pm 0.03 
+ 
+ 
+ 
+ 9.78 
+ 
+ 
+ 
+ 9.7650 
+ 
+
+ 
+ 
+ 
+ 
+ Table 14: 
+Allocation-geometry controls on Qwen2.5-7B at a matched 20% high-precision retention target.
+Total payload denotes the stored representation measured in this control.
+Retained saliency mass is reported as a fraction, and PPL uses the fixed 62-document subset.
+Bold marks the best displayed value in each row.
+ 
+ 
+ 
+ 
+ 
+ 
+ Metric 
+ 
+ 
+ 
+ Unit 
+ 
+ Allocation controls 
+ 
+ 
+ Ours 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Full column 
+ 
+ 
+ 
+ 1 × 64 1\times 64 
+ 
+ 
+ 
+ 64 × 1 64\times 1 
+ 
+ 
+ 
+ Full row 
+ 
+ 
+ 
+ 64 × 64 64\times 64 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Total payload ↓ \downarrow 
+ 
+ 
+ 
+ GiB 
+ 
+ 
+ 
+ 7.2995 
+ 
+ 
+ 
+ 7.3744 
+ 
+ 
+ 
+ 7.3744 
+ 
+ 
+ 
+ 7.2997 
+ 
+ 
+ 
+ 7.2984 
+ 
+
+ 
+ 
+ 
+ Metadata ↓ \downarrow 
+ 
+ 
+ 
+ MiB 
+ 
+ 
+ 
+ 0.43 
+ 
+ 
+ 
+ 77.21 
+ 
+ 
+ 
+ 77.21 
+ 
+ 
+ 
+ 0.53 
+ 
+ 
+ 
+ 0.61 
+ 
+
+ 
+ 
+ 
+ Retained saliency mass ↑ \uparrow 
+ 
+ 
+ 
+ Fraction 
+ 
+ 
+ 
+ 0.31 
+ 
+ 
+ 
+ 0.26 
+ 
+ 
+ 
+ 0.32 
+ 
+ 
+ 
+ 0.23 
+ 
+ 
+ 
+ 0.24 
+ 
+
+ 
+ 
+ 
+ Matched-control PPL ↓ \downarrow 
+ 
+ 
+ 
+ PPL 
+ 
+ 
+ 
+ 9.72 
+ 
+ 
+ 
+ 9.87 
+ 
+ 
+ 
+ 9.71 
+ 
+ 
+ 
+ 9.98 
+ 
+ 
+ 
+ 9.7650 
+ 
+
+ 
+ 
+ 
+ 
+ Table 15: 
+Geometry-specific execution on Qwen2.5-7B with IAA scores and 20% 16-bit retention.
+Native tiles are 64 × 64 64\times 64 . FP-intersected tiles contain retained weights; partially mixed tiles contain both precisions.
+B1 and B4 denote batch sizes 1 and 4; TPOT is time per output token.
+Bold marks the minimum in each row.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Metric 
+ Unit 
+ One-dimensional paths 
+ Ours 
+ 
+ 
+ 
+ Full 
+ column 
+ 
+ 
+ 
+ 64 × 1 64\times 1 
+ compact strip 
+ 
+ 
+ 
+ 64 × 64 64\times 64 
+ tile 
+ 
+ 
+ 
+ 
+ Metadata ↓ \downarrow 
+ MiB 
+ 0.436 
+ 77.208 
+ 0.611 
+ 
+ 
+ 
+ FP-intersected 
+ native tiles 
+ ↓ \downarrow 
+ % 
+ 99.50 
+ 99.53 
+ 20.01 
+ 
+ 
+ 
+ Partially mixed 
+ native tiles 
+ ↓ \downarrow 
+ Count 
+ 1,581,552 
+ 1,583,860 
+ 0 
+ 
+ 
+ 
+ Prefill 
+ B1/8K 
+ ↓ \downarrow 
+ ms 
+ 1548.57 
+ 4183.85 
+ 1211.46 
+ 
+ 
+ 
+ Decode B1 
+ TPOT 
+ ↓ \downarrow 
+ 
+ 
+ ms/ 
+ token 
+ 
+ 57.12 
+ 58.67 
+ 40.08 
+ 
+ 
+ 
+ Decode B4 
+ TPOT 
+ ↓ \downarrow 
+ 
+ 
+ ms/ 
+ token 
+ 
+ 58.06 
+ 62.93 
+ 39.73 
+ 
+ 
+ 
+ Post-load 
+ memory 
+ ↓ \downarrow 
+ GiB 
+ 10.574 
+ 11.674 
+ 9.377 
+ 
+ 
+ 
+
+ 
+ 
+ Table 16: 
+Exact-budget tile-size sensitivity on Qwen2.5-7B .
+Each configuration retains 66,977,792 high-precision weight elements.
+Map time measures decision-map construction.
+PPL is the matched-control value, MMLU accuracy is a percentage, and LongEval accuracy is a fraction at 52.9K tokens.
+Bold marks the best displayed value in each row.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Metric 
+ Unit 
+ Weight tile size 
+ 
+ 32 × 32 32\times 32 
+ 64 × 64 64\times 64 
+ 128 × 128 128\times 128 
+ 
+ 
+ 
+ Target-linear payload ↓ \downarrow 
+ GiB 
+ 6.1457 
+ 6.1454 
+ 6.1454 
+ 
+ Metadata ↓ \downarrow 
+ Bytes 
+ 246,848 
+ 35,840 
+ 11,312 
+ 
+ Map-construction time ↓ \downarrow 
+ s 
+ 5.48 
+ 3.16 
+ 2.16 
+ 
+ Matched-control PPL ↓ \downarrow 
+ PPL 
+ 9.9368 
+ 9.9319 
+ 9.9322 
+ 
+ MMLU ↑ \uparrow 
+ % 
+ 73.89 
+ 74.06 
+ 73.80 
+ 
+ LongEval at 52.9K ↑ \uparrow 
+ Accuracy 
+ 0.40 
+ 0.50 
+ 0.30 
+ 
+ 
+ 
+
+ 
+ 
+ Table 17: 
+Offline calibration time and peak GPU memory for GI and IAA at three sample counts. Speedup is the ratio of GI time to IAA time at the same sample count. Bold marks the lower-cost route in each pair.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Samples 
+ Time (s) ↓ \downarrow 
+ 
+ 
+ IAA 
+ speedup ( × \times ) 
+ 
+ Peak memory (GiB) ↓ \downarrow 
+ 
+ GI 
+ IAA 
+ GI 
+ IAA 
+ 
+ 
+ 
+ 128 
+ 112.4 
+ 36.8 
+ 3.05 
+ 25.41 
+ 9.24 
+ 
+ 256 
+ 218.3 
+ 77.0 
+ 2.83 
+ 25.41 
+ 9.24 
+ 
+ 512 
+ 407.1 
+ 132.6 
+ 3.07 
+ 25.41 
+ 9.24 
+ 
+ 
+ 
+
+ 
+ 
+ Table 18: 
+Retained-set stability across three independent calibration draws at 1% and 20% retention. Values report Jaccard similarity between selected tile sets. Bold marks the larger value in each pair, including ties.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Statistic 
+ 1% retention 
+ 20% retention 
+ 
+ GI 
+ IAA 
+ GI 
+ IAA 
+ 
+ 
+ 
+ Pairwise Jaccard mean ↑ \uparrow 
+ 0.98 
+ 0.99 
+ 0.99 
+ 0.99 
+ 
+ Pairwise Jaccard minimum ↑ \uparrow 
+ 0.97 
+ 0.99 
+ 0.99 
+ 0.99 
+ 
+ Per-layer Jaccard median ↑ \uparrow 
+ 0.97 
+ 0.99 
+ 0.99 
+ 0.99 
+ 
+ Per-layer Jaccard minimum ↑ \uparrow 
+ 0.93 
+ 0.97 
+ 0.97 
+ 0.99 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Table 19: 
+Overlap between GI and IAA retained sets across models and retention ratios.
+Jaccard is reported as a fraction, shared/retained as a percentage, and Jaccard/chance as the reported ratio to random-map overlap.
+These columns describe agreement between selection routes across models.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Model 
+ 
+ 
+ Retention 
+ (%) 
+ 
+ Jaccard 
+ 
+ 
+ Jaccard / 
+ chance ( × \times ) 
+ 
+ 
+ 
+ Shared / 
+ retained (%) 
+ 
+ 
+ 
+ 
+ Llama-3.2-3B 
+ 1 
+ 0.04 
+ 8.60 
+ 8.29 
+ 
+ 5 
+ 0.09 
+ 3.45 
+ 16.25 
+ 
+ 10 
+ 0.13 
+ 2.52 
+ 23.39 
+ 
+ 20 
+ 0.22 
+ 1.94 
+ 35.44 
+ 
+ Qwen2.5-7B 
+ 1 
+ 0.15 
+ 29.19 
+ 25.58 
+ 
+ 5 
+ 0.29 
+ 11.20 
+ 44.63 
+ 
+ 10 
+ 0.36 
+ 6.87 
+ 53.11 
+ 
+ 20 
+ 0.42 
+ 3.78 
+ 59.14 
+ 
+ Qwen2.5-14B 
+ 1 
+ 0.13 
+ 25.67 
+ 22.85 
+ 
+ 5 
+ 0.22 
+ 8.77 
+ 36.71 
+ 
+ 10 
+ 0.29 
+ 5.47 
+ 44.71 
+ 
+ 20 
+ 0.37 
+ 3.30 
+ 53.62 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ Table 20: 
+Projection-level saliency coverage and GI/IAA retained-set overlap on Qwen2.5-7B at 20% retention. All values are percentages.
+The GI and IAA columns report retained saliency mass, while the final two columns describe agreement between their retained sets.
+These statistics characterize selected regions by projection family and scoring route.
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Projection 
+ 
+ 
+ Retained saliency 
+ mass (%) 
+ 
+ 
+ 
+ Jaccard 
+ (%) 
+ 
+ 
+ 
+ Shared / 
+ retained (%) 
+ 
+ 
+ GI 
+ IAA 
+ 
+ 
+ 
+ q_proj 
+ 32.37 
+ 25.33 
+ 23.89 
+ 38.03 
+ 
+ k_proj 
+ 28.62 
+ 26.13 
+ 31.12 
+ 45.67 
+ 
+ v_proj 
+ 27.86 
+ 24.07 
+ 22.30 
+ 32.66 
+ 
+ o_proj 
+ 29.35 
+ 29.70 
+ 58.51 
+ 71.97 
+ 
+ up_proj 
+ 22.75 
+ 21.94 
+ 39.12 
+ 55.83 
+ 
+ gate_proj 
+ 24.03 
+ 25.59 
+ 49.74 
+ 66.13 
+ 
+ down_proj 
+ 22.58 
+ 22.09 
+ 41.40 
+ 58.11 
+ 
+ 
+ 
+
+ 
+
+ 
+ Appendix G Calibration and Allocation Analysis
+
+ 
+ We examine how retained locations, allocation geometry, and calibration choices contribute to TileQuant . The first three studies isolate tile selection, allocation geometry, and tile size under matched high-precision budgets on Qwen2.5-7B. We then evaluate calibration cost, the reproducibility of retained sets, and the differences between GI and IAA maps. For the selection, geometry, and tile-size controls, matched-control perplexity (PPL) is evaluated on a fixed subset of 62 WikiText-2 test documents using a common evaluation wrapper. Full-benchmark results are in Appendix  F.3 .
+
+ 
+ G.1 Matched-Budget Tile Selection
+
+ 
+ To isolate the value of retained locations, we fix the 64 × 64 64\times 64 tile grid and compare IAA, magnitude-based selection, and random selection. Within each budget, all three rules retain the same number of high-precision weights: 326,516,736 at 5% and 1,305,608,192 at 20%. Random selection uses five independent draws. Table  13 reports the resulting matched-control PPL and retained saliency mass, the percentage of calibration saliency covered by the retained weights.
+
+ 
+ At 5% retention, IAA achieves 9.85 PPL, compared with 9.93 for magnitude selection and 9.92 for random selection, while covering 7.05% of the calibration saliency. At 20%, IAA further achieves 9.7650 PPL, compared with 9.78 and 9.82 for the two controls. Since all methods retain the same high-precision capacity within each comparison, these results show that activation-aware scores effectively prioritize useful local weight regions. We next examine how the geometry of these regions affects their representation and execution.
+
+ 
+ G.2 Allocation Geometry and Execution
+
+ 
+ Selection scores determine priority, while the allocation unit determines which weights share a precision decision. We therefore compare 1 × 64 1\times 64 and 64 × 1 64\times 1 strips, full rows, full columns, and 64 × 64 64\times 64 tiles at a matched 20% retention target. Table  14 reports the payload, metadata, retained saliency mass, and matched-control PPL for these alternatives.
+
+ 
+ At 20% retention, 64 × 64 64\times 64 tiles achieve 9.7650 matched-control PPL, close to 9.72 for full columns and 9.71 for 64 × 1 64\times 1 strips. Their metadata occupies 0.61 MiB, compared with 77.21 MiB for the compact strips. Thus, 2D tiles preserve similar language-modeling quality in this control with substantially less metadata than fine-grained strips. The execution measurements below test how these representations affect prefill and decoding.
+
+ 
+ We further compare executable full-column, compact-strip, and tile implementations using the same IAA entry scores and 20% retention target. These geometry measurements use an A100-40GB GPU, with 10 warm-up requests followed by 30 timed requests in each of three fresh processes. Table  15 reports prefill latency, decode TPOT, and post-load memory for this dedicated control.
+
+ 
+ Relative to full-column allocation, the tile implementation reduces 8K prefill latency by 21.8%, B1 decode TPOT by 29.8%, and B4 decode TPOT by 31.6%, with approximately 1.20 GiB less post-load memory. Together with the quality comparison, these measurements support the hardware-aligned tile as an effective allocation and execution unit among those evaluated.
+
+ 
+ G.3 Tile-Size Sensitivity
+
+ 
+ Within the 2D design, tile size controls the resolution of precision placement and the amount of selection metadata. We compare 32 × 32 32\times 32 , 64 × 64 64\times 64 , and 128 × 128 128\times 128 tiles while retaining exactly 66,977,792 high-precision weight elements in every configuration, corresponding to approximately 1.026% retention. Table  16 therefore evaluates size changes at equal retained capacity.
+
+ 
+ The 64 × 64 64\times 64 configuration achieves the highest MMLU accuracy and LongEval accuracy among the three evaluated sizes, reaching 74.06% and 0.50, respectively. Compared with 32 × 32 32\times 32 tiles, it requires 85.5% less metadata and 42.3% less map-construction time. These results support the selected tile dimensions for local precision allocation and compact metadata construction.
+
+ 
+ G.4 Calibration Cost
+
+ 
+ The two scoring routes share the selection and execution pipeline, while collecting different calibration signals. To quantify their offline resource requirements, we compare wall-clock time and peak memory at matched sample counts of 128, 256, and 512 (Table  17 ). These cost measurements use the stated sample counts, while the full quality evaluation uses maps calibrated with 8,192 examples.
+
+ 
+ IAA is 2.83–3.07 × \times faster across these sample counts, and its peak memory is 9.24 GiB versus 25.41 GiB for GI, a reduction of 63.6%. This difference follows the information collected by each route: IAA uses forward statistics, while GI additionally computes gradients of the prediction loss. The shared pipeline therefore supports lower-cost calibration alongside loss-sensitive selection.
+
+ 
+ G.5 Retained-Set Stability
+
+ 
+ We examine whether changing the calibration records changes which tiles receive high precision. Calibration is repeated across three independent draws for each route at 1% and 20% retention. For retained sets ℛ 1 \mathcal{R}_{1} and ℛ 2 \mathcal{R}_{2} from two draws, Jaccard similarity is J ⁡ ( ℛ 1 , ℛ 2 ) = | ℛ 1 ∩ ℛ 2 | / | ℛ 1 ∪ ℛ 2 | J(\mathcal{R}_{1},\mathcal{R}_{2})=|\mathcal{R}_{1}\cap\mathcal{R}_{2}|/|\mathcal{R}_{1}\cup\mathcal{R}_{2}| . Table  18 reports agreement between full-model retained sets and within individual projections, measuring the repeatability of local precision selection.
+
+ 
+ The mean pairwise Jaccard is 0.98 for GI at 1% retention and 0.99 for the other three configurations. Layer-level minima range from 0.93 to 0.99, showing that the agreement extends to individual layers. Both routes therefore produce reproducible retained locations under the evaluated sampling changes. We next compare GI with IAA to distinguish this within-route stability from differences between the two scoring signals.
+
+ 
+ G.6 GI/IAA Retained-Set Overlap
+
+ 
+ GI and IAA use the same capacity rule but evaluate importance through different signals. Table  20 compares their retained sets across three models and four retention ratios. Jaccard measures intersection relative to union, while shared/retained measures the fraction of either equally sized retained set selected by both routes. The chance-normalized column compares Jaccard with the expected overlap of random maps at the same retention ratio.
+
+ 
+ Agreement exceeds the reported chance reference by 1.94–29.19 × \times . At 20% retention, the two routes share 35.44% of retained tiles on Llama-3.2-3B, 59.14% on Qwen2.5-7B, and 53.62% on Qwen2.5-14B. The maps therefore contain shared selections alongside locations preferred by each scoring signal. These overlaps describe the difference in retained locations, while the quality and calibration-cost experiments evaluate the practical value of each route.
+
+ 
+ To locate differences between the two retained maps, Table  20 groups the 20% retention results on Qwen2.5-7B by projection family across 28 decoder layers. Both routes retain 318,752 tiles, with 188,508 shared selections, corresponding to 41.98% Jaccard similarity and 59.14% shared/retained overlap. Retained saliency mass measures the fraction of importance scores covered by selected regions in each projection family.
+
+ 
+ Agreement is highest in the attention-output and gate projections, while the query and value projections show less overlap. The retained budget is identical for the two routes within each projection, so these differences concern the locations receiving high precision. Projection-level comparisons therefore identify where the two calibration routes make the most different local selections.
+
+ 
+
+ 
+ 
+ Experimental support, please
+ view the build logs 
+ for errors. Generated by
+ 
+ 
+ L
+ A 
+ T
+ E 
+ 
+ xml 
+ 
+ .
+ 
+
+ 
+ Instructions for reporting errors
+
+ We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+ support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+ methods listed below:
+
+ 
+ Click the "Report Issue" ( 
+ 
+ ) button, located in the page header.
+
+ 
+ Tip: You can select the relevant text first, to include it in your report.
+
+ Our team has already identified the following issues . We appreciate your time reviewing and reporting rendering errors we
+ may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+ should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+ all.
+
+ Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion , and welcome developer contributions .
+
+ 
+
+ 
+ 
+ 
+ 
+ We gratefully acknowledge support from our major funders ,
+ member institutions , ,
+ and all contributors.
+ 
+
+ 
+ About &middot; 
+ Help &middot; 
+ Contact &middot; 
+ Subscribe &middot; 
+ Copyright &middot; 
+ Privacy &middot; 
+ Accessibility &middot; 
+ Operational Status (opens in new tab) 
+ 
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 

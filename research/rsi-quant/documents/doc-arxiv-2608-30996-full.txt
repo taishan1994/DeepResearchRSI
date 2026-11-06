@@ -1,0 +1,1248 @@
+ 
+ 
+ 
+ Faithfulness Is Not Free: Auditing Offline KV-Cache Quantizationin Retrieval-Augmented Generation 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Report GitHub Issue
+
+ × 
+ 
+
+ 
+ Title: 
+ 
+
+ Content selection saved. Describe the issue below:
+
+ Description: 
+ 
+ 
+
+ 
+ Submit without GitHub 
+ Submit in GitHub 
+ 
+ 
+ 
+ 
+ arXiv is now an independent nonprofit! 
+ Learn more 
+ &times; 
+ 
+
+ 
+ 
+ 
+ Back to arXiv 
+ 
+ 
+
+ 
+ 
+ Why HTML? 
+ 
+ 
+ 
+ 
+ Report Issue 
+ 
+ 
+ 
+ 
+ 
+ 
+ Back to Abstract 
+ 
+ 
+ 
+ 
+ 
+ 
+ Download PDF 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Abstract 
+
+ 1 Introduction 
+
+ 2 Background and Related Work 
+ 
+ 2.1 KV-cache compression. 
+
+ 2.2 RAG faithfulness. 
+
+ 2.3 Offline KV-cache RAG. 
+
+ 
+
+ 3 Method 
+
+ 4 Experimental Setup 
+
+ 5 Results 
+
+ 6 Conclusion 
+
+ References 
+
+ A Ablation Studies 
+ 
+ A.1 Fidelity of the Cache Round-Trip (Stage-0 Gate) 
+
+ A.2 Numerical Stability 
+
+ A.3 Faithfulness Signal Agreement 
+
+ A.4 Effect of Per-Block Overhead on INT4 Storage 
+
+ A.5 H2 Power Analysis 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ License: CC BY 4.0
+ 
+ 
+arXiv:2608.30996v1 [cs.CL] 31 Aug 2026
+
+ 
+ 
+ Faithfulness Is Not Free: Auditing Offline KV-Cache Quantization
+ in Retrieval-Augmented Generation
+
+ 
+ 
+ Atta Ul Asad
+ 
+ Email:  26280099@lums.edu.pk 
+ 
+    
+ Ahsan Bilal
+ 
+ Email:  ahsan.bilal-1@ou.edu 
+ 
+    
+ Muhammad Ali
+ 
+ Affiliation:  Air University
+ 
+ Email:  hougen@ou.edu 
+ 
+    
+ Muhammad Haseeb
+ 
+ Affiliation:  National University of Sciences and Technology (NUST)
+ 
+    
+ Dean F. Hougen
+ 
+ Affiliation:  University of Oklahoma
+ 
+ 
+ Affiliation:  Lahore University of Management Sciences (LUMS)
+ 
+
+ Abstract
+
+ 
+ Retrieval-augmented generation systems can precompute and store key-value caches of retrieved documents to avoid re-encoding context at every query. Quantizing these caches further reduces storage, but no prior work asks whether compression damages faithfulness , whether responses remain grounded in the retrieved evidence. Faithfulness and accuracy are not equivalent: a model can produce a correct answer that is no longer supported by the context it was given. We evaluate Qwen2.5-7B-Instruct under INT8 and INT4 quantization on RGB and HotpotQA, measuring both accuracy and faithfulness with a hallucination detector, NLI entailment, and an LLM judge. INT8 is near-lossless across both metrics. INT4 reduces accuracy and, more critically, even among answers that remain factually correct, over 90% of faithfulness changes are negative, i.e., accuracy metrics are blind to this regression. The harm grows under noisy retrieval and with more retrieved chunks. Faithfulness must be audited before compressed caches are deployed.
+
+ 
+
+ 
+ 
+
+ † † 
+ 
+ 
+ ∗  Equal contribution (core contributors). 
+ 
+ 1 Introduction
+
+ 
+ Retrieval-augmented generation (RAG) grounds model responses in external documents, but re-processing the retrieved context for every query is expensive. Recent systems eliminate this cost by precomputing key-value (KV) caches for documents once and reusing them at inference time ( Lu et al., 2025 ; Yao et al., 2025 ) . As these offline caches scale with corpus size and retrieval depth, their storage footprint becomes a bottleneck, making low-bit quantization an attractive solution.
+
+ 
+ Prior work shows KV caches can be quantized to INT8 and INT4 with little accuracy 
+degradation ( Liu et al., 2024 ; Hooper et al., 2024 ) , though aggressive compression can harm
+reasoning on complex tasks ( Liu et al., 2025 ) .
+However, all existing evaluations measure only task accuracy.
+They leave open a more subtle question: do quantized caches preserve
+ faithfulness , whether generated responses remain supported by the
+retrieved evidence ?
+This distinction matters.
+Exact Match and F1 measure agreement with a reference answer; they do not verify
+whether the answer is grounded in the provided context.
+A model can preserve the correct answer string while becoming less dependent on
+retrieved evidence, creating a hidden failure mode in compressed RAG
+systems ( Yen et al., 2025 ; Tamber et al., 2025 ) .
+
+ 
+ To our knowledge, this is the first audit of offline KV-cache quantization in RAG that evaluates faithfulness, showing that cache precision can affect grounding even when answer accuracy is preserved. Figure  1 shows our controlled protocol, which isolates cache precision as the sole variable and evaluates faithfulness with three independent signals. Our contributions are threefold. First, we introduce a faithfulness-centered audit protocol that avoids positional-stitching confounds by caching the full retrieved context in a single causal pass. Second, we show that INT8 is near-lossless, while INT4 silently degrades grounding even on accuracy-preserved examples ( > > 90% of faithfulness flips are negative; McNemar p < 10 − 20 p<10^{-20} ). Third, we show that this degradation is amplified by retrieval noise and larger retrieval depth, establishing faithfulness (not accuracy alone) as the necessary audit signal for compressed RAG.
+
+ 
+ Figure 1: Audit pipeline. Prepare : retrieved documents are prefilled in one
+causal pass, and the resulting KV cache is quantized and stored.
+ Inference : the stored cache is dequantized and reused for each query.
+ Evaluate : three complementary faithfulness signals (HHEM hallucination
+rate ↓ \downarrow , DeBERTa-v3 NLI entailment ↑ \uparrow , LLM-as-judge ↑ \uparrow )
+are measured alongside standard accuracy metrics. 
+ 
+
+ 
+ 2 Background and Related Work
+
+ 
+ 2.1 KV-cache compression.
+
+ 
+ KIVI ( Liu et al., 2024 ) achieves near-lossless 2-bit asymmetric quantization;
+KVQuant ( Hooper et al., 2024 ) reaches sub-4-bit via per-channel key quantization;
+ZipCache ( He et al., 2024 ) identifies token-level precision sensitivity;
+KVTuner ( Li et al., 2025 ) sets 4-bit as the safe floor for Qwen2.5-7B on
+reasoning tasks.
+Sub-4-bit can cause up to 59% accuracy loss on long-context
+tasks ( Mekala et al., 2025 ) , prompting variance-normalized
+quantization ( Müller et al., 2026 ) and query-aware mixed-precision
+allocation ( Zhang et al., 2025 ) .
+ Gap : all of these evaluate online cache compression via accuracy or
+perplexity; none audits faithfulness in retrieval-augmented settings.
+
+ 
+ 2.2 RAG faithfulness.
+
+ 
+ RAGChecker ( Ru et al., 2024 ) and RAGTruth ( Niu et al., 2024 ) show that EM and F1 miss systematic faithfulness failures. HELMET ( Yen et al., 2025 ) finds standard accuracy proxies correlate poorly with downstream RAG quality. LLM-as-judge outperforms detector-only methods for faithfulness evaluation ( Tamber et al., 2025 ; Song et al., 2025 ) . Distractor passages cause systematic grounding failures even without compression ( Wu et al., 2025 ; Amiraz et al., 2025 ) . Gap : none of these studies examines whether cache compression introduces faithfulness failures beyond those from retrieval noise alone.
+
+ 
+ 2.3 Offline KV-cache RAG.
+
+ 
+ TurboRAG ( Lu et al., 2025 ) stores chunk-level caches offline to eliminate repeated prefill; CacheBlend ( Yao et al., 2025 ) addresses per-chunk positional mismatch via selective recomputation, reducing TTFT by 2.2–3.3 × \times . Gap : neither examines whether compressing stored caches harms faithfulness.
+
+ 
+ 3 Method
+
+ 
+ Our goal is to isolate the effect of KV-cache quantization in RAG. We keep the retrieved evidence, prompt, and decoding fixed, and vary only the stored cache precision. The method builds one position-consistent cache for the full retrieved context, quantizes it before storage, dequantizes it before decoding, and compares BF16, INT8, and INT4 under identical inference conditions.
+
+ 
+ Building a unified cache. 
+For each query, we concatenate the system prompt with the top- K K retrieved
+chunks and run one causal prefill pass. The resulting KV cache is a single
+unified cache for the full retrieved context, and this is the cache we compress.
+We avoid caching chunks independently and stitching them later, because
+independent chunk caches are created at local token positions but consumed at
+global positions during generation. This positional mismatch can degrade output
+quality by itself. Using a single prefill pass removes this confound and ensures
+that cache bit-width is the only variable changed across conditions.
+
+ 
+ Quantizing the cache. 
+After prefill, we quantize the KV cache before storage and dequantize it back to
+bfloat16 before decoding. This matches an offline RAG deployment in which
+document caches are written to disk once and reused at inference time. INT8 uses
+per-token asymmetric quantization ( Liu et al., 2024 ) . INT4 uses group-wise
+quantization with groups of 64 channels, where each group stores its own scale
+and zero-point. This reduces the risk that large-magnitude channels dominate the
+quantization range and collapse smaller values under INT4’s 16 levels
+ ( Liu et al., 2024 ; Hooper et al., 2024 ) . The on-disk footprint of one KV cache is
+
+ 
+
+ 
+ 
+ M ⁡ ( b , g , o ) = 2 ​ L ​ H ​ d h ​ N ⋅ b 8 + 2 ​ L ​ H ​ d h ​ N g ⋅ o 8 , M(b,g,o)=2LHd_{h}N\cdot\tfrac{b}{8}+\tfrac{2LHd_{h}N}{g}\cdot\tfrac{o}{8}, 
+ 
+ (1) 
+ 
+ 
+ where L L , H H , d h d_{h} , and N N denote the number of layers, KV heads, head
+dimension, and cached tokens. The quantization bit-width is b b , the group size
+is g g , and o o is the scale/zero-point overhead per group. BF16
+( b = 16 b{=}16 ) has no overhead term. INT8 uses b = 8 b{=}8 and g = d h g{=}d_{h} , while INT4 uses
+ b = 4 b{=}4 and g = 64 g{=}64 . Because INT8 and INT4 store metadata for each group, their
+realized compression ratios are lower than the nominal 2 × 2{\times} and
+ 4 × 4{\times} limits.
+
+ 
+ Precision comparisons. 
+Using the same retrieved chunks and greedy decoding, we compare four cache settings. C0 (Oracle) runs standard full-context generation without a cache round trip. C1 (BF16) stores and reloads the uncompressed cache, serving as the cache baseline. C2 (INT8) and C3 (INT4) store quantized caches and dequantize them before decoding. Thus, C1–C2 isolates the effect of INT8 compression, while C1–C3 isolates the effect of aggressive INT4 compression.
+
+ 
+ 4 Experimental Setup
+
+ 
+ We evaluate Qwen2.5-7B-Instruct ( Yang et al., 2024 ) , a bfloat16-native 7B
+instruction-tuned decoder with a 32K-token context window.
+Its native bfloat16 precision avoids the float16 dynamic-range overflow that silently
+corrupts cached KV values on this architecture.
+
+ 
+ We use two complementary benchmarks.
+ RGB ( Chen et al., 2024 ) (300 examples) provides its own positive and
+distractor passages, keeping retrieval recall high and the noise structure controlled.
+ HotpotQA ( Yang et al., 2018 ) (300 examples, distractor split)
+requires combining evidence across at least two supporting passages mixed with
+distractors, testing multi-hop reasoning.
+Each example is evaluated at K ∈ { 1 , 3 , 5 } K\in\{1,3,5\} retrieved chunks,
+giving 300 × 3 × 4 = 3,600 300\times 3\times 4=3{,}600 generations per dataset.
+Retrieval uses a FAISS index ( Johnson et al., 2021 ) over bge-small-en-v1.5 ( BAAI, 2023 ) 
+embeddings; we retrieve the top-10 chunks and slice to the first K K .
+
+ 
+ We report both answer accuracy and evidence faithfulness. Accuracy is measured by containment exact match (EM), which marks a prediction correct if any normalized gold alias appears in the generated answer, and by token-level F1 as a secondary overlap metric. Faithfulness is measured with three independent signals: HHEM-2.1-Open ( Vectara, 2024 ) , reported as hallucination rate at threshold 0.5 ( ↓ \downarrow ); DeBERTa-v3-large NLI entailment ( He et al., 2023 ) ( ↑ \uparrow ); and an LLM judge using Claude Haiku 4.5 ( ↑ \uparrow ). Since HHEM and NLI agree only moderately on RGB (Pearson r = 0.44 r{=}0.44 ), we treat them as complementary diagnostics. The LLM judge achieves 92% agreement on 50 hand-checked labels and serves as the primary faithfulness signal. We test three hypotheses using C1 BF16 as the uncompressed reference and C3 INT4 as the aggressive compression condition. For H1 , we test whether faithfulness degrades even when accuracy is preserved. We restrict to examples whose containment-EM outcome is unchanged between C1 and C3, then apply a paired McNemar test to faithfulness label flips. For H2 , we test whether harm increases with retrieval depth by fitting a linear slope over K ∈ { 1 , 3 , 5 } K\in\{1,3,5\} . Because only three retrieval depths are available, this test is underpowered ( p = 0.12 p{=}0.12 ) and is reported as directional. For H3 , we test whether retrieval noise amplifies INT4 degradation by regressing the per-example INT4 faithfulness gap on distractor fraction within each K K . H3 is evaluated only on RGB, where per-example noise ratios are available.
+
+ 
+ 
+ 
+ 
+ 
+ 
+ (a) RGB EM accuracy 
+ 
+ 
+ 
+ (b) RGB F1 
+ 
+ 
+ 
+ (c) RGB hallucination 
+ 
+ 
+ 
+ (d) RGB entailment 
+ 
+ 
+ 
+ (e) HotpotQA EM accuracy 
+ 
+ 
+ 
+ 
+ (f) HotpotQA F1 
+ 
+ 
+ 
+ (g) HotpotQA hallucination 
+ 
+ 
+ 
+ (h) HotpotQA entailment 
+ 
+ 
+ 
+ (i) HotpotQA refusal 
+ 
+ 
+ 
+ (j) KV cache size 
+ 
+ 
+ 
+ 
+ (k) Hidden faithfulness harm (H1) 
+ 
+ 
+ 
+ (l) Degeneracy ( K = 5 K{=}5 ) 
+ 
+
+ Figure 2: Benchmark results across RGB and HotpotQA under four precision conditions: C0–C3. † \dagger marks the HotpotQA K = 1 K{=}1 refusal artifact: INT4 under-refuses, which
+ inflates surface EM and NLI entailment—not a genuine gain.
+In ( 2(j) ), tick labels are dataset,K (R = {=} RGB, H = {=} HotpotQA);
+the inset shows on-disk shrinkage vs. C1 BF16: ∼ \sim 1.9 × \times (INT8) and
+ ∼ \sim 3.6 × \times (INT4) at K = 5 K{=}5 , below the nominal 4 × \times because INT4 stores
+per-block scale/zero-point pairs.
+In ( 2(k) ), columns group by dataset; within each, EM = {=} containment
+exact-match, HH = {=} HHEM, LJ = {=} LLM-judge; bars are McNemar flip counts
+ b b (worsened) vs. c c (improved).
+Significance: ∗ ∗ ∗ p < 10 − 3 {\ast\ast\ast}\,p{<}10^{-3} , ∗ ∗ p < 10 − 2 {\ast\ast}\,p{<}10^{-2} ,
+ ∗ p < 0.05 {\ast}\,p{<}0.05 . 
+ 
+
+ 
+ 5 Results
+
+ 
+ Figure  2 reports the complete results across RGB and HotpotQA, and Table  1 summarizes the main effects.
+
+ 
+ Accuracy and hidden faithfulness harm. INT8 remains close to the BF16 cache baseline across accuracy and faithfulness metrics, whereas INT4 consistently degrades performance. INT4 reduces containment-EM (as shown in Figs.  2(a) ,  2(e) ) and token-F1 (as shown in Figs.  2(b) ,  2(f) ); correct → \to wrong flips greatly outnumber wrong → \to correct flips on both RGB ( 133 133 vs. 10 10 ) and HotpotQA ( 117 117 vs. 24 24 ; Fig.  2(k) ). More importantly, INT4 also causes faithfulness loss that accuracy does not expose. On the accuracy-preserved subset, where containment-EM is unchanged between C1 and C3, faithfulness flips remain overwhelmingly negative: the LLM judge records 231 231 worsenings vs. 24 24 improvements on RGB ( p < 10 − 38 p{<}10^{-38} ) and 173 173 vs. 31 31 on HotpotQA ( p < 10 − 30 p{<}10^{-30} ; Fig.  2(k) ). HHEM corroborates this trend on RGB for all K K and on HotpotQA at K = 5 K{=}5 . Thus, INT4 does not merely make more answers wrong; it also makes some still-correct answers less grounded in the retrieved evidence. On HotpotQA at low K K , INT4 additionally disrupts refusal calibration: the refusal rate drops from 0.513 0.513 to 0.317 0.317 at K = 1 K{=}1 (Fig.  2(i) ), which artificially inflates containment-EM and NLI entailment (the † \dagger markers in Figs.  2(e) ,  2(h) ). For this reason, the LLM judge is the primary H1 signal on HotpotQA.
+
+ 
+ Amplification, storage, and degeneration. The degradation becomes larger under harder retrieval settings. The INT4–BF16 hallucination gap increases monotonically from K = 1 K{=}1 to 5 5 on both benchmarks (Figs.  2(c) ,  2(g) ), although the slope test over only three retrieval depths is underpowered ( p = 0.12 p{=}0.12 ), so we treat H2 as suggestive. On RGB, where per-example noise ratios are available, the INT4 faithfulness gap also grows with distractor fraction independently of retrieval depth ( β = 0.22 \beta{=}0.22 , significant within- K K at K = 3 K{=}3 and K = 5 K{=}5 ), supporting H3. These failures occur despite substantial storage savings: at K = 5 K{=}5 , INT8 and INT4 reduce cache size by approximately 1.9 × 1.9{\times} and 3.6 × 3.6{\times} , respectively (Fig.  2(j) ), with INT4 falling below the nominal 4 × 4{\times} due to per-block scale and zero-point overhead in Eq.  1 . INT4 is also the only condition that produces degenerate generations, i.e., empty outputs or repetition loops reaching 6% on RGB and 3% on HotpotQA at K = 5 K{=}5 (as shown in Fig.  2(l) ); BF16 and INT8 never degenerate.
+
+ 
+ 6 Conclusion
+
+ 
+ KV-cache compression should be treated as a reliability decision, not only a storage optimization. In offline RAG, the cached KV forms the model’s effective interface to retrieved evidence; when this representation is aggressively compressed, the model can preserve the surface answer while weakening its dependence on the supporting context. The central lesson is that compressed RAG systems cannot be validated by EM or F1 alone. Before deploying low-bit offline caches, systems should audit whether answers remain grounded in the retrieved documents. Faithfulness is therefore a necessary evaluation target for practical KV-cache compression, especially when storage savings are obtained through aggressive quantization.
+
+ 
+ Limitations
+
+ 
+ This study isolates KV-cache precision under a controlled offline RAG setup, but its scope is limited to one model family, two QA-style benchmarks, and three retrieval depths. The magnitude of faithfulness loss may differ for larger models, other architectures, denser retrieval settings, or production retrievers. HotpotQA also introduces a refusal-calibration confound at low K K , which limits the reliability of HHEM and NLI in that regime; we therefore rely on the LLM judge as the primary signal in that regime.
+
+ 
+ References
+
+ 
+ 
+ Amiraz et al. (2025) 
+ 
+Chen Amiraz, Florin Cuconasu, Simone Filice, and Zohar Karnin. 2025.
+
+ 
+ The distracting effect: Understanding irrelevant passages in RAG .
+
+ 
+ In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 18228–18258, Vienna, Austria. Association for Computational Linguistics.
+
+ 
+
+ 
+ BAAI (2023) 
+ 
+BAAI. 2023.
+
+ 
+ BGE-small-en-v1.5: BAAI general embedding.
+
+ 
+ https://huggingface.co/BAAI/bge-small-en-v1.5 .
+
+ 
+
+ 
+ Chen et al. (2024) 
+ 
+Jiawei Chen, Hongyu Lin, Xianpei Han, and Le Sun. 2024.
+
+ 
+ Benchmarking large language models in retrieval-augmented generation .
+
+ 
+ In Proceedings of the AAAI Conference on Artificial Intelligence , volume 38, pages 17754–17762.
+
+ 
+
+ 
+ He et al. (2023) 
+ 
+Pengcheng He, Jianfeng Gao, and Weizhu Chen. 2023.
+
+ 
+ DeBERTaV3: Improving DeBERTa using ELECTRA-style pre-training with gradient-disentangled embedding sharing.
+
+ 
+ In The Eleventh International Conference on Learning Representations (ICLR 2023) .
+
+ 
+
+ 
+ He et al. (2024) 
+ 
+Yefei He, Luoming Zhang, Weijia Wu, Jing Liu, Hong Zhou, and Bohan Zhuang. 2024.
+
+ 
+ ZipCache: Accurate and efficient KV cache quantization with salient token identification.
+
+ 
+ In Advances in Neural Information Processing Systems 37 (NeurIPS 2024) , pages 68287–68307.
+
+ 
+
+ 
+ Hooper et al. (2024) 
+ 
+Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2024.
+
+ 
+ KVQuant: Towards 10 million context length LLM inference with KV cache quantization.
+
+ 
+ In Advances in Neural Information Processing Systems 37 (NeurIPS 2024) , pages 1270–1303.
+
+ 
+
+ 
+ Johnson et al. (2021) 
+ 
+Jeff Johnson, Matthijs Douze, and Hervé Jégou. 2021.
+
+ 
+ Billion-scale similarity search with GPUs .
+
+ 
+ IEEE Transactions on Big Data , 7(3):535–547.
+
+ 
+
+ 
+ Li et al. (2025) 
+ 
+Xing Li, Zeyu Xing, Yiming Li, Linping Qu, Hui-Ling Zhen, Yiwu Yao, Wulong Liu, Sinno Jialin Pan, and Mingxuan Yuan. 2025.
+
+ 
+ KVTuner: Sensitivity-aware layer-wise mixed-precision KV cache quantization for efficient and nearly lossless LLM inference.
+
+ 
+ In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , pages 36451–36485. PMLR.
+
+ 
+
+ 
+ Liu et al. (2025) 
+ 
+Ruikang Liu, Yuxuan Sun, Manyi Zhang, Haoli Bai, Xianzhi Yu, Tiezheng Yu, Chun Yuan, and Lu Hou. 2025.
+
+ 
+ Quantization hurts reasoning? An empirical study on quantized reasoning models.
+
+ 
+ In Second Conference on Language Modeling (COLM 2025) .
+
+ 
+
+ 
+ Liu et al. (2024) 
+ 
+Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024.
+
+ 
+ KIVI: A tuning-free asymmetric 2bit quantization for KV cache.
+
+ 
+ In Proceedings of the 41st International Conference on Machine Learning , volume 235 of Proceedings of Machine Learning Research , pages 32332–32344. PMLR.
+
+ 
+
+ 
+ Lu et al. (2025) 
+ 
+Songshuo Lu, Hua Wang, Yutian Rong, Zhi Chen, and Yaohua Tang. 2025.
+
+ 
+ TurboRAG: Accelerating retrieval-augmented generation with precomputed KV caches for chunked text .
+
+ 
+ In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing , pages 6588–6601. Association for Computational Linguistics.
+
+ 
+
+ 
+ Mekala et al. (2025) 
+ 
+Anmol Reddy Mekala, Anirudh Atmakuru, Yixiao Song, Marzena Karpinska, and Mohit Iyyer. 2025.
+
+ 
+ Does quantization affect models’ performance on long-context tasks?
+
+ 
+ In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing , pages 9422–9470, Suzhou, China. Association for Computational Linguistics.
+
+ 
+
+ 
+ Müller et al. (2026) 
+ 
+Lorenz K. Müller, Philippe Bich, Chiara Boretti, Hyun-Min Chang, Jiawei Zhuang, and Lukas Cavigelli. 2026.
+
+ 
+ KVarN: Variance-normalized KV-cache quantization mitigates error accumulation in reasoning tasks .
+
+ 
+ Preprint , arXiv:2606.03458.
+
+ 
+ Preprint.
+
+ 
+
+ 
+ Niu et al. (2024) 
+ 
+Cheng Niu, Yuanhao Wu, Juno Zhu, Siliang Xu, KaShun Shum, Randy Zhong, Juntong Song, and Tong Zhang. 2024.
+
+ 
+ RAGTruth: A hallucination corpus for developing trustworthy retrieval-augmented language models.
+
+ 
+ In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 10862–10878, Bangkok, Thailand. Association for Computational Linguistics.
+
+ 
+
+ 
+ Ru et al. (2024) 
+ 
+Dongyu Ru, Lin Qiu, Xiangkun Hu, Tianhang Zhang, Peng Shi, Shuaichen Chang, Cheng Jiayang, Cunxiang Wang, Shichao Sun, Huanyu Li, Zizhao Zhang, Binjie Wang, Jiarong Jiang, Tong He, Zhiguo Wang, Pengfei Liu, Yue Zhang, and Zheng Zhang. 2024.
+
+ 
+ RAGChecker: A fine-grained framework for diagnosing retrieval-augmented generation.
+
+ 
+ In Advances in Neural Information Processing Systems 37 (NeurIPS 2024) , pages 21999–22027.
+
+ 
+
+ 
+ Song et al. (2025) 
+ 
+Maojia Song, Shang Hong Sim, Rishabh Bhardwaj, Hai Leong Chieu, Navonil Majumder, and Soujanya Poria. 2025.
+
+ 
+ Measuring and enhancing trustworthiness of LLMs in RAG through grounded attributions and learning to refuse.
+
+ 
+ In The Thirteenth International Conference on Learning Representations (ICLR 2025) .
+
+ 
+
+ 
+ Tamber et al. (2025) 
+ 
+Manveer Singh Tamber, Forrest Sheng Bao, Chenyu Xu, Ge Luo, Suleman Kazi, Minseok Bae, Miaoran Li, Ofer Mendelevitch, Renyi Qu, and Jimmy Lin. 2025.
+
+ 
+ Benchmarking LLM faithfulness in RAG with evolving leaderboards.
+
+ 
+ In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing: Industry Track , pages 799–811, Suzhou, China. Association for Computational Linguistics.
+
+ 
+
+ 
+ Vectara (2024) 
+ 
+Vectara. 2024.
+
+ 
+ HHEM-2.1-Open: Hughes hallucination evaluation model.
+
+ 
+ https://huggingface.co/vectara/hallucination_evaluation_model .
+
+ 
+
+ 
+ Wu et al. (2025) 
+ 
+Jinyang Wu, Shuai Zhang, Feihu Che, Mingkuan Feng, Pengpeng Shao, and Jianhua Tao. 2025.
+
+ 
+ Pandora’s box or aladdin’s lamp: A comprehensive analysis revealing the role of RAG noise in large language models .
+
+ 
+ In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 5019–5039, Vienna, Austria. Association for Computational Linguistics.
+
+ 
+
+ 
+ Yang et al. (2024) 
+ 
+An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jingren Zhou, Junyang Lin, Kai Dang, et al. 2024.
+
+ 
+ Qwen2.5 technical report .
+
+ 
+
+ 
+ Yang et al. (2018) 
+ 
+Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William W. Cohen, Ruslan Salakhutdinov, and Christopher D. Manning. 2018.
+
+ 
+ HotpotQA: A dataset for diverse, explainable multi-hop question answering .
+
+ 
+ In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing , pages 2369–2380. Association for Computational Linguistics.
+
+ 
+
+ 
+ Yao et al. (2025) 
+ 
+Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025.
+
+ 
+ CacheBlend: Fast large language model serving for RAG with cached knowledge fusion .
+
+ 
+ In Proceedings of the Twentieth European Conference on Computer Systems (EuroSys ’25) , pages 94–109. Association for Computing Machinery.
+
+ 
+
+ 
+ Yen et al. (2025) 
+ 
+Howard Yen, Tianyu Gao, Minmin Hou, Ke Ding, Daniel Fleischer, Peter Izsak, Moshe Wasserblat, and Danqi Chen. 2025.
+
+ 
+ HELMET: How to evaluate long-context language models effectively and thoroughly.
+
+ 
+ In The Thirteenth International Conference on Learning Representations (ICLR 2025) .
+
+ 
+
+ 
+ Zhang et al. (2025) 
+ 
+Tao Zhang, Ziqian Zeng, Hao Peng, Huiping Zhuang, and Cen Chen. 2025.
+
+ 
+ MixKVQ: Query-aware mixed-precision KV cache quantization for long-context reasoning .
+
+ 
+ Preprint , arXiv:2512.19206.
+
+ 
+ Preprint.
+
+ 
+
+ 
+ 
+
+ 
+
+ 
+ Appendix A Ablation Studies
+
+ 
+ Table 1: Summary: how KV-cache quantization affects accuracy and faithfulness in RAG. Each row is one observable effect; columns show what happens under each precision level and whether accuracy metrics would catch the problem on their own. ✓ = effect present / condition met; ✗ = not observed. INT8 is safe across the board; INT4 breaks faithfulness even when accuracy looks fine. 
+ 
+ 
+ 
+ 
+ 
+ What we measured 
+ 
+ 
+ 
+ What it means in plain terms 
+ 
+ 
+ 
+ INT8 
+ 
+ 
+ 
+ INT4 
+ 
+ 
+ 
+ Does accuracy catch it? 
+ 
+
+ 
+ Accuracy effects 
+
+ 
+ 
+ 
+ Containment-EM drops 
+ 
+ 
+ 
+ More answers are simply wrong 
+ 
+ 
+ 
+ ✗(safe) 
+ 
+ 
+ 
+ ✓(drops) 
+ 
+ 
+ 
+ Yes, EM detects this directly 
+ 
+
+ 
+ 
+ 
+ Token-F1 drops 
+ 
+ 
+ 
+ Even partial matches are worse 
+ 
+ 
+ 
+ ✗(safe) 
+ 
+ 
+ 
+ ✓(drops) 
+ 
+ 
+ 
+ Yes, F1 detects this directly 
+ 
+
+ 
+ Faithfulness effects (measured independently of accuracy) 
+
+ 
+ 
+ 
+ HHEM hallucination rate rises 
+ 
+ 
+ 
+ Answers are flagged as not backed
+by the retrieved documents 
+ 
+ 
+ 
+ ✗(safe) 
+ 
+ 
+ 
+ ✓(rises) 
+ 
+ 
+ 
+ No, EM/F1 miss this 
+ 
+
+ 
+ 
+ 
+ NLI entailment score drops 
+ 
+ 
+ 
+ Answers no longer logically follow
+from the retrieved context 
+ 
+ 
+ 
+ ✗(safe) 
+ 
+ 
+ 
+ ✓(drops) 
+ 
+ 
+ 
+ No, EM/F1 miss this 
+ 
+
+ 
+ 
+ 
+ LLM judge marks answer as unfaithful 
+ 
+ 
+ 
+ A strong LLM judges the answer as
+unsupported by the evidence 
+ 
+ 
+ 
+ ✗(safe) 
+ 
+ 
+ 
+ ✓( > 90 % >90\% of flips negative) 
+ 
+ 
+ 
+ No, EM/F1 miss this 
+ 
+
+ 
+ The “hidden harm”: faithfulness loss on accuracy-preserved examples (H1) 
+
+ 
+ 
+ 
+ Faithfulness drops even when the
+answer string stays correct 
+ 
+ 
+ 
+ The model gives the right answer
+but for the wrong reason—it is no
+longer using the retrieved evidence 
+ 
+ 
+ 
+ ✗(not observed) 
+ 
+ 
+ 
+ ✓(McNemar
+ p < 10 − 20 p{<}10^{-20} ,
+both datasets) 
+ 
+ 
+ 
+ No , this is exactly
+what EM/F1 cannot see 
+ 
+
+ 
+ Does the harm grow? (H2 and H3) 
+
+ 
+ 
+ 
+ Harm grows with more retrieved chunks
+(H2) 
+ 
+ 
+ 
+ Longer context amplifies the
+quantization error in the cache 
+ 
+ 
+ 
+ ✗ 
+ 
+ 
+ 
+ ✓(directional,
+ K = 1 → 5 K{=}1{\to}5 ;
+ p = 0.12 p{=}0.12 , underpowered) 
+ 
+ 
+ 
+ No 
+ 
+
+ 
+ 
+ 
+ Harm grows with more distractor
+passages (H3, RGB only) 
+ 
+ 
+ 
+ Noisy retrieval makes INT4 even more
+likely to hallucinate 
+ 
+ 
+ 
+ ✗ 
+ 
+ 
+ 
+ ✓( β = 0.22 \beta{=}0.22 ,
+significant at K = 3 , 5 K{=}3,5 ) 
+ 
+ 
+ 
+ No 
+ 
+
+ 
+ Failure modes unique to INT4 
+
+ 
+ 
+ 
+ Degenerate output (empty or
+repeated text) 
+ 
+ 
+ 
+ The model collapses—produces
+nothing useful at all 
+ 
+ 
+ 
+ ✗ 
+ 
+ 
+ 
+ ✓(up to 6%
+of outputs at K = 5 K{=}5 ) 
+ 
+ 
+ 
+ Partially; EM is zero but
+the root cause is invisible 
+ 
+
+ 
+ 
+ 
+ HotpotQA refusal confound 
+ 
+ 
+ 
+ INT4 noise breaks the model’s
+“I don’t know” instinct;
+it guesses instead of refusing,
+inflating apparent accuracy 
+ 
+ 
+ 
+ ✗ 
+ 
+ 
+ 
+ ✓(refusal drops
+from 51% to 32%
+at K = 1 K{=}1 ) 
+ 
+ 
+ 
+ No , EM and NLI
+are inflated , masking harm 
+ 
+
+ 
+ Storage efficiency 
+
+ 
+ 
+ 
+ Cache size reduction vs. BF16
+baseline (C1) 
+ 
+ 
+ 
+ How much disk space is saved 
+ 
+ 
+ 
+ ∼ 1.9 × {\sim}1.9\times at K = 5 K{=}5 
+(vs. nominal 2 × 2\times ) 
+ 
+ 
+ 
+ ∼ 3.6 × {\sim}3.6\times at K = 5 K{=}5 
+(vs. nominal 4 × 4\times ) 
+ 
+ 
+ 
+ N/A 
+ 
+
+ 
+ 
+ 
+ 
+ A.1 Fidelity of the Cache Round-Trip (Stage-0 Gate)
+
+ 
+ Before any quantized run, we require C1 (BF16) to exactly reproduce C0 (Oracle) on
+50 held-out examples.
+This gate confirms that the cache round-trip itself introduces no degradation; any
+difference in C2/C3 is attributable purely to quantization bit-width.
+C1 reproduced C0 within floating-point tolerance on all 50 examples, validating the
+baseline.
+
+ 
+ A.2 Numerical Stability
+
+ 
+ We monitored logits for NaN/Inf values across all 3,600 generations per dataset.
+No non-finite logits appeared under C0, C1, or C2.
+Under C3 (INT4), non-finite logits occurred in < 0.1 % <0.1\% of examples and were
+aborted rather than allowed to emit corrupted tokens.
+This confirms that degeneracy (Fig.  2(l) ) reflects semantic failure, not
+numerical explosion.
+
+ 
+ A.3 Faithfulness Signal Agreement
+
+ 
+ The three faithfulness signals are intentionally complementary.
+On RGB, HHEM and NLI entailment agree only moderately (Pearson r = 0.44 r{=}0.44 ),
+confirming they capture distinct failure modes.
+The LLM judge achieves 92% agreement with human labels on RGB (76% on HotpotQA,
+where refusal artifacts add noise).
+Any single signal would undercount the faithfulness harm: H1 is supported by all
+three signals on RGB but only by the LLM judge on HotpotQA at low K K ,
+underscoring the need for a multi-signal faithfulness audit.
+
+ 
+ A.4 Effect of Per-Block Overhead on INT4 Storage
+
+ 
+ Equation  1 predicts that INT4 with g = 64 g{=}64 achieves a
+ ∼ {\sim} 3.6 × \times footprint reduction over BF16 at K = 5 K{=}5 , not the nominal
+ 4 × 4\times .
+We verified this empirically: the per-block scale/zero-point pairs consume
+ ≈ \approx 11% of the INT4 cache footprint, shrinking the effective compression ratio
+from 4 × 4\times to 3.6 × 3.6\times .
+The INT8 footprint reduction of ∼ {\sim} 1.9 × \times (vs. nominal 2 × 2\times ) follows
+the same pattern, with per-token overhead consuming ≈ \approx 5% of the INT8 cache.
+
+ 
+ A.5 H2 Power Analysis
+
+ 
+ The slope regression for H2 uses only three K K values ( K ∈ { 1 , 3 , 5 } K\in\{1,3,5\} ), leaving it
+statistically underpowered ( p = 0.12 p{=}0.12 ).
+Nonetheless, the directional trend is consistent: on RGB, the INT4–BF16
+hallucination gap increases from 0.09 0.09 at K = 1 K{=}1 to 0.26 0.26 at K = 5 K{=}5 ; on
+HotpotQA from 0.05 0.05 at K = 1 K{=}1 to 0.25 0.25 at K = 5 K{=}5 .
+A denser sweep over K ∈ { 1 , 2 , 3 , 4 , 5 , 7 , 10 } K\in\{1,2,3,4,5,7,10\} would likely yield a significant slope;
+we leave this to future work.
+
+ 
+
+ 
+ 
+ Experimental support, please
+ view the build logs 
+ for errors. Generated by
+ 
+ 
+ L
+ A 
+ T
+ E 
+ 
+ xml 
+ 
+ .
+ 
+
+ 
+ Instructions for reporting errors
+
+ We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+ support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+ methods listed below:
+
+ 
+ Click the "Report Issue" ( 
+ 
+ ) button, located in the page header.
+
+ 
+ Tip: You can select the relevant text first, to include it in your report.
+
+ Our team has already identified the following issues . We appreciate your time reviewing and reporting rendering errors we
+ may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+ should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+ all.
+
+ Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion , and welcome developer contributions .
+
+ 
+
+ 
+ 
+ 
+ 
+ We gratefully acknowledge support from
+ our major funders ,
+ member institutions , ,
+ and all contributors.
+ 
+
+ 
+ About 
+ &middot; 
+ Help 
+ &middot; 
+ Contact 
+ &middot; 
+ Subscribe 
+ &middot; 
+ Copyright 
+ &middot; 
+ Privacy 
+ &middot; 
+ Accessibility 
+ &middot; 
+ Operational Status (opens in new tab) 
+ 
+ 
+
+ 
+ Major funding support from
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 

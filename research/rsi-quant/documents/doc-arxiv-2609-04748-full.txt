@@ -1,0 +1,3030 @@
+ 
+ 
+ 
+ Same Request, Different Answer: Quantization Amplifies Cache-Induced Divergence in LLM Serving 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Report GitHub Issue
+
+ × 
+ 
+
+ 
+ Title: 
+ 
+
+ Content selection saved. Describe the issue below:
+
+ Description: 
+ 
+ 
+
+ 
+ Submit without GitHub 
+ Submit in GitHub 
+ 
+ 
+ 
+ 
+ arXiv is now an independent nonprofit! 
+ Learn more 
+ &times; 
+ 
+
+ 
+ 
+ 
+ Back to arXiv 
+ 
+ 
+
+ 
+ 
+ Why HTML? 
+ 
+ 
+ 
+ 
+ Report Issue 
+ 
+ 
+ 
+ 
+ 
+ 
+ Back to Abstract 
+ 
+ 
+ 
+ 
+ 
+ 
+ Download PDF 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Abstract 
+
+ I Introduction 
+
+ II Background and Related Work 
+ 
+ II-A Prefix caching in production serving stacks 
+
+ II-B Nondeterminism in LLM inference 
+
+ II-C Quantization and behavioral change 
+
+ 
+
+ III Study Design 
+ 
+ III-A Research questions 
+
+ III-B Two caching mechanisms and two effects 
+
+ III-C Experimental protocol 
+
+ III-D Workloads 
+
+ III-E Isolating the cause 
+
+ III-F Replicated controlled sweep 
+
+ III-G Measures 
+
+ 
+
+ IV Results 
+ 
+ IV-A RQ1: cache-disabled execution repeats exactly 
+
+ IV-B RQ2: cache-enabled execution diverges, and why 
+ 
+ IV-B 1 Cache-enabled and cache-disabled execution differ 
+
+ IV-B 2 On llama.cpp, a second caching layer drives run-to-run
+divergence 
+
+ 
+
+ IV-C The mechanism: state carried between runs 
+
+ IV-D RQ3: quantization amplifies divergence 
+
+ IV-E RQ4: path divergence appears on both engines 
+
+ IV-F RQ5: instability without detectable bias 
+
+ 
+
+ V Discussion 
+ 
+ V-A What practitioners should take from this 
+
+ V-B Implications for benchmark and agent evaluation 
+
+ V-C Relationship to prior single-turn findings 
+
+ 
+
+ VI Threats to Validity 
+
+ VII Conclusion 
+
+ References 
+
+ 
+ 
+ 
+ 
+ 
+ License: arXiv.org perpetual non-exclusive license
+ 
+ 
+arXiv:2609.04748v2 [cs.SE] 12 Oct 2026
+
+ 
+ 
+ \vol 
+ 14
+2026
+
+ Same Request, Different Answer: Quantization Amplifies Cache-Induced
+Divergence in LLM Serving
+
+ 
+ 
+ ADITI PATODIYA
+ 
+
+ Abstract
+
+ 
+ Major open-source serving stacks reuse the key-value tensors of a shared
+prefix by default. We measure what this prefix reuse costs in
+reproducibility. Holding model, decoding, seed and request order
+fixed at batch size one, we ran an eighty-episode multi-turn agentic tool-use
+workload with prefix reuse on and off across two engines and four weight
+formats. Without prefix reuse, repeated runs reproduced every
+token and log-probability in all ten configurations. With it, cache-hit
+and recompute paths diverged on both engines. On llama.cpp
+with GGUF weights this path divergence rises with quantization: for
+Qwen2.5-7B over ten independent server histories, it reached
+37.4 percent of episodes at 16-bit and 82.5
+percent at four-bit. Near-tie decisions became only about 1.2 times as common,
+while the cache-path change in top-two margins grew
+4.9-fold from 16-bit to three-bit. Serving four-bit weights through 16-bit kernels
+left divergence not detectably different from 16-bit, placing the amplification
+mainly in the quantized execution path. At Q4_K_M, run-to-run divergence came
+mainly from llama.cpp’s server-level prompt cache: under the canonical episode order it
+moved divergence by 37.5 points, and at its default, divergence spanned
+20.0 to 28.7 percent under five random orders. With cache
+state restored, each path reproduced exactly while the two still differed.
+In the tested stacks, cached serving is irreproducible because the cache
+state is absent from the request and not reset by default. A single-turn bridge shows
+path divergence reaching task outcomes with no detectable net change in
+accuracy. We
+release the harness, logs, and analysis pipeline.
+
+ 
+
+ 
+ Index Terms: 
+Large language models, inference serving, reproducibility, prompt caching,
+key-value cache, quantization, software testing, empirical software
+engineering
+
+ † † history: Date of publication xxxx 00, 0000, date of current version xxxx 00, 0000. † † doi: 10.1109/ACCESS.2026.DOI † † address: Independent Researcher, Milpitas, CA 95035 USA † † corresponding: Corresponding author: Aditi Patodiya (e-mail: aditi.patodia31@gmail.com). 
+ 
+ I Introduction 
+
+ 
+ Prefix caching is one of the least controversial optimizations in modern
+language model serving. When consecutive requests share a leading span of
+tokens, the server reuses the key and value tensors it already computed for
+that span instead of recomputing them. Every major serving stack ships the
+feature and most enable it by default [ 1 , 2 , 3 ] . The savings are large and well
+documented: a recent evaluation of long-horizon agent pipelines reports 41
+to 80 percent lower cost and 13 to 31 percent faster time to first token
+when caching is on [ 4 ] . For agentic workloads the
+appeal is even stronger than for chat, because an agent re-sends its entire
+growing transcript on every step, so almost the whole prompt is a cache hit
+after the first turn.
+
+ 
+ The optimization carries an implicit promise. Reusing arithmetic that was
+already performed is supposed to be an implementation detail, invisible
+above the serving layer. A user who sends the same request with the same
+sampling parameters expects the same answer whether or not the server
+happened to have a warm cache.
+
+ 
+ That promise does not hold, and the failure is not subtle. Reusing cached
+keys and values can change the order in which floating point accumulations are
+performed, and floating point addition is not associative, so the reused
+path and the recomputed path can produce slightly different numbers. Most of
+the time the difference is invisible. Occasionally it moves a token
+probability across a decision boundary, and the sampled token changes. In a
+single-turn setting that is a curiosity. In an agent loop it is not, because
+the changed token may be part of a tool call, and the tool call determines
+the next observation, which determines the rest of the episode.
+
+ 
+ Practitioners have noticed. Two issues in the vLLM tracker report
+behavior of this kind. One describes an accuracy drop from roughly 78
+percent to 60 percent when the prefix cache interacts with the recomputation
+path [ 5 ] . The other, filed against ROCm hardware and
+not reproducing on CUDA, shows an identical request returning different text
+depending on whether it hit the cache [ 6 ] . Both were
+closed without a systematic characterization. In the literature, one recent study established that
+cached and recomputed decoding are not numerically equivalent under FP16 on
+single-turn arithmetic [ 7 ] , and a study of
+inference backends found that backend choice alone can shift benchmark
+scores by as much as 16.6 points, naming prefix caching among the causes, although its ablation of that
+feature measured aggregate accuracy alone [ 8 ] . What has been missing is a
+controlled measurement of how often this matters for the workload the
+feature was designed to accelerate, and of what the effect does when the
+weights are quantized, which is how most locally served models run.
+
+ 
+ This paper provides that measurement. We run a paired design in which the
+only variable is the cache setting, with greedy decoding, a fixed seed, a
+batch size of one, and serial requests, so the usual sources of serving
+nondeterminism are held out. The workload is multi-turn agentic tool use
+from the Berkeley Function Calling Leaderboard [ 9 ] , with
+single-turn grade school mathematics [ 10 ] as a bridge to
+the prior single-turn result. We run every configuration twice, which turns
+the design into something stronger than a comparison between arms: it lets
+each arm be compared against itself.
+
+ 
+ That design produces the paper’s central result. With prefix
+reuse disabled, outputs from repeated executions of the identical workload
+match exactly in every configuration we tested, down to the log-probability of
+every token. With
+prefix reuse enabled, two different things happen. The cache-hit path and the
+recompute path produce different trajectories for a large share of episodes
+(path divergence), and repeated cache-enabled runs disagree with each other when
+the server carries state between them, mostly through a second, server-level
+prompt cache that llama.cpp enables by default (run-to-run divergence). In the
+configurations we tested, restoring the cache state that prefix reuse reads
+removed all observed variation within each path, so the server
+behaved deterministically given its state. What it lacks is reproducibility from the request alone, because the state that
+decides the output is not part of the request.
+
+ 
+ The mechanism is not news, and we do not present it as such. Work on
+deterministic inference already identifies reduction-order variation between
+prefilled and cached execution as a source of nondeterminism, and prescribes
+batch-invariant kernels to remove it [ 11 ] . SGLang now ships
+a deterministic mode [ 12 ] that reports consistent
+output across cached and uncached prefill on two of its three attention
+backends [ 13 ] . What has not been established is the
+magnitude in the configuration people actually deploy. Those fixes are
+opt-in, they carry a throughput cost, they are unavailable on some backends, and neither llama.cpp nor vLLM
+offered them in the versions we tested. Our contribution is to measure what the default
+configuration does to the workload the cache was built for.
+
+ 
+ The contributions are as follows.
+
+ 
+ 
+ • 
+ 
+ A controlled measurement across model families, quantization formats,
+and two serving implementations, showing that cache-disabled serving repeats
+exactly, in every token and every reported log-probability, while
+cache-enabled serving departs from it.
+
+ • 
+ 
+ An isolation of the cause. Under the canonical episode order, a single
+server-level prompt-cache setting is shown to move run-to-run divergence by 37.5
+percentage points, and at its default the divergence ranges from
+20.0 to 28.7 percent under five random orders; once the
+setting is disabled, the order in which passes run has no effect in the configuration tested. A reset control, repeated across weight
+formats and independent server sessions, demonstrates that the cached path is
+reproducible once cache state is restored. Under the configurations tested,
+restoring cache state removed all observed variation within each path, and that
+state is something deployments neither report nor control.
+
+ • 
+ 
+ A replicated measurement of how weight quantization interacts with path
+divergence for Qwen2.5-7B on llama.cpp with GGUF weights. Over ten independent server
+histories, divergence rises from 37.4 percent of episodes at
+F16 to 82.5 percent at Q4_K_M, an odds ratio of
+2.30 per format step (95% CI 1.76 to
+3.15). Direct top-two margin measurements, and a control that
+serves the four-bit weights through the 16-bit kernels, point to the quantized
+execution path rather than the rounded weight values as the main source of the
+amplification.
+
+ • 
+ 
+ An outcome-level analysis separating instability from degradation,
+independently replicating a concurrent single-turn result in a
+serving-engine setting: individual items change correctness in both
+directions with no detectable net change in accuracy.
+
+ • 
+ 
+ A released harness, raw per-request logs including server-reported
+cache exposure, and an analysis pipeline that regenerates every number in
+this paper from the released logs and telemetry summary.
+
+ 
+
+ 
+ II Background and Related Work 
+
+ 
+ II-A Prefix caching in production serving stacks 
+
+ 
+ Key-value caching within a single generation is standard. What concerns us
+here is reuse across requests. PagedAttention introduced the memory
+management that makes such sharing practical by storing the cache in
+non-contiguous blocks that different sequences can reference
+ [ 1 ] . RadixAttention generalized the idea to a prefix
+tree over live requests, which is a natural fit for agent loops where many
+requests share long leading spans [ 2 ] . Prompt Cache went
+further and reused attention states for non-contiguous prompt modules
+ [ 3 ] , and CacheBlend fused cached knowledge for
+retrieval-augmented serving with selective recomputation
+ [ 14 ] . Cache eviction and windowing schemes add another
+layer of state that varies between runs [ 15 , 16 ] .
+
+ 
+ These systems are evaluated on throughput, latency, and memory, and often
+on aggregate task accuracy. What they do not report is whether a given
+request returns the same answer with a warm cache as with a cold one. The
+closest evaluation to ours in workload terms measured caching across more
+than five hundred agent sessions but recorded only cost and time to first
+token [ 4 ] . The behavioral question was left open, and
+the field guidance that resulted, namely to cache aggressively, was issued
+without it.
+
+ 
+ II-B Nondeterminism in LLM inference 
+
+ 
+ Practitioners have long observed that temperature zero does not guarantee
+identical output, and this has been documented systematically
+ [ 17 ] . The mechanism that has received the most
+recent attention is batch invariance. Because reduction order in fused
+kernels depends on how requests are grouped, a request batched with
+different neighbors takes a different arithmetic path, and rewriting kernels
+to be batch invariant removes that source [ 11 ] . SGLang
+implemented such a deterministic mode as an opt-in flag
+ [ 12 ] ; it supports the radix cache on two of its
+three attention backends [ 13 ] , and its reported
+performance benchmarks were run with that cache disabled, so the reported cost
+of determinism excludes the cache. Neither source reports how often cached
+and uncached prefill diverge in the default mode. A complementary line restores determinism
+through verified speculation rather than kernel redesign
+ [ 18 ] .
+
+ 
+ Our measurements deliberately exclude the cross-request part of the
+batch-invariance story.
+Every request in this study is issued alone, at batch size one, in serial
+order, so grouping cannot vary between runs. The cache-disabled arms confirm
+this directly by repeating exactly, token for token, under the same
+conditions. What prefix reuse changes is how many of a request’s tokens one
+forward pass computes, the within-request case that batch-invariant kernels
+must also cover [ 11 ] .
+
+ 
+ Two studies bear directly on the cached path. One demonstrated that FP16
+decoding with a key-value cache is not numerically equivalent to
+recomputation, using single-turn arithmetic and three models, and attributed
+the effect to accumulation order under FP16 non-associativity
+ [ 7 ] . Another quantified how much benchmark scores
+move when only the inference backend changes, reporting shifts up to 16.6
+points and naming prefix caching among the mechanisms
+ [ 8 ] . We extend the first study to
+multi-turn agent episodes and add quantization as a factor. We complement the
+second study’s aggregate-accuracy ablation of prefix caching by measuring
+divergence request by request and episode by episode.
+
+ 
+ II-C Quantization and behavioral change 
+
+ 
+ Quantization studies usually report aggregate accuracy, and by that measure
+modern low-bit formats are close to lossless [ 19 ] . A more
+careful reading of compressed model behavior shows that this framing hides
+churn: models that match a baseline on aggregate accuracy can disagree with
+it on a substantial share of individual items [ 20 ] .
+Damage from quantization is also unevenly distributed across populations
+that aggregate metrics average over [ 21 ] .
+
+ 
+ That distinction is the one our results turn on. We do not claim that
+quantization degrades accuracy, and our data would not support such a claim.
+We report instead that quantization changes how strongly the cache path
+perturbs the computation, and therefore how often that perturbation flips a
+decision. That is a question about the numerical difference between two
+arithmetic paths, not about the model’s average competence.
+
+ 
+ III Study Design 
+
+ 
+ III-A Research questions 
+
+ 
+ RQ1 (baseline determinism). With prefix reuse disabled,
+does repeated execution of an identical workload reproduce every emitted token
+and its log-probability under greedy decoding on a fixed serving stack?
+
+ 
+ RQ2 (cache-induced divergence). With prefix reuse
+enabled, how often does the output differ from the recompute path (path
+divergence) and from a repeat of the same run (run-to-run divergence), and how
+deep into an episode does the first difference appear?
+
+ 
+ RQ3 (quantization interaction). Does weight quantization
+amplify or damp path divergence?
+
+ 
+ RQ4 (backend generality). Do the effects reproduce across
+independent serving implementations?
+
+ 
+ RQ5 (task outcomes). Does cache-induced divergence change
+task correctness, and if so, is the change directional or merely unstable?
+
+ 
+ III-B Two caching mechanisms and two effects 
+
+ 
+ Two mechanisms in this study keep state between requests, and they need
+separate names. Prefix reuse is the reuse of key and value tensors
+already computed for the leading tokens of a prompt. llama.cpp controls it per
+request through its cache_prompt flag, and vLLM through its prefix
+caching option. It is the variable we manipulate, and cache-enabled and
+ cache-disabled in this paper always refer to it. The server-level
+prompt cache is a second layer in llama.cpp: a host-memory store of whole
+conversation states, enabled by default and controlled by the
+ --cache-ram option (Section  IV-C ). We name it
+explicitly wherever it matters.
+
+ 
+ The effects we measure are also distinct. Path divergence is a difference
+between the cache-hit path and the recompute path for the same request.
+ Run-to-run divergence is a difference between two runs of the same
+workload with prefix reuse enabled, and it arises from state the server carried
+over from earlier requests. Table  I lists the four terms.
+
+ 
+ TABLE I: Terms for the two caching mechanisms and the two effects. 
+ 
+ 
+ 
+ 
+ 
+ Term 
+ 
+ 
+ 
+ Meaning in this paper 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Prefix reuse 
+ 
+ 
+ 
+ Reuse of cached key and value tensors for a shared prompt
+prefix; the manipulated variable 
+ 
+
+ 
+ 
+ 
+ Server-level prompt cache 
+ 
+ 
+ 
+ llama.cpp’s host-memory store of conversation
+states; disabled in the replicated sweep and its other controls, at its default in
+the production-default runs 
+ 
+
+ 
+ 
+ 
+ Path divergence 
+ 
+ 
+ 
+ Same request, cache-hit path against recompute path 
+ 
+
+ 
+ 
+ 
+ Run-to-run divergence 
+ 
+ 
+ 
+ Same workload rerun with prefix reuse enabled, differing
+because of carried-over server state 
+ 
+
+ 
+ 
+ 
+
+ 
+ III-C Experimental protocol 
+
+ 
+ The study uses a paired design. A cell is one complete pass of a
+workload through one serving configuration with prefix reuse either
+enabled or disabled. Everything outside the caching setting is held fixed
+within a configuration: the model weights, the quantization format, the
+engine build, the sampling parameters, the request order, and the hardware.
+
+ 
+ Sampling is greedy throughout. Temperature is zero, the random seed is
+fixed at 42, and every request carries the same seed. Requests are issued
+serially with a batch size of one, so no request shares a forward pass with
+another. This matters because continuous batching is itself a documented
+source of nondeterminism, and leaving it active would confound the
+measurement we are trying to isolate. The key-value cache is stored in
+16-bit floating point in every arm, including the arms that serve quantized
+weights, so that cache precision never varies with the weight format.
+
+ 
+ Two properties of the design carry the argument. First, in the original grid, each
+configuration is run twice per arm, which yields a run-to-run comparison: the
+same arm against itself. The cache-disabled run-to-run comparison is the internal
+validity check, since any difference there would indicate a nondeterminism
+source we failed to control. Second, the cache setting is verified from the
+server rather than assumed wherever the engine permits it. On llama.cpp every
+response records how many prompt tokens were served from cache, making cache
+exposure a measured per-request variable rather than an inferred property of
+the arm. vLLM 0.11.0 leaves that field unpopulated on the endpoint we use, so
+there the check comes from the engine log instead, as Section  IV-E 
+reports.
+
+ 
+ Cache control differs by engine and we follow each engine’s own mechanism.
+We use llama.cpp [ 22 ] with GGUF weights
+ [ 23 ] and vLLM. In llama.cpp prefix reuse is a per-request flag,
+so in the original grid both arms run against a single server process, and in
+the replicated sweep every pass runs on a fresh one (Section  III-F ). In vLLM prefix caching is set when the server is launched, so
+each arm runs against its own server process launched with the corresponding
+flag. A third engine, SGLang, entered the frozen study plan as a
+budget-contingent stretch lane, which the plan specified would be the first
+component dropped if the compute allowance required it. It was dropped under
+that rule before any collection, so no SGLang cells exist and none are
+reported. Engine versions, launch flags, and model checksums are recorded and
+released with the artifact.
+
+ 
+ All measurements ran on a rented NVIDIA RTX 4090 with 24 GB of memory,
+compute capability 8.9, under Ubuntu 24.04 with the CUDA 12.6 toolkit. The
+serving stacks are llama.cpp built from source at release b10434, commit
+7e4c0a9, with CUDA offload, and vLLM 0.11.0 on PyTorch 2.8.0+cu128 with
+transformers 4.57. The grid of Table  V ran under NVIDIA driver
+570.211.01, and the experiments of Section  IV-C , apart from the
+controls of Section  III-F reported there, ran under
+580.126.20 on a second machine of the same type, so comparisons across those
+two groups carry a driver difference. Every comparison from which we
+draw a causal conclusion was collected within a single machine and driver
+version, with one exception that we checked directly. One cell of the pass-order
+comparison comes from the original grid. Its first cache-enabled pass is
+identical, in every token and log-probability, to the first pass of the new run
+it is compared with. The replicated sweep and
+the controls of Section  III-F ran on a third machine of the same
+type under driver 595.91.07 with the same llama.cpp build. Before collecting
+them we checked that this machine reproduces the earlier measurements: a
+cache-disabled and a cache-enabled pass of Qwen2.5-7B at Q4_K_M matched the
+corresponding earlier passes in every emitted token and every reported
+log-probability, in 80 of 80 episodes each. The cache-disabled reference passes
+of the sweep, recorded with five log-probabilities, also reproduced the earlier
+cache-disabled grid token for token in all four formats, and the reference of
+each format was identical in every token and log-probability under two
+different episode orders.
+Table  II lists the principal
+settings that can affect the measurements and the reason for each value.
+
+ 
+ TABLE II: Settings that can affect the measurements. Nothing is trained or
+tuned on outcomes; the table gives the reason for each value. 
+ 
+ 
+ 
+ 
+ 
+ Setting 
+ 
+ 
+ 
+ Value 
+ 
+ 
+ 
+ Reason 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ llama.cpp build 
+ 
+ 
+ 
+ release b10434, commit 7e4c0a9, CUDA 12.6, sm_89 
+ 
+ 
+ 
+ cache behavior is version-specific 
+ 
+
+ 
+ 
+ 
+ vLLM build 
+ 
+ 
+ 
+ 0.11.0, PyTorch 2.8.0+cu128, transformers 4.57 
+ 
+ 
+ 
+ same 
+ 
+
+ 
+ 
+ 
+ Slots and batching 
+ 
+ 
+ 
+ one slot, batch size 1, serial requests 
+ 
+ 
+ 
+ removes batch-composition effects 
+ 
+
+ 
+ 
+ 
+ Context length 
+ 
+ 
+ 
+ 16,384 tokens 
+ 
+ 
+ 
+ holds every episode but one: in one random order of the production-default reruns, one episode exceeded it at the same request in both passes (Section  IV-C ) 
+ 
+
+ 
+ 
+ 
+ Key-value cache precision 
+ 
+ 
+ 
+ 16-bit floating point in every arm 
+ 
+ 
+ 
+ keeps cache precision independent of the weight format 
+ 
+
+ 
+ 
+ 
+ Server-level prompt cache 
+ 
+ 
+ 
+ default (8192 MiB) in the original grid, the GSM8K bridge and the production-default reruns; both settings in the flag, order and latency experiments; disabled in the replicated sweep and its other controls 
+ 
+ 
+ 
+ the variable isolated in Section  IV-C 
+ 
+
+ 
+ 
+ 
+ Decoding 
+ 
+ 
+ 
+ greedy, temperature 0, seed 42 on every request 
+ 
+ 
+ 
+ removes sampling as a source of variation 
+ 
+
+ 
+ 
+ 
+ Maximum new tokens 
+ 
+ 
+ 
+ 4096 (BFCL, capped by remaining context); 1024 (GSM8K) 
+ 
+ 
+ 
+ reached by 12 of 140,167 agentic and 4 of 11,027 single-turn requests across all runs 
+ 
+
+ 
+ 
+ 
+ Reported log-probabilities 
+ 
+ 
+ 
+ top 1 (original runs, production-default reruns, latency runs); top 5 (replicated sweep and its isolation, reset and dequantization controls) 
+ 
+ 
+ 
+ top 5 gives the exact top-two margin; emitted tokens are unchanged by it 
+ 
+
+ 
+ 
+ 
+ Workload selection 
+ 
+ 
+ 
+ first 80 BFCL multi-turn base episodes by id; GSM8K test items 0–499 
+ 
+ 
+ 
+ fixed before inspecting results 
+ 
+
+ 
+ 
+ 
+ Bootstrap, single pass 
+ 
+ 
+ 
+ 10,000 replicates; circular blocks; length by the Politis–White rule, at least 5 (realized 5 to 13); seed 20261007 
+ 
+ 
+ 
+ dependence-aware intervals 
+ 
+
+ 
+ 
+ 
+ Bootstrap, replicated sweep 
+ 
+ 
+ 
+ episodes and histories resampled independently; 10,000 replicates (2,000 with model refits for the odds ratio) 
+ 
+ 
+ 
+ carries episode and history variation 
+ 
+
+ 
+ 
+ 
+ Mixed model 
+ 
+ 
+ 
+ random intercept per episode; formats coded 0 to 3 in the order F16, Q8_0, Q4_K_M, Q3_K_M; adaptive Gauss–Hermite quadrature, 100 nodes 
+ 
+ 
+ 
+ paired trend across formats 
+ 
+
+ 
+ 
+ 
+ History orders 
+ 
+ 
+ 
+ 10 random permutations, order k k drawn with seed (20261007, k k ), shared by all formats 
+ 
+ 
+ 
+ pairs formats on episode and history 
+ 
+
+ 
+ 
+ 
+
+ 
+ III-D Workloads 
+
+ 
+ The primary workload is multi-turn agentic tool use. We use the multi-turn
+base category of the Berkeley Function Calling Leaderboard, which places a
+model in a simulated environment of stateful APIs and scores whether the
+resulting environment state and call sequence match a reference. Episodes
+run for several user turns, and within each turn the agent may take many
+steps, so a single episode issues about ten requests on average, ranging from
+seven to thirteen across configurations, and
+accumulates a context in the thousands of tokens. That growth pattern is
+what makes the workload appropriate here: each step re-sends the whole
+conversation, which is exactly the shape of request that prefix caching is
+designed to accelerate. Episodes are selected by a rule fixed before any
+result was inspected, namely the first eighty entries in ascending
+numeric identifier order.
+
+ 
+ The secondary workload is single-turn grade-school mathematics from GSM8K.
+It serves two purposes. It provides a bridge to prior work on cached
+inference, which studied single-turn arithmetic, and it supplies an outcome
+measure clear of the floor: the models we run solve roughly nine in ten of
+these problems, which still leaves enough incorrect items for flips to be
+observable in both directions. Each item is presented four times in a
+fixed order: twice on the recompute path and twice on the cache-hit path.
+The repeated passes on each path give a per-path determinism check, so a
+difference between paths is only counted as cache-attributable when each
+path agreed with itself.
+
+ 
+ III-E Isolating the cause 
+
+ 
+ Our first grid measured divergence but did not establish what produced it,
+and a measurement of that kind invites two objections: that the passes
+differed in execution order, and that comparing two runs whose cache states
+differ is definitionally guaranteed to show a difference. Three further
+experiments address both, all on Qwen2.5-7B at Q4_K_M under llama.cpp,
+the configuration with the highest run-to-run divergence in the grid; the third
+is also repeated for all four formats alongside the replicated sweep
+(Section  III-F ).
+
+ 
+ The first varies execution order alone. One arm places a complete
+cache-disabled pass between the two cache-enabled passes, matching the order
+used in our llama.cpp lane; the other runs the two cache-enabled passes
+adjacently, matching the vLLM lane. Everything else is held constant,
+including a fresh server for each arm.
+
+ 
+ The second varies one flag. llama.cpp maintains a server-level prompt cache
+(Section  III-B ) that is separate from prefix reuse, stores whole conversation
+states, and selects among them by prefix similarity rather than by identity. We run the same procedure with that
+layer disabled and at its default, again with a fresh server for each arm,
+so the flag is the only difference.
+
+ 
+ The third re-establishes the cache state directly. Each item is served four times,
+twice on the recompute path and twice on the cache-hit path, with the cold
+state re-established before each recompute pass. Comparing each path against
+itself under a restored state separates dependence on cache state from
+residual randomness in either path. We do not use the engine’s cache-erase
+endpoint for this: it returns success while leaving the cached state intact,
+which we verified from the reported cached-token counts, so the cold state is
+established with the per-request flag that forces recomputation, whose
+effect is visible in the same telemetry.
+
+ 
+ III-F Replicated controlled sweep 
+
+ 
+ The quantization comparison needs replication at the level where state lives. A
+fresh server process given the same episode order reproduced its output token
+for token in every check we ran: a second, independently started process at
+the canonical order matched the first in all four formats, in every one of
+100,050 tokens and their log-probabilities. What differs
+between deployments is the history a server has processed, and with the
+server-level prompt cache disabled, that history reaches an episode only through
+the prefix that the preceding episode left in the cache. We vary it by
+randomizing the episode order.
+
+ 
+ For each of the four Qwen2.5-7B formats, F16, Q8_0, Q4_K_M and Q3_K_M, the
+server-level prompt cache is disabled from launch and every pass runs on a fresh
+server. Each format runs under eleven histories: the canonical ascending order
+and ten random permutations drawn with a recorded seed. The same orders are used
+for every format, so formats are paired on both episode and history, and a
+Williams design balances the order in which formats run on the machine. Each
+cache-enabled pass is compared with a cache-disabled reference pass of the same
+format. The reference should not depend on history, and we check that rather
+than assume it by running it under two different orders. Every request in these
+runs records the five most probable tokens with their log-probabilities, which
+gives the exact logit margin between the top two candidates at each position.
+
+ 
+ Five controls accompany the sweep. A second server process at the canonical
+history checks process-level reproducibility in every format. An
+episode-isolated variant overwrites the cache with a fixed sentinel prompt
+before each episode, so that every episode starts from the same verified state,
+and runs the workload under three orders. The restored-state control of
+Section  III-E is repeated for all four formats in three
+independent server sessions of 100 items each. The production-default
+configuration, with the server-level prompt cache enabled, is rerun under five
+random orders with both passes on one server, which measures how much the
+run-to-run divergence it produces depends on history. Finally, to separate the
+quantized weight values from the arithmetic that serves them, the Q4_K_M
+weights are also dequantized to a 16-bit file, which keeps their values to
+within 16-bit rounding but runs them through the F16 kernels, and the sweep is
+repeated for that file under four histories.
+
+ 
+ III-G Measures 
+
+ 
+ Divergence is measured on token identifiers rather than on decoded text
+wherever the engine returns them, so that a difference is registered even when
+detokenization hides it. llama.cpp returns token identifiers on every
+response. vLLM 0.11.0 returns token strings on the endpoint we use, so its two
+configurations are compared on decoded tokens, which is a slightly weaker
+criterion; each configuration records which criterion applied. For a
+pair of runs we walk the request sequence of each episode in lockstep and
+record the first position where the two runs differ, either in the prompt
+that was assembled or in the emitted token sequence. An episode is counted
+as divergent if any request differs or if the two runs issue different
+numbers of requests, the latter meaning the agent took a different number
+of steps.
+
+ 
+ Agentic outcomes are scored by the benchmark’s own checker without
+modification, so scoring is independent of our instrumentation; the checker
+compares the final environment state and the sequence of invoked methods
+against the reference. For the mathematics workload an answer is correct when
+the final numeric value, extracted as described in Section  IV-F ,
+matches the reference.
+
+ 
+ Episodes within a pass run in sequence against one server, and this study’s own
+claim is that state carries across requests, so episodes are not
+exchangeable and Wilson intervals may be anticonservative. Divergence rates
+measured in a single pass, those of Tables  III 
+and  V , of Fig.  1 and of the production-default
+reruns of Section  IV-C , carry a dependence-aware interval: a circular block bootstrap of the
+episode-level indicators in execution order
+ [ 24 ] , with 10,000 replicates and the block length chosen
+by the automatic rule of Politis and White [ 25 , 26 ] , floored at five episodes. Blocks wrap around the end of
+the sequence. We report the envelope of this interval and the Wilson interval,
+so that allowing for dependence can widen an interval but never narrow it.
+Where serial dependence is weak the block bootstrap comes out narrower, and the
+reported interval is then the Wilson one. Realized block lengths run from 5 to
+13 episodes, with most series at the floor, and recomputing every interval at
+block lengths of 1, 5, 10 and 20 changes no conclusion. These single-pass
+intervals are approximate: with 80 ordered episodes their coverage depends on the strength and form of the dependence, which is one reason the
+replicated sweep rather than any single pass carries the quantization result. Rates in the replicated
+sweep (Table  VI , Fig.  2 ) and the differences
+reported for its dequantization control use a
+bootstrap that resamples episodes and histories independently, the two-way
+design for crossed factors [ 27 ] , because each of those
+quantities pools passes over several histories. Single-history values given
+beside them, the canonical column of Table  VI and the sentinel
+rates, are descriptive. Results that describe exact
+reproduction are reported as counts. Token counts in those results are counts of the log-probability records the
+engine returns; llama.cpp merges a token that ends
+inside a multi-byte character with the next one, so a record can cover more than
+one token, and identical records imply identical response text. Perturbation comparisons use passes
+recorded at the same top- k k depth, because llama.cpp’s reported
+log-probabilities depend in their last bits on that depth: requesting the top
+five changes the order in which the reporting softmax is summed, not the logits
+or any emitted token.
+When no episode diverges, the bootstrap is degenerate and we report the count
+itself; where a figure draws a bar for such a count, its caption names the
+reference interval shown. We also test directly for position dependence, and report it in Section  IV-C .
+
+ 
+ The quantization trend is estimated with methods that keep each episode paired
+across formats, with the formats entered as an ordinal score from 0 (F16) to 3
+(Q3_K_M): a logistic model with a random intercept per episode, fitted by
+maximum likelihood with adaptive quadrature; on the original grid, a
+conditional logistic regression stratified by episode, fitted by conditional
+maximum likelihood; and, as a secondary check, an exact test that permutes divergence across
+formats within each episode, which assumes that the format labels are
+exchangeable within an episode [ 28 ] . In the replicated sweep an
+episode recurs in every history, so it remains the unit of the permutation
+test: the test acts on each episode’s divergence counts summed over histories
+and permutes formats within the episode, never treating an episode’s histories
+as independent. In both cases the statistic is the sum of the format ranks over
+all observed divergences, and its null distribution, with the formats
+exchangeable within each episode, is computed exactly by convolution over
+episodes. The random-intercept model is fitted to each history, its
+slope is averaged over the histories, and the interval for that average comes
+from the two-way bootstrap with the model refitted in every resampled history.
+Effect sizes, as paired differences in divergence rate, are reported first and
+the tests second. In the logit-margin analysis of Section  IV-D ,
+per-episode summaries are compared across the ordered formats with Page’s trend
+test, with episodes as blocks, and ratios of format means carry intervals from a
+bootstrap over episodes.
+
+ 
+ Paired outcome changes on GSM8K are tested with an exact McNemar test
+ [ 29 ] on the discordant pairs, which is the appropriate test
+when the same item is observed under both conditions and we care whether
+changes favor one condition [ 30 ] .
+The same problems appear in several configurations, so the pooled analysis is
+done at the problem level, with a problem-clustered sign test and a bootstrap
+that resamples problems. We report the discordant counts alongside the
+p-value, since with small numbers of flips the counts themselves are more
+informative than the test statistic.
+
+ 
+ IV Results 
+
+ 
+ IV-A RQ1: cache-disabled execution repeats exactly 
+
+ 
+ We begin with the control, because everything else depends on it. For every
+configuration we executed the full eighty-episode workload twice with prefix
+reuse disabled and compared the two runs request by request, on token
+identifiers for llama.cpp and on token strings for vLLM.
+
+ 
+ Not one episode differed. In every configuration, across both serving
+engines, across weight formats from 16-bit floating point down to three-bit
+k-quantization, the second run reproduced the first exactly: identical
+prompts at every step, identical emitted tokens, identical numbers of
+requests per episode. The identity holds below the token level as well:
+every emitted token carried an identical log-probability in both runs,
+277,280 tokens across the ten configurations. On vLLM, which reports token strings
+rather than identifiers, this covers the strings and their log-probabilities.
+Table  V reports 0.0 0.0 in the cache-disabled column for every
+configuration. We report this as an observed count (no divergent episode in any of the ten
+configurations, 0 of 800 configuration-episode executions) rather than as a
+pooled bound, because the configurations share episodes and are not
+independent trials.
+
+ 
+ The value of this result is what it licenses. Under our conditions, greedy decoding with a fixed
+seed, a batch size of one, and serial requests, the serving stack behaved as a
+deterministic function of its input in every repetition we ran. Any
+divergence observed elsewhere in this paper therefore cannot be attributed to
+sampling, to scheduler nondeterminism, to batch composition, or to
+unspecified engine noise, because all of those are equally present in the
+cache-disabled arms and produced no observed variation. We also checked
+every episode log for failures: no episode in any cell of the original grid raised an error, so
+divergence cannot be an artifact of timeouts or exceptions.
+
+ 
+ IV-B RQ2: cache-enabled execution diverges, and why 
+
+ 
+ We then repeated the identical procedure with prefix reuse enabled,
+changing nothing else about the workload or the decoding parameters.
+
+ 
+ Two distinct measurements follow, and separating them is the substance of
+this section. Path divergence compares the cache-enabled arm against
+the cache-disabled arm. Run-to-run divergence compares the cache-enabled arm
+against itself, re-run.
+
+ 
+ IV-B 1 Cache-enabled and cache-disabled execution differ
+
+ 
+ The path-divergence column of Table  V reports the first
+comparison. In the production-default grid, enabling prefix reuse
+changes the agent’s trajectory on between 36.2 and 91.2 percent of episodes,
+depending on configuration. This
+measurement is stable: on the canonical history of the replicated sweep
+(Section  IV-D ), run with the server-level prompt cache disabled, path
+divergence for the four Qwen2.5-7B formats is 40.0,
+60.0, 81.2 and 77.5 percent,
+against 36.2, 61.3, 75.0 and 77.5 percent in the grid.
+
+ 
+ The presumed mechanism is the familiar one. A request that hits the cache
+reads keys and values for the shared prefix instead of recomputing them, so the
+rest of the computation runs with different batch shapes and can accumulate in
+a different order. Floating point addition is not associative, and the resulting logits can differ in their low-order bits. We did not instrument the
+kernels, so this account is an interpretation. What the measurement adds is
+that the difference is not confined to low-order bits of the output. It
+crosses token decision boundaries often enough to change agent behavior in a
+large fraction of episodes. Divergence also begins early: across
+configurations the first differing request has a median index between 1 and 4
+of roughly ten, and within that request the first differing token has a median
+index between 4 and 17. Among episodes that diverge, the first difference typically appears in the
+opening exchanges, leaving several subsequent requests through which it can
+propagate.
+
+ 
+ IV-B 2 On llama.cpp, a second caching layer drives run-to-run
+divergence
+
+ 
+ Re-running the cache-enabled arm against itself (run-to-run divergence)
+changed the trajectory on 8.8 to 77.5 percent of episodes across the ten
+configurations of Table  V . Taken alone, that invites the
+conclusion that cached serving is intrinsically nondeterministic.
+
+ 
+ It is not, and the next section shows why. The eight llama.cpp configurations
+were collected with the server-level prompt cache left at its default, a
+second caching layer, a host-memory prompt cache that is distinct from prefix
+reuse and that persists whole conversation states across requests
+independently of it.
+The two vLLM configurations have no such layer; their run-to-run divergence
+comes from prefix-cache state held in one server process
+(Section  IV-C ). Once the llama.cpp layer is disabled, repeated
+cache-enabled runs of Qwen2.5-7B at Q4_K_M agree on 79 of 80 episodes. The
+exception is the first episode run, which the first pass serves from an empty
+cache and the second from the prefix the first pass left behind. In that
+configuration the cached path is reproducible; what is not reproducible is
+the state it reads from.
+
+ 
+ IV-C The mechanism: state carried between runs 
+
+ 
+ Fig. 1: Where the divergence comes from. Repeating a cache-disabled run
+changes nothing. Repeating a cache-enabled run (run-to-run divergence) changes
+little once the server-level prompt cache is disabled, and a great deal at its
+default setting. Path divergence compares the cache-enabled and cache-disabled arms of the same run and has the highest observed rate shown. All four bars come from the controlled runs of
+Section  IV-C rather than from Table  V . Bars show
+dependence-aware 95% intervals (Section  III-G ); for the zero
+count the bootstrap is degenerate and the Wilson interval is shown. Qwen2.5-7B
+at Q4_K_M under llama.cpp, 80 episodes per bar. 
+ 
+ 
+ Three experiments isolate the cause. The first two use Qwen2.5-7B at
+Q4_K_M, the configuration with the highest run-to-run divergence in the
+grid, and hold
+the model, episode set, decoding parameters, and server freshness constant.
+The third re-establishes the cache state directly and is repeated in all four weight
+formats. The vLLM
+comparison at the end of the section uses the same model at BF16, the
+checkpoint’s native 16-bit format, since vLLM serves the unquantized weights.
+
+ 
+ Figure  1 summarizes the result.
+
+ 
+ A second caching layer controls run-to-run divergence. Beyond the per-request
+prefix reuse under study, llama.cpp maintains a server-level host-memory prompt cache that
+stores whole conversation states, selects among them by longest-common-prefix
+similarity rather than by identity, and evicts oldest-first
+ [ 31 ] . It is enabled by default at 8192 MiB and
+controlled by a documented flag [ 32 ] , and it was
+introduced in October 2025, so evaluations on llama.cpp builds from that date
+with default settings could have been affected without notice. Our first grid
+left it at its default. Holding everything else fixed, including a fresh server
+for each arm and the canonical episode order, and changing only that flag,
+repeated cache-enabled runs diverged on 1 of
+80 episodes with the layer disabled (1.2 percent, dependence-aware 95% CI 0.0
+to 6.7) and 31 of 80 with it at its default (38.8 percent, 22.5 to 57.5). Under
+that order, changing this one setting produced a paired difference of 37.5
+percentage points in run-to-run divergence (dependence-aware 95% CI 21.2 to
+57.5). We state the difference rather than the
+ratio, since a single divergent episode in the disabled arm cannot pin a ratio
+down.
+
+ 
+ The setting and its default are documented, and the documentation separately
+warns that the per-request prefix cache can produce nondeterministic results
+ [ 32 ] . What we did not find in the documentation, in
+the pull request that introduced the feature, or in the issue tracker is any
+report that this second layer is an independent source of run-to-run variation
+on an identical workload. Our contribution here is the measurement rather than
+the discovery of the setting: a request’s arithmetic path depends on which
+stored state the similarity search selects, and that depends on what the server
+processed earlier.
+
+ 
+ Pass order acts through the same layer. Our llama.cpp and vLLM
+lanes had run their passes in different orders, so we tested order against the
+flag above. Table  III assembles the four cells. Three are new
+runs made for this purpose; the fourth, at the default setting with a
+cache-disabled pass in between, is the corresponding configuration from
+Table  V , whose first cache-enabled pass we verified is identical
+to that of the new run in the same row. We label it as such rather than
+presenting the table as a single designed experiment.
+
+ 
+ With the server-level prompt cache active, interposing a complete cache-disabled pass
+between the two cache-enabled passes raises divergence from 38.8 to 77.5
+percent, a difference of 38.8 points (dependence-aware interval 22.5
+to 55.0), consistent with the intervening traffic rewriting the state that the
+second pass inherits. With the layer disabled the same manipulation changes
+nothing, 1.2 percent either way, and the two orderings produced identical
+output, token for token, in every cell. Order therefore appears to act through the state the
+layer carries rather than independently of it. The two rows do not share a
+common starting point: at the default setting the first pass issues 854
+requests and with the layer disabled it issues 827, so the setting changes
+behavior within a pass as well as between runs.
+
+ 
+ Divergence in that configuration is also concentrated early in the run. Split
+into quartiles of execution order, the counts of divergent episodes are 16, 6,
+6 and 3, a trend that a permutation test puts at p = 0.0002 p=0.0002 . The same split in the
+grid configuration shows no trend ( p = 0.59 p=0.59 ). A layer that accumulates and
+evicts entries as a run proceeds would be expected to produce exactly this
+settling behavior, and it is a further reason to treat episodes within a cell
+as dependent rather than as independent trials.
+
+ 
+ Those runs used one fixed episode order, so we repeated the production-default
+configuration under five random orders, the first five of the replicated sweep,
+with both cache-enabled passes back to back on one server, as in the
+adjacent-passes column of Table  III . Run-to-run divergence averaged 24.5 percent, with a
+between-order standard deviation of 3.1 points and a range from
+20.0 percent (dependence-aware 95% CI 11.2 to
+30.0) to 28.7 percent (17.5 to
+40.0). The canonical order, measured on
+the second machine, gave 38.8 percent, above all five random orders measured on
+the third machine. Although the third machine reproduced earlier Q4_K_M cache-disabled and
+cache-enabled passes exactly, with the server-level prompt cache disabled
+(Section  III-C ), this comparison, made with that cache at its
+default, does not isolate episode order from machine and driver differences.
+The five random orders on the third machine, under otherwise fixed conditions,
+show that the effect is present under every tested order and that its size
+depends on the history the server has processed. The early concentration
+holds as well: in all five orders the first quarter of the run contains the
+most divergent episodes, with a permutation p p of at most
+0.014 in each. One of these orders was run twice on fresh
+servers, and the two runs agreed in every one of 52,757 tokens
+and log-probabilities across both passes. In that order, then, with the server-level prompt cache at its default, the
+server was deterministic given its history, and the
+run-to-run divergence came from the state it carried from the first pass into
+the second.
+One episode in that order grew beyond the 16,384-token context window at the
+same request in both passes, and it was compared on the requests both passes
+completed.
+
+ 
+ With cache state restored, the cached path is reproducible. The reset
+control serves each item four times, twice on the recompute path and twice on
+the cache-hit path, re-establishing the cold state before each recompute pass
+and verifying it from the reported cached-token counts on every request. In
+the original control, 40 items in one session at Q4_K_M, the recompute path
+reproduced on 40 of 40 items and the cached path on 40 of 40, while the two
+paths differed from each other on 14 of 40. We repeated the control in all four
+weight formats, in three independent server sessions each, with 100 items served in a different order in each session (Table  IV ).
+The telemetry confirmed the intended state on every request: all
+2,400 recompute requests reported 0 cached tokens,
+and every one of the 2,400 cache-hit requests reported at least
+68. In all twelve sessions both paths reproduced on every
+item. The two paths differed on 2 of 100 items at F16,
+43 at Q8_0, 43 at Q4_K_M and
+60 at Q3_K_M, with the same count in all three sessions
+of each format. Within each path, every item’s emitted tokens were identical
+across the three sessions, although each session served the items in a
+different order.
+
+ 
+ The same holds for whole episodes. When the cache is overwritten with a fixed
+sentinel prompt before every episode, verified by zero cached tokens on each
+episode’s first request, every episode starts from the same state whatever ran
+before it. Under three different episode orders, the canonical order and the
+first two random orders of the sweep, the cache-enabled pass was then identical across the three orders in all four formats, in every one of 205,472 compared tokens
+and their log-probabilities. The cache-hit path still departed from the
+recompute path on 40.0, 66.2,
+80.0 and 67.5 percent of episodes at F16,
+Q8_0, Q4_K_M and Q3_K_M. Isolation changes the state each episode
+starts from, so these rates need not match the sweep’s: Q8_0 and Q3_K_M fall
+outside the range of its histories, while every quantized format remains above
+F16. With the history removed, path divergence and
+its amplification by quantization remain. These
+controls ran with the server-level prompt cache disabled, so they establish that the
+cached path is a function of cache state in the regime where state is
+otherwise controlled; they do not by themselves speak to the default
+configuration, which the first two experiments cover.
+
+ 
+ The second engine points the same way through a different lever. vLLM exposes
+no equivalent of the llama.cpp setting, so what varies there is server
+lifetime. The configuration that launched a fresh server for each
+cache-enabled pass diverged on 0 of 80 episodes, since each pass then begins
+from an empty cache. Configurations that served both passes from one process diverged on 7 of 80
+and 22 of 80 for Qwen2.5-7B in two sessions, and on 8 of 80 for Llama-3.1-8B
+in its one session. The direction is consistent across every session; the
+magnitude for the repeated model is not, 8.8 against 27.5 percent. Those two
+sessions differ in the script that launched them, in whether an explicit GPU
+memory fraction was set, and in the machine and driver version, and we did not
+isolate which of these matters. We therefore take the vLLM lane as
+establishing the direction of the effect on a second engine and the llama.cpp
+lane as fixing its size.
+
+ 
+ Taken together, these results support a more precise claim than the raw
+run-to-run numbers suggest. In the configurations tested, restoring cache
+state eliminated all observed variation within each path, so cached serving
+behaved as a deterministic function of the request and the cache state.
+Cached serving is irreproducible in practice because
+cache state is not part of the request, is reported in the response at most
+as a count of reused tokens, and is not reset between runs by default in any stack we tested. Disabling prefix
+reuse removes the state, and with it both kinds of divergence. That gap, between a system that
+is deterministic given its state and one that is reproducible from the
+request, is what these experiments measure.
+
+ 
+ TABLE III: Pass order and the server-level prompt cache, crossed. Values are
+the fraction of 80 episodes whose trajectory changed when the cache-enabled arm
+was repeated, with dependence-aware 95% intervals. Order matters only while
+that cache is active. Qwen2.5-7B at Q4_K_M under llama.cpp. 
+ 
+ 
+ 
+ Server-level 
+ passes 
+ cache-off pass 
+
+ 
+ prompt cache 
+ adjacent (%) 
+ in between (%) 
+
+ 
+ 
+ 
+ default 
+ 38.8 [22.5, 57.5] 
+ 77.5 [67.2, 86.2] 
+
+ 
+ disabled 
+ 1.2 [0.0, 6.7] 
+ 1.2 [0.0, 6.7] 
+
+ 
+ 
+ 
+ 
+ TABLE IV: Restored-state control in every weight format, Qwen2.5-7B under
+llama.cpp, GSM8K test items 0 to 99: three independent server sessions per format, each serving the same items four times (twice on
+the recompute path, twice on the cache-hit path) with the cold state verified
+from server telemetry on every request. The sessions serve the same items in
+different orders. Counts are given per session; the last two columns count
+items whose tokens are identical in all three sessions, out of 100. 
+ 
+ 
+ 
+ 
+ 
+ path reproduces 
+ paths 
+ same in all sessions 
+
+ 
+ Weights 
+ items 
+ recompute 
+ cache hit 
+ differ 
+ recompute 
+ cache hit 
+
+ 
+ 
+ 
+ F16 
+ 100 
+ 100/100/100 
+ 100/100/100 
+ 2/2/2 
+ 100/100 
+ 100/100 
+
+ 
+ Q8_0 
+ 100 
+ 100/100/100 
+ 100/100/100 
+ 43/43/43 
+ 100/100 
+ 100/100 
+
+ 
+ Q4_K_M 
+ 100 
+ 100/100/100 
+ 100/100/100 
+ 43/43/43 
+ 100/100 
+ 100/100 
+
+ 
+ Q3_K_M 
+ 100 
+ 100/100/100 
+ 100/100/100 
+ 60/60/60 
+ 100/100 
+ 100/100 
+
+ 
+ 
+ 
+ 
+ TABLE V: Episode-level divergence in the original grid (production-default
+configuration: llama.cpp’s server-level prompt cache at its default; vLLM, which
+has no such layer, served both cache-enabled passes from one process; on llama.cpp a cache-disabled pass
+ran between the two cache-enabled passes, except for Qwen2.5-14B, whose cache-enabled passes ran back to back as
+on vLLM). Each configuration ran
+the same 80-episode workload twice per arm on one server history, so each row is
+a single-history measurement; the replicated sweep of Table  VI 
+gives the between-history variation for the four Qwen2.5-7B formats under
+llama.cpp. Run-to-run divergence, for cache off and cache on , is the share
+of episodes whose trajectory changed when the same arm was repeated; path
+divergence compares the two arms. Every cache-off value is
+exactly zero. Intervals are the envelope of a circular block bootstrap and the
+Wilson interval (Section  III-G ); where serial dependence is weak
+the bootstrap is narrower and the Wilson bound is the one shown. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ run-to-run divergence (%) 
+ path divergence (%) 
+
+ 
+ Engine 
+ Model 
+ Weights 
+ n n 
+ cache off 
+ cache on 
+ 95% CI 
+ rate 
+ 95% CI 
+
+ 
+ llama.cpp 
+ Qwen2.5-7B 
+ F16 
+ 80 
+ 0.0 
+ 20.0 
+ [11.2, 30.0] 
+ 36.2 
+ [26.2, 47.2] 
+
+ 
+ llama.cpp 
+ Qwen2.5-7B 
+ Q8_0 
+ 80 
+ 0.0 
+ 55.0 
+ [44.1, 65.4] 
+ 61.3 
+ [50.0, 71.2] 
+
+ 
+ llama.cpp 
+ Qwen2.5-7B 
+ Q4_K_M 
+ 80 
+ 0.0 
+ 77.5 
+ [67.2, 86.2] 
+ 75.0 
+ [64.5, 83.8] 
+
+ 
+ llama.cpp 
+ Qwen2.5-7B 
+ Q3_K_M 
+ 80 
+ 0.0 
+ 67.5 
+ [56.2, 78.8] 
+ 77.5 
+ [67.2, 86.2] 
+
+ 
+ llama.cpp 
+ Llama-3.1-8B 
+ Q8_0 
+ 80 
+ 0.0 
+ 33.8 
+ [24.3, 44.6] 
+ 55.0 
+ [44.1, 65.4] 
+
+ 
+ llama.cpp 
+ Llama-3.1-8B 
+ Q4_K_M 
+ 80 
+ 0.0 
+ 60.0 
+ [48.8, 71.2] 
+ 70.0 
+ [59.2, 78.9] 
+
+ 
+ llama.cpp 
+ Llama-3.1-8B 
+ Q3_K_M 
+ 80 
+ 0.0 
+ 62.5 
+ [50.0, 75.0] 
+ 68.8 
+ [57.9, 78.8] 
+
+ 
+ llama.cpp 
+ Qwen2.5-14B 
+ Q4_K_M 
+ 80 
+ 0.0 
+ 31.2 
+ [16.2, 47.5] 
+ 91.2 
+ [83.0, 96.2] 
+
+ 
+ vLLM 
+ Qwen2.5-7B 
+ BF16 
+ 80 
+ 0.0 
+ 8.8 
+ [2.5, 17.0] 
+ 62.5 
+ [50.0, 75.0] 
+
+ 
+ vLLM 
+ Llama-3.1-8B 
+ BF16 
+ 80 
+ 0.0 
+ 10.0 
+ [1.2, 20.0] 
+ 53.8 
+ [41.2, 65.0] 
+
+ 
+ 
+ 
+
+ 
+ IV-D RQ3: quantization amplifies divergence 
+
+ 
+ Table  VI and Fig.  2 give the replicated
+controlled sweep of Section  III-F , which is the primary
+evidence for this question. Averaged over the ten random histories, path
+divergence, the share of episodes whose cache-enabled trajectory departs from
+the cache-disabled reference, is 37.4 percent at F16, 59.5 percent at
+Q8_0, 82.5 percent at Q4_K_M and 77.1 percent at
+Q3_K_M. The between-history standard deviation is only 1.6 to
+2.5 points, far smaller than the differences between formats, so
+the aggregate rates were robust to the order in which the episodes were served; most of the
+width of the intervals below comes from the sample of episodes. Individual
+episodes are less stable: between 12 and 20
+of the 80 episodes, depending on the format, diverge in some histories and not
+in others. Paired by episode and
+history, the difference
+from F16 is 22.1 points at Q8_0 (95% CI 9.9
+to 34.4), 45.1 at Q4_K_M (34.9
+to 55.6) and 39.8 at Q3_K_M
+(26.9 to 52.1). Every quantized format lies
+above F16 in all 10 histories. The canonical history,
+run the same way, gives 40.0, 60.0,
+81.2 and 77.5 percent. On the third machine, its F16, Q4_K_M and
+Q3_K_M passes reproduced token for token the controlled
+measurements of these cells made earlier with the server-level prompt cache disabled. A second, independently started server
+process given the canonical history reproduced the cache-enabled pass in all four formats, in every
+one of 100,050 tokens and their log-probabilities.
+
+ 
+ The paired trend models agree. Fitted to each random history and averaged over
+the histories, the random-intercept model gives an odds ratio of
+2.30 per format step (95% CI 1.76 to
+3.15, from 2,000 bootstrap replicates that resample
+episodes and histories and refit the model). The divergence rate
+rises by 14.2 percentage points per format step (95% CI
+10.2 to 18.1, resampling episodes and histories),
+and the exact within-episode permutation test gives a two-sided
+ p = 1.1 × 10 − 12 p=1.1\times 10^{-12} .
+
+ 
+ The rise happens in two steps of similar size, from F16 to Q8_0
+(22.1 points, 95% CI 9.9 to
+34.4) and from Q8_0 to Q4_K_M
+(23.0 points, 11.9 to
+34.4), and both steps are upward in all 10 histories.
+Q3_K_M adds nothing beyond Q4_K_M. It lies below Q4_K_M in all 10
+histories, by 5.4 points on average, but the interval that also
+resamples episodes runs from − - 15.6 to
+5.0, so the order of Q4_K_M and Q3_K_M holds for
+this set of episodes but is not established beyond it. We
+therefore read the result as an amplification that grows from F16 through
+Q8_0 to Q4_K_M, and not as a strict monotone gradient in bit width. The size
+of the cache-path perturbation, reported below, follows the same order.
+
+ 
+ TABLE VI: Replicated controlled sweep: cache-enabled against cache-disabled path
+divergence for Qwen2.5-7B under llama.cpp, server-level prompt cache disabled
+from launch, a fresh server for every pass, 80 episodes per pass. Each random
+history is an independent episode order shared by all four formats. The
+interval resamples episodes and histories; the difference from F16 is paired
+by episode and history. 
+ 
+ 
+ 
+ 
+ canonical 
+ 10 random histories (%) 
+ difference 
+ histories 
+
+ 
+ Weights 
+ history (%) 
+ mean 
+ SD 
+ range 
+ 95% CI 
+ from F16 (points) 
+ above F16 
+
+ 
+ F16 
+ 40.0 
+ 37.4 
+ 1.8 
+ 35.0–40.0 
+ [27.4, 47.6] 
+ – 
+ – 
+
+ 
+ Q8_0 
+ 60.0 
+ 59.5 
+ 1.6 
+ 57.5–61.3 
+ [49.1, 69.8] 
+ +22.1 [+9.9, +34.4] 
+ 10/10 
+
+ 
+ Q4_K_M 
+ 81.2 
+ 82.5 
+ 1.9 
+ 80.0–85.0 
+ [74.4, 89.9] 
+ +45.1 [+34.9, +55.6] 
+ 10/10 
+
+ 
+ Q3_K_M 
+ 77.5 
+ 77.1 
+ 2.5 
+ 72.5–81.2 
+ [68.2, 85.4] 
+ +39.8 [+26.9, +52.1] 
+ 10/10 
+
+ 
+ 
+ 
+ 
+ The production-default grid of Table  V , measured under one
+history, shows the same rise from F16 to Q4_K_M and Q3_K_M: path divergence
+of 36.2 percent at F16, 61.3 percent at Q8_0, 75.0 percent at Q4_K_M and
+77.5 percent at Q3_K_M. A random-intercept model on those four cells gives an
+odds ratio of 2.31 per format step (95% CI 1.73 to
+3.08; random-intercept standard deviation 1.37 on the
+logit scale). The conditional logistic regression gives 2.32
+(95% CI 1.74 to 3.09) from the
+56 episodes whose status differs across formats, the
+exact within-episode permutation test gives a two-sided p = 1.3 × 10 − 10 p=1.3\times 10^{-10} , and a bootstrap that resamples episodes jointly across
+the four formats puts the increase at 13.8 percentage points per step
+(95% CI 9.4 to 18.0). Llama-3.1-8B rises from 55.0 percent at
+Q8_0 to 70.0 percent at Q4_K_M, with Q3_K_M at 68.8 percent, within a few points
+of the cell above it. The 16-bit cell matters most for interpretation: divergence is already present without any
+quantization, so quantization is not the cause of the effect. It is a
+multiplier.
+
+ 
+ Fig. 2: Quantized formats widen path divergence: it rises from F16 through
+Q8_0 to Q4_K_M, and in the controlled sweep Q3_K_M does not exceed Q4_K_M. Gray dots are individual random histories; the line gives the
+mean over histories with a 95% interval that resamples episodes and
+histories. The dashed line is the production-default grid of
+Table  V , one history per format. Qwen2.5-7B under llama.cpp, 80
+episodes per pass. 
+ 
+ 
+ Why the quantized formats diverge more is a separate question, and the five
+log-probabilities recorded at every position let us test it directly. A
+token can flip when the cache path changes the relative logits enough for a
+competing candidate to overtake the original winner. Quantization could raise
+the flip rate in two ways: by narrowing the top-two gap, so that more positions
+sit close to a tie, or by enlarging the change that the cache path makes to the
+logits. The two
+explanations predict different things, and Fig.  3 separates
+them. Every divergent episode on the canonical history has its first flip at
+a position where both paths had seen the same prompt and the same preceding
+tokens, so each flip can be read against the margin the recompute path had
+there. The flip hazard falls steeply with that margin in every format
+(Fig.  3 a, in coarse bins). In finer bins at Q4_K_M,
+2 of the 3 positions with a margin
+below 0.01 logits flipped, 3 of 6
+between 0.01 and 0.03, 14 of 33
+between 0.03 and 0.1, 22 of 90
+between 0.1 and 0.3, 20 of 246 between
+0.3 and 1, 4 of 629 between 1 and 3,
+and none of the 8,038 positions above 3.
+
+ 
+ The share of positions close to a tie rises little with
+quantization. On the recompute path, 0.6, 0.5,
+0.6 and 0.6 percent of tokens have a margin below
+0.1 logits at F16, Q8_0, Q4_K_M and Q3_K_M. On per-episode shares, a Page
+test for an increase across formats gives p = 0.119 p=0.119 , and the
+share at Q3_K_M is 1.2 times that at F16 (95% CI
+0.9 to 1.7), far from the change in the
+perturbation reported next. What grows is the perturbation. We measure it as the absolute
+difference between the two paths’ top-two logit margins. We restrict this
+measurement to positions in cache-hit requests where both paths saw the same
+prompt and preceding tokens and emitted the same token. This measures a change
+in the margin rather than in the full logit vector. Its median is 0.028 logits at F16, 0.10 at
+Q8_0, 0.16 at Q4_K_M and 0.14 at
+Q3_K_M. Averaged over episodes, the perturbation at Q3_K_M is
+4.9 times that at F16 (95% CI 4.4 to
+5.4; Page test for an increase, p = 8.1 × 10 − 32 p=8.1\times 10^{-32} ). It also follows the
+divergence rates: it is largest at Q4_K_M, the format that diverges most on
+this history, and a little smaller at Q3_K_M. A larger perturbation also
+reaches larger margins. The median recompute-path margin at a flipped position
+is 0.037 logits at F16,
+0.091 at Q8_0, 0.15 at
+Q4_K_M and 0.13 at Q3_K_M, and at the same margin
+the quantized formats flip more often (Fig.  3 a). The extra flips
+under the quantized formats are therefore consistent with a larger change in the
+top-two margin on the cache path, while the share of decisions close to a tie rises only about
+1.2-fold.
+
+ 
+ Fig. 3: Where flips happen and why quantization adds more of them.
+(a) Share of positions whose token flips on the cache-hit path, by the top-two
+logit margin on the recompute path, with 95% intervals from a bootstrap over
+episodes. (b) Size of the change that the cache-hit path makes to that margin
+at positions that did not flip: median, interquartile range and 10th to 90th
+percentiles. Canonical history, so every position counts once; Qwen2.5-7B
+under llama.cpp. 
+ 
+ 
+ A final control separates the quantized weight values from the arithmetic that
+serves them. We dequantized the Q4_K_M weights to a 16-bit file, which keeps
+their values to within 16-bit rounding, and served it on the F16 kernels under
+four histories, the canonical order and the first three random orders; we ran
+this control for Q4_K_M only. The result is a model of its own: its recompute path
+differs from that of the F16 model on 77 of 80 episodes and
+from that of the Q4_K_M model on 62. Its path divergence,
+however, fell to 33.4 percent, against 37.5 percent for
+F16 and 81.9 percent for Q4_K_M on the same histories. That is
+48.4 points below Q4_K_M (95% CI 37.5
+to 59.4) and − - 4.1 points from F16, with an
+interval from − - 17.8 to 9.7 that
+includes zero, so no difference in path divergence between the dequantized model and F16
+was detected here, although the interval is too wide to establish equivalence. The cache-path perturbation fell with it, to a median
+of 0.027 logits against 0.028 at F16 and
+0.16 at Q4_K_M, while the share of near-tie positions was
+0.7 percent, against 0.6 at F16 and
+0.6 at Q4_K_M. The amplification therefore comes mainly from the
+quantized execution path, the arithmetic llama.cpp uses to serve quantized
+weights, rather than from the rounded weight values themselves. In this build that path differs from the 16-bit one in its kernels,
+traceable from the dispatch function
+ ggml_cuda_mul_mat of ggml/src/ggml-cuda/ggml-cuda.cu 
+at commit 7e4c0a9. Products with quantized weights round the
+activations to 8-bit blocks before multiplying. For both kinds of weights,
+the kernel and its tiling are chosen by the number of tokens in the call, so
+the short prefill of a cache hit and the long prefill of a recomputation run
+through different code. We did not isolate which of these enlarges the
+perturbation, and a dequantized Q8_0 control would show whether the first
+step of the rise has the same source.
+
+ 
+ IV-E RQ4: path divergence appears on both engines 
+
+ 
+ Two independently built engines agree on path divergence. The last
+two rows of Table  V carry the evidence. Under vLLM, an engine with a
+different cache design, different kernels, and chunked prefill enabled, the
+cache-disabled arms again repeat exactly, and the cache-enabled arms depart
+from them on 62.5 and 53.8 percent of episodes. vLLM returns token strings rather than identifiers on the endpoint we use,
+so for this engine “exactly” means identical token strings with identical
+log-probabilities, at all 30,252 and 33,969 tokens of its two configurations.
+
+ 
+ The run-to-run rates of the two engines are not comparable. On vLLM at
+16-bit (BF16), repeating the cache-enabled arm changed 8.8 percent of episodes,
+against 20.0 percent for llama.cpp at F16. The llama.cpp grid, however, ran with the server-level prompt cache at its default and with a
+cache-disabled pass between its two cache-enabled passes, the two conditions
+that Table  III shows to govern run-to-run divergence on that engine. The vLLM passes ran back to back. We therefore compare the
+engines only on whether path divergence appears.
+
+ 
+ One disclosure belongs with these vLLM figures. The cache-enabled and
+cache-disabled arms of the Qwen2.5-7B configuration were launched by different
+scripts, and the relaunch set an explicit GPU memory fraction that the original
+did not. That parameter governs the block pool the cache draws on, so we
+checked whether it mattered: the cache-disabled arm reproduces every token string
+and log-probability
+across all three sessions, including the differently provisioned ones, which shows that the cache-disabled reference is unaffected by the
+provisioning difference. It does not rule out an interaction between that
+difference and the cache-enabled path, which is one reason we use the vLLM lane
+for the direction of the effect and not its size.
+
+ 
+ The manipulation check comes from the engine
+rather than from the response body. vLLM 0.11.0 does not populate the cached-token field on the
+completions endpoint, so every response in the cache-enabled arm reported
+no cached-token value even while the cache was working. The engine log resolves
+it: prefix caching is recorded as enabled at startup and the reported hit
+rate rises from 87.1 to 99.1 percent across 226 logged observations. We note
+this because a study that trusted response telemetry alone would have
+concluded that the manipulation had failed and discarded a valid arm.
+
+ 
+ IV-F RQ5: instability without detectable bias 
+
+ 
+ TABLE VII: Single-turn bridge (GSM8K). Each item is served four times, twice on
+the recompute path and twice on the cache-hit path. Both paths are
+individually deterministic, yet they disagree with each other on a large
+fraction of items once quantized (path divergence, with 95% Wilson intervals). Correctness
+flips occur in both directions. Answers are derived from the stored responses
+by numeric comparison; the released artifact reproduces every value. 
+ 
+ 
+ 
+ 
+ 
+ 
+ path determinism 
+ path divergence 
+ flips 
+ correct 
+ McNemar 
+
+ 
+ Model 
+ Weights 
+ n n 
+ recompute 
+ cache hit 
+ % 
+ 95% CI 
+ (n) 
+ recompute 
+ cache hit 
+ p p 
+
+ 
+ Qwen2.5-7B 
+ F16 
+ 200 
+ 200/200 
+ 200/200 
+ 3.5 
+ [1.7, 7.0] 
+ 0 
+ 183 
+ 183 
+ 1.000 
+
+ 
+ Qwen2.5-7B 
+ Q8_0 
+ 200 
+ 200/200 
+ 200/200 
+ 44.5 
+ [37.8, 51.4] 
+ 4 
+ 184 
+ 182 
+ 0.625 
+
+ 
+ Qwen2.5-7B 
+ Q4_K_M 
+ 200 
+ 200/200 
+ 200/200 
+ 41.5 
+ [34.9, 48.4] 
+ 4 
+ 180 
+ 180 
+ 1.000 
+
+ 
+ Qwen2.5-14B 
+ Q4_K_M 
+ 200 
+ 200/200 
+ 200/200 
+ 48.0 
+ [41.2, 54.9] 
+ 1 
+ 185 
+ 186 
+ 1.000 
+
+ 
+ Qwen2.5-7B 
+ Q4_K_M 
+ 500 
+ 500/500 
+ 500/500 
+ 45.4 
+ [41.1, 49.8] 
+ 12 
+ 453 
+ 459 
+ 0.146 
+
+ 
+ Qwen2.5-7B 
+ Q3_K_M 
+ 200 
+ 200/200 
+ 200/200 
+ 48.0 
+ [41.2, 54.9] 
+ 3 
+ 178 
+ 179 
+ 1.000 
+
+ 
+ 
+ 
+ 
+ The agentic workload cannot answer the outcome question. Models of this size
+solve few of its episodes, from 1.2 percent in the weakest configuration to
+18.8 percent for Qwen2.5-14B, so success rates sit near the floor and paired
+flips are too few for a precise comparison. Pooled across all ten configurations,
+the cache-enabled arm won 12 episodes and the cache-disabled arm won 7. No per-configuration test approaches significance. The largest model we ran
+raises the ceiling without changing the conclusion, which suggests the limit
+is task difficulty rather than a quirk of the smallest models. We therefore
+draw no conclusion about agent task success from these data and report the
+trajectory-level results of Sections  IV-A – IV-E , which do
+not depend on task success, as the agentic contribution.
+
+ 
+ Outcome conclusions come from the single-turn bridge, where accuracy sits
+well clear of the floor at 89 to 93 percent. Table  VII reports
+it. Each item
+is served four times, twice on the recompute path and twice on the cache-hit
+path, so that path divergence is only counted when each path first
+agreed with itself. Every path was internally deterministic on every item in
+every configuration, which is what licenses the attribution.
+
+ 
+ The 500-item run at Q4_K_M extends the 200-item run at the same setting,
+sharing its first 200 problems, so the pooled analysis uses five distinct
+configurations: 1300 item-configuration observations over 500 unique problems,
+with 20 correctness flips attributable to the cache path. Problems 0 to 199
+appear in all five configurations and problems 200 to 499 only in the 500-item
+run.
+
+ 
+ Two patterns appear. The first is a step between 16-bit and every quantized
+format. At 16-bit precision the cache path changes the output for 3.5 percent
+of items, so at full precision a single-turn request is largely unaffected.
+Under quantization the same measurement rises to between 41.5 and 48.0 percent,
+and a larger run of 500 items at Q4_K_M places the rate at 45.4 percent with
+a correspondingly tighter interval. Unlike the agentic sweep, the single-turn
+data show no further rise from Q8_0 to Q4_K_M. Comparing the 16-bit rate against the
+agentic numbers is instructive: at 16-bit, individual requests diverge on 3.5
+percent of items, yet 37.4 percent of agent episodes do in the
+replicated sweep. An episode chains about ten requests, and the gap is
+consistent with a single changed token propagating through the remaining
+turns.
+
+ 
+ The second pattern is the more important one for practice.
+Correctness flips occur in both directions, and we detected no net change in
+aggregate accuracy. Of the 20 flips, 13 favor the cache-hit path and 7 favor recompute. They
+fall on 20 different problems, so clustering by problem leaves the inference
+unchanged: the problem-clustered sign test gives p = 0.26 p=0.26 , the same as the
+pooled exact McNemar test, and no individual configuration reaches
+significance. Six tests were run without
+multiplicity correction, so a nominally significant single result would have
+warranted caution; none arose. The net change in accuracy on the cache-hit path is +0.46
+percentage points, with a 95 percent interval of − 0.15 -0.15 to + 1.15 +1.15 points from a
+bootstrap that resamples problems. At these settings the
+evidence supports instability rather than degradation.
+
+ 
+ The measurement here required a correction worth reporting, because it is a
+trap for anyone repeating this design. Our collection-time scorer accepted
+only the answer format the prompt requested, and the models frequently
+answered correctly in a different unambiguous form. Between 13 and 37 percent of
+recompute-path responses were scored wrong for formatting alone, which inverted the apparent
+accuracy ordering across quantization levels and inflated the flip count
+roughly fourfold. Re-deriving every answer offline from the stored response
+text, with no new inference, resolves it, and comparing answers numerically
+rather than as strings resolves a second, smaller case. Table  VII 
+reports the corrected figures, and the artifact ships both the original and
+the re-derived scores so the correction is auditable. Anyone repeating this
+design should validate the extractor against the model’s actual output
+formats before drawing conclusions from flip counts.
+
+ 
+ We state the consequence plainly because it is easy to misread in either
+direction. Cached serving is not measurably worse at these settings, so a
+practitioner choosing caching for throughput gives up no detectable accuracy on
+average. What they give up is repeatability: a specific item
+answered correctly may be answered incorrectly when an identical request hits
+the cache, and the reverse, with no net change detectable in the aggregate. Reporting
+only the aggregate hides this, which is the same observation made about
+compressed models, where matched average accuracy conceals substantial
+per-item disagreement [ 20 ] .
+
+ 
+ Concurrent work reaches the same conclusion by a different route. Lorup
+ [ 33 ] compares a retained live cache against a
+one-shot prefill of identical tokens on a reasoning benchmark, with a
+per-path replica control equivalent in spirit to our four-pass protocol, and
+likewise finds substantial suffix divergence, correctness flips in both
+directions, and no detectable aggregate accuracy shift. That study adds a bidirectional
+cache-transplantation experiment and an FP32 falsification that we do not
+have; ours adds a serving-engine setting, a weight-quantization axis, and
+multi-turn agent episodes that it does not. We therefore present this
+section as independent replication rather than as a new finding, and note
+that two studies with different models, benchmarks, precisions, and
+execution stacks now agree that the outcome effect is instability without
+a detectable direction, in contrast to the systematic bias reported earlier by
+Chodavarapu and Xu [ 7 ] .
+
+ 
+ V Discussion 
+
+ 
+ V-A What practitioners should take from this 
+
+ 
+ Enabling the cache changes the guarantee a serving endpoint provides. The
+savings are real and large [ 4 ] , and nothing in our data
+suggests that caching makes models worse on average, so nothing here argues
+against prefix caching. The change to the guarantee, however, is documented at most as a brief
+caveat [ 32 ] and is unmeasured in deployment.
+
+ 
+ Three consequences follow directly. First, a system whose behavior must be
+auditable or repeatable, for example one whose outputs are logged for later
+review, cannot obtain that property from a cache-enabled endpoint alone,
+because the same input is not guaranteed to reproduce the same output.
+Second, debugging becomes harder in a specific way: a failure observed once
+may not reproduce on replay, not because the input was captured incorrectly
+but because the server’s cache state differs. Third, an A/B comparison
+between two prompts or two models run at different times on a shared
+endpoint is confounded by whatever else that endpoint served in between.
+
+ 
+ The remedies differ by effect. Run-to-run divergence for an identical request
+sequence responded to controlling cache state, not to abandoning caching: under
+the canonical order, disabling the server-level prompt cache while leaving
+prefix reuse on cut it from 38.8 to 1.2 percent, and restarting the server
+between runs achieved the same on the second engine. The cost of that control
+is small in our setting. On Qwen2.5-7B at Q4_K_M, with requests served one at a time and
+latencies averaged over three sessions, mean latency per request was
+0.290 s with the server-level prompt cache at its default and
+0.305 s with it disabled, an increase of
+5 percent. Recomputing every prompt took
+0.871 s. With that cache disabled, prefix reuse kept
+97 percent of its latency reduction and stayed
+2.9 times faster than recomputation. Mean server-reported prefill time per request, which precedes the first
+token, rose from 21.4 to 50.7 ms
+because more of each prompt was recomputed; recomputing every prompt took
+628.0 ms. Within each mode, all three sessions issued the same number of requests, but
+the two cache-enabled modes followed slightly different trajectories
+(854 and 827 requests per session), so these are averages over
+slightly different request mixes. Restarting the server, which resets all
+cache state between runs, took 2.2 s with the model
+files already in the operating-system cache.
+These are single-stream measurements; we did not measure throughput under
+concurrent load. A workflow that needs repeatable results for an identical
+request sequence can pin the cache configuration and reset state at
+run boundaries rather than turn prefix reuse off. History dependence under
+varying traffic is harder to remove: with the server-level prompt cache
+disabled, between
+12 and 20 of the 80 episodes still changed
+divergence status with the history the server had processed, and only isolating each
+episode’s cache state, as the sentinel control did, removed that dependence;
+we did not measure the cost of such isolation. Path divergence, the gap between
+the cache-hit and recompute paths, remains under all of these controls. Only
+turning prefix reuse off, or using kernels that compute both paths identically
+ [ 12 ] , removes it. A more practical middle path, which our per-request telemetry
+makes concrete, is to record cache exposure alongside each response so that
+irreproducibility is at least detectable after the fact. Only one of the two engines we tested reports this uniformly: llama.cpp
+exposes cached tokens on every request, while vLLM 0.11.0 leaves the field
+null on the endpoint we used even though the cache is demonstrably active.
+
+ 
+ The dequantized control has a practical reading as well. At Q4_K_M, the extra path
+divergence of quantized serving comes mainly from the arithmetic that computes
+with quantized weights, so it is a property of the engine and its version as much as
+of the model file, which is one more reason to report both. Serving the
+dequantized weights on the 16-bit kernels brought path divergence to a level
+at which no difference from 16-bit was detected in our measurements, but it gives up the memory saving of
+quantization and changes the outputs themselves: the dequantized model’s
+recompute path differs from the Q4_K_M model’s on 62 of 80
+episodes. It is an option for reducing the extra divergence of four-bit
+serving rather than a free fix. Path divergence appeared on both llama.cpp and vLLM,
+but its amplification by quantization was measured only on llama.cpp with
+GGUF weights, and whether the quantized kernels of other engines behave the
+same way is not something our data show.
+
+ 
+ V-B Implications for benchmark and agent evaluation 
+
+ 
+ Published evaluations of language models rarely report cache configuration.
+Our results imply that they should. A benchmark score obtained on a
+cache-enabled endpoint is a sample from a distribution induced partly by
+serving history, not a property of the model and prompt alone, and the
+single-turn bridge shows that individual items change correctness at a
+measurable rate even when no net change in the aggregate is detected.
+
+ 
+ The effect is large enough to matter at the scale differences that
+evaluation papers routinely treat as meaningful. Reported variance from
+seeds and training noise is generally small [ 34 ] ,
+and score differences of a few points are commonly discussed as substantive.
+Our path-divergence measurements show agent trajectories changing on a majority of
+episodes in several configurations, and while trajectory change is not the
+same as score change, it is a much larger perturbation than the sources
+evaluation practice currently controls for.
+
+ 
+ This suggests a concrete and cheap addition to existing reproducibility
+checklists [ 35 , 36 , 37 ] :
+report the serving engine, its version, the weight format, whether prefix
+caching was enabled, and any server-level cache setting such as llama.cpp’s
+server-level prompt cache, in the same way that decoding parameters are already reported. This
+is the kind of configuration-level reporting that critiques of agent
+evaluation practice have called for [ 38 ] . Work on
+reliability metrics for agents measures repeated-trial variation and
+attributes it to the model [ 39 ] ; our results indicate that
+part of that variation may belong to the serving layer instead.
+
+ 
+ V-C Relationship to prior single-turn findings 
+
+ 
+ The closest prior study established that cached and recomputed decoding
+differ numerically under FP16, using single-turn arithmetic, and reported a
+systematic accuracy bias across most of its conditions
+ [ 7 ] . Our single-turn bridge reproduces the
+divergence half of that result and, on our models and item set, does not
+reproduce the directional half. Both paths are individually deterministic,
+they disagree on a substantial fraction of items once quantized, correctness flips occur in
+both directions, and we detected no net change in aggregate accuracy.
+
+ 
+ We read this as a refinement rather than a contradiction. Their setup
+differs from ours in models, in item set, and in the absence of a per-path
+determinism control, and a directional effect may well be real for their
+configuration. The distinction matters for what practitioners should worry
+about. A systematic bias would mean cached serving quietly shifts accuracy in one
+direction, and would call for correction. Instability without bias means cached serving is
+not measurably worse on average but is not repeatable from the request alone, which calls for disclosure and
+for care in any workflow that assumes repeatability.
+
+ 
+ VI Threats to Validity 
+
+ 
+ Construct validity. Our primary measure is divergence in emitted
+tokens (identifiers on llama.cpp, strings on vLLM), which is a strict criterion: two runs that produce
+semantically identical answers in different words are counted as divergent.
+This is deliberate, because the question we ask is whether the system is
+reproducible, not whether it is approximately as good. Where the question is
+about quality rather than reproducibility we switch to task-outcome scoring
+(Section  III-G ) and report task outcomes separately.
+
+ 
+ Internal validity. The design’s main threat is that some
+uncontrolled factor, rather than prefix reuse, produces the divergence we
+attribute to it. One such factor was present in our first grid and we found
+it only by testing for it. The eight llama.cpp configurations of
+Table  V were collected with the server-level prompt cache at its
+default, which inflates the run-to-run measurement through a second layer of
+server state; Section  IV-C isolates it and reports the corrected
+figure. We also verified that the execution order of passes, which differed between
+our llama.cpp and vLLM lanes, has no effect for Qwen2.5-7B at Q4_K_M once
+the server-level prompt cache is disabled; with that cache active, order matters, as Table  III 
+shows. Both the
+original and the controlled measurements are reported rather than one
+silently replacing the other. The broader threat is answered by measurement
+rather than by argument. Every
+configuration in the original grid is executed twice per arm, and the
+cache-disabled repetitions are identical throughout, in every emitted token and its log-probability, so no
+other source of nondeterminism was observed under our conditions. Batch size is fixed at
+one and requests are serial, removing batch-composition effects
+ [ 11 ] . Cache precision is held at 16-bit floating point in
+all arms so that it never covaries with the weight format. Chunked prefill,
+where the engine enables it by default, is left at its default and is
+identical across arms of a configuration.
+
+ 
+ A tautology objection. A reader may respond that reusing cached
+state obviously changes arithmetic, so divergence is expected and the
+finding is definitional. We accept the mechanism as unsurprising and answer
+the objection with an experiment rather than an argument. Restoring the cache
+to a known state before each recompute pass makes both paths individually
+reproducible, in every weight format and in three independent sessions each,
+while the two paths still differ from each other on
+2 to 60 of every 100 items,
+depending on the format (Table  IV ). Under the controlled
+configurations tested, path divergence is therefore a
+function of cache state and not of residual randomness in either path, and cache
+state is precisely what deployments do not control. Beyond that we claim the magnitude and the
+consequence. Neither the fraction of agent
+episodes affected, nor the interaction with quantization, nor the fact that
+correctness flips without a detectable shift in aggregate accuracy, follows from
+knowing that floating point addition is not associative. Practice also does
+not treat the effect as expected: two production bug reports describe it as
+a defect [ 5 , 6 ] , and published
+evaluations rarely report cache configuration.
+
+ 
+ Completeness of the released runs. Three details are visible in the
+artifact and we state them here. The 16-bit bridge log retains 67 records from
+an aborted first attempt that was restarted; the analysis keys on item and
+pass, so the restarted run supersedes them and the reported values are
+unaffected. The earlier controlled measurements of the 16-bit and Q3_K_M cells
+(Section  IV-D ) were run once rather than twice, so they contribute path-divergence values but no run-to-run
+repeat; the replicated sweep of Section  III-F replaces them as
+the evidence for the quantization result. One vLLM cell in the ordering comparison completed without its
+end-of-run marker and one was not collected; the reported vLLM figures use the
+cells that completed, and the counts are given with each.
+
+ 
+ External validity. We study open-weight models in the 7 to 14
+billion parameter range on a single consumer-class accelerator, because that
+is what the study’s budget allowed. The two parts of the result
+have different reach. Path divergence appears on both engines we tested, while
+its amplification by quantization was measured only on llama.cpp with GGUF
+weights, since vLLM was run at 16-bit precision. Whether other quantization schemes and
+engines show the same amplification is outside what we measured. Behavior at frontier scale, on hosted
+endpoints, or under multi-tenant load with cache eviction may differ, and we
+make no claim about it. Our workloads are one agentic benchmark and one
+mathematics benchmark, both English. The direction we would expect from
+these limits is that multi-tenant deployments, where cache contents depend
+on other users’ traffic, would show more history dependence rather than
+less, but we did not measure that and do not assert it.
+
+ 
+ Statistical conclusion validity. The agentic benchmark is difficult
+for models of this size, and their success rates sit near the floor. We
+therefore do not draw outcome conclusions from it and say so explicitly in
+Section  IV ; the trajectory-level measurements from that
+workload remain valid because they do not depend on task success. Outcome
+conclusions rest on the mathematics workload, where accuracy sits at 89 to 93
+percent, well clear of the floor. Where we report a null result we report the discordant
+counts alongside the test, since a p-value on small counts is easy to
+over-read [ 40 ] .
+
+ 
+ VII Conclusion 
+
+ 
+ Prefix caching is enabled by default in the serving stacks that most
+deployments use, and it is treated as a transparent optimization. This paper
+shows that it is not transparent. Holding decoding, seed, batch size, and
+request order fixed, we found that repeated execution of an identical
+workload reproduced every emitted token and its log-probability when prefix
+reuse was disabled, in all ten configurations across two independent engines,
+and did not when prefix reuse was enabled in the production-default
+configuration. Three further experiments locate the
+dependence. Once llama.cpp’s
+server-level prompt cache is disabled, the order in which passes run has no
+effect in the configuration tested. This dependence reflects cache state
+carried between runs. Under the canonical episode order, changing the
+prompt-cache flag alone moves run-to-run divergence by 37.5 percentage points.
+With that cache at its default, run-to-run divergence ranges from
+20.0 to 28.7 percent under five random orders.
+When cache state is restored to a known point, both the cached and the
+recompute paths reproduce exactly, while continuing to differ from each
+other, in every weight format and in independent server sessions. In the
+configurations tested, restoring cache state eliminated all observed variation
+within each path; the problem is that cache state is invisible to the request,
+reported at most as a token count in the response, and uncontrolled by default.
+
+ 
+ Path divergence appeared on both llama.cpp and vLLM. On llama.cpp, its
+magnitude depends on how the model is quantized, and it is larger for
+chained requests than for single ones. For Qwen2.5-7B on llama.cpp with GGUF
+weights, serving quantized weights widens
+path divergence, from 37.4 percent of agent episodes at 16-bit
+to 82.5 percent at four-bit, averaged over ten independent server
+histories; the rise runs from F16 through Q8_0 to Q4_K_M, and Q3_K_M does
+not go further. The recorded logit margins point to why: with quantization the
+share of decisions near a tie grows only about 1.2-fold, while
+the change that the cache path makes to the top-two margin grows
+4.9-fold. Serving the four-bit weights
+through the 16-bit kernels left no detectable difference from the 16-bit level
+in path divergence, and the dequantized model’s median margin change was close to the 16-bit value
+(0.027 against 0.028 logits), so at
+four-bit the amplification comes mainly from the quantized execution path
+rather than from the rounded weights. Single-turn requests
+that are nearly unaffected at full precision diverge on more than forty percent
+of items once quantized. Chained requests enlarge the effect again, since a
+single changed token can propagate through every subsequent turn. Whether other
+quantization schemes and kernels on other engines show the same amplification
+is the next question to test.
+
+ 
+ What the effect does to task outcomes is narrower than one might assume.
+Individual answers change correctness in both directions, and we detected no
+net change in aggregate accuracy. Cached serving is not measurably worse. It is not repeatable from the request alone.
+Those are different problems requiring different responses: accuracy
+degradation would call for a correction; irreproducibility calls for
+disclosure.
+
+ 
+ The immediate recommendation is cheap. Evaluations and deployment records
+should state the serving engine, its version, the weight format, whether
+prefix caching was enabled and, on llama.cpp, the server-level prompt-cache
+setting, alongside the decoding parameters that are already reported as a
+matter of course. Engines should report cache exposure per request
+uniformly, which one of the two we tested does and the other does not, so
+that irreproducibility is at least detectable after the fact. Longer term,
+deterministic modes that cover cached execution already exist in at least
+one stack [ 12 ] , and the underlying mechanism is
+understood [ 11 , 41 ] . What our measurements
+add is the size of the gap those modes are closing, in the default
+configuration that most deployments and most published evaluations
+actually run [ 8 ] , where agent results are often credited
+to the model alone [ 42 ] and temperature-zero inference
+is often treated as reproducible [ 43 ] .
+
+ 
+ Data Availability
+
+ 
+ The measurement harness, the complete raw per-request logs, and the analysis
+pipeline are available at https://github.com/aditi-p31/cache-divergence-study 
+(tag resubmission-2026-10 ). The logs record, for every request,
+the prompt hash, the emitted tokens (identifiers on llama.cpp, strings on
+vLLM) with their log-probabilities, the latency and, on llama.cpp, the
+cached-token count reported by the server. Every number and figure in this paper is regenerated from those logs and the
+released telemetry summary by the scripts in analysis/ and harness/ : reextract_bridge.py derives the
+single-turn answers; analyze.py and analyze_repair.py write
+ findings.json and repair_findings.json ;
+ robustness.py computes the position-dependence test of
+Section  IV-C ; results/cache_telemetry.json holds the vLLM cache hit
+rates that harness/extract_cache_telemetry.py read from the engine log;
+ revision_stats.py computes the dependence-aware intervals, the paired
+trend models and the problem-level GSM8K analysis; phaseb_stats.py 
+analyzes the replicated sweep and its controls, including the top-two margin
+perturbation and the latency measurements; or_bootstrap.py computes
+the bootstrap interval of the replicated-sweep odds ratio in Section  IV-D ; make_phaseb_values.py 
+writes the values from the replicated sweep and its controls that the text quotes; and make_tables.py , make_figures.py ,
+ make_phaseb_tables.py and make_phaseb_figures.py produce the
+tables and figures. The episode orders, their seeds and the run orchestration
+for the replicated sweep are included. Pinned engine versions, model checksums, and the
+launch flags used for each configuration are recorded in the repository. They
+are needed to reproduce the results, because the measured effects depend on the
+engine version and the cache configuration.
+
+ 
+ Acknowledgment
+
+ 
+ The author used Claude (Anthropic) to assist with measurement and analysis
+code, figure generation, and manuscript preparation. The author designed the
+study, verified all reported results against the raw data and primary sources,
+and takes full responsibility for the content. All hypotheses, interpretations,
+and conclusions presented in this study reflect the author’s original ideas.
+
+ 
+ References
+
+ 
+ 
+ [1] 
+ 
+W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez,
+H. Zhang, and I. Stoica, “Efficient memory management for large language
+model serving with PagedAttention,” in Proceedings of the 29th
+Symposium on Operating Systems Principles (SOSP) , 2023, arXiv:2309.06180.
+
+ 
+
+ 
+ [2] 
+ 
+L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis,
+I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng, “SGLang: Efficient
+execution of structured language model programs,” in Advances in
+Neural Information Processing Systems 37 (NeurIPS) , 2024. [Online].
+Available: https://arxiv.org/abs/2312.07104 
+
+ 
+
+ 
+ [3] 
+ 
+I. Gim, G. Chen, S.-s. Lee, N. Sarda, A. Khandelwal, and L. Zhong, “Prompt
+cache: Modular attention reuse for low-latency inference,” in
+ Proceedings of Machine Learning and Systems (MLSys) , 2024,
+arXiv:2311.04934.
+
+ 
+
+ 
+ [4] 
+ 
+E. Lumer, F. Nizar, A. Jangiti, K. Frank, A. Gulati, M. Phadate, and V. K.
+Subbiah, “Don’t break the cache: An evaluation of prompt caching for
+long-horizon agentic tasks,” 2026. [Online]. Available:
+ https://arxiv.org/abs/2601.06007 
+
+ 
+
+ 
+ [5] 
+ 
+vLLM Project Contributors, “Accuracy degradation in vLLM when prefix-cache
+is enabled for recomputation workloads,” GitHub issue #18055,
+vllm-project/vllm, May 2025, accessed: 2026-08-16. [Online]. Available:
+ https://github.com/vllm-project/vllm/issues/18055 
+
+ 
+
+ 
+ [6] 
+ 
+——, “Prefix caching produces different output on first request (cache
+miss) vs subsequent requests (cache hit),” GitHub issue #33123,
+vllm-project/vllm, Jan. 2026, accessed: 2026-08-16. [Online]. Available:
+ https://github.com/vllm-project/vllm/issues/33123 
+
+ 
+
+ 
+ [7] 
+ 
+R. Chodavarapu and L. Xu, “The illusion of equivalence: Systematic FP16
+divergence in KV-cached autoregressive inference,” 2026. [Online].
+Available: https://arxiv.org/abs/2604.15409 
+
+ 
+
+ 
+ [8] 
+ 
+D. Pape, J. Evertz, and L. Schönherr, “The silent hyperparameter:
+Quantifying the impact of inference backends on LLM reproducibility,”
+2026. [Online]. Available: https://arxiv.org/abs/2605.19537 
+
+ 
+
+ 
+ [9] 
+ 
+S. G. Patil, H. Mao, F. Yan, C. C.-J. Ji, V. Suresh, I. Stoica, and J. E.
+Gonzalez, “The Berkeley function calling leaderboard (BFCL): From tool
+use to agentic evaluation of large language models,” in Proceedings of
+the 42nd International Conference on Machine Learning (ICML) , ser.
+Proceedings of Machine Learning Research, vol. 267. PMLR, 2025, pp. 48 371–48 392. [Online]. Available:
+ https://proceedings.mlr.press/v267/patil25a.html 
+
+ 
+
+ 
+ [10] 
+ 
+K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert,
+J. Tworek, J. Hilton, R. Nakano, C. Hesse, and J. Schulman, “Training
+verifiers to solve math word problems,” 2021. [Online]. Available:
+ https://arxiv.org/abs/2110.14168 
+
+ 
+
+ 
+ [11] 
+ 
+H. He and Thinking Machines Lab, “Defeating nondeterminism in LLM
+inference,” Thinking Machines Lab: Connectionism, Sep. 2025, accessed:
+2026-08-16. [Online]. Available:
+ https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/ 
+
+ 
+
+ 
+ [12] 
+ 
+SGLang Team, “Towards deterministic inference in SGLang and reproducible
+RL training,” LMSYS Org blog, Sep. 2025, accessed: 2026-08-16. [Online].
+Available: https://lmsys.org/blog/2025-09-22-sglang-deterministic/ 
+
+ 
+
+ 
+ [13] 
+ 
+——, “Deterministic inference,” SGLang documentation, 2026, accessed:
+2026-10-09. [Online]. Available:
+ https://docs.sglang.io/advanced_features/deterministic_inference.html 
+
+ 
+
+ 
+ [14] 
+ 
+J. Yao, H. Li, Y. Liu, S. Ray, Y. Cheng, Q. Zhang, K. Du, S. Lu, and J. Jiang,
+“CacheBlend: Fast large language model serving for RAG with cached
+knowledge fusion,” in Proceedings of the Twentieth European Conference
+on Computer Systems (EuroSys) , 2025.
+
+ 
+
+ 
+ [15] 
+ 
+Z. Zhang, Y. Sheng, T. Zhou, T. Chen, L. Zheng, R. Cai, Z. Song, Y. Tian,
+C. Ré, C. Barrett, Z. Wang, and B. Chen, “H2O: Heavy-hitter oracle for
+efficient generative inference of large language models,” in Advances
+in Neural Information Processing Systems 36 (NeurIPS) , 2023,
+arXiv:2306.14048.
+
+ 
+
+ 
+ [16] 
+ 
+G. Xiao, Y. Tian, B. Chen, S. Han, and M. Lewis, “Efficient streaming language
+models with attention sinks,” in International Conference on Learning
+Representations (ICLR) , 2024, arXiv:2309.17453.
+
+ 
+
+ 
+ [17] 
+ 
+B. Atil, S. Aykent, A. Chittams, L. Fu, R. J. Passonneau, E. Radcliffe, G. R.
+Rajagopal, A. Sloan, T. Tudrej, F. Ture, Z. Wu, L. Xu, and B. Baldwin,
+“Non-determinism of “deterministic” LLM settings,” 2024. [Online].
+Available: https://arxiv.org/abs/2408.04667 
+
+ 
+
+ 
+ [18] 
+ 
+R. Gond, A. K. Kamath, R. Ramjee, and A. Panwar, “LLM-42: Enabling
+determinism in LLM inference with verified speculation,” in
+ Proceedings of the 32nd Symposium on Operating Systems Principles
+(SOSP) , 2026, arXiv:2601.17768.
+
+ 
+
+ 
+ [19] 
+ 
+E. Kurtic, A. N. Marques, S. Pandit, M. Kurtz, and D. Alistarh, “Give me
+BF16 or give me death? Accuracy-performance trade-offs in LLM
+quantization,” in Proceedings of the 63rd Annual Meeting of the
+Association for Computational Linguistics (ACL) , 2025, arXiv:2411.02355.
+
+ 
+
+ 
+ [20] 
+ 
+A. Dutta, S. Krishnan, N. Kwatra, and R. Ramjee, “Accuracy is not all you
+need,” in Advances in Neural Information Processing Systems 37
+(NeurIPS) , 2024, arXiv:2407.09141.
+
+ 
+
+ 
+ [21] 
+ 
+K. Marchisio, S. Dash, H. Chen, D. Aumiller, A. Üstün, S. Hooker, and
+S. Ruder, “How does quantization affect multilingual LLMs?” in
+ Findings of the Association for Computational Linguistics: EMNLP ,
+2024, arXiv:2407.03211.
+
+ 
+
+ 
+ [22] 
+ 
+G. Gerganov and llama.cpp contributors, “llama.cpp,” GitHub repository,
+ggml-org/llama.cpp, MIT License, 2023, accessed: 2026-08-16. [Online].
+Available: https://github.com/ggml-org/llama.cpp 
+
+ 
+
+ 
+ [23] 
+ 
+G. Gerganov and ggml contributors, “GGUF file format specification,”
+ggml-org/ggml, docs/gguf.md, 2023, accessed: 2026-08-16. [Online]. Available:
+ https://github.com/ggml-org/ggml/blob/master/docs/gguf.md 
+
+ 
+
+ 
+ [24] 
+ 
+D. N. Politis and J. P. Romano, “A circular block-resampling procedure for
+stationary data,” in Exploring the Limits of Bootstrap , R. LePage and
+L. Billard, Eds. New York: Wiley,
+1992, pp. 263–270.
+
+ 
+
+ 
+ [25] 
+ 
+D. N. Politis and H. White, “Automatic block-length selection for the
+dependent bootstrap,” Econometric Reviews , vol. 23, no. 1, pp.
+53–70, 2004.
+
+ 
+
+ 
+ [26] 
+ 
+A. Patton, D. N. Politis, and H. White, “Correction to “Automatic
+block-length selection for the dependent bootstrap” by D. Politis and H.
+White,” Econometric Reviews , vol. 28, no. 4, pp. 372–375, 2009.
+
+ 
+
+ 
+ [27] 
+ 
+A. B. Owen, “The pigeonhole bootstrap,” The Annals of Applied
+Statistics , vol. 1, no. 2, pp. 386–411, 2007.
+
+ 
+
+ 
+ [28] 
+ 
+A. Agresti, Categorical Data Analysis , 3rd ed. Hoboken, NJ: Wiley, 2013.
+
+ 
+
+ 
+ [29] 
+ 
+Q. McNemar, “Note on the sampling error of the difference between correlated
+proportions or percentages,” Psychometrika , vol. 12, no. 2, pp.
+153–157, 1947.
+
+ 
+
+ 
+ [30] 
+ 
+T. G. Dietterich, “Approximate statistical tests for comparing supervised
+classification learning algorithms,” Neural Computation , vol. 10,
+no. 7, pp. 1895–1923, 1998.
+
+ 
+
+ 
+ [31] 
+ 
+G. Gerganov and llama.cpp contributors, “server: host-memory prompt
+caching,” Pull request #16391, ggml-org/llama.cpp, merged 2025-10-09, 2025,
+accessed: 2026-08-18. [Online]. Available:
+ https://github.com/ggml-org/llama.cpp/pull/16391 
+
+ 
+
+ 
+ [32] 
+ 
+llama.cpp contributors, “llama.cpp server documentation,”
+tools/server/README.md, ggml-org/llama.cpp, 2026, accessed: 2026-08-18.
+[Online]. Available:
+ https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md 
+
+ 
+
+ 
+ [33] 
+ 
+A. B. Lorup, “Stage-replay divergence follows the KV cache: Fixed-prefix
+precision controls and bidirectional cache transplantation,” 2026, accessed:
+2026-08-16. [Online]. Available: https://arxiv.org/abs/2607.28495 
+
+ 
+
+ 
+ [34] 
+ 
+L. Madaan, A. K. Singh, R. Schaeffer, A. Poulton, S. Koyejo, P. Stenetorp,
+S. Narang, and D. Hupkes, “Quantifying variance in evaluation benchmarks,”
+2024. [Online]. Available: https://arxiv.org/abs/2406.10229 
+
+ 
+
+ 
+ [35] 
+ 
+J. Pineau, P. Vincent-Lamarre, K. Sinha, V. Larivière, A. Beygelzimer,
+F. d’Alché Buc, E. Fox, and H. Larochelle, “Improving reproducibility in
+machine learning research (a report from the NeurIPS 2019 reproducibility
+program),” Journal of Machine Learning Research , vol. 22, no. 164,
+pp. 1–20, 2021. [Online]. Available:
+ https://jmlr.org/papers/v22/20-303.html 
+
+ 
+
+ 
+ [36] 
+ 
+S. Biderman, H. Schoelkopf, L. Sutawika, L. Gao, J. Tow, B. Abbasi, A. F. Aji,
+P. S. Ammanamanchi, S. Black, J. Clive, A. DiPofi, J. Etxaniz, B. Fattori,
+J. Z. Forde, C. Foster, J. Hsu, M. Jaiswal, W. Y. Lee, H. Li, C. Lovering,
+N. Muennighoff, E. Pavlick, J. Phang, A. Skowron, S. Tan, X. Tang, K. A.
+Wang, G. I. Winata, F. Yvon, and A. Zou, “Lessons from the trenches on
+reproducible evaluation of language models,” 2024. [Online]. Available:
+ https://arxiv.org/abs/2405.14782 
+
+ 
+
+ 
+ [37] 
+ 
+Y. Zhu, T. Jin, Y. Pruksachatkun, A. Zhang, S. Liu, S. Cui, S. Kapoor,
+S. Longpre, K. Meng, R. Weiss, F. Barez, R. Gupta, J. Dhamala, J. Merizian,
+M. Giulianelli, H. Coppock, C. Ududec, J. Sekhon, J. Steinhardt,
+A. Kellermann, S. Schwettmann, M. Zaharia, I. Stoica, P. Liang, and D. Kang,
+“Establishing best practices for building rigorous agentic benchmarks,”
+2025. [Online]. Available: https://arxiv.org/abs/2507.02825 
+
+ 
+
+ 
+ [38] 
+ 
+S. Kapoor, B. Stroebl, Z. S. Siegel, N. Nadgir, and A. Narayanan, “AI agents
+that matter,” 2024. [Online]. Available:
+ https://arxiv.org/abs/2407.01502 
+
+ 
+
+ 
+ [39] 
+ 
+S. Yao, N. Shinn, P. Razavi, and K. Narasimhan, “ τ \tau -bench: A benchmark for
+tool-agent-user interaction in real-world domains,” 2024. [Online].
+Available: https://arxiv.org/abs/2406.12045 
+
+ 
+
+ 
+ [40] 
+ 
+E. Miller, “Adding error bars to evals: A statistical approach to language
+model evaluations,” 2024. [Online]. Available:
+ https://arxiv.org/abs/2411.00640 
+
+ 
+
+ 
+ [41] 
+ 
+J. Yuan, H. Li, X. Ding, W. Xie, Y.-J. Li, W. Zhao, K. Wan, J. Shi, X. Hu, and
+Z. Liu, “Understanding and mitigating numerical sources of nondeterminism in
+LLM inference,” 2025. [Online]. Available:
+ https://arxiv.org/abs/2506.09501 
+
+ 
+
+ 
+ [42] 
+ 
+Y. Yao, X. Tan, C.-H. Liu, Y. Li, Z. Wang, W. Yu, Z. Tan, Y. Tian, G. Zhao,
+L. Sun, X. Zhang, and T. Yang, “Harness-Bench: Measuring harness effects
+across models in realistic agent workflows,” 2026. [Online]. Available:
+ https://arxiv.org/abs/2605.27922 
+
+ 
+
+ 
+ [43] 
+ 
+K. Chu, Y. Zhou, and W. Zhang, “MarginGate: Sparse margin-triggered
+verification for batch-invariant LLM inference,” 2026. [Online].
+Available: https://arxiv.org/abs/2605.30218 
+
+ 
+
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ ADITI PATODIYA 
+(Senior Member, IEEE) received the B.Tech. degree in Computer Engineering
+from Charotar University of Science and Technology, India, and the M.S. degree
+in Computer Science from California State University, Long Beach, CA, USA. She
+is a Senior Software Engineer based in California with over 10 years of
+industry experience, a reviewer for computing venues including CHI,
+Supercomputing, ECIS, and ISMAR, and a technical writer. Her expertise spans
+enterprise AI infrastructure, context engineering, and software engineering
+for large language model systems. Her work focuses on designing and
+architecting scalable backend infrastructure and context pipelines capable of
+handling large-scale production traffic. Her current research centers on LLM
+inference reproducibility, prompt caching behaviors, and the measurement of
+agentic systems in production deployments. 
+ 
+
+ 
+ 
+ \eoddefinedtrue 
+
+ 
+
+ 
+ 
+ Experimental support, please
+ view the build logs 
+ for errors. Generated by
+ 
+ 
+ L
+ A 
+ T
+ E 
+ 
+ xml 
+ 
+ .
+ 
+
+ 
+ Instructions for reporting errors
+
+ We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+ support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+ methods listed below:
+
+ 
+ Click the "Report Issue" ( 
+ 
+ ) button, located in the page header.
+
+ 
+ Tip: You can select the relevant text first, to include it in your report.
+
+ Our team has already identified the following issues . We appreciate your time reviewing and reporting rendering errors we
+ may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+ should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+ all.
+
+ Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion , and welcome developer contributions .
+
+ 
+
+ 
+ 
+ 
+ 
+ We gratefully acknowledge support from
+ our major funders ,
+ member institutions , ,
+ and all contributors.
+ 
+
+ 
+ About 
+ &middot; 
+ Help 
+ &middot; 
+ Contact 
+ &middot; 
+ Subscribe 
+ &middot; 
+ Copyright 
+ &middot; 
+ Privacy 
+ &middot; 
+ Accessibility 
+ &middot; 
+ Operational Status (opens in new tab) 
+ 
+ 
+
+ 
+ Major funding support from
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 

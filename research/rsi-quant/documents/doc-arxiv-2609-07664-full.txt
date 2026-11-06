@@ -1,0 +1,2647 @@
+ 
+ 
+ 
+ Accuracy is Not Enough: A Divergence-Based Approach to Evaluate Fidelity Loss in Quantized LLMs 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Skip to main content 
+ 
+ 
+ 
+ Report GitHub Issue
+
+ × 
+ 
+
+ 
+ Title: 
+ 
+
+ Content selection saved. Describe the issue below:
+
+ Description: 
+ 
+ 
+
+ 
+ Submit without GitHub 
+ Submit in GitHub 
+ 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Why HTML? 
+ 
+ Report Issue 
+ 
+ Back to Abstract 
+ 
+ 
+ Download PDF 
+ 
+ Contents 
+ 
+ 
+ Reading mode 
+ 
+ 
+ Colour theme 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ Abstract 
+
+ I Introduction 
+
+ II Related Work 
+ 
+ II-A LLM Compression and the Precision Bottleneck 
+
+ II-B The Illusion of Accuracy and Distributional Divergence 
+
+ 
+
+ III Background and Preliminaries 
+ 
+ III-A Uniform vs. Mixed-Precision Quantization 
+
+ III-B Full-Vocabulary Probability Distribution 
+
+ III-C Statistical Divergence Metrics 
+
+ 
+
+ IV Methodology and Experimental Setup 
+ 
+ IV-A Design Rationale and Dual-Stream Pipeline 
+
+ IV-B Quantization, Prompting, and Flip Analysis 
+
+ IV-C Metrics 
+
+ IV-D Evaluated Models, Datasets, and Hardware 
+
+ 
+
+ V Results and Discussion 
+ 
+ V-A The Masking Effect of Task Accuracy 
+
+ V-B Quantifying Information Loss via TVD 
+
+ V-C Mixed-Precision vs. Legacy Uniform Quantization 
+
+ V-D The Hardware Pareto Frontier 
+
+ 
+
+ VI Conclusion and Future Work 
+
+ References 
+
+ VII Theorems 
+
+ VIII Complete Empirical Results 
+
+ 
+ 
+ 
+ 
+ 
+ License: CC BY 4.0
+ 
+ 
+arXiv:2609.07664v2 [cs.LG] 09 Sep 2026
+
+ 
+ 
+ Accuracy is Not Enough: A Divergence-Based Approach to Evaluate Fidelity Loss in Quantized LLMs Thanks:  
+This work was funded by the Deutsche Forschungsgemeinschaft (DFG, German Research Foundation) under Germany’s Excellence Strategy—EXC 2070 Grant No. 390732324 (Cluster of Excellence PhenoRob) and by the State of North Rhine-Westphalia through the Lamarr Institute for Machine Learning and Artificial Intelligence.
+ 
+
+ 
+ 
+ Shahzeb Qamar 1,2,3,4 ,
+Lorenz Sparrenberg 3,4 ,
+Christian Bauckhage 1,2,3,4 , 
+ Baha Rababah 5 ,
+Carson Leung 5 ,
+Murat Kantarcioglu 7 ,
+Cuneyt Gurcan Akcora 6 ,
+Rafet Sifa 1,3,4 
+ 
+ Affiliation:  
+ 
+ Affiliation:  1 Fraunhofer IAIS, Germany ({shahzeb.qamar, rafet.sifa, christian.bauckhage}[at]iais.fraunhofer.de) 
+ 2 PhenoRob Cluster of Excellence, University of Bonn, Germany 
+ 3 Lamarr Institute for Machine Learning and Artificial Intelligence, Germany 
+ 4 University of Bonn, Germany (lsparren[at]uni-bonn.de) 
+ 5 University of Manitoba, Canada (rababahb[at]myUManitoba.ca, Carson.Leung[at]UManitoba.ca) 
+ 6 University of Central Florida, USA (cuneyt.akcora[at]ucf.edu) 
+ 7 Virginia Tech, USA (muratk[at]vt.edu)
+
+ 
+
+ Abstract
+
+ 
+ Deployment of Large Language Models (LLMs) on memory-constrained edge devices relies heavily on aggressive post-training quantization. However, the evaluation of these quantized models is still largely based on zero-shot task accuracy, which depends solely on argmax predictions and is therefore insensitive to changes in the underlying predictive distribution. As a result, accuracy can exhibit unstable and non-monotonic behavior under progressive quantization, masking substantial fidelity loss relative to the BFloat16 ( BF16 ) uncompressed base model and potentially providing misleading signals for deployment decisions.
+
+ 
+ In this work, we introduce a distribution-sensitive evaluation framework that quantifies information loss in quantized LLMs as the divergence between full-vocabulary predictive distributions at the token decision boundary. Specifically, we compute statistical distances, including Jensen-Shannon Divergence and Total Variation Distance, between the outputs of full-precision and quantized models, enabling a fine-grained analysis of distributional shift.
+
+ 
+ Using this framework, we quantify probability mass displacement and distributional drift relative to the BF16 reference. These measures capture changes in the predictive distribution that may not be reflected in top-1 task accuracy. We conduct a 120-run experimental matrix across five foundation model architectures and four reasoning benchmarks under progressive quantization regimes, from uncompressed BF16 to Q2_K , providing a systematic fidelity analysis.
+
+ 
+ Our results show that divergence metrics generally increase under stronger quantization in the evaluated settings, complementing task accuracy with a fidelity signal relative to the BF16 reference. Across the tested llama.cpp quantization schemes, mixed-precision Q4_K generally yields lower divergence than uniform Q4_0 at similar memory footprints. These findings motivate distribution-aware evaluation as a practical diagnostic complement to task accuracy; they do not directly establish correctness, calibration, safety, or user-perceived quality.
+
+ 
+
+ 
+ Index Terms: 
+
+LLM Quantization, Model Compression, Post-Training Quantization,
+Probability Leakage, Evaluation Metrics
+
+ 
+ Fig. 1 : VRAM requirement versus average TVD in the evaluated settings. The plot illustrates that more aggressive compression is associated with increased distributional divergence from the BF16 reference, with Q4_K providing a favorable empirical trade-off for the tested models and quantization schemes. 
+ 
+ 
+ I Introduction 
+
+ 
+ The rapid scaling of Large Language Models (LLMs) is fundamentally bottlenecked by the strict memory constraints of edge devices [ 1 , 2 , 3 ] . To bridge this gap, Post-Training Quantization (PTQ) serves as the standard for model compression [ 4 , 5 , 6 , 7 ] , with frameworks like llama.cpp [ 8 ] popularizing mixed-precision schemes (e.g., K-quants) [ 9 ] . Despite these advancements, standard evaluation methodologies remain flawed  [ 10 ] . Industry benchmarks heavily rely on zero-shot task accuracy (i.e., evaluation without task-specific demonstrations) ( e.g.,  MMLU  [ 11 ] , BoolQ  [ 12 ] , PIQA  [ 13 ] , HELM  [ 14 ] ). Because accuracy evaluates only whether the predicted argmax token matches the ground truth, it reduces model behavior to a coarse binary outcome and discards the underlying predictive distribution. Consequently, a degraded low-bit model might guess the correct token purely by chance from a flattened distribution, or default to a dominant prior token, scoring artificially high without true task understanding. This masking effect creates a misleading signal of model reliability  [ 15 ] .
+
+ 
+ Building on Dutta et al.  [ 16 ] , who showed that stable aggregate accuracy can hide severe internal prediction “flips”   [ 17 ] , we argue that quantized LLM evaluation must move from discrete argmax outcomes to continuous, full-vocabulary probability distributions. Standard benchmarks often treat LLMs as deterministic classifiers, yet the argmax operation discards most of the model’s uncertainty information and can score a confident BF16 model and a degraded quantized model as equivalent  [ 18 , 19 ] . This concern is consistent with evidence from computer vision  [ 20 ] , adversarial robustness  [ 21 ] , and medical AI  [ 22 ] , where accuracy alone has proven insufficient for reliability assessment. Foundational LLM work has likewise shown that confidence and calibration are necessary for reliable deployment  [ 19 ] .
+
+ 
+ TABLE I : Comparison of the Proposed Framework with Recent LLM Evaluation Literature 
+ 
+ 
+ Work 
+ Evaluation Focus 
+ Distributional Analysis? 
+ Quantization Focus 
+ Primary Metric(s) 
+
+ 
+ Gong et al. (2023) [ 10 ] 
+ General PTQ Benchmarking 
+ No (Top-1 Argmax) 
+ Uniform 
+ Zero-Shot Accuracy 
+
+ 
+ Huang et al. (2024) [ 15 ] 
+ Low-bit Degradation Trends 
+ No (Top-1 Argmax) 
+ Uniform 
+ Accuracy & Perplexity 
+
+ 
+ Dutta et al. (2024) [ 16 ] 
+ Prediction Instability 
+ Partial (KL-Divergence) 
+ Uniform 
+ Flip Rate & KL-Div. 
+
+ 
+ Kübler et al. (2026) [ 23 ] 
+ Statistical Significance 
+ No (Binary Sample-Level) 
+ Uniform & Mixed 
+ McNemar’s Test 
+
+ 
+ Proposed Framework 
+ Structural Distributional Drift 
+ Yes (Full Vocabulary) 
+ Uniform & Mixed 
+ TVD & JSD 
+
+ 
+ 
+ 
+ Drawing on these cross-disciplinary principles, we investigate whether aggressive quantization induces distributional drift relative to the BF16 reference model even when task accuracy remains stable. To quantify this drift, we use Total Variation Distance (TVD)  [ 24 ] and Jensen-Shannon Divergence (JSD)  [ 25 ] , computed over the full vocabulary. These metrics measure reference-distribution fidelity; they do not by themselves establish correctness, calibration, safety, or downstream utility.
+
+ 
+ Moving beyond binary accuracy, our approach provides distribution-level fidelity signals under stronger compression (Figure  1 ). Our four main contributions are: (1) we show that task accuracy can mask substantial distributional differences relative to a BF16 reference; (2) we introduce a full-vocabulary fidelity analysis using bounded TVD and JSD, supported by a coarse-graining result; (3) we evaluate 120 120 configurations across five foundation models, four benchmarks, and six quantization regimes; and (4) for the tested llama.cpp schemes, we find that mixed-precision Q4_K generally yields lower divergence than uniform Q4_0 at similar memory footprints.
+
+ 
+ II Related Work 
+
+ 
+ II-A LLM Compression and the Precision Bottleneck 
+
+ 
+ To mitigate the latency and privacy bottlenecks of cloud-centric LLMs  [ 26 , 27 , 28 , 29 ] , Post-Training Quantization (PTQ) has become a standard approach for deploying large models on VRAM-constrained edge devices  [ 30 , 9 ] . Unlike Quantization-Aware Training, PTQ avoids costly retraining while reducing model memory through lower-precision weights and activations [ 31 , 32 ] . This massive parameter reduction facilitates viable on-device local inference for latency-sensitive and privacy-critical applications, such as real-time critical error detection in machine translation [ 33 ] . While PTQ methods reduce memory cost enough to make edge deployment feasible  [ 4 , 5 ] , they do not guarantee that the quantized model preserves the full predictive distribution of its BF16 reference. Recently, open-source deployment frameworks have popularized mixed-precision schemes such as K-quants. Unlike legacy uniform quantization ( e.g.,  Q4_0 ), which applies the same low-bit format across layers, mixed-precision quantization preserves higher precision ( e.g.,  6-bit) in sensitive components while compressing more robust feed-forward layers more aggressively  [ 9 ] . These methods address the hardware bottleneck, but evaluating whether quantized models retain predictive fidelity remains unresolved.
+
+ 
+ II-B The Illusion of Accuracy and Distributional Divergence 
+
+ 
+ The prevailing paradigm for evaluating quantized LLMs relies on discrete, zero-shot accuracy [ 10 ] . However, top-1 accuracy can create statistical mirages that obfuscate continuous model behaviors [ 18 ] . Huang et al. [ 15 ] observed that low-bit models exhibit erratic, non-monotonic behavior on reasoning tasks. Critically, Dutta et al. [ 16 ] highlighted that aggregate accuracy frequently masks massive internal prediction instability, leading to “flips” in previously correct answers.
+
+ 
+ While Dutta et al.  [ 16 ] exposed this instability through discrete prediction flips and KL divergence, their distributional analysis inherits KL divergence’s sensitivity to near-zero probabilities, which are common in extreme low-bit quantization. Similarly, Kübler et al.  [ 23 ] rigorously quantified model degradation using McNemar’s test, and Rababah et al.  [ 34 ] characterized behavioral divergences through sample-level correctness agreement. However, these analyses remain fundamentally tied to binary correct/incorrect outcomes rather than the continuous underlying predictive structure.
+
+ 
+ Because accuracy depends only on the model’s top ( argmax ) prediction, it disregards the full probability distribution, frequently masking significant behavioral shifts occurring beneath the surface. This structural limitation is extensively documented in broader deep learning literature. For instance, Guo et al.  [ 20 ] demonstrated that modern neural networks can maintain high task accuracy while becoming severely uncalibrated. Similarly, adversarial robustness literature reveals that model vulnerabilities are often detected not by immediate accuracy drops, but by measuring divergence in the underlying softmax distributions [ 21 ] . Furthermore, Kadavath et al.  [ 19 ] recently emphasized that evaluating discrete accuracy without assessing an LLM’s internal confidence calibration leads to brittle, unreliable deployments. This vulnerability extends directly to model compression; for instance, Xu et al.  [ 35 ] recently demonstrated that quantization can silently destroy a model’s safety alignment while leaving traditional accuracy and perplexity metrics effectively unchanged. Recognizing this, recent efforts have actively begun exploring uncertainty-aware and calibration-focused evaluations tailored specifically for low-bit quantized LLMs [ 36 ] . Consequently, ensuring the reliability of edge-deployed compressed models necessitates moving beyond binary outcomes.
+To address the blind spots of discrete task-level evaluation, we introduce a continuous framework to quantify probability mass displacement relative to the BF16 reference. This analysis complements discrete task metrics but does not define a universal deployment threshold.
+
+ 
+ III Background and Preliminaries 
+
+ 
+ III-A Uniform vs. Mixed-Precision Quantization 
+
+ 
+ In post-training quantization, the method of bit-allocation drastically impacts the structural preservation of the model. Traditional legacy approaches ( e.g.,  Q4_0 ) utilize uniform quantization , wherein every weight tensor across the entire network is rigidly compressed to the same bit-width ( e.g.,  4-bit). While computationally simple, uniform quantization often destroys highly sensitive outlier weights and degrades critical attention mechanisms [ 5 , 6 ] .
+
+ 
+ Fig. 2 : Evaluation framework for quantized LLMs. The pipeline compares BF16 and quantized models through aligned inference, contrasting standard task accuracy with distribution-level fidelity metrics such as TVD and JSD. 
+ 
+ 
+ Conversely, modern llama.cpp implementations utilize K-quantization ( e.g.,  Q4_K ), a sophisticated mixed-precision heuristic [ 9 ] . To fully understand its advantage, it is essential to contrast it with legacy uniform quantization. Legacy methods rely on basic block quantization, assigning a full-precision ( BF16 )
+scale and offset to every small block of weights ( e.g.,  32 parameters), which introduces significant memory bandwidth overhead. In contrast, K-quants implement a highly efficient two-step “double quantization” architecture. They group multiple standard blocks together into a larger “super-block.” The scaling factors for the individual constituent blocks are themselves quantized down to 8-bit integers, and a single set of FP16 super-scales is stored for the entire super-block to dequantize them. This two-level scheme slashes metadata overhead and heavily optimizes CPU cache line reads.
+
+ 
+ Furthermore, rather than enforcing a blanket bit-width across the network, K-quants profile the architecture to distribute precision dynamically. They assign higher precision ( e.g.,  6-bit) to mathematically sensitive structures, such as attention layers and final output tensors, while aggressively compressing the robust, over-parameterized feed-forward networks down to 3-bit or 4-bit.
+
+ 
+ III-B Full-Vocabulary Probability Distribution 
+
+ 
+ Traditional task-accuracy metrics evaluate LLMs primarily based on whether the correct candidate option is selected, often using scores derived from the Negative Log-Likelihood (NLL) over a small subset of candidate answers. In contrast, to quantify structural information loss, we evaluate the model’s predictive uncertainty across its entire vocabulary 𝒱 \mathcal{V} at the immediate decision boundary.
+
+ 
+ Let f θ f_{\theta} denote the uncompressed reference LLM with parameters θ \theta , and let f θ ^ f_{\hat{\theta}} denote its quantized counterpart obtained through post-training quantization. Both models share the same tokenizer and vocabulary 𝒱 \mathcal{V} , differing only in parameter precision. Given an input prompt sequence X X , both models produce next-token logit vectors, 𝐳 ∈ ℝ | 𝒱 | \mathbf{z}\in\mathbb{R}^{|\mathcal{V}|} , over 𝒱 \mathcal{V} .
+
+ 
+ This logit vector is mapped to a conditional probability distribution using the softmax function:
+
+ 
+ 
+
+ 
+ 
+ p ⁡ ( v i ∣ X ) = exp ⁡ ( z i ) ∑ j = 1 | 𝒱 | exp ⁡ ( z j ) p(v_{i}\mid X)=\frac{\exp(z_{i})}{\sum_{j=1}^{|\mathcal{V}|}\exp(z_{j})} 
+ 
+ 
+ 
+
+ 
+ where p ⁡ ( v i ∣ X ) p(v_{i}\mid X) represents the model’s scalar probability (confidence) for the i i -th token v i ∈ 𝒱 v_{i}\in\mathcal{V} , conditioned explicitly on the input prompt X X . Specifically, let P P denote the full predictive distribution produced by the uncompressed base model f θ f_{\theta} , and let Q Q denote the corresponding predictive distribution produced by the quantized model f θ ^ f_{\hat{\theta}} .
+
+ 
+ III-C Statistical Divergence Metrics 
+
+ 
+ To measure probability mass displacement, where quantization noise redistributes probability mass away from the uncompressed f θ f_{\theta} model’s reference distribution, we employ two distinct statistical divergence metrics: Jensen-Shannon Divergence (JSD) and Total Variation Distance (TVD).
+
+ 
+ We select TVD and JSD because both are bounded and symmetric, whereas KL divergence is unbounded and can be dominated by low-probability mismatches. TVD provides a direct probability-mass interpretation, while JSD provides a bounded information-theoretic comparison [ 20 , 21 ] . We use these metrics to quantify distributional drift relative to the BF16 reference that may not be visible through zero-shot accuracy alone.
+
+ 
+ Jensen-Shannon Divergence (JSD)   [ 25 ] : To capture information-theoretic divergence stably, JSD evaluates the divergence of both distributions from their smoothed average mixture M = 1 2 ​ ( P + Q ) M=\frac{1}{2}(P+Q) :
+
+ 
+
+ 
+ 
+ J S D ( P ∥ Q ) = 1 2 D K ​ L ( P ∥ M ) + 1 2 D K ​ L ( Q ∥ M ) JSD(P\parallel Q)=\frac{1}{2}D_{KL}(P\parallel M)+\frac{1}{2}D_{KL}(Q\parallel M) 
+ 
+ 
+ 
+ where D K ​ L ( ⋅ ∥ ⋅ ) D_{KL}(\cdot\parallel\cdot) denotes the standard Kullback-Leibler divergence. When computed using the base-2 logarithm, JSD is strictly bounded within the interval [ 0 , 1 ] [0,1] . In the context of our evaluation, a JSD of 0 0 indicates that the quantized model’s predictive distribution perfectly matches the uncompressed baseline (zero fidelity loss).
+Conversely, a JSD approaching 1 1 indicates nearly disjoint predictive distributions and therefore severe divergence from the BF16 reference.
+
+ 
+ Total Variation Distance (TVD)   [ 24 ] : While JSD provides an information-theoretic comparison, TVD measures the absolute difference between distributions. TVD equals the minimum fraction of probability mass that must be reassigned to transform the base distribution P P into the quantized distribution Q Q . For discrete probability distributions over a vocabulary 𝒱 \mathcal{V} , TVD is defined mathematically as half the L 1 L_{1} distance:
+
+ 
+ 
+
+ 
+ 
+ TVD ​ ( P , Q ) = 1 2 ​ ∑ v ∈ 𝒱 | P ⁡ ( v ) − Q ⁡ ( v ) | \text{TVD}(P,Q)=\frac{1}{2}\sum_{v\in\mathcal{V}}|P(v)-Q(v)| 
+ 
+ (1) 
+ 
+ 
+
+ 
+ Because TVD is strictly bounded within [ 0 , 1 ] [0,1] , it allows for direct physical interpretation.
+For example, a TVD of 0.25 0.25 means that 25 % 25\% of probability mass must be reassigned to transform one distribution into the other. Together, these metrics quantify fidelity loss relative to the BF16 reference caused by quantization.
+
+ 
+ IV Methodology and Experimental Setup 
+
+ 
+ IV-A Design Rationale and Dual-Stream Pipeline 
+
+ 
+ To operationalize our information-theoretic framework, we must physically capture the probability mass displaced by quantization noise. Because standard accuracy metrics rely on a lossy, non-invertible argmax function, they are blind to shifts in the underlying uncertainty manifold. We compute statistical divergence between full-vocabulary softmax distributions to quantify fidelity to the BF16 reference that zero-shot accuracy may conceal.
+To rigorously quantify this phenomenon, we design a dual-stream evaluation pipeline. Stream 1 computes zero-shot task accuracy by leveraging native Key-Value caching and selecting the candidate option that minimizes the standard length-normalized negative log-likelihood (NLL) utilized by established benchmarks  [ 14 ] :
+ NLL ( Y ) = − 1 | Y | ∑ i = 1 | Y | log P ( y i ∣ X , y < i ) \text{NLL}(Y)=-\frac{1}{|Y|}\sum_{i=1}^{|Y|}\log P(y_{i}\mid X,y_{<i}) .
+
+ 
+ For each prompt, Stream 2 evaluates the prompt, extracts the backend-provided full-vocabulary output vector, and applies a temperature- 1.0 1.0 softmax without distribution truncation. We then compare the BF16 and quantized distributions using TVD and JSD. Thus, Stream 2 is a prompt-conditioned full-vocabulary fidelity diagnostic. For multi-token answer options, NLL scores the complete candidate sequence, whereas TVD and JSD characterize the extracted prompt-level distribution; the two streams are therefore complementary rather than equivalent task measures. Answer-level aggregation maps the vocabulary to a smaller output space, so the following theorem formalizes that such coarse-graining cannot increase distributional discrepancy.
+
+ 
+ Theorem 1 . 
+
+ 
+ Let K ⁡ ( a ∣ v ) K(a\mid v) be a stochastic coarse-graining operator mapping a
+full-vocabulary distribution over 𝒱 \mathcal{V} to an answer-level
+distribution over 𝒜 \mathcal{A} . Then, for all
+ P , Q ∈ Δ ⁡ ( 𝒱 ) P,Q\in\Delta(\mathcal{V}) , 
+
+ 
+
+ 
+ 
+ TVD ⁡ ( K ​ P , K ​ Q ) \displaystyle\mathrm{TVD}(KP,KQ) 
+ ≤ TVD ⁡ ( P , Q ) , \displaystyle\leq\mathrm{TVD}(P,Q), 
+ 
+ 
+ 
+ 
+ JSD ⁡ ( K ​ P , K ​ Q ) \displaystyle\mathrm{JSD}(KP,KQ) 
+ ≤ JSD ⁡ ( P , Q ) . \displaystyle\leq\mathrm{JSD}(P,Q). 
+ 
+ (2) 
+ 
+ 
+
+ 
+ Proof.
+
+ 
+ For TVD, we use T ​ V ​ D ​ ( P , Q ) = 1 2 ​ ∑ v | P ⁡ ( v ) − Q ⁡ ( v ) | . TVD(P,Q)=\frac{1}{2}\sum_{v}|P(v)-Q(v)|. Then 
+
+ 
+
+ 
+ 
+ 2 ​ T ​ V ​ D ​ ( K ​ P , K ​ Q ) \displaystyle 2TVD(KP,KQ) 
+ = ∑ a | ∑ v K ⁡ ( a | v ) ​ ( P ⁡ ( v ) − Q ⁡ ( v ) ) | \displaystyle=\sum_{a}|\sum_{v}K(a|v)(P(v)-Q(v))| 
+ 
+ 
+ 
+ 
+ 
+ ≤ ∑ a ∑ v K ⁡ ( a | v ) ​ | P ⁡ ( v ) − Q ⁡ ( v ) | \displaystyle\leq\sum_{a}\sum_{v}K(a|v)|P(v)-Q(v)| 
+ 
+ 
+ 
+ 
+ 
+ = ∑ v | P ⁡ ( v ) − Q ⁡ ( v ) | ​ ∑ a K ⁡ ( a | v ) \displaystyle=\sum_{v}|P(v)-Q(v)|\sum_{a}K(a|v) 
+ 
+ 
+ 
+ 
+ 
+ = ∑ v | P ⁡ ( v ) − Q ⁡ ( v ) | = 2 ​ T ​ V ​ D ​ ( P , Q ) \displaystyle=\sum_{v}|P(v)-Q(v)|=2\,TVD(P,Q) 
+ 
+ 
+ 
+ since ∑ a K ⁡ ( a | v ) = 1 \sum_{a}K(a|v)=1 for every v v . Dividing by 2 2 gives T ​ V ​ D ​ ( K ​ P , K ​ Q ) ≤ T ​ V ​ D ​ ( P , Q ) . TVD(KP,KQ)\leq TVD(P,Q). We give the proof for JSD in App.  VII 
+∎ 
+
+ 
+ IV-B Quantization, Prompting, and Flip Analysis 
+
+ 
+ To guarantee that measured divergence stems strictly from precision truncation, all quantized models are generated directly from their BF16 Hugging Face baselines using llama.cpp . To objectively map the degradation curve, we evaluate five distinct compression states: 8-bit uniform ( Q8_0 ), 6-bit mixed ( Q6_K ), 4-bit uniform ( Q4_0 ), 4-bit mixed ( Q4_K ), and 2-bit mixed ( Q2_K ). To control prompt-template variation, we enforce fixed continuous-generation formatting templates ( e.g.,  Question: {question} \nAnswer: ) to bypass instruction-tuning chats. Furthermore, adapting the methodology of Dutta et al. [ 16 ] , we track discrete prediction “total flips” (the aggregate sum of both Flip-to-Wrong and Flip-to-Correct transitions) between the BF16 and quantized states to expose the overall instability of task-level accuracy.
+
+ 
+ IV-C Metrics 
+
+ 
+ We use TVD and JSD as fidelity diagnostics relative to the BF16 reference and compare their trends with task accuracy and prediction flips. Our objective is to determine whether distributional divergence distinguishes quantization schemes that appear similar under conventional task metrics. While both TVD and JSD are continuously tracked (as illustrated in Figure  3 ), we prioritize TVD as the primary reporting metric in our tabular results because it has a direct interpretation as the fraction of probability mass that would need to be reassigned to transform one predictive distribution into the other.
+
+ 
+ IV-D Evaluated Models, Datasets, and Hardware 
+
+ 
+ We evaluate five diverse foundation models targeted for edge deployment: LLaMA-3.1-8B [ 1 ] , LLaMA-3.2-1B, Mistral-7B-v0.1 [ 2 ] , Teuken-7B-base-v0.6 [ 37 ] , and Gemma-2B [ 3 ] . To ensure domain diversity, we utilize four established zero-shot benchmarks: MMLU, BoolQ, PIQA, and CausalBench, with full dataset statistics detailed in Table  II . Inference is executed deterministically ( seed=42 ) on a single NVIDIA V100 32GB GPU, constrained to a 2048 context window, with dynamic VRAM allocation tracked via standard driver queries.
+
+ 
+ TABLE II : 
+Evaluation benchmarks used in the zero-shot experiments. 
+ 
+ 
+ Dataset 
+ Entries 
+ Task Type 
+ Split 
+
+ 
+ MMLU  [ 11 ] 
+ 1,530 
+ Multidomain QA 
+ Validation 
+
+ 
+ BoolQ  [ 12 ] 
+ 3,270 
+ Reading comprehension 
+ Validation 
+
+ 
+ PIQA  [ 13 ] 
+ 1,838 
+ Physical commonsense 
+ Validation 
+
+ 
+ CausalBench  [ 38 ] 
+ 1,500 
+ Causal reasoning 
+ Stratified subset 
+
+ 
+ 
+
+ 
+ V Results and Discussion 
+
+ 
+ V-A The Masking Effect of Task Accuracy 
+
+ 
+ TABLE III : Impact of Quantization on Accuracy, Prediction Stability, and Information Loss Across Reasoning (PIQA) and Knowledge (MMLU) Domains. 
+ 
+ 
+ 
+ Model & Quantization 
+ VRAM 
+ PIQA (Language Reasoning) 
+ MMLU (Factual Knowledge) 
+
+ 
+ Accuracy( ↑ \uparrow ) 
+ % Flips from BF16 
+ TVD( ↓ \downarrow ) 
+ Accuracy( ↑ \uparrow ) 
+ % Flips from BF16 
+ TVD( ↓ \downarrow ) 
+
+ 
+ Teuken-7B-base-v0.6 ( BF16 ) 
+ 14.8 14.8 GB 
+ 68.9 % 68.9\% 
+ — 
+ — 
+ 31.1 % \mathbf{31.1\%} 
+ — 
+ — 
+
+ 
+ Teuken-7B-base-v0.6 Q4_K (Mixed) 
+ 6.6 6.6 GB 
+ 69.2 % \mathbf{69.2\%} 
+ 3.43 % \mathbf{3.43\%} 
+ 0.136 \mathbf{0.136} 
+ 30.3 % 30.3\% 
+ 3.92 % \mathbf{3.92\%} 
+ 0.143 \mathbf{0.143} 
+
+ 
+ Teuken-7B-base-v0.6 Q4_0 (Uniform) 
+ 6.1 6.1 GB 
+ 68.7 % 68.7\% 
+ 4.84 % 4.84\% 
+ 0.560 0.560 
+ 30.3 % 30.3\% 
+ 4.58 % 4.58\% 
+ 0.541 0.541 
+
+ 
+ LLaMA-3.1-8B ( BF16 ) 
+ 14.8 14.8 GB 
+ 77.3 % \mathbf{77.3\%} 
+ — 
+ — 
+ 32.1 % 32.1\% 
+ — 
+ — 
+
+ 
+ LLaMA-3.1-8B Q4_K (Mixed) 
+ 5.7 5.7 GB 
+ 77.1 % 77.1\% 
+ 2.72 % \mathbf{2.72\%} 
+ 0.052 \mathbf{0.052} 
+ 32.2 % \mathbf{32.2\%} 
+ 2.48 % \mathbf{2.48\%} 
+ 0.055 \mathbf{0.055} 
+
+ 
+ LLaMA-3.1-8B Q4_0 (Uniform) 
+ 5.5 5.5 GB 
+ 77.2 % 77.2\% 
+ 4.08 % 4.08\% 
+ 0.215 0.215 
+ 32.1 % 32.1\% 
+ 2.94 % 2.94\% 
+ 0.221 0.221 
+
+ 
+ Mistral-7B-v0.1 ( BF16 ) 
+ 14.0 14.0 GB 
+ 78.8 % \mathbf{78.8\%} 
+ — 
+ — 
+ 33.5 % \mathbf{33.5\%} 
+ — 
+ — 
+
+ 
+ Mistral-7B-v0.1 Q4_K (Mixed) 
+ 4.9 4.9 GB 
+ 77.6 % 77.6\% 
+ 3.26 % \mathbf{3.26\%} 
+ 0.009 \mathbf{0.009} 
+ 32.8 % 32.8\% 
+ 3.46 % \mathbf{3.46\%} 
+ 0.015 \mathbf{0.015} 
+
+ 
+ Mistral-7B-v0.1 Q4_0 (Uniform) 
+ 4.6 4.6 GB 
+ 76.9 % 76.9\% 
+ 4.08 % 4.08\% 
+ 0.030 0.030 
+ 31.9 % 31.9\% 
+ 6.08 % 6.08\% 
+ 0.030 0.030 
+
+ 
+ 
+
+ 
+ 
+ A central hypothesis of this study is that task-level accuracy metrics are insufficient for characterizing fidelity to the BF16 reference in heavily quantized models. Our empirical results in Table  III immediately reveal a critical masking effect, wherein task accuracy remains artificially stable despite severe degradation in the model’s internal predictive behavior. For example, when observing the Teuken-7B-base-v0.6 model compressed to 4-bit uniform precision ( Q4_0 ) on the PIQA dataset, zero-shot accuracy drops by a negligible 0.2 % 0.2\% (from 68.9 % 68.9\% to 68.7 % 68.7\% ). However, the same setting yields 4.84 % 4.84\% prediction flips and a TVD of 0.560 0.560 , meaning that transforming its next-token distribution into the BF16 reference distribution requires reassigning 56 % 56\% of probability mass. This substantial reference-distribution divergence is not reflected by raw accuracy alone.
+
+ 
+ This phenomenon, and the danger of relying solely on accuracy, is most pronounced in the 1B and 2B parameter architectures ( Gemma-2B and LLaMA-3.2-1B ). As detailed in App. Table VII , when evaluated on the CausalBench dataset, both models achieve an accuracy of approximately 50.1 % 50.1\% across nearly all quantization thresholds, from the uncompressed BF16 baseline down to 4-bit mixed precision ( Q4_K ). Evaluated in a vacuum, this metric suggests stable, albeit baseline, performance. However, the confusion matrix reveals Precision and Recall scores of exactly 0.0 0.0 with zero prediction flips. The models predict the negative class uniformly in this evaluation setup. While these discrete metrics expose this degenerate prediction pattern, they do not quantify the associated divergence from the BF16 predictive distribution.
+
+ 
+ A similar majority-class prediction pattern occurs on the BoolQ benchmark (see App. Table VII ). Across all evaluated quantization levels (down to Q2_K ), both the 1B and 2B models achieve an exact accuracy of 62.2 % 62.2\% with zero prediction flips. While this successfully matches the majority class distribution of the validation split, both models yield a Precision of 0.6217 0.6217 and a Recall of exactly 1.0 1.0 . This indicates that these models predict the “True” token for all evaluated examples. This behavior is consistent with majority-class prediction, although the present analysis does not establish its cause.
+
+ 
+ Because these models produce the same class prediction across quantization states, prediction flips can remain zero despite distributional differences. In this setting, top-1 accuracy alone does not reveal the underlying prediction pattern. Precision, recall, and TVD provide complementary information: the former characterize class-level behavior, while TVD quantifies divergence from the BF16 next-token distribution.
+
+ 
+ Fig. 3 : Comparative analysis of task metrics (top) and divergence metrics (bottom) across quantization levels on PIQA. Accuracy and F1 can exhibit non-monotonic fluctuations, whereas TVD and JSD provide distribution-level fidelity measurements relative to the BF16 reference that generally increase under stronger quantization in these experiments. 
+ 
+
+ 
+ V-B Quantifying Information Loss via TVD 
+
+ 
+ To complement task accuracy, we analyze the full-vocabulary softmax distributions of the models. We calculate TVD and JSD to quantify next-token distributional divergence from the BF16 reference induced by quantization.
+As illustrated in Figure 3 , the contrast between task-level and distribution-level metrics yields one of our most interesting results. The upper panels (Accuracy and F1 Score) exhibit erratic, non-monotonic behavior across quantization levels.
+For example, the accuracy of LLaMA-3.1-8B increases slightly at the Q6_K threshold relative to its uncompressed baseline before decreasing at lower precisions. This non-monotonic behavior illustrates why accuracy alone may be insufficient to characterize reference-distribution fidelity.
+
+ 
+ The lower panels of Figure 3 show that TVD and JSD generally increase as quantization becomes more aggressive in the evaluated PIQA settings. Because TVD measures distance from the BF16 next-token distribution rather than agreement with class labels, it is not directly affected by class imbalance in the same way as accuracy. It nevertheless measures reference fidelity rather than task correctness or calibration.
+
+ 
+ TVD is particularly interpretable because it equals the fraction of probability mass that must be reassigned to transform one predictive distribution into the other. For example, when compressing LLaMA-3.1-8B to Q2_K on PIQA, accuracy remains 74.6 % 74.6\% , compared with 77.3 % 77.3\% for BF16 , while TVD is 0.257 0.257 . Thus, despite a moderate accuracy change, transforming the quantized next-token distribution into the BF16 reference requires reassigning 25.7 % 25.7\% of probability mass.
+
+ 
+ V-C Mixed-Precision vs. Legacy Uniform Quantization 
+
+ 
+ We use TVD to compare the reference-distribution fidelity of modern mixed-precision K-quants ( Q4_K ) and legacy uniform quantization ( Q4_0 ) in the evaluated settings.
+
+ 
+ When evaluating these two algorithms purely through the lens of deployment resources and task metrics, they appear practically identical. As detailed in Table III , compressing the LLaMA-3.1-8B architecture via Q4_0 and Q4_K yields nearly indistinguishable VRAM footprints (approx. 5.5 5.5 GB) and essentially identical zero-shot accuracy scores on both the PIQA benchmark ( 77.2 % 77.2\% vs. 77.1 % 77.1\% ) and the MMLU benchmark ( 32.1 % 32.1\% vs. 32.2 % 32.2\% ).
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+
+ Fig. 4 : Comparison of legacy uniform quantization ( Q4_0 ) versus mixed-precision ( Q4_K ) averaged across the evaluation suite in a) flips and b) TVD. Error bars denote the standard deviation across datasets.
+ 
+ 
+ 
+ However, Figure 4 shows substantial differences in distributional fidelity and flip behavior. In the evaluated settings, Q4_K exhibits lower average divergence, whereas Q4_0 shows greater variation in prediction flips across datasets.
+
+ 
+ For LLaMA-3.1-8B on MMLU (Table III ), Q4_K yields a TVD of 0.055 0.055 , whereas Q4_0 yields 0.221 0.221 , approximately four times higher, despite similar task accuracy. For Teuken-7B , the corresponding TVDs are 0.143 0.143 for Q4_K and 0.541 0.541 for Q4_0 . These results indicate substantially lower fidelity to the BF16 reference for uniform quantization in these evaluated cases.
+
+ 
+ These results show that TVD distinguishes the two quantization schemes even when their memory footprints and task accuracies are similar. For the tested models, benchmarks, and llama.cpp schemes, mixed-precision quantization generally provides greater fidelity to the BF16 reference than uniform quantization.
+
+ 
+ V-D The Hardware Pareto Frontier 
+
+ 
+ Figure 1 relates VRAM requirements to TVD relative to the BF16 reference in the evaluated settings. The plot shows that lower-memory quantization states are generally associated with higher divergence, although the magnitude varies across architectures and quantization schemes.
+
+ 
+ For example, LLaMA-3.1-8B is reduced from 15.2 GB in BF16 to 5.27 GB with Q4_K , while its reported TVD remains below 0.055 0.055 in the corresponding evaluation. Moving from Q4_K to Q4_0 yields comparatively small memory reductions but substantially higher TVD for several models. More aggressive states, such as Q2_K , show larger divergence in some architectures.
+
+ 
+ Accordingly, Q4_K is a favorable empirical memory–fidelity trade-off among the tested models, benchmarks, and llama.cpp quantization schemes. This observation does not constitute a universal deployment threshold and does not substitute for latency, throughput, energy, calibration, or generation-quality evaluation on target devices.
+
+ 
+ VI Conclusion and Future Work 
+
+ 
+ For quantized LLMs, zero-shot accuracy alone may not characterize fidelity to an uncompressed reference model. We therefore evaluate full-vocabulary predictive distributions using bounded JSD and TVD. JSD provides a bounded information-theoretic comparison, while TVD quantifies the probability mass that must be reassigned to transform the quantized distribution into the BF16 reference distribution. These metrics measure reference fidelity rather than correctness, calibration, safety, or user-perceived quality.
+
+ 
+ Across the tested models, benchmarks, and llama.cpp quantization schemes, uniform Q4_0 often yields substantially higher TVD than mixed-precision Q4_K despite similar task accuracy and memory footprints. Thus, Q4_K provides a favorable empirical memory–fidelity trade-off in our setting, including up to a 65 % 65\% memory reduction for the reported LLaMA-3.1-8B configuration. This result is not a universal safe-deployment threshold.
+
+ 
+ Future Work: Our study is limited to base models, fixed prompt templates, prompt-conditioned full-vocabulary distributions, and llama.cpp/GGUF quantization. Future work should evaluate multi-step generation in instruction-tuned and RLHF-aligned architectures; compare AWQ, GPTQ, and SmoothQuant; assess prompt-template sensitivity; examine the computational scalability of full-vocabulary divergence evaluation; and measure latency, throughput, energy, calibration, and generation quality on target hardware.
+
+ 
+ Acknowledgment
+
+ 
+ The authors acknowledge support from the PhenoRob Cluster of Excellence and the Lamarr Institute for Machine Learning and Artificial Intelligence. We thank G. Gerganov and the open-source community for developing and maintaining llama.cpp and ggml , which supported this work. ChatGPT [ 39 ] and Gemini [ 40 ] were used for code optimization and language proofreading.
+
+ 
+ References
+
+ 
+ [1] 
+ A. Grattafiori, A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Vaughan, et al. (2024) 
+ 
+ The llama 3 herd of models .
+ 
+ arXiv preprint arXiv:2407.21783 .
+ 
+ Cited by: §I ,
+ §IV-D .
+ 
+
+ [2] 
+ A. Q. Jiang, A. Sablayrolles, A. Mensch, C. Bamford, D. S. Chaplot, D. de Las Casas, F. Bressand, G. Lengyel, G. Lample, L. Saulnier, L. R. Lavaud, M. Lachaux, P. Stock, T. L. Scao, T. Lavril, T. Wang, T. Lacroix, and W. E. Sayed (2023) 
+ 
+ Mistral 7b .
+ 
+ CoRR abs/2310.06825 .
+ 
+ External Links: Link ,
+ Document ,
+ 2310.06825 
+ 
+ Cited by: §I ,
+ §IV-D .
+ 
+
+ [3] 
+ G. Team (2024) 
+ 
+ Gemma 2: improving open language models at a practical size .
+ 
+ arXiv preprint arXiv:2408.00118 .
+ 
+ External Links: Link 
+ 
+ Cited by: §I ,
+ §IV-D .
+ 
+
+ [4] 
+ E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh (2023) 
+ 
+ OPTQ: accurate quantization for generative pre-trained transformers .
+ 
+ In The Eleventh International Conference on Learning Representations ,
+ 
+ External Links: Link 
+ 
+ Cited by: §I ,
+ §II-A .
+ 
+
+ [5] 
+ J. Lin, J. Tang, H. Tang, S. Yang, G. Xiao, and S. Han (2025) 
+ 
+ AWQ: activation-aware weight quantization for on-device llm compression and acceleration .
+ 
+ GetMobile: Mobile Computing and Communications 28 ( 4 ), pp. 12–17 .
+ 
+ Cited by: §I ,
+ §II-A ,
+ §III-A .
+ 
+
+ [6] 
+ G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han (2023) 
+ 
+ SmoothQuant: accurate and efficient post-training quantization for large language models .
+ 
+ In International Conference on Machine Learning, ICML 2023, 23-29 July
+2023, Honolulu, Hawaii, USA ,
+ 
+ Proceedings of Machine Learning Research , Vol. 202 , pp. 38087–38099 .
+ 
+ External Links: Link 
+ 
+ Cited by: §I ,
+ §III-A .
+ 
+
+ [7] 
+ J. Chee, Y. Cai, V. Kuleshov, and C. D. Sa (2023) 
+ 
+ QuIP: 2-bit quantization of large language models with guarantees .
+ 
+ In Advances in Neural Information Processing Systems 36: Annual Conference
+on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans,
+LA, USA, December 10 - 16, 2023 ,
+ 
+ External Links: Link 
+ 
+ Cited by: §I .
+ 
+
+ [8] 
+ G. Gerganov et al. (2023) 
+ 
+ Llama.cpp: port of facebook’s llama model in c/c++ .
+ 
+ Note: https://github.com/ggerganov/llama.cpp Accessed: Mar. 26, 2026, Commit: ded446b 
+ 
+ Cited by: §I .
+ 
+
+ [9] 
+ L. Sparrenberg, T. Deußer, A. Berger, and R. Sifa (2025) 
+ 
+ Small and fast llms on commodity hardware: post-training quantization in llama. cpp .
+ 
+ In 12th IEEE International Conference on Data Science and Advanced
+Analytics, DSAA 2025, Birmingham, United Kingdom, October 9-12,
+2025 ,
+ 
+ pp. 1–10 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §I ,
+ §II-A ,
+ §III-A .
+ 
+
+ [10] 
+ R. Gong, Y. Yong, S. Gu, Y. Huang, Y. Zhang, X. Liu, and D. Tao (2024) 
+ 
+ LLM-qbench: A benchmark towards the best practice for post-training quantization of large language models .
+ 
+ CoRR abs/2405.06001 .
+ 
+ External Links: Link ,
+ Document ,
+ 2405.06001 
+ 
+ Cited by: TABLE I ,
+ §I ,
+ §II-B .
+ 
+
+ [11] 
+ D. Hendrycks, C. Burns, S. Basart, A. Zou, M. Mazeika, D. Song, and J. Steinhardt (2021) 
+ 
+ Measuring massive multitask language understanding .
+ 
+ In 9th International Conference on Learning Representations, ICLR 2021,
+Virtual Event, Austria, May 3-7, 2021 ,
+ 
+ External Links: Link 
+ 
+ Cited by: §I ,
+ TABLE II .
+ 
+
+ [12] 
+ C. Clark, K. Lee, M. Chang, T. Kwiatkowski, M. Collins, and K. Toutanova (2019) 
+ 
+ BoolQ: exploring the surprising difficulty of natural yes/no questions .
+ 
+ In Proceedings of the 2019 Conference of the North American Chapter of
+the Association for Computational Linguistics: Human Language Technologies,
+NAACL-HLT 2019, Minneapolis, MN, USA, June 2-7, 2019, Volume 1 (Long
+and Short Papers) ,
+ 
+ pp. 2924–2936 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §I ,
+ TABLE II .
+ 
+
+ [13] 
+ Y. Bisk, R. Zellers, R. L. Bras, J. Gao, and Y. Choi (2020) 
+ 
+ PIQA: reasoning about physical commonsense in natural language .
+ 
+ In The Thirty-Fourth AAAI Conference on Artificial Intelligence, AAAI
+2020, The Thirty-Second Innovative Applications of Artificial Intelligence
+Conference, IAAI 2020, The Tenth AAAI Symposium on Educational
+Advances in Artificial Intelligence, EAAI 2020, New York, NY, USA,
+February 7-12, 2020 ,
+ 
+ pp. 7432–7439 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §I ,
+ TABLE II .
+ 
+
+ [14] 
+ P. Liang, R. Bommasani, T. Lee, D. Tsipras, D. Soylu, M. Yasunaga, Y. Zhang, D. Narayanan, Y. Wu, A. Kumar, B. Newman, B. Yuan, B. Yan, C. Zhang, C. Cosgrove, C. D. Manning, C. Ré, D. Acosta-Navas, D. A. Hudson, E. Zelikman, E. Durmus, F. Ladhak, F. Rong, H. Ren, H. Yao, J. Wang, K. Santhanam, L. J. Orr, L. Zheng, M. Yüksekgönül, M. Suzgun, N. Kim, N. Guha, N. S. Chatterji, O. Khattab, P. Henderson, Q. Huang, R. Chi, S. M. Xie, S. Santurkar, S. Ganguli, T. Hashimoto, T. Icard, T. Zhang, V. Chaudhary, W. Wang, X. Li, Y. Mai, Y. Zhang, and Y. Koreeda (2023) 
+ 
+ Holistic evaluation of language models .
+ 
+ Trans. Mach. Learn. Res. 2023 .
+ 
+ External Links: Link 
+ 
+ Cited by: §I ,
+ §IV-A .
+ 
+
+ [15] 
+ W. Huang, X. Ma, H. Qin, X. Zheng, C. Lv, H. Chen, J. Luo, X. Qi, X. Liu, and M. Magno (2024) 
+ 
+ How good are low-bit quantized llama3 models? an empirical study .
+ 
+ CoRR abs/2404.14047 .
+ 
+ External Links: Link ,
+ Document ,
+ 2404.14047 
+ 
+ Cited by: TABLE I ,
+ §I ,
+ §II-B .
+ 
+
+ [16] 
+ A. Dutta, S. Krishnan, N. Kwatra, and R. Ramjee (2024) 
+ 
+ Accuracy is not all you need .
+ 
+ In Advances in Neural Information Processing Systems 37: Annual Conference
+on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver,
+BC, Canada, December 10 - 15, 2024 ,
+ 
+ External Links: Link 
+ 
+ Cited by: TABLE I ,
+ §I ,
+ §II-B ,
+ §II-B ,
+ §IV-B .
+ 
+
+ [17] 
+ S. Hooker, A. Courville, G. Clark, Y. Dauphin, and A. Frome (2019) 
+ 
+ What do compressed deep neural networks forget? .
+ 
+ arXiv preprint arXiv:1911.05248 .
+ 
+ Cited by: §I .
+ 
+
+ [18] 
+ R. Schaeffer, B. Miranda, and S. Koyejo (2023) 
+ 
+ Are emergent abilities of large language models a mirage? .
+ 
+ Advances in neural information processing systems 36 , pp. 55565–55581 .
+ 
+ Cited by: §I ,
+ §II-B .
+ 
+
+ [19] 
+ S. Kadavath, T. Conerly, A. Askell, T. Henighan, D. Drain, E. Perez, N. Schiefer, Z. Hatfield-Dodds, N. DasSarma, E. Tran-Johnson, S. Johnston, S. E. Showk, A. Jones, N. Elhage, T. Hume, A. Chen, Y. Bai, S. Bowman, S. Fort, D. Ganguli, D. Hernandez, J. Jacobson, J. Kernion, S. Kravec, L. Lovitt, K. Ndousse, C. Olsson, S. Ringer, D. Amodei, T. Brown, J. Clark, N. Joseph, B. Mann, S. McCandlish, C. Olah, and J. Kaplan (2022) 
+ 
+ Language models (mostly) know what they know .
+ 
+ CoRR abs/2207.05221 .
+ 
+ External Links: Link ,
+ Document ,
+ 2207.05221 
+ 
+ Cited by: §I ,
+ §II-B .
+ 
+
+ [20] 
+ C. Guo, G. Pleiss, Y. Sun, and K. Q. Weinberger (2017) 
+ 
+ On calibration of modern neural networks .
+ 
+ In Proceedings of the 34th International Conference on Machine Learning,
+ICML 2017, Sydney, NSW, Australia, 6-11 August 2017 ,
+ 
+ Proceedings of Machine Learning Research , Vol. 70 , pp. 1321–1330 .
+ 
+ External Links: Link 
+ 
+ Cited by: §I ,
+ §II-B ,
+ §III-C .
+ 
+
+ [21] 
+ C. Szegedy, W. Zaremba, I. Sutskever, J. Bruna, D. Erhan, I. J. Goodfellow, and R. Fergus (2014) 
+ 
+ Intriguing properties of neural networks .
+ 
+ In 2nd International Conference on Learning Representations, ICLR 2014,
+Banff, AB, Canada, April 14-16, 2014, Conference Track Proceedings ,
+ 
+ External Links: Link 
+ 
+ Cited by: §I ,
+ §II-B ,
+ §III-C .
+ 
+
+ [22] 
+ E. Begoli, T. Bhattacharya, and D. Kusnezov (2019) 
+ 
+ The need for uncertainty quantification in machine-assisted medical decision making .
+ 
+ Nat. Mach. Intell. 1 ( 1 ), pp. 20–23 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §I .
+ 
+
+ [23] 
+ J. M. Kübler, K. Budhathoki, M. Kleindessner, X. Zhou, J. Yin, A. Khetan, and G. Karypis (2026) 
+ 
+ When llms get significantly worse: A statistical approach to detect model degradations .
+ 
+ CoRR abs/2602.10144 .
+ 
+ External Links: Link ,
+ Document ,
+ 2602.10144 
+ 
+ Cited by: TABLE I ,
+ §II-B .
+ 
+
+ [24] 
+ T. M. Cover and J. A. Thomas (2006) 
+ 
+ Elements of information theory (2. ed.) .
+ 
+ Wiley .
+ 
+ External Links: Link ,
+ ISBN 978-0-471-24195-9 
+ 
+ Cited by: §I ,
+ §III-C .
+ 
+
+ [25] 
+ J. Lin (1991) 
+ 
+ Divergence measures based on the shannon entropy .
+ 
+ IEEE Trans. Inf. Theory 37 ( 1 ), pp. 145–151 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §I ,
+ §III-C .
+ 
+
+ [26] 
+ T. B. Brown, B. Mann, N. Ryder, M. Subbiah, J. Kaplan, P. Dhariwal, A. Neelakantan, P. Shyam, G. Sastry, A. Askell, S. Agarwal, A. Herbert-Voss, G. Krueger, T. Henighan, R. Child, A. Ramesh, D. M. Ziegler, J. Wu, C. Winter, C. Hesse, M. Chen, E. Sigler, M. Litwin, S. Gray, B. Chess, J. Clark, C. Berner, S. McCandlish, A. Radford, I. Sutskever, and D. Amodei (2020) 
+ 
+ Language models are few-shot learners .
+ 
+ In Advances in Neural Information Processing Systems 33: Annual Conference
+on Neural Information Processing Systems 2020, NeurIPS 2020, December
+6-12, 2020, virtual ,
+ 
+ External Links: Link 
+ 
+ Cited by: §II-A .
+ 
+
+ [27] 
+ H. Touvron, T. Lavril, G. Izacard, X. Martinet, M. Lachaux, T. Lacroix, B. Rozière, N. Goyal, E. Hambro, F. Azhar, A. Rodriguez, A. Joulin, E. Grave, and G. Lample (2023) 
+ 
+ LLaMA: open and efficient foundation language models .
+ 
+ CoRR abs/2302.13971 .
+ 
+ External Links: Link ,
+ Document ,
+ 2302.13971 
+ 
+ Cited by: §II-A .
+ 
+
+ [28] 
+ N. Carlini, F. Tramèr, E. Wallace, M. Jagielski, A. Herbert-Voss, K. Lee, A. Roberts, T. B. Brown, D. Song, Ú. Erlingsson, A. Oprea, and C. Raffel (2021) 
+ 
+ Extracting training data from large language models .
+ 
+ In 30th USENIX Security Symposium, USENIX Security 2021, August 11-13,
+2021 ,
+ 
+ pp. 2633–2650 .
+ 
+ External Links: Link 
+ 
+ Cited by: §II-A .
+ 
+
+ [29] 
+ F. Mireshghallah, M. Taram, P. Vepakomma, A. Singh, R. Raskar, and H. Esmaeilzadeh (2020) 
+ 
+ Privacy in deep learning: A survey .
+ 
+ CoRR abs/2004.12254 .
+ 
+ External Links: Link ,
+ 2004.12254 
+ 
+ Cited by: §II-A .
+ 
+
+ [30] 
+ W. Chen, J. Wang, Y. Zhang, Y. Shi, T. Jiang, S. Zhou, C. Wu, A. Zhang, C. Zhou, M. Wang, X. Liu, X. Hao, Y. Wu, Y. Li, Y. Hu, Z. Cao, Y. Lu, M. Li, Y. Ma, Z. Lu, J. Han, and Y. Guo (2026) 
+ 
+ On-device large language models: a survey of model compression and system optimization .
+ 
+ Artif. Intell. Rev. 59 ( 9 ), pp. 191 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §II-A .
+ 
+
+ [31] 
+ X. Zhu, J. Li, Y. Liu, C. Ma, and W. Wang (2024) 
+ 
+ A survey on model compression for large language models .
+ 
+ Trans. Assoc. Comput. Linguistics 12 , pp. 1556–1577 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §II-A .
+ 
+
+ [32] 
+ M. Nagel, R. A. Amjad, M. van Baalen, C. Louizos, and T. Blankevoort (2020) 
+ 
+ Up or down? adaptive rounding for post-training quantization .
+ 
+ In Proceedings of the 37th International Conference on Machine Learning,
+ICML 2020, 13-18 July 2020, Virtual Event ,
+ 
+ Proceedings of Machine Learning Research , Vol. 119 , pp. 7197–7206 .
+ 
+ External Links: Link 
+ 
+ Cited by: §II-A .
+ 
+
+ [33] 
+ M. Chopra, L. Sparrenberg, S. Khanna, and R. Sifa (2025) 
+ 
+ How small can you go? compact language models for on-device critical error detection in machine translation .
+ 
+ In IEEE International Conference on Big Data, BigData 2025, Macau,
+China, December 8-11, 2025 ,
+ 
+ pp. 5410–5417 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §II-A .
+ 
+
+ [34] 
+ B. Rababah, S. Qamar, L. Sparrenberg, R. Sifa, M. Kantarcioglu, C. G. Akcora, and C. K. Leung (2026) 
+ 
+ The illusion of equivalency: statistical characterization of quantization effects in llms .
+ 
+ CoRR abs/2607.08734 .
+ 
+ External Links: Link ,
+ Document ,
+ 2607.08734 
+ 
+ Cited by: §II-B .
+ 
+
+ [35] 
+ B. C. Xu, A. Kumarappan, and M. Zhou (2026) 
+ 
+ Alignment collapse under KV cache quantization: diagnosis and mitigation .
+ 
+ CoRR abs/2606.09864 .
+ 
+ External Links: Link ,
+ Document ,
+ 2606.09864 
+ 
+ Cited by: §II-B .
+ 
+
+ [36] 
+ L. Sparrenberg, T. Schneider, T. Deußer, A. Berger, and R. Sifa (2025) 
+ 
+ Towards uncertainty-aware low-bit quantized llms for on-device inference .
+ 
+ In IEEE International Conference on Big Data, BigData 2025, Macau,
+China, December 8-11, 2025 ,
+ 
+ pp. 5930–5939 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §II-B .
+ 
+
+ [37] 
+ M. Ali, M. Fromm, K. Thellmann, J. Ebert, A. A. Weber, R. Rutmann, C. Jain, M. Lübbering, D. Steinigen, J. Leveling, K. Klug, J. S. Buschhoff, L. Jurkschat, H. Abdelwahab, B. J. Stein, K. Sylla, P. Denisov, N. Brandizzi, Q. Saleem, A. Bhowmick, L. Helmer, C. M. John, P. O. Suarez, M. Ostendorff, A. Jude, L. Manjunath, S. Weinbach, C. Penke, O. Filatov, F. Barth, P. Mirza, L. Weber, I. Wendler, R. Sifa, F. Küch, A. Herten, R. Jäkel, G. Rehm, S. Kesselheim, J. Köhler, and N. Flores-Herr (2025) 
+ 
+ Teuken-7b-base & teuken-7b-instruct: towards european llms .
+ 
+ In ECAI 2025 - 28th European Conference on Artificial Intelligence,
+25-30 October 2025, Bologna, Italy - Including 14th Conference on
+Prestigious Applications of Intelligent Systems (PAIS 2025) ,
+ 
+ Frontiers in Artificial Intelligence and Applications , Vol. 413 , pp. 4321–4329 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: §IV-D .
+ 
+
+ [38] 
+ Z. Wang (2024) 
+ 
+ CausalBench: a comprehensive benchmark for evaluating causal reasoning capabilities of large language models .
+ 
+ In Proceedings of the 10th SIGHAN Workshop on Chinese Language Processing (SIGHAN-10) ,
+ 
+ Bangkok, Thailand , pp. 143–151 .
+ 
+ External Links: Link 
+ 
+ Cited by: TABLE II .
+ 
+
+ [39] 
+ OpenAI (2023) 
+ 
+ GPT-4 technical report .
+ 
+ CoRR abs/2303.08774 .
+ 
+ External Links: Link ,
+ Document ,
+ 2303.08774 
+ 
+ Cited by: Acknowledgment .
+ 
+
+ [40] 
+ G. Team (2023) 
+ 
+ Gemini: A family of highly capable multimodal models .
+ 
+ CoRR abs/2312.11805 .
+ 
+ External Links: Link ,
+ Document ,
+ 2312.11805 
+ 
+ Cited by: Acknowledgment .
+ 
+
+ 
+
+ 
+ Supplementary Material
+
+ 
+ VII Theorems 
+
+ 
+ Proof.
+
+ 
+ For JSD, let M = ( P + Q ) / 2 , M=(P+Q)/2, so K ​ M = ( K ​ P + K ​ Q ) / 2 . KM=(KP+KQ)/2. We have 
+
+ 
+
+ 
+ 
+ J S D ( K P , K Q ) = 1 2 K L ( K P ∥ K M ) + 1 2 K L ( K Q ∥ K M ) . \displaystyle JSD(KP,KQ)=\frac{1}{2}KL(KP\|KM)+\frac{1}{2}KL(KQ\|KM). 
+ 
+ (3) 
+ 
+ 
+ We show K L ( K P ∥ K M ) ≤ K L ( P ∥ M ) . KL(KP\|KM)\leq KL(P\|M). 
+
+ 
+ For each a a , apply the log-sum inequality to x v = K ⁡ ( a ∣ v ) ​ P ​ ( v ) x_{v}=K(a\mid v)P(v) and y v = K ⁡ ( a ∣ v ) ​ M ​ ( v ) : y_{v}=K(a\mid v)M(v): 
+
+ 
+ 
+
+ 
+ 
+ ( ∑ v x v ) ​ log ⁡ ∑ v x v ∑ v y v ≤ ∑ v x v ​ log ⁡ x v y v . \displaystyle\left(\sum_{v}x_{v}\right)\log\frac{\sum_{v}x_{v}}{\sum_{v}y_{v}}\leq\sum_{v}x_{v}\log\frac{x_{v}}{y_{v}}. 
+ 
+ (4) 
+ 
+ 
+
+ 
+ Since ∑ v x v = ( K ​ P ) ​ ( a ) \sum_{v}x_{v}=(KP)(a) and ∑ v y v = ( K ​ M ) ​ ( a ) , \sum_{v}y_{v}=(KM)(a), this yields 
+
+ 
+
+ 
+ 
+ ( K ​ P ) ​ ( a ) ​ log ⁡ ( K ​ P ) ​ ( a ) ( K ​ M ) ​ ( a ) ≤ ∑ v K ⁡ ( a ∣ v ) ​ P ​ ( v ) ​ log ⁡ P ⁡ ( v ) M ⁡ ( v ) . \displaystyle(KP)(a)\log\frac{(KP)(a)}{(KM)(a)}\leq\sum_{v}K(a\mid v)P(v)\log\frac{P(v)}{M(v)}. 
+ 
+ (5) 
+ 
+ 
+
+ 
+ Summing over a a and using ∑ a K ⁡ ( a ∣ v ) = 1 \sum_{a}K(a\mid v)=1 gives K L ( K P ∥ K M ) ≤ K L ( P ∥ M ) . KL(KP\|KM)\leq KL(P\|M). The same argument with Q Q in place of P P gives K L ( K Q ∥ K M ) ≤ K L ( Q ∥ M ) . KL(KQ\|KM)\leq KL(Q\|M). Averaging the two inequalities proves J ​ S ​ D ​ ( K ​ P , K ​ Q ) ≤ J ​ S ​ D ​ ( P , Q ) . JSD(KP,KQ)\leq JSD(P,Q). 
+∎ 
+
+ 
+ VIII Complete Empirical Results 
+
+ 
+ This appendix provides the exhaustive quantitative evaluation across all 120 experimental configurations discussed in this study. To ensure readability, the results are categorized by benchmark dataset. Tables V through VII detail the zero-shot Accuracy, F1 Score, percentage of Prediction Flips, JSD, and TVD for all five foundation models under progressive quantization regimes.
+
+ 
+ 
+ 
+ 
+ TABLE IV : Complete Evaluation Metrics: MMLU 
+ 
+ 
+ 
+ Model & Quantization 
+ VRAM 
+ Acc ( ↑ \uparrow ) 
+ F1 ( ↑ \uparrow ) 
+ % Flips ( ↓ \downarrow ) 
+ JSD ( ↓ \downarrow ) 
+ TVD ( ↓ \downarrow ) 
+
+ 
+ Teuken-7B-base-v0.6 
+
+ 
+ Base ( BF16 ) 
+ 15.0 15.0 GB 
+ 31.1 % 31.1\% 
+ 0.310 0.310 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 10.4 10.4 GB 
+ 30.8 % 30.8\% 
+ 0.308 0.308 
+ 1.05 % \mathbf{1.05\%} 
+ 0.002 \mathbf{0.002} 
+ 0.048 \mathbf{0.048} 
+
+ 
+ Q6_K (Mixed) 
+ 9.2 9.2 GB 
+ 31.4 % \mathbf{31.4\%} 
+ 0.313 \mathbf{0.313} 
+ 1.76 % 1.76\% 
+ 0.006 0.006 
+ 0.075 0.075 
+
+ 
+ Q4_K (Mixed) 
+ 7.7 7.7 GB 
+ 30.3 % 30.3\% 
+ 0.302 0.302 
+ 3.92 % 3.92\% 
+ 0.018 0.018 
+ 0.143 0.143 
+
+ 
+ Q4_0 (Uniform) 
+ 7.2 7.2 GB 
+ 30.3 % 30.3\% 
+ 0.303 0.303 
+ 4.58 % 4.58\% 
+ 0.213 0.213 
+ 0.541 0.541 
+
+ 
+ Q2_K (Mixed) 
+ 6.3 6.3 GB 
+ 28.0 % 28.0\% 
+ 0.279 0.279 
+ 10.59 % 10.59\% 
+ 0.262 0.262 
+ 0.585 0.585 
+
+ 
+ LLaMA-3.1-8B 
+
+ 
+ Base ( BF16 ) 
+ 14.9 14.9 GB 
+ 32.1 % 32.1\% 
+ 0.320 0.320 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 9.4 9.4 GB 
+ 32.3 % \mathbf{32.3\%} 
+ 0.323 \mathbf{0.323} 
+ 0.65 % \mathbf{0.65\%} 
+ 0.000 \mathbf{0.000} 
+ 0.021 \mathbf{0.021} 
+
+ 
+ Q6_K (Mixed) 
+ 7.7 7.7 GB 
+ 32.2 % 32.2\% 
+ 0.322 0.322 
+ 0.78 % 0.78\% 
+ 0.001 0.001 
+ 0.034 0.034 
+
+ 
+ Q4_K (Mixed) 
+ 6.3 6.3 GB 
+ 32.2 % 32.2\% 
+ 0.322 0.322 
+ 2.48 % 2.48\% 
+ 0.003 0.003 
+ 0.055 0.055 
+
+ 
+ Q4_0 (Uniform) 
+ 6.0 6.0 GB 
+ 32.1 % 32.1\% 
+ 0.321 0.321 
+ 2.94 % 2.94\% 
+ 0.038 0.038 
+ 0.221 0.221 
+
+ 
+ Q2_K (Mixed) 
+ 4.8 4.8 GB 
+ 31.2 % 31.2\% 
+ 0.312 0.312 
+ 9.87 % 9.87\% 
+ 0.050 0.050 
+ 0.258 0.258 
+
+ 
+ Mistral-7B-v0.1 
+
+ 
+ Base ( BF16 ) 
+ 14.0 14.0 GB 
+ 33.5 % \mathbf{33.5\%} 
+ 0.335 \mathbf{0.335} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 8.1 8.1 GB 
+ 33.4 % 33.4\% 
+ 0.334 0.334 
+ 0.33 % \mathbf{0.33\%} 
+ 0.000 \mathbf{0.000} 
+ 0.009 \mathbf{0.009} 
+
+ 
+ Q6_K (Mixed) 
+ 6.5 6.5 GB 
+ 33.0 % 33.0\% 
+ 0.329 0.329 
+ 1.83 % 1.83\% 
+ 0.000 0.000 
+ 0.016 0.016 
+
+ 
+ Q4_K (Mixed) 
+ 5.0 5.0 GB 
+ 32.8 % 32.8\% 
+ 0.327 0.327 
+ 3.46 % 3.46\% 
+ 0.000 0.000 
+ 0.015 0.015 
+
+ 
+ Q4_0 (Uniform) 
+ 4.8 4.8 GB 
+ 31.9 % 31.9\% 
+ 0.319 0.319 
+ 6.08 % 6.08\% 
+ 0.001 0.001 
+ 0.030 0.030 
+
+ 
+ Q2_K (Mixed) 
+ 3.5 3.5 GB 
+ 31.3 % 31.3\% 
+ 0.313 0.313 
+ 7.58 % 7.58\% 
+ 0.002 0.002 
+ 0.057 0.057 
+
+ 
+ Gemma-2B 
+
+ 
+ Base ( BF16 ) 
+ 5.8 5.8 GB 
+ 29.2 % \mathbf{29.2\%} 
+ 0.292 \mathbf{0.292} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 4.6 4.6 GB 
+ 29.2 % \mathbf{29.2\%} 
+ 0.292 0.292 
+ 0.52 % \mathbf{0.52\%} 
+ 0.002 \mathbf{0.002} 
+ 0.050 \mathbf{0.050} 
+
+ 
+ Q6_K (Mixed) 
+ 4.0 4.0 GB 
+ 29.0 % 29.0\% 
+ 0.290 0.290 
+ 2.16 % 2.16\% 
+ 0.006 0.006 
+ 0.089 0.089 
+
+ 
+ Q4_K (Mixed) 
+ 3.6 3.6 GB 
+ 29.1 % 29.1\% 
+ 0.291 0.291 
+ 3.27 % 3.27\% 
+ 0.006 0.006 
+ 0.086 0.086 
+
+ 
+ Q4_0 (Uniform) 
+ 3.5 3.5 GB 
+ 28.7 % 28.7\% 
+ 0.287 0.287 
+ 5.16 % 5.16\% 
+ 0.014 0.014 
+ 0.143 0.143 
+
+ 
+ Q2_K (Mixed) 
+ 3.2 3.2 GB 
+ 27.5 % 27.5\% 
+ 0.275 0.275 
+ 11.50 % 11.50\% 
+ 0.061 0.061 
+ 0.266 0.266 
+
+ 
+ LLaMA-3.2-1B 
+
+ 
+ Base ( BF16 ) 
+ 3.1 3.1 GB 
+ 28.8 % 28.8\% 
+ 0.288 0.288 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 2.5 2.5 GB 
+ 28.9 % \mathbf{28.9\%} 
+ 0.289 \mathbf{0.289} 
+ 0.72 % \mathbf{0.72\%} 
+ 0.000 \mathbf{0.000} 
+ 0.013 \mathbf{0.013} 
+
+ 
+ Q6_K (Mixed) 
+ 2.2 2.2 GB 
+ 28.9 % \mathbf{28.9\%} 
+ 0.289 0.289 
+ 1.24 % 1.24\% 
+ 0.002 0.002 
+ 0.052 0.052 
+
+ 
+ Q4_K (Mixed) 
+ 2.0 2.0 GB 
+ 28.7 % 28.7\% 
+ 0.286 0.286 
+ 3.33 % 3.33\% 
+ 0.003 0.003 
+ 0.066 0.066 
+
+ 
+ Q4_0 (Uniform) 
+ 2.0 2.0 GB 
+ 28.3 % 28.3\% 
+ 0.282 0.282 
+ 4.90 % 4.90\% 
+ 0.048 0.048 
+ 0.251 0.251 
+
+ 
+ Q2_K (Mixed) 
+ 1.8 1.8 GB 
+ 26.9 % 26.9\% 
+ 0.269 0.269 
+ 13.07 % 13.07\% 
+ 0.058 0.058 
+ 0.279 0.279 
+
+ 
+ 
+
+ 
+ 
+ 
+ TABLE V : Complete Evaluation Metrics: PIQA 
+ 
+ 
+ 
+ Model & Quantization 
+ VRAM 
+ Acc ( ↑ \uparrow ) 
+ F1 ( ↑ \uparrow ) 
+ % Flips ( ↓ \downarrow ) 
+ JSD ( ↓ \downarrow ) 
+ TVD ( ↓ \downarrow ) 
+
+ 
+ Teuken-7B-base-v0.6 
+
+ 
+ Base ( BF16 ) 
+ 14.8 14.8 GB 
+ 68.9 % 68.9\% 
+ 0.683 0.683 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 8.3 8.3 GB 
+ 68.8 % 68.8\% 
+ 0.682 0.682 
+ 1.47 % \mathbf{1.47\%} 
+ 0.002 \mathbf{0.002} 
+ 0.046 \mathbf{0.046} 
+
+ 
+ Q6_K (Mixed) 
+ 7.0 7.0 GB 
+ 69.0 % 69.0\% 
+ 0.683 0.683 
+ 1.85 % 1.85\% 
+ 0.005 0.005 
+ 0.068 0.068 
+
+ 
+ Q4_K (Mixed) 
+ 5.6 5.6 GB 
+ 69.2 % \mathbf{69.2\%} 
+ 0.686 \mathbf{0.686} 
+ 3.43 % 3.43\% 
+ 0.016 0.016 
+ 0.136 0.136 
+
+ 
+ Q4_0 (Uniform) 
+ 5.1 5.1 GB 
+ 68.7 % 68.7\% 
+ 0.679 0.679 
+ 4.84 % 4.84\% 
+ 0.225 0.225 
+ 0.560 0.560 
+
+ 
+ Q2_K (Mixed) 
+ 4.1 4.1 GB 
+ 66.3 % 66.3\% 
+ 0.655 0.655 
+ 10.83 % 10.83\% 
+ 0.261 0.261 
+ 0.583 0.583 
+
+ 
+ LLaMA-3.1-8B 
+
+ 
+ Base ( BF16 ) 
+ 14.8 14.8 GB 
+ 77.3 % 77.3\% 
+ 0.769 0.769 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 8.3 8.3 GB 
+ 77.1 % 77.1\% 
+ 0.767 0.767 
+ 1.09 % \mathbf{1.09\%} 
+ 0.000 \mathbf{0.000} 
+ 0.017 \mathbf{0.017} 
+
+ 
+ Q6_K (Mixed) 
+ 6.6 6.6 GB 
+ 77.7 % \mathbf{77.7\%} 
+ 0.773 \mathbf{0.773} 
+ 1.58 % 1.58\% 
+ 0.001 0.001 
+ 0.031 0.031 
+
+ 
+ Q4_K (Mixed) 
+ 5.2 5.2 GB 
+ 77.1 % 77.1\% 
+ 0.766 0.766 
+ 2.72 % 2.72\% 
+ 0.002 0.002 
+ 0.052 0.052 
+
+ 
+ Q4_0 (Uniform) 
+ 4.9 4.9 GB 
+ 77.2 % 77.2\% 
+ 0.768 0.768 
+ 4.08 % 4.08\% 
+ 0.036 0.036 
+ 0.215 0.215 
+
+ 
+ Q2_K (Mixed) 
+ 3.6 3.6 GB 
+ 74.6 % 74.6\% 
+ 0.741 0.741 
+ 10.72 % 10.72\% 
+ 0.050 0.050 
+ 0.257 0.257 
+
+ 
+ Mistral-7B-v0.1 
+
+ 
+ Base ( BF16 ) 
+ 14.0 14.0 GB 
+ 78.8 % 78.8\% 
+ 0.787 0.787 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 7.8 7.8 GB 
+ 78.8 % \mathbf{78.8\%} 
+ 0.788 \mathbf{0.788} 
+ 1.25 % \mathbf{1.25\%} 
+ 0.000 \mathbf{0.000} 
+ 0.006 \mathbf{0.006} 
+
+ 
+ Q6_K (Mixed) 
+ 6.2 6.2 GB 
+ 78.0 % 78.0\% 
+ 0.778 0.778 
+ 2.01 % 2.01\% 
+ 0.000 0.000 
+ 0.010 0.010 
+
+ 
+ Q4_K (Mixed) 
+ 4.8 4.8 GB 
+ 77.6 % 77.6\% 
+ 0.774 0.774 
+ 3.26 % 3.26\% 
+ 0.000 0.000 
+ 0.009 0.009 
+
+ 
+ Q4_0 (Uniform) 
+ 4.5 4.5 GB 
+ 76.9 % 76.9\% 
+ 0.768 0.768 
+ 4.08 % 4.08\% 
+ 0.001 0.001 
+ 0.030 0.030 
+
+ 
+ Q2_K (Mixed) 
+ 3.3 3.3 GB 
+ 75.4 % 75.4\% 
+ 0.751 0.751 
+ 6.91 % 6.91\% 
+ 0.002 0.002 
+ 0.055 0.055 
+
+ 
+ Gemma-2B 
+
+ 
+ Base ( BF16 ) 
+ 5.5 5.5 GB 
+ 74.7 % 74.7\% 
+ 0.743 0.743 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 3.4 3.4 GB 
+ 75.5 % \mathbf{75.5\%} 
+ 0.751 \mathbf{0.751} 
+ 1.96 % \mathbf{1.96\%} 
+ 0.002 \mathbf{0.002} 
+ 0.052 \mathbf{0.052} 
+
+ 
+ Q6_K (Mixed) 
+ 2.8 2.8 GB 
+ 75.0 % 75.0\% 
+ 0.748 0.748 
+ 3.54 % 3.54\% 
+ 0.006 0.006 
+ 0.084 0.084 
+
+ 
+ Q4_K (Mixed) 
+ 2.4 2.4 GB 
+ 74.8 % 74.8\% 
+ 0.742 0.742 
+ 5.39 % 5.39\% 
+ 0.006 0.006 
+ 0.083 0.083 
+
+ 
+ Q4_0 (Uniform) 
+ 2.3 2.3 GB 
+ 74.3 % 74.3\% 
+ 0.736 0.736 
+ 5.66 % 5.66\% 
+ 0.013 0.013 
+ 0.133 0.133 
+
+ 
+ Q2_K (Mixed) 
+ 2.0 2.0 GB 
+ 70.0 % 70.0\% 
+ 0.693 0.693 
+ 12.19 % 12.19\% 
+ 0.059 0.059 
+ 0.263 0.263 
+
+ 
+ LLaMA-3.2-1B 
+
+ 
+ Base ( BF16 ) 
+ 2.9 2.9 GB 
+ 73.2 % \mathbf{73.2\%} 
+ 0.728 \mathbf{0.728} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 1.9 1.9 GB 
+ 73.0 % 73.0\% 
+ 0.726 0.726 
+ 1.25 % \mathbf{1.25\%} 
+ 0.000 \mathbf{0.000} 
+ 0.013 \mathbf{0.013} 
+
+ 
+ Q6_K (Mixed) 
+ 1.6 1.6 GB 
+ 73.0 % 73.0\% 
+ 0.726 0.726 
+ 1.90 % 1.90\% 
+ 0.002 0.002 
+ 0.056 0.056 
+
+ 
+ Q4_K (Mixed) 
+ 1.4 1.4 GB 
+ 72.3 % 72.3\% 
+ 0.720 0.720 
+ 4.41 % 4.41\% 
+ 0.003 0.003 
+ 0.068 0.068 
+
+ 
+ Q4_0 (Uniform) 
+ 1.4 1.4 GB 
+ 71.9 % 71.9\% 
+ 0.716 0.716 
+ 6.31 % 6.31\% 
+ 0.047 0.047 
+ 0.250 0.250 
+
+ 
+ Q2_K (Mixed) 
+ 1.2 1.2 GB 
+ 65.6 % 65.6\% 
+ 0.654 0.654 
+ 16.97 % 16.97\% 
+ 0.058 0.058 
+ 0.278 0.278 
+
+ 
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ TABLE VI : Complete Evaluation Metrics: BoolQ 
+ 
+ 
+ 
+ Model & Quantization 
+ VRAM 
+ Acc ( ↑ \uparrow ) 
+ F1 ( ↑ \uparrow ) 
+ % Flips ( ↓ \downarrow ) 
+ JSD ( ↓ \downarrow ) 
+ TVD ( ↓ \downarrow ) 
+
+ 
+ Teuken-7B-base-v0.6 
+
+ 
+ Base ( BF16 ) 
+ 15.0 15.0 GB 
+ 68.7 % \mathbf{68.7\%} 
+ 0.776 \mathbf{0.776} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 10.4 10.4 GB 
+ 68.4 % 68.4\% 
+ 0.775 0.775 
+ 1.31 % \mathbf{1.31\%} 
+ 0.002 \mathbf{0.002} 
+ 0.050 \mathbf{0.050} 
+
+ 
+ Q6_K (Mixed) 
+ 9.2 9.2 GB 
+ 68.4 % 68.4\% 
+ 0.774 0.774 
+ 2.20 % 2.20\% 
+ 0.006 0.006 
+ 0.087 0.087 
+
+ 
+ Q4_K (Mixed) 
+ 7.7 7.7 GB 
+ 67.8 % 67.8\% 
+ 0.760 0.760 
+ 7.34 % 7.34\% 
+ 0.021 0.021 
+ 0.152 0.152 
+
+ 
+ Q4_0 (Uniform) 
+ 7.2 7.2 GB 
+ 67.3 % 67.3\% 
+ 0.716 0.716 
+ 25.23 % 25.23\% 
+ 0.193 0.193 
+ 0.510 0.510 
+
+ 
+ Q2_K (Mixed) 
+ 6.3 6.3 GB 
+ 61.1 % 61.1\% 
+ 0.737 0.737 
+ 19.05 % 19.05\% 
+ 0.265 0.265 
+ 0.589 0.589 
+
+ 
+ LLaMA-3.1-8B 
+
+ 
+ Base ( BF16 ) 
+ 14.9 14.9 GB 
+ 44.3 % 44.3\% 
+ 0.380 0.380 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 9.4 9.4 GB 
+ 44.6 % 44.6\% 
+ 0.396 0.396 
+ 2.32 % \mathbf{2.32\%} 
+ 0.001 \mathbf{0.001} 
+ 0.027 \mathbf{0.027} 
+
+ 
+ Q6_K (Mixed) 
+ 7.7 7.7 GB 
+ 47.6 % 47.6\% 
+ 0.482 0.482 
+ 11.41 % 11.41\% 
+ 0.002 0.002 
+ 0.040 0.040 
+
+ 
+ Q4_K (Mixed) 
+ 6.3 6.3 GB 
+ 47.3 % 47.3\% 
+ 0.473 0.473 
+ 10.61 % 10.61\% 
+ 0.003 0.003 
+ 0.059 0.059 
+
+ 
+ Q4_0 (Uniform) 
+ 6.0 6.0 GB 
+ 59.9 % 59.9\% 
+ 0.735 0.735 
+ 61.74 % 61.74\% 
+ 0.042 0.042 
+ 0.233 0.233 
+
+ 
+ Q2_K (Mixed) 
+ 4.8 4.8 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 72.29 % 72.29\% 
+ 0.051 0.051 
+ 0.262 0.262 
+
+ 
+ Mistral-7B-v0.1 
+
+ 
+ Base ( BF16 ) 
+ 14.0 14.0 GB 
+ 65.6 % 65.6\% 
+ 0.747 0.747 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 8.1 8.1 GB 
+ 65.7 % 65.7\% 
+ 0.748 0.748 
+ 0.98 % \mathbf{0.98\%} 
+ 0.000 \mathbf{0.000} 
+ 0.013 \mathbf{0.013} 
+
+ 
+ Q6_K (Mixed) 
+ 6.5 6.5 GB 
+ 65.8 % \mathbf{65.8\%} 
+ 0.762 0.762 
+ 7.52 % 7.52\% 
+ 0.000 0.000 
+ 0.022 0.022 
+
+ 
+ Q4_K (Mixed) 
+ 5.0 5.0 GB 
+ 65.0 % 65.0\% 
+ 0.764 0.764 
+ 12.35 % 12.35\% 
+ 0.000 0.000 
+ 0.021 0.021 
+
+ 
+ Q4_0 (Uniform) 
+ 4.8 4.8 GB 
+ 62.2 % 62.2\% 
+ 0.767 \mathbf{0.767} 
+ 25.96 % 25.96\% 
+ 0.001 0.001 
+ 0.029 0.029 
+
+ 
+ Q2_K (Mixed) 
+ 3.5 3.5 GB 
+ 62.2 % 62.2\% 
+ 0.767 \mathbf{0.767} 
+ 25.96 % 25.96\% 
+ 0.002 0.002 
+ 0.061 0.061 
+
+ 
+ Gemma-2B 
+
+ 
+ Base ( BF16 ) 
+ 5.8 5.8 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 4.6 4.6 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.002 \mathbf{0.002} 
+ 0.045 \mathbf{0.045} 
+
+ 
+ Q6_K (Mixed) 
+ 4.0 4.0 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.007 0.007 
+ 0.098 0.098 
+
+ 
+ Q4_K (Mixed) 
+ 3.6 3.6 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.007 0.007 
+ 0.089 0.089 
+
+ 
+ Q4_0 (Uniform) 
+ 3.5 3.5 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.018 0.018 
+ 0.164 0.164 
+
+ 
+ Q2_K (Mixed) 
+ 3.2 3.2 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.065 0.065 
+ 0.270 0.270 
+
+ 
+ LLaMA-3.2-1B 
+
+ 
+ Base ( BF16 ) 
+ 3.1 3.1 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 2.5 2.5 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.000 \mathbf{0.000} 
+ 0.014 \mathbf{0.014} 
+
+ 
+ Q6_K (Mixed) 
+ 2.2 2.2 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.001 0.001 
+ 0.045 0.045 
+
+ 
+ Q4_K (Mixed) 
+ 2.0 2.0 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.003 0.003 
+ 0.064 0.064 
+
+ 
+ Q4_0 (Uniform) 
+ 2.0 2.0 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.048 0.048 
+ 0.254 0.254 
+
+ 
+ Q2_K (Mixed) 
+ 1.8 1.8 GB 
+ 62.2 % \mathbf{62.2\%} 
+ 0.767 \mathbf{0.767} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.058 0.058 
+ 0.280 0.280 
+
+ 
+ 
+
+ 
+ 
+ 
+ TABLE VII : Complete Evaluation Metrics: CausalBench 
+ 
+ 
+ 
+ Model & Quantization 
+ VRAM 
+ Acc ( ↑ \uparrow ) 
+ F1 ( ↑ \uparrow ) 
+ % Flips ( ↓ \downarrow ) 
+ JSD ( ↓ \downarrow ) 
+ TVD ( ↓ \downarrow ) 
+
+ 
+ Teuken-7B-base-v0.6 
+
+ 
+ Base ( BF16 ) 
+ 15.0 15.0 GB 
+ 50.5 % 50.5\% 
+ 0.628 \mathbf{0.628} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 10.4 10.4 GB 
+ 50.0 % 50.0\% 
+ 0.627 0.627 
+ 3.27 % \mathbf{3.27\%} 
+ 0.002 \mathbf{0.002} 
+ 0.048 \mathbf{0.048} 
+
+ 
+ Q6_K (Mixed) 
+ 9.2 9.2 GB 
+ 51.5 % 51.5\% 
+ 0.619 0.619 
+ 6.60 % 6.60\% 
+ 0.006 0.006 
+ 0.088 0.088 
+
+ 
+ Q4_K (Mixed) 
+ 7.7 7.7 GB 
+ 49.9 % 49.9\% 
+ 0.608 0.608 
+ 7.53 % 7.53\% 
+ 0.021 0.021 
+ 0.151 0.151 
+
+ 
+ Q4_0 (Uniform) 
+ 7.2 7.2 GB 
+ 52.7 % \mathbf{52.7\%} 
+ 0.517 0.517 
+ 35.13 % 35.13\% 
+ 0.193 0.193 
+ 0.511 0.511 
+
+ 
+ Q2_K (Mixed) 
+ 6.3 6.3 GB 
+ 45.9 % 45.9\% 
+ 0.550 0.550 
+ 26.27 % 26.27\% 
+ 0.265 0.265 
+ 0.590 0.590 
+
+ 
+ LLaMA-3.1-8B 
+
+ 
+ Base ( BF16 ) 
+ 14.9 14.9 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 \mathbf{0.000} 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 9.4 9.4 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 \mathbf{0.000} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.001 \mathbf{0.001} 
+ 0.027 \mathbf{0.027} 
+
+ 
+ Q6_K (Mixed) 
+ 7.7 7.7 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 \mathbf{0.000} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.002 0.002 
+ 0.039 0.039 
+
+ 
+ Q4_K (Mixed) 
+ 6.2 6.2 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 \mathbf{0.000} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.003 0.003 
+ 0.059 0.059 
+
+ 
+ Q4_0 (Uniform) 
+ 6.0 6.0 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 \mathbf{0.000} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.042 0.042 
+ 0.233 0.233 
+
+ 
+ Q2_K (Mixed) 
+ 4.7 4.7 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 \mathbf{0.000} 
+ 0.00 % \mathbf{0.00\%} 
+ 0.051 0.051 
+ 0.262 0.262 
+
+ 
+ Mistral-7B-v0.1 
+
+ 
+ Base ( BF16 ) 
+ 14.0 14.0 GB 
+ 53.7 % \mathbf{53.7\%} 
+ 0.348 0.348 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 8.1 8.1 GB 
+ 53.7 % 53.7\% 
+ 0.337 0.337 
+ 1.27 % \mathbf{1.27\%} 
+ 0.000 \mathbf{0.000} 
+ 0.012 \mathbf{0.012} 
+
+ 
+ Q6_K (Mixed) 
+ 6.5 6.5 GB 
+ 53.5 % 53.5\% 
+ 0.274 0.274 
+ 8.73 % 8.73\% 
+ 0.000 0.000 
+ 0.019 0.019 
+
+ 
+ Q4_K (Mixed) 
+ 5.0 5.0 GB 
+ 51.7 % 51.7\% 
+ 0.376 0.376 
+ 11.47 % 11.47\% 
+ 0.000 0.000 
+ 0.018 0.018 
+
+ 
+ Q4_0 (Uniform) 
+ 4.8 4.8 GB 
+ 48.9 % 48.9\% 
+ 0.661 0.661 
+ 78.47 % 78.47\% 
+ 0.001 0.001 
+ 0.030 0.030 
+
+ 
+ Q2_K (Mixed) 
+ 3.5 3.5 GB 
+ 49.0 % 49.0\% 
+ 0.662 \mathbf{0.662} 
+ 78.47 % 78.47\% 
+ 0.002 0.002 
+ 0.059 0.059 
+
+ 
+ Gemma-2B 
+
+ 
+ Base ( BF16 ) 
+ 5.7 5.7 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 0.000 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 4.6 4.6 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 0.000 
+ 0.00 % \mathbf{0.00\%} 
+ 0.002 \mathbf{0.002} 
+ 0.045 \mathbf{0.045} 
+
+ 
+ Q6_K (Mixed) 
+ 4.0 4.0 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 0.000 
+ 0.00 % \mathbf{0.00\%} 
+ 0.007 0.007 
+ 0.098 0.098 
+
+ 
+ Q4_K (Mixed) 
+ 3.6 3.6 GB 
+ 50.1 % \mathbf{50.1\%} 
+ 0.000 0.000 
+ 0.00 % \mathbf{0.00\%} 
+ 0.007 0.007 
+ 0.089 0.089 
+
+ 
+ Q4_0 (Uniform) 
+ 3.5 3.5 GB 
+ 48.9 % 48.9\% 
+ 0.660 \mathbf{0.660} 
+ 98.73 % 98.73\% 
+ 0.018 0.018 
+ 0.166 0.166 
+
+ 
+ Q2_K (Mixed) 
+ 3.1 3.1 GB 
+ 48.6 % 48.6\% 
+ 0.057 0.057 
+ 4.60 % 4.60\% 
+ 0.066 0.066 
+ 0.269 0.269 
+
+ 
+ LLaMA-3.2-1B 
+
+ 
+ Base ( BF16 ) 
+ 3.0 3.0 GB 
+ 50.1 % 50.1\% 
+ 0.000 0.000 
+ — 
+ — 
+ — 
+
+ 
+ Q8_0 (Uniform) 
+ 2.5 2.5 GB 
+ 50.1 % 50.1\% 
+ 0.000 0.000 
+ 0.00 % \mathbf{0.00\%} 
+ 0.000 \mathbf{0.000} 
+ 0.014 \mathbf{0.014} 
+
+ 
+ Q6_K (Mixed) 
+ 2.2 2.2 GB 
+ 50.1 % 50.1\% 
+ 0.000 0.000 
+ 0.00 % \mathbf{0.00\%} 
+ 0.001 0.001 
+ 0.044 0.044 
+
+ 
+ Q4_K (Mixed) 
+ 2.0 2.0 GB 
+ 50.1 % 50.1\% 
+ 0.000 0.000 
+ 0.00 % \mathbf{0.00\%} 
+ 0.003 0.003 
+ 0.063 0.063 
+
+ 
+ Q4_0 (Uniform) 
+ 2.0 2.0 GB 
+ 50.1 % 50.1\% 
+ 0.000 0.000 
+ 0.00 % \mathbf{0.00\%} 
+ 0.049 0.049 
+ 0.254 0.254 
+
+ 
+ Q2_K (Mixed) 
+ 1.8 1.8 GB 
+ 50.2 % \mathbf{50.2\%} 
+ 0.003 \mathbf{0.003} 
+ 0.07 % 0.07\% 
+ 0.058 0.058 
+ 0.280 0.280 
+
+ 
+ 
+
+ 
+
+ 
+
+ 
+
+ 
+ 
+ Experimental support, please
+ view the build logs 
+ for errors. Generated by
+ 
+ 
+ L
+ A 
+ T
+ E 
+ 
+ xml 
+ 
+ .
+ 
+
+ 
+ Instructions for reporting errors
+
+ We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+ support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+ methods listed below:
+
+ 
+ Click the "Report Issue" ( 
+ 
+ ) button, located in the page header.
+
+ 
+ Tip: You can select the relevant text first, to include it in your report.
+
+ Our team has already identified the following issues . We appreciate your time reviewing and reporting rendering errors we
+ may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+ should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+ all.
+
+ Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion , and welcome developer contributions .
+
+ 
+
+ 
+ 
+ 
+ 
+ We gratefully acknowledge support from our major funders ,
+ member institutions , ,
+ and all contributors.
+ 
+
+ 
+ About &middot; 
+ Help &middot; 
+ Contact &middot; 
+ Subscribe &middot; 
+ Copyright &middot; 
+ Privacy &middot; 
+ Accessibility &middot; 
+ Operational Status (opens in new tab) 
+ 
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 

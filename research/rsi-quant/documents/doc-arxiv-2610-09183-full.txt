@@ -1,0 +1,3908 @@
+ 
+ 
+ 
+ Q-PACE: Dynamic Precision Allocation for Quantization-Aware Training 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Skip to main content 
+ 
+ 
+ 
+ Report GitHub Issue
+
+ × 
+ 
+
+ 
+ Title: 
+ 
+
+ Content selection saved. Describe the issue below:
+
+ Description: 
+ 
+ 
+
+ 
+ Submit without GitHub 
+ Submit in GitHub 
+ 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Why HTML? 
+ 
+ Report Issue 
+ 
+ Back to Abstract 
+ 
+ 
+ Download PDF 
+ 
+ Contents 
+ 
+ 
+ Reading mode 
+ 
+ 
+ Colour theme 
+ 
+ 
+ 
+
+ 
+ 
+ 
+ Abstract 
+
+ 1 Introduction 
+
+ 2 The Problem: QAT with Adaptive Mixed-Precision 
+
+ 3 Method 
+ 
+ Connection to Hutchinson trace estimation. 
+
+ MSE estimation. 
+
+ Curvature estimation. 
+
+ Bitwidth assignment. 
+
+ Q-PACE. 
+
+ Computational and memory overhead. 
+
+ 
+
+ 4 Experimental Results 
+ 
+ 4.1 Experimental Setup 
+ 
+ Quantization-aware training. 
+
+ Baselines. 
+
+ 
+
+ 4.2 Forward Error Is Sufficient for Loss Estimation 
+
+ 4.3 Pretraining Experiments 
+
+ 4.4 Supervised Fine-Tuning Experiments 
+
+ 4.5 Performance-memory Trade-off 
+
+ 
+
+ 5 Analysis 
+ 
+ Sensitivity is structured by layer type and depth. 
+
+ Sensitivity evolves during training. 
+
+ How frequently is reallocation necessary? 
+
+ 
+
+ 6 Related Work 
+ 
+ Non-uniform compression. 
+
+ Mixed precision during training. 
+
+ 
+
+ 7 Conclusion 
+
+ References 
+
+ A Modeling loss under quantization noise 
+ 
+ Case 1: Isotropic quantization noise. 
+
+ Case 2: Floating-point quantization noise. 
+
+ Effect of error normalization. 
+
+ 
+
+ B MSE Estimation: Analytic vs Measured 
+
+ C On loss linearity vs. forward-pass error 
+
+ D Training Setup 
+ 
+ Pretraining. 
+
+ Supervised-Fine-tuning (SFT). 
+
+ Numerics and hardware. 
+
+ 
+
+ E SNIP Weight-grad-only 
+
+ F Q-PACE hyperparameter ablation 
+
+ G Alternative sensitivity models 
+ 
+ Q-PACE inversed. 
+
+ First-order Taylor sensitivity. 
+
+ Cosine similarity. 
+
+ Q-PACE-Quadratic model. 
+
+ 
+
+ H Additional sensitivity analysis 
+
+ I Budget trade-off, sensitivity, and allocations 
+ 
+ I.1 Downstream task scores 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ License: arXiv.org perpetual non-exclusive license
+ 
+ 
+arXiv:2610.09183v1 [cs.LG] 06 Oct 2026
+
+ 
+ 
+ Q-PACE: Dynamic Precision Allocation for Quantization-Aware Training
+
+ 
+ 
+ Alexandra Volkova
+ † † thanks: Equal contribution. 
+ Affiliation:  ISTA
+ 
+ Email:  avolkova@ista.ac.at 
+ 
+    
+ Matin Ansaripour 1 1 footnotemark: 
+ 1 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Affiliation:  EPFL, ISTA
+ 
+    
+ Erik Schultheis
+ 
+ Affiliation:  ISTA
+ 
+    
+ Christoph H. Lampert
+ 
+ Affiliation:  ISTA
+ 
+    
+ Dan Alistarh
+ 
+ Affiliation:  ISTA
+ 
+
+ Abstract
+
+ 
+ Quantization-aware training (QAT) leverages lower-precision arithmetic to reduce the cost of LLM deployment, but aggressive quantization degrades final model performance. A common remedy is mixed-precision training, in which high precision is assigned to some of the layers to maintain performance while keeping the cost constrained. This approach then requires precision assignments for model layers during training. We provide a new approach, called Q-PACE, consisting of a second-order sensitivity model that predicts the loss increase as a sum of quantization noise MSE weighted by per-layer curvature coefficients. During training, we periodically re-compute these coefficients using perturbations across layers, and re-assign precision. Pretraining and supervised fine-tuning experiments on LLMs of up to 4B parameters show that Q-PACE consistently improves over existing mixed-precision training recipes, and achieves comparable loss at substantially lower total memory budgets. We further find that quantization sensitivity is highly predictable by depth and layer type, and its stability during training allows for infrequent, cheap recalibration.
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 
+
+ 
+ 1 Introduction
+
+ 
+ Quantization-aware training (QAT) methods  ( Courbariaux et al., 2016 ; Jacob et al., 2018 ) use low-precision arithmetic to lower the cost of both deploying LLMs, as they result in lower-bitwidth accurate models, and training them, as the matrix multiplications during training can be mapped to lower precision.
+Recent recipes make end-to-end NVFP4 and MXFP4 pretraining viable by leveraging techniques such as block (micro) scaling, stochastic rounding, rotations, and unbiased gradient estimators  ( Castro et al., 2026 ; Chen et al., 2026b ; NVIDIA et al., 2026 ) . However, there is still a clear loss gap between lower-precision approaches and BF16 and MXFP8 training, and uniform four-bit training can be lossy or even become unstable over long horizons  ( NVIDIA et al., 2026 ) .
+
+ 
+ It is known that not every network layer needs the same precision, e.g.  Malinovskii et al. (2025) . Moreover, modern microscaling formats allow matrix products across various precisions, or even mixed-precision operands  ( Rouhani et al., 2023 ) , so the bitwidth of each linear layer can be chosen separately, assuming a global budget constraint. The key question, which we consider here, is how to choose the layer-wise bitwidths that maximize accuracy while satisfying a precision budget. Current approaches either keep a fixed set of layers, typically the last few, in higher precision  ( NVIDIA et al., 2026 ) , or rank layers by a local proxy, such as the product of gradient norm and quantization error  ( Pan et al., 2026 ) . It is not clear whether these heuristics can be improved.
+
+ 
+ In this paper, we show that the second-order loss model as a sum of per-layer errors weighted by sensitivity coefficients accurately predicts loss increase due to quantization during training (Sec.  3 ). This gives a training-time analogue of the “linearity theorem” model of Malinovskii et al. (2025) , previously used for one-shot, post-training quantization.
+
+ 
+ We call our approach  Q-PACE , P recision A llocation via C urvature E stimation for Q uantization-aware training, and apply it at training iterates. Estimated per-layer sensitivity coefficients depend only on the model weights and are reasonably stable across iterations, so Q-PACE re-estimates them periodically during training: once they are determined, we solve a knapsack problem to determine “optimal” per-layer bit-widths. This approach only requires forward passes for coefficient estimation, and has negligible memory overhead and marginal computational overhead.
+
+ 
+ We evaluate Q-PACE on pretraining experiments for models between 350M and 4B parameters, and on supervised fine-tuning of Qwen3 models, against state-of-the-art baselines  ( NVIDIA et al., 2026 ; Pan et al., 2026 ) , at budgets between 5.0 and 6.5 bits per weight. Our findings are as follows:
+
+ 
+ • 
+ 
+ Q-PACE consistently improves over existing mixed-precision training strategies across model scales, precision budgets, and format options. In pretraining, it achieves the lowest final loss in every setting we evaluate, recovering up to 81 % 81\% of the loss gap between uniform NVFP4 and MXFP8 training; the same trend holds for supervised fine-tuning.
+
+ • 
+ 
+ Q-PACE provides a substantially better quality–precision trade-off. At a fixed precision budget, Q-PACE produces better final loss than both SNIP and the NVIDIA heuristic, while at matched loss it requires fewer bits per model parameter (Figure  1 ).
+
+ • 
+ 
+ A detailed analysis of the produced allocations shows that quantization sensitivity is highly structured across the network: it depends on both layer type and depth, and its profile evolves over the course of training. However, these changes occur much slower than parameter updates. As a result, only a small number of reallocations (on the order of 10 over a full training run) is sufficient, keeping the overhead of Q-PACE low in practice.
+
+ 
+
+ 
+ 
+ 
+ 
+
+ Figure 1: Final loss improvement for a 500M model trained with mixed precision across methods and budgets. We improve over last layers in BF16   ( NVIDIA et al., 2026 ) and SNIP   ( Pan et al., 2026 ) . 
+ 
+ 
+ All in all, our results show that layer-wise precision can be assigned from a sensitivity model estimated using only forward passes, rather than from more complex error proxies. Doing so can recover a large fraction of the accuracy gap to uniform higher-precision training, at a small fraction of the training cost.
+
+ 
+ 2 The Problem: QAT with Adaptive Mixed-Precision
+
+ 
+ Our goal is to choose the quantization levels of n n layers
+in a network during quantization-aware training.
+We concentrate on linear layers, i.e. fully-connected layers or attention projections.
+For each of the full-precision weight tensors W = ( W i ) i = 1 n W=(W_{i})_{i=1}^{n} , we want to select a corresponding bitwidth ,
+ b i b_{i} , from a set of candidate bitwidths, denoted as β \beta .
+
+ 
+ We use the term bitwidth as it is common in the literature. Technically, the selection is among formats used for matrix multiplication operations. We distinguish between formats even if they nominally have the same number of bits but use a different value representation, such as FP8 E8M0 and FP8 E4M3.
+We denote the quantization of a tensor W i W_{i} by Q ⁡ ( W i , b i ) Q(W_{i},b_{i}) . Any choice of quantization bitwidths will influence the model’s overall quality,
+i.e. the achieved loss , as well as its resource cost , such
+as storage and compute.
+Typically, there is a tradeoff between those: a larger bitwidth results
+in lower loss, but higher training and inference cost.
+
+ 
+ For a sequence B = ( b 1 , … , b n ) ∈ β n B=(b_{1},\dots,b_{n})\in\beta^{n} , called bitwidth allocation ,
+we denote its loss by L ( W , B ) := L ( { Q ( W i , b i )  for  b i ∈ B } ) L(W,B):=L(\{Q(W_{i},b_{i})\text{ for }b_{i}\in B\}) , and its resource cost by C ⁡ ( W , B ) C(W,B) . We assume the cost to be additively linear, C ⁡ ( W , B ) := ∑ i = 1 n c i ​ ( b i ) C(W,B):=\sum_{i=1}^{n}c_{i}(b_{i}) , where c i ​ ( b i ) = d ⁡ ( W i ) ​ κ ​ ( b i ) c_{i}(b_{i})=d(W_{i})\kappa(b_{i}) , d d is a function of the size of the weight tensor W i W_{i} (but not of its actual values), and κ \kappa is a characteristic cost of a bitwidth.
+
+ 
+ With the goal to constraint memory at inference time, we take d ⁡ ( W i ) = : d i d(W_{i})=:d_{i} as the number of elements in a tensor W i W_{i} , and κ ⁡ ( b i ) \kappa(b_{i}) as the number of bits required to store an element, including the format’s block scales (4.5 bits for NVFP4; 6.25 and 8.25 bits for MXFP6 and MXFP8; 16 bits for BF16), which we write as b i b_{i} again, meaning that C ⁡ ( W , B ) = ∑ i = 1 n d i ​ b i C(W,B)=\sum_{i=1}^{n}d_{i}b_{i} measures the total model size in bits.
+Note, however, that the framework we describe here would also apply to other choices of d ⁡ ( W i ) d(W_{i}) and κ ⁡ ( b i ) \kappa(b_{i}) .
+
+ 
+ Ultimately, for a model with set of weights W W , the problem of optimal bitwidth allocation is minimization of the loss under a given maximum model size constraint, C 0 C_{0} . Formally, we want to find
+
+ 
+
+ 
+ 
+ B ∗ = argmin B = ( b 1 , … , b n ) L ​ ( W , B ) ​  subject to  ​ ∑ i b i ​ d i ≤ C 0 . B^{\ast}=\argmin_{B=(b_{1},\dots,b_{n})}\,L(W,B)\text{ subject to }\sum_{i}b_{i}d_{i}\leq C_{0}. 
+ 
+ (1) 
+ 
+ 
+
+ 
+ For post-training quantization, the bitwidth allocation only has to be chosen once. In this work, however, we focus on QAT, where the choice of quantization has a direct influence on the quality of learned weights, and one cannot assume that the best quantization strategy is constant over the course of training  ( Liu et al., 2025b ) .
+
+ 
+ Consequently, we are interested in finding a sequence of allocations B 1 , … , B T B^{1},\dots,B^{T} , where T T is the number of training steps, that ultimately achieves the lowest final loss while adhering to the cost budget at each iteration. We use a superscript to index training steps.
+The new precision allocation at each optimization step then affects both the loss calculation in the forward pass and the errors in the gradient computation in the backward pass.
+
+ 
+ The final set of weights, W T W^{T} , which determines the final loss, is affected by all previous allocations. Then the optimal sequence of allocations during training should be
+
+ 
+
+ 
+ 
+ ( B 1 , … , B T ) ∗ ≔ argmin all trajectories  ​ ( B t ) L ​ ( W T ​ ( B 1 , … , B T − 1 ) , B T ) ​  subject to  ​ max t = 1 , … , T ⁡ C ⁡ ( B t ) ≤ C 0 . (B^{1},\dots,B^{T})^{\ast}\coloneqq\!\!\!\argmin_{\text{all trajectories }(B^{t})}\!\!\!L(W^{T}(B^{1},\dots,B^{T-1}),B^{T})\text{ subject to }\max_{t=1,\dots,T}\!\!C(B_{t})\leq C_{0}. 
+ 
+ (2) 
+ 
+ 
+
+ 
+ Due to the complex structure with interactions between layers as well as time steps, a direct optimization of Eq. ( 2 ) is intractable.
+In the following section, we discuss approximations to L ⁡ ( W , B ) L(W,B) that make the optimization computationally feasible.
+
+ 
+ 3 Method
+
+ 
+ For simplicity of exposition, we first discuss a setup where only two bitwidth choices are available: high-precision, high , and low-precision, low , e.g. BF16 and FP4, respectively.
+
+ 
+ For a bitwidth allocation B ∈ { low , high } n B\in\{\texttt{low},\texttt{high}\}^{n} , we denote the quantization error (perturbation) of quantizing a layer into low format as δ ​ W i := Q ⁡ ( W i , b i ) − W i \delta W_{i}:=Q(W_{i},b_{i})-W_{i} . Assuming that high is the original data format, such that Q ⁡ ( W i , high ) = W i Q(W_{i},\texttt{high})=W_{i} , we have
+ δ ​ W i = 0 \delta W_{i}=0 if b i = high b_{i}=\texttt{high} , but δ ​ W i ≠ 0 \delta W_{i}\neq 0 
+otherwise.
+With δ ​ W := ( δ ​ W 1 , … , δ ​ W n ) \delta W:=(\delta W_{1},\dots,\delta W_{n}) , a Taylor expansion of the loss function around the unquantized loss L ⁡ ( W ) = L high L(W)=L_{\texttt{high}} yields
+
+ 
+
+ 
+ 
+ L ⁡ ( Q ⁡ ( W , B ) ) − L ⁡ ( W ) ≈ ∑ i ⟨ ∂ L ⁡ ( W ) ∂ W i , δ ​ W i ⟩ + 1 2 ​ ∑ i , j δ ​ W i ⊤ ​ ∂ 2 L ⁡ ( W ) ∂ 2 W i ​ W j ​ δ ​ W j . \displaystyle L(Q(W,B))-L(W)\approx\sum_{i}\Bigl\langle\frac{\partial L(W)}{\partial W_{i}},\delta W_{i}\Bigr\rangle+\frac{1}{2}\sum_{i,j}\delta W_{i}^{\top}\frac{\partial^{2}L(W)}{\partial^{2}W_{i}W_{j}}\delta W_{j}. 
+ 
+ (3) 
+ 
+ 
+ Following the Linearity Theorem   ( Malinovskii et al., 2025 ) , the quantization error δ ​ W i \delta W_{i} can be modeled as an isotropic random variable with zero mean 𝔼 ⁡ [ δ ​ W i ] = 0 \mathbb{E}[\delta W_{i}]=0 and finite variance 𝕍 ⁡ [ δ ​ W i ] = σ i 2 ​ I \mathbb{V}[\delta W_{i}]=\sigma^{2}_{i}I , σ i 2 > 0 \sigma_{i}^{2}>0 . Moreover, we assume the errors to be uncorrelated between layers, 𝔼 ⁡ [ δ ​ W i ​ δ ​ W j ] = 0 \mathbb{E}[\delta W_{i}\delta W_{j}]=0 for 1 ≤ i < j ≤ n 1\leq i<j\leq n .
+Assuming this, we can take the expectation over δ ​ W i \delta W_{i} in Eq. ( 3 ) to obtain:
+
+ 
+ 
+ 
+ 
+ 𝔼 ⁡ [ L ⁡ ( W + δ ​ W ) − L ⁡ ( W ) ] \displaystyle\mathbb{E}\Bigl[L(W+\delta W)-L(W)\Bigr] 
+ ≈ 1 2 ∑ i Tr ( H ii ) σ i 2 = 1 2 ∑ i Tr ( H ii ) 1 d i ​ 𝔼 ​ ‖ δ ​ W i ‖ F 2 ⏟ = MSE ⁡ ( Q ⁡ ( W i ) , W i ) , \displaystyle\approx\frac{1}{2}\sum_{i}\;\Tr(H_{ii})\,\sigma_{i}^{2}=\frac{1}{2}\sum_{i}\;\Tr(H_{ii})\underbrace{\frac{1}{d_{i}}\mathbb{E}||\delta W_{i}||^{2}_{F}}_{=\operatorname{MSE}(Q(W_{i}),W_{i})}, 
+ 
+ (4) 
+ 
+ 
+
+ 
+ where d i d_{i} denotes the number of elements in the i i -th weight matrix, and H i ​ i H_{ii} denotes the Hessian matrix of L L with respect to these weights. For a formal proof and implications see App.  A .
+
+ 
+ The derivation presented above can be done for any precision low ; thus, we obtain, for any bitwidth allocation:
+
+ 
+
+ 
+ 
+ L ⁡ ( W , B ) ≈ L high + ∑ i α i ​ MSE ^ ​ ( Q ⁡ ( W i , B i ) , W i ) , L(W,B)\approx L_{\texttt{high}}+\sum_{i}\alpha_{i}\,\widehat{\operatorname{MSE}}(Q(W_{i},B_{i}),W_{i}), 
+ 
+ (5) 
+ 
+ 
+ where L high = L ⁡ ( W ) L_{\texttt{high}}=L(W) is the loss over full-precision weights, and α i \alpha_{i} is an
+estimate of 1 2 Tr ( H ii ) \frac{1}{2}\Tr(H_{ii}) that can be interpreted as the
+aggregated curvature of a layer.
+
+ 
+ Connection to Hutchinson trace estimation.
+
+ 
+ For an isotropic random probe z z satisfying
+ 𝔼 ⁡ [ z ​ z ⊤ ] = I \mathbb{E}[zz^{\top}]=I , we have 𝔼 z [ L ( W + ϵ z ) − L ( W ) ] ≈ 𝔼 z [ z ⊤ H i ​ i z ] = ϵ 2 2 Tr ( H ii ) \mathbb{E}_{z}\!\left[L(W+\epsilon z)-L(W)\right]\approx\mathbb{E}_{z}\!\left[z^{\top}H_{ii}z\right]=\frac{\epsilon^{2}}{2}\Tr(H_{ii}) ( Hutchinson, 1990 ) . Our forward-pass calibration can be viewed as a variant of Hutchinson trace estimation: the layer-wise curvature
+ α i \alpha_{i} is estimated from the increase in loss induced by isotropic
+random perturbations, normalized by their mean-squared magnitude.
+
+ 
+ MSE estimation.
+
+ 
+ The estimate MSE ^ \widehat{\operatorname{MSE}} can be obtained empirically by measuring the statistics of the actual tensor weights or the analytic approximation,
+ MSE ^ ​ ( Q ⁡ ( W i ) , W i ) ∝ 4 − b i \widehat{\operatorname{MSE}}(Q(W_{i}),W_{i})\propto 4^{-b_{i}} , based the analysis in App.  B . The experiments (App.  B ) showed a moderate advantage of using the analytical MSE estimates over measured ones, so we adopt the former throughout this study.
+
+ 
+ Curvature estimation.
+
+ 
+ To estimate α i \alpha_{i} , we use that Q ⁡ ( W i , b i ) = W i Q(W_{i},b_{i})=W_{i} and MSE ⁡ ( Q ⁡ ( W i , b i ) , W i ) = 0 \operatorname{MSE}(Q(W_{i},b_{i}),W_{i})=0 for the layers that are kept in full precision ( b i = high b_{i}=\texttt{high} ), so effectively Eq. ( 5 ) sums only over those layers that are quantized.
+Then, for layer i i we model quantization error by adding Gaussian noise δ ​ W i \delta W_{i} to the weight tensor W i W_{i} (with B i = { b j ≠ i = high , b i = low } B_{i}=\{b_{j\neq i}=\texttt{high},b_{i}=\texttt{low}\} ) and can directly read off
+
+ 
+
+ 
+ 
+ L ⁡ ( W , B i ) − L high = α i ​ MSE ^ ​ ( Q ⁡ ( W i , B i ) , W i ) = α i ​ MSE ⁡ ( W i + δ ​ W i , W i ) . L(W,B_{i})-L_{\texttt{high}}=\alpha_{i}\;\widehat{\operatorname{MSE}}(Q(W_{i},B_{i}),W_{i})=\alpha_{i}\;\operatorname{MSE}(W_{i}+\delta W_{i},W_{i}). 
+ 
+ (6) 
+ 
+ 
+
+ 
+ The dataset on which the loss in Eq.  6 is evaluated, 𝒟 \mathcal{D} , we call
+the calibration dataset . It should be large enough for an
+accurate loss approximation while being small enough to
+avoid excessive computational overhead.
+
+ 
+ In principle, Eq. ( 6 ) yields α 1 , … , α n \alpha_{1},\dots,\alpha_{n} 
+from n + 1 n+1 forward passes over 𝒟 \mathcal{D} , but we note that using several noise perturbations per layer with different variances improves our loss estimation. We used m ∈ { 3 , … , 10 } m\in\{3,\ldots,10\} noise levels to estimate α i \alpha_{i} . Therefore, curvature estimation requires the total of m ​ n + 1 mn+1 forward passes. See details on hyperparameter choice in App.  F .
+
+ 
+ Algorithm 1 Q-PACE 
+ 
+ 
+ 1: 
+ 
+ 
+ Weight tensors W = ( W 1 , … , W n ) W=(W_{1},\dots,W_{n}) , calibration data 𝒟 \mathcal{D} , update interval τ \tau 
+
+ 
+ 2: 
+ 
+ 
+ repeat 
+
+ 
+ 3: 
+ 
+ 
+   Evaluate L high L_{\texttt{high}} on 𝒟 \mathcal{D} 
+
+ 
+ 4: 
+ 
+ 
+    for layers i = 1 , … , n i=1,\dots,n do 
+
+ 
+ 5: 
+ 
+ 
+     for m m noise levels { σ k 2 } \{\sigma^{2}_{k}\} do 
+
+ 
+ 6: 
+ 
+ 
+      Add noise δ ​ W i ∼ N ⁡ ( 0 , σ k 2 ) \delta W_{i}\sim N(0,\sigma_{k}^{2}) to layer weight W i W_{i} 
+
+ 
+ 7: 
+ 
+ 
+      Determine MSE ^ ​ ( W i , W i + δ ​ W i ) \widehat{\operatorname{MSE}}(W_{i},W_{i}+\delta W_{i}) 
+
+ 
+ 8: 
+ 
+ 
+      Evaluate L ⁡ ( W + δ ​ W i ) L(W+\delta W_{i}) on 𝒟 \mathcal{D} 
+
+ 
+ 9: 
+ 
+ 
+     end for 
+
+ 
+ 10: 
+ 
+ 
+    Estimate sensitivity α i \alpha_{i} via least squares using Eq. ( 6 )
+
+ 
+ 11: 
+ 
+ 
+    end for 
+
+ 
+ 12: 
+ 
+ 
+    B ← B\leftarrow solution of knapsack problem Eq. ( 1 )
+
+ 
+ 13: 
+ 
+ 
+   Train model with the new bitwidth allocation B B for τ \tau steps
+
+ 
+ 14: 
+ 
+ 
+ until termination condition
+
+ 
+
+ 
+ Bitwidth assignment.
+
+ 
+ Once we have determined sensitivities α i \alpha_{i} for all i = 1 , … , n i=1,\dots,n , we can solve Eq. ( 1 ) with Eq. ( 5 )
+as a proxy for the intractable L ⁡ ( W , B ) L(W,B) .
+As a discrete selection problem with linear objective and
+linear constraints, this constitutes a multiple choice knapsack problem (MCKP) .
+For our implementation we use pseudo-polynomial dynamic programming  ( Pisinger, 1995 ) : the budget C 0 C_{0} is discretized into M M bins, and each layer cost d i ​ b i d_{i}b_{i} is rounded up to the whole number of bins. The discrete problem is then solved via a dynamic program that tracks an allocation that gives minimal loss degradation for each cost level. The time complexity of the algorithm is O ⁡ ( n ​ M ​ | β | ) O(nM|\beta|) , and in practice, for the models used, we measure ≲ 1 \lesssim 1 s of knapsack solving time, which is negligible compared to multiple forward passes needed for estimating α i \alpha_{i} .
+
+ 
+ Q-PACE.
+
+ 
+ Ideally, the estimates α i \alpha_{i} and MSE ^ \widehat{\operatorname{MSE}} should stay up-to-date
+at any time during training.
+However, given that they require multiple forward passes to be updated,
+it would be unreasonable to change them at every optimization step.
+In practice, we observed that sensitivities demonstrate a stable pattern
+during training and infrequent re-allocations suffice. Therefore,
+we propose to update the estimates only at regular intervals of τ \tau 
+steps.
+In our experiments, re-allocation periods lower than 5B training tokens
+did not yield measurable improvement.
+Summarizing the discussion above, we obtain the Q-PACE procedure which
+is our main contribution in this work, see Algorithm  1 for the
+pseudo-code.
+
+ 
+ Computational and memory overhead.
+
+ 
+ Q-PACE calibration requires only forward passes. To perturb layer i i we add δ ​ W i \delta W_{i} to the weights and evaluate the loss on 𝒟 \mathcal{D} . The only extra memory is a single noise tensor the size of the largest layer, which is negligible compared to the training state. In contrast, gradient-based methods  ( Pan et al., 2026 ) require storing the activations and gradients needed for the backward pass, resulting in a substantially larger memory overhead.
+
+ 
+ One recalibration costs m ​ n + 1 mn+1 forward passes over 𝒟 \mathcal{D} : one unperturbed
+pass for L high L_{\texttt{high}} and one per (layer, noise level) pair. It is followed by a knapsack solve with
+negligible cost. For a batch size B B the relative compute overhead is then ( m ​ n + 1 ) ​ | 𝒟 | 3 ​ τ ​ B \frac{(mn+1)|\mathcal{D}|}{3\tau B} , linear in both m m and | 𝒟 | |\mathcal{D}| and inversely proportional to τ \tau . In our experiments the measured wall-clock time overhead was only 5% for 4B model corresponding to a conservative choice of τ = 5 ​ k \tau=5k . Time overhead can likely be reduced substantially by increasing τ \tau (Sec.  5 ). More details on hyperparameter choice can be found in App.  F .
+
+ 
+ 4 Experimental Results
+
+ 
+ 4.1 Experimental Setup
+
+ 
+ We train a decoder-only Transformer  ( Vaswani et al., 2017 ) , with each block following an OLMo-2-style  ( OLMo: et al., 2025 ) : multi-head self-attention and a two-layer MLP, with RMSNorm  ( Zhang and Sennrich, 2019 ) applied to each sub-layer output before the residual. Attention uses rotary position embeddings  ( Su et al., 2023 ) , and Qwen3-style  ( Yang et al., 2025 ) QK-RMSNorm. We use model sizes of 350M, 500M, 800M, and 4B.
+We start our experiments with a 350M model on 18B tokens and evaluate all the strategies, then select the best-performing ones for larger up to 4B model runs.
+
+ 
+ The training data is ClimbMix dataset  ( Diao et al., 2025 ) . We use a subset pre-tokenized with TokenMonster (vocab size 32 000). We used AdamW  ( Kingma and Ba, 2017 ; Loshchilov and Hutter, 2019 ) and Muon  ( Jordan et al., 2024 ) optimizers. The learning rate (LR) schedule used is WSD  ( Hu et al., 2024 ) . The optimal LR is found via a grid search. Context length range is from 1024 for 350M model to 4096 for 4B model, more details are provided in App.  D .
+
+ 
+ Quantization-aware training.
+
+ 
+ Linear layers in the blocks (Q, K, V, O, and MLP projections) are the only quantized modules; embeddings and the LM head remain in high precision. We follow the e2e QAT setup by Panferov et al. (2026) , which performs all of the weights-activations matmul and gradients-weight/activations matmuls in FP4. In our experiments, the candidate low precision formats for matmix multiplications are NVFP4, MXFP6, MXFP8. For mixed-precision runs, a global bitwidth budget is defined as the total memory cost of the quantized weights divided by the number of quantized parameters, i.e., bits per parameter. Unless stated otherwise, all matmuls for a layer, forward and backward, are performed in the same precision. The weight master copy and optimizer state are stored in FP32.
+
+ 
+ Baselines.
+
+ 
+ We compare Q-PACE against uniform NVFP4, MXFP8, the last-layers strategy of  NVIDIA et al. (2026) , and SNIP  ( Pan et al., 2026 ) . NVIDIA keeps the last layers of the model at high precision, with the cutoff chosen to satisfy the budget. SNIP solves a similar knapsack problem, but estimates layer costs using gradient-based forward sensitivity and backward-update divergence. We also consider a version of SNIP, named SNIP weight-gradient-only, as it performs better than the original SNIP recipe in pretraining. See App.  E for details.
+
+ 
+ 4.2 Forward Error Is Sufficient for Loss Estimation
+
+ 
+ Before we report our method’s performance, we provide a justification for our
+choice of modeling the quantization error purely as a function of the MSE \operatorname{MSE} , i.e. weight quantization error, Eq. ( 4 ). Other mixed-precision training methods model loss degradation using the error introduced during the backward pass  ( Pan et al., 2026 ) . We test whether the signal from the backward pass is necessary for predicting the loss under QAT.
+
+ 
+ For this, we compare two training settings for a 500M model trained on 74B tokens, with various precision allocation methods. In the first setting, the layer-wise precision
+assignment is applied to both the forward and backward matrix multiplications. In the second, the precision assignment is applied only to the forward matmuls, while all the backward matmuls are computed in FP4 (FP4 bwd). The second setup introduces additional backward pass quantization error that is not captured by our forward error metric (Eq.  5 ).
+
+ 
+ Figure 2: Test loss vs. the modeled sensitivity-weighted forward error for 500M models’ final allocations. 
+ 
+ 
+ Figure  2 shows the final test loss as a function of our loss estimate (Eq.  5 ), which uses forward error only. In both settings, the final loss remains linear in the forward error. We calculate the Pearson correlation between the loss estimate and final test loss, r r . When forward and backward precisions are the same per layer, the correlations are r = 0.98 r=0.98 for our model. Keeping the backward pass uniformly in FP4 does not change this, and the corresponding Pearson correlation remains r = 0.98 r=0.98 .
+
+ 
+ We conclude that, although additional perturbation is indeed introduced during the backward pass in QAT, backward pass metrics are not required to predict the impact on the loss. Across the precision allocation methods tested, forward error alone can be a good predictor of final loss. Supporting results in App.  C .
+
+ 
+ 4.3 Pretraining Experiments
+
+ 
+ Table 1: Final test loss across models.
+Budget equals target average bits per parameter.
+“Rec.” (recovery) is the share of the FP4-to-FP8 gap recovered, ( L FP4 − L ) / ( L FP4 − L FP8 ) (L_{\text{FP4}}-L)/(L_{\text{FP4}}-L_{\text{FP8}}) .
+The column “gain” reports the ratio between the gain of Q-PACE over FP4
+and the gain of the NVIDIA allocation over FP4,
+ ( L FP4 − L Q-PACE  ) / ( L FP4 − L NVIDIA ) (L_{\text{FP4}}-L_{\text{Q-PACE }})/(L_{\text{FP4}}-L_{\text{NVIDIA}}) . The std error measured over 3 random seeds for 350M model is ≤ 0.001 \leq 0.001 . Best loss per row is shown in bold.
+ 
+ 
+ 
+ 
+ 
+ Model 
+ Budget 
+ FP4 
+ FP8 
+ NVIDIA 
+ Rec. 
+ SNIP 
+ Rec. 
+ Q-PACE 
+ Rec. 
+ gain 
+
+ 
+ 350 350 M, 16 16 B tok 
+ 5.0 ​ { 4 , 6 , 8 , 16 } 5.0\ \{4,6,8,16\} 
+ 2.886 2.886 
+ 2.848 2.848 
+ 2.884 2.884 
+ 6 % 6\% 
+ 2.872 2.872 
+ 37 % 37\% 
+ 2.868 \mathbf{2.868} 
+ 𝟒𝟗 % \mathbf{49\%} 
+ 7.5 × 7.5\times 
+
+ 
+ 5.5 ​ { 4 , 6 , 8 , 16 } 5.5\ \{4,6,8,16\} 
+ 2.880 2.880 
+ 15 % 15\% 
+ 2.867 2.867 
+ 51 % 51\% 
+ 2.858 \mathbf{2.858} 
+ 𝟕𝟒 % \mathbf{74\%} 
+ 4.8 × 4.8\times 
+
+ 
+ 6.5 ​ { 4 , 8 , 16 } 6.5\ \{4,8,16\} 
+ 2.876 2.876 
+ 28 % 28\% 
+ 2.864 2.864 
+ 59 % 59\% 
+ 2.857 \mathbf{2.857} 
+ 𝟕𝟓 % \mathbf{75\%} 
+ 2.7 × 2.7\times 
+
+ 
+ 6.5 ​ { 4 , 16 } 6.5\ \{4,16\} 
+ 2.876 2.876 
+ 28 % 28\% 
+ 2.874 2.874 
+ 33 % 33\% 
+ 2.870 \mathbf{2.870} 
+ 𝟒𝟑 % \mathbf{43\%} 
+ 1.6 × 1.6\times 
+
+ 
+ 500 500 M, 74 74 B tok 
+ 5.0 ​ { 4 , 6 , 8 , 16 } 5.0\ \{4,6,8,16\} 
+ 2.693 2.693 
+ 2.657 2.657 
+ 2.692 2.692 
+ 2 % 2\% 
+ 2.678 2.678 
+ 40 % 40\% 
+ 2.673 \mathbf{2.673} 
+ 𝟓𝟓 % \mathbf{55\%} 
+ 32.4 × 32.4\times 
+
+ 
+ 5.5 ​ { 4 , 6 , 8 , 16 } 5.5\ \{4,6,8,16\} 
+ 2.688 2.688 
+ 14 % 14\% 
+ 2.673 2.673 
+ 54 % 54\% 
+ 2.664 \mathbf{2.664} 
+ 𝟖𝟎 % \mathbf{80\%} 
+ 5.8 × 5.8\times 
+
+ 
+ 6.5 ​ { 4 , 8 , 16 } 6.5\ \{4,8,16\} 
+ 2.683 2.683 
+ 26 % 26\% 
+ 2.672 2.672 
+ 58 % 58\% 
+ 2.663 \mathbf{2.663} 
+ 𝟖𝟏 % \mathbf{81\%} 
+ 3.1 × 3.1\times 
+
+ 
+ 6.5 ​ { 4 , 16 } 6.5\ \{4,16\} 
+ 2.683 2.683 
+ 26 % 26\% 
+ 2.680 2.680 
+ 36 % 36\% 
+ 2.675 \mathbf{2.675} 
+ 𝟒𝟖 % \mathbf{48\%} 
+ 1.8 × 1.8\times 
+
+ 
+ 800 800 M, 80 80 B tok 
+ 5.0 ​ { 4 , 16 } 5.0\ \{4,16\} 
+ 2.616 2.616 
+ 2.581 2.581 
+ 2.613 2.613 
+ 9 % 9\% 
+ 2.613 2.613 
+ 9 % 9\% 
+ 2.609 \mathbf{2.609} 
+ 𝟐𝟎 % \mathbf{20\%} 
+ 2.2 × 2.2\times 
+
+ 
+ 5.5 ​ { 4 , 16 } 5.5\ \{4,16\} 
+ 2.611 2.611 
+ 14 % 14\% 
+ 2.612 2.612 
+ 11 % 11\% 
+ 2.607 \mathbf{2.607} 
+ 𝟐𝟔 % \mathbf{26\%} 
+ 1.9 × 1.9\times 
+
+ 
+ 
+ 6.0 6.0 { 4 , 16 } \{4,16\} 
+ 2.607 2.607 
+ 26 % 26\% 
+ 2.605 2.605 
+ 31 % 31\% 
+ 2.602 \mathbf{2.602} 
+ 𝟒𝟎 % \mathbf{40\%} 
+ 1.5 × 1.5\times 
+
+ 
+ 4 4 B, 105 105 B tok 
+ 6.5 ​ { 4 , 16 } 6.5\ \{4,16\} 
+ 2.278 2.278 
+ 2.251 2.251 
+ 2.270 2.270 
+ 31 % 31\% 
+ 2.270 2.270 
+ 32 % 32\% 
+ 2.266 \mathbf{2.266} 
+ 𝟒𝟕 % \mathbf{47\%} 
+ 1.5 × 1.5\times 
+
+ 
+ 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ Figure 3: Loss improvement over uniform FP4 for 800M models with varying budgets. To achieve the same quality models trained with Q-PACE need 1 bit/parameter less than those trained with NVIDIA when using AdamW and 0.5 bit/parameter less when using Muon. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ Loss 
+ Rec. 
+ Acc. 
+ 
+ uniform FP4 
+ 0.7375 ± 0.0005 0.7375_{\pm 0.0005} 
+ 0 % 0\% 
+ 55.0 ± 0.3 55.0_{\pm 0.3} 
+ 
+ uniform FP8 
+ 0.6790 ± 0.0001 0.6790_{\pm 0.0001} 
+ 100 % 100\% 
+ 57.3 ± 0.2 57.3_{\pm 0.2} 
+ 
+ budget 5 { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+ 
+ NVIDIA 
+ 0.7283 ± 0.0004 0.7283_{\pm 0.0004} 
+ 16 % 16\% 
+ 55.0 ± 0.2 55.0_{\pm 0.2} 
+ 
+ SNIP 
+ 0.7115 ± 0.0003 0.7115_{\pm 0.0003} 
+ 44 % 44\% 
+ 56.2 ± 0.2 \mathbf{56.2}_{\pm 0.2} 
+ 
+ Q-PACE 
+ 0.7077 ± 0.0003 \mathbf{0.7077}_{\pm 0.0003} 
+ 𝟓𝟏 % \mathbf{51\%} 
+ 55.9 ± 0.2 55.9_{\pm 0.2} 
+ 
+ budget 5.5 { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+ 
+ NVIDIA 
+ 0.7221 ± 0.0003 0.7221_{\pm 0.0003} 
+ 26 % 26\% 
+ 55.0 ± 0.3 55.0_{\pm 0.3} 
+ 
+ SNIP 
+ 0.7004 ± 0.0004 0.7004_{\pm 0.0004} 
+ 63 % 63\% 
+ 56.4 ± 0.1 56.4_{\pm 0.1} 
+ 
+ Q-PACE 
+ 0.6961 ± 0.0005 \mathbf{0.6961}_{\pm 0.0005} 
+ 𝟕𝟏 % \mathbf{71\%} 
+ 56.5 ± 0.3 \mathbf{56.5}_{\pm 0.3} 
+ 
+ budget 6.5 { 4 , 8 , 16 } \{4,8,16\} 
+ 
+ NVIDIA 
+ 0.7174 ± 0.0005 0.7174_{\pm 0.0005} 
+ 34 % 34\% 
+ 54.8 ± 0.2 54.8_{\pm 0.2} 
+ 
+ SNIP 
+ 0.6973 ± 0.0003 0.6973_{\pm 0.0003} 
+ 69 % 69\% 
+ 56.7 ± 0.1 \mathbf{56.7}_{\pm 0.1} 
+ 
+ Q-PACE 
+ 0.6919 ± 0.0006 \mathbf{0.6919}_{\pm 0.0006} 
+ 𝟕𝟖 % \mathbf{78\%} 
+ 56.5 ± 0.2 56.5_{\pm 0.2} 
+ 
+ budget 6.5 { 4 , 16 } \{4,16\} 
+ 
+ NVIDIA 
+ 0.7174 ± 0.0005 0.7174_{\pm 0.0005} 
+ 34 % 34\% 
+ 54.8 ± 0.2 54.8_{\pm 0.2} 
+ 
+ SNIP 
+ 0.7099 ± 0.0011 0.7099_{\pm 0.0011} 
+ 47 % 47\% 
+ 56.0 ± 0.3 \mathbf{56.0}_{\pm 0.3} 
+ 
+ Q-PACE 
+ 0.7085 ± 0.0005 \mathbf{0.7085}_{\pm 0.0005} 
+ 𝟓𝟎 % \mathbf{50\%} 
+ 55.8 ± 0.3 55.8_{\pm 0.3} 
+ 
+ 
+
+ 
+ Table 2: SFT held-out loss, recovered share of the FP4-to-FP8 gap (Rec.), and mean downstream accuracy of Qwen3-4B-Base on Tulu-3 (mean and standard deviation over three seeds). 
+ 
+
+ 
+ 
+ We compare the mixed-precision training methods by their final test loss in Table  1 . Across all model scales, precision budgets, and candidate precision sets, Q-PACE achieves lower final test loss than both the NVIDIA heuristic and SNIP  ( Pan et al., 2026 ) . These gains are obtained under the same average precision budget. Q-PACE recovers substantially more of the FP4-to-FP8 loss gap than other methods, up to 81 % 81\% of the gap. Q-PACE provides 1.5 × 1.5\times – 32 × 32\times the loss improvement of the NVIDIA across the reported settings.
+This shows that allocating precision according to curvature-aware layer sensitivity is consistently more effective compared to other baselines.
+
+ 
+ The benefit of sensitivity-aware allocation is particularly clear when more than 2 precision levels are available. At the same 6.5 6.5 -bit budget, replacing the bitwidth set { 4 , 16 } \{4,16\} with { 4 , 8 , 16 } \{4,8,16\} increases the recovered gap of Q-PACE from 43 % 43\% to 75 % 75\% for the 350M model and from 48 % 48\% to 81 % 81\% for the 500M model. Figure  4 further shows how our method improves with additional bitwidth choices . With the same budget of 6.5 bits/parameter, using { 4 , 8 , 16 } \{4,8,16\} as available formats allows to close 79 % 79\% of gap to the FP8 level, whereas with only { 4 , 16 } \{4,16\} choices it reaches 47 % 47\% .
+
+ 
+ 4.4 Supervised Fine-Tuning Experiments
+
+ 
+ We extend our experiments to supervised fine-tuning (SFT). We fine-tune Qwen3-4B-Base  ( Team, 2025 ) on Tulu-3  ( Lambert et al., 2025 ) with budgets from 5.0 to 6.5 over three random seeds. Table  2 reports the held-out loss, the recovered share of the FP4-to-FP8 gap, and the mean accuracy over the downstream benchmarks. Q-PACE reaches the lowest loss at every budget, with a substantial margin over the baselines. Q-PACE outperforms the NVIDIA baseline in the downstream tasks average. However, it falls very close to SNIP and within the noise range. Detailed downstream benchmarks are provided in App.  I.1 .
+
+ 
+ 4.5 Performance-memory Trade-off
+
+ 
+ Next, we study the trade-off between model quality and precision budget.
+Figure  3 shows test loss improvement over the FP4 baseline 800M model across bitwidths.
+For both AdamW and Muon, Q-PACE forms an empirical Pareto frontier: at a fixed precision budget, it achieves a larger loss improvement than the NVIDIA, while at a matched loss it requires fewer bits per weight.
+For Adam, our method outperforms NVIDIA strategy while using 1 bit per parameter less, that is 16% less model size in memory.
+With Muon, the corresponding saving is approximately 0.5 bits per weight.
+Altogether, this indicates that the benefit of curvature-aware sensitivity is not restricted to a single precision budget or optimizer.
+
+ 
+ Since a model can be deployed under various weight and activation formats during inference, we additionally measure the loss–memory trade-off for different inference formats .
+Figure  5(a) shows the evaluation of 800M model checkpoints under several inference configurations, including W mix ​ A mix W_{\mathrm{mix}}A_{\mathrm{mix}} , W mix ​ A 8 W_{\mathrm{mix}}A_{8} , and W ​ 4 ​ A ​ 8 W4A8 . Here mix {}_{\text{mix}} denotes mixed precision across layers.
+
+ 
+ Across the evaluated configurations, models trained with Q-PACE again lie on the empirical Pareto frontier: for a given inference-memory budget they achieve lower loss, or equivalently reach a comparable loss with less memory.
+Thus, the advantage of sensitivity-guided precision allocation during training is retained under variable inference formats.
+
+ 
+ Figure 4: Pretraining experiment for a 4B model. Test-loss improvement over uniform FP4; labels give the recovered gap between FP4 and FP8 trainings, realized bits/parameter, and the precision options in parentheses. 
+ 
+ 
+ 
+ 
+ 
+ (a) Loss – inference memory tradeoff for 800M model across different inference formats: W mix ​ A mix W_{\text{mix}}A_{\text{mix}} , W mix ​ A ​ 8 W_{\text{mix}}A8 , W ​ 4 ​ A ​ 8 W4A8 . 
+ 
+ 
+ 
+ (b) Final loss as a function of number of reallocations during training for the 350M model. 
+ 
+
+ 
+
+ 
+ 5 Analysis
+
+ 
+ Next we analyze the properties and evolution of bitwidth allocations produced by our method.
+
+ 
+ Sensitivity is structured by layer type and depth. 
+
+ 
+ Figure  6(a) shows the final precision allocation produced by Q-PACE and SNIP for the 4B model. The allocation is highly non-uniform: the assigned precision depends both on the layer type and its position in the model.
+The depth dependence is particularly pronounced in the final block, where Q-PACE promotes five of the six quantized linear layers to the full precision.
+This observation helps to explain why the NVIDIA heuristic is effective relative to uniform FP4 training: later layers are indeed highly sensitive to quantization.
+
+ 
+ However, sensitivity is not solely a function of depth. Layers of different types within the one block receive different precisions, while sensitive layers can also occur substantially earlier in the network.
+In particular, K and V projection layers receive a substantial fraction of the higher-precision budget under both Q-PACE and SNIP. At the same time, SNIP does not promote MLP projections at all, while Q-PACE assigns high precision to MLP projections toward the end of the model.
+
+ 
+ Sensitivity evolves during training.
+
+ 
+ Figure  6(b) shows the fraction of each layer type assigned to BF16 throughout training.
+While the number of layers of each type, selected by SNIP, remains nearly constant over time, the allocation produced by Q-PACE evolves. The largest changes occur between the early and middle stages of training, after which the allocation becomes substantially more stable. K and V projections remain repeatedly promoted to BF16, while the share of promoted Q projections decreases over time, and the share of MLP grows.
+
+ 
+ Therefore, the sensitivity pattern has both a constant factor, determined by layer type and block number, as well as a time-dependent factor. The former explains why simple static heuristics can provide some benefit, whereas the latter motivates periodic reallocation during training. Additional analysis results can be found
+in App.  H 
+
+ 
+ How frequently is reallocation necessary?
+
+ 
+ Next, we analyze the impact of the reallocation period τ \tau . Figure  5(b) reports final loss while varying the number of reallocations over training. For a 350M model, reallocating more than five times over the full training run provides no additional benefits.
+
+ 
+ This result demonstrates that the gain of Q-PACE is not only due to finding a better initial mixed-precision allocation. Adapting the allocation dynamically during training provides an additional benefit.
+Secondly, it shows that sensitivity changes on a much slower timescale than optimization steps, allowing to keep the computational overhead of Q-PACE recalibration marginal.
+
+ 
+ 
+ 
+ 
+ (a) Final format allocation for 4B model at 6.5 bit/param budget for Q-PACE and SNIP  ( Pan et al., 2026 ) . Both method favor K and V projection layers, with Q-PACE also promoting the MLP in the last blocks. 
+ 
+ 
+ 
+ (b) Share of layers promoted to BF16 in 4B model at 6.5 bit/param, by layer type, over training duration. 
+ 
+
+ 
+
+ 
+ 6 Related Work
+
+ 
+ Post-training quantization (PTQ)  ( Dettmers et al., 2022 ; Xiao et al., 2023 ; Frantar et al., 2023 ) has become a standard approach for reducing the memory and inference cost of LLMs.
+Most PTQ methods apply the same bitwidth to every layer.
+
+ 
+ Non-uniform compression.
+
+ 
+ A parallel line of work distributes compression non-uniformly across layers.
+AMC  ( He et al., 2018 ) and HAQ  ( Wang et al., 2019 ) used reinforcement learning with hardware feedback for this, while DNAS  ( Wu et al., 2018 ) relaxed the search into a differentiable one.
+HAWQ  ( Dong et al., 2019 ; Dong et al., 2020 ; Yao et al., 2021 ) instead scores layers by second-order information, and selects bitwidths by integer programming.
+SPDY  ( Frantar and Alistarh, 2022 ) and OBC  ( Frantar et al., 2022 ) cast the allocation as a dynamic program over per-layer compression levels.
+EvoPress  ( Sieberling et al., 2025 ) showed that such additive (“error-monotone”) models can fail, and replaced them with an evolutionary search.
+For LLMs, mixed-precision schemes range from keeping salient weights or groups in higher precision  ( Dettmers et al., 2024 ; Kim et al., 2024 ; Huang et al., 2025 ) , to layer-wise allocation driven by per-layer sensitivity estimates and knapsack solvers  ( Malinovskii et al., 2025 ; Helcig et al., 2026 ) , or even more complex manifold optimization  ( Helcig and Alistarh, 2026 ) .
+Other work accounts for interactions between layers  ( Schaefer et al., 2023 ) or for perturbations  ( Hu et al., 2025 ) .
+The closest work to ours is HIGGS  ( Malinovskii et al., 2025 ) , whose linearity theorem underlies our sensitivity model.
+Q-PACE differs from it in three main ways:
+1. HIGGS allocates bitwidths once; we allocate during training;
+2. HIGGS compresses only the weights, whereas we compress weights, activations, and gradient multiplications.
+3., We investigate hardware-supported microscaling formats (NVFP4, MXFP6, MXFP8, BF16) and use an analytic 4 − b 4^{-b} distortion model, so no per-layer, per-format errors are needed.
+
+ 
+ Mixed precision during training.
+
+ 
+ Non-uniform precision during training has received less attention.
+Low-precision training recipes typically keep a hand-picked set of components in higher precision, e.g. DeepSeek-V3 keeps the embeddings, output head, MoE gating, normalization, and attention in higher precision  ( DeepSeek-AI, 2024 ) , and NVFP4 pretraining keeps the last blocks in BF16  ( NVIDIA et al., 2026 ) .
+Earlier work on convolutional networks learned per-layer bitwidths jointly with the weights during QAT  ( Wu et al., 2018 ; Uhlich et al., 2020 ; van Baalen et al., 2020 ) .
+However, these methods target the precision of the final inference model whereas we periodically re-allocate precision during training under a fixed global budget.
+The work closest to ours is SNIP  ( Pan et al., 2026 ) , which periodically re-assigns per-layer precision during LLM pretraining by solving a knapsack problem.
+Its scores combine a first-order Taylor estimate of the forward loss change with an optimizer-dependent estimate of the divergence in the weight updates.
+Q-PACE replaces these with a second-order, loss-based sensitivity model, estimated from forward passes alone.
+We show that this yields substantially better accuracy.
+
+ 
+ 7 Conclusion
+
+ 
+ We propose Q-PACE, a new method for adaptive mixed-precision LLM training, which probes linear layers and estimates their sensitivity. This information is then used for periodic reassignment of precision across layers during training. With no memory overhead, our method consistently improves over existing baselines and allows for substantial memory savings at a matched performance. Across pretraining experiments from 350M to 4B parameters and supervised fine-tuning of Qwen3-4B, it outperforms other methods and recovers up to 81 % 81\% of the NVFP4-to-MXFP8 loss gap at 6.5 bit/parameter.
+
+ 
+ Our study is limited to a restricted range of model scales and precision formats, and primarily considers settings where the same layer-wise precision is used in the forward and backward passes. Extending dynamic allocation to larger models, broader format choices, and independently optimized forward and backward precisions are promising directions for future work.
+
+ 
+ Acknowledgments
+
+ 
+ We would like to thank our contacts at Verda, Paul Chang and Antonio Dominguez, for hardware support that was essential to this project.
+
+ 
+ The computational results have been achieved using the Austrian Scientific Computing (ASC) infrastructure. This research was supported by the Scientific Service Units (SSU) of IST Austria through resources provided by Scientific Computing (SciComp).
+
+ 
+ We thank NVIDIA and Google corporation for their grants, which supported part of this research. This research was supported by the ISTA Responsible AI Program, made possible through the generous support of Garrett Camp and the Camp Foundation.
+
+ 
+ AI use statement
+
+ 
+ We used ChatGPT and Claude to assist in organizing and editing the manuscript, as well as verifying mathematical reasoning and our interpretation of the results. Additionally, we employed Claude Code to visualize our experimental results. We have thoroughly reviewed and verified the final manuscript, including all citations, experimental details, and AI-assisted edits, and we take full responsibility for its content.
+
+ 
+ Reproducibility Statement
+
+ 
+ We provide detailed information intended to support reproduction of our results. The model architectures, training configurations, datasets, optimizer settings, learning-rate schedules, batch sizes, context lengths, and recalibration frequencies are described in Appendix  D . The numerical formats and implementation details for NVFP4, MXFP6, MXFP8, and BF16 training, including the hardware used, are specified in Appendix  D . The Q-PACE procedure is given explicitly in Algorithm 1, including the sensitivity-estimation and precision-allocation steps, and we report the calibration and reallocation hyperparameters used in our experiments. Appendix  F studies the sensitivity of the method to its main calibration hyperparameters, while the remaining appendices provide additional ablations, analyses, and downstream results. All reported experimental results are obtained from the configurations described in the paper.
+
+ 
+ References
+
+ 
+ Bennett (1948) 
+ W. R. Bennett 
+ 
+ Spectra of quantized signals .
+ 
+ The Bell System Technical Journal 27 ( 3 ), pp. 446–472 .
+ 
+ Cited by: Appendix B .
+ 
+
+ Castro et al. (2026) 
+ R. L. Castro, A. Panferov, S. Tabesh, O. Sieberling, J. Chen, M. Nikdan, S. Ashkboos, and D. Alistarh 
+ 
+ Quartet: native FP4 training can be optimal for large language models .
+ 
+ External Links: 2505.14669 ,
+ Link 
+ 
+ Cited by: §1 .
+ 
+
+ Chen et al. (2026a) 
+ J. Chen, V. Egiazarian, R. L. Castro, T. Hoefler, and D. Alistarh 
+ 
+ WUSH: near-optimal adaptive transforms for LLM quantization .
+ 
+ In Forty-third International Conference on Machine Learning ,
+ 
+ External Links: Link 
+ 
+ Cited by: Appendix A .
+ 
+
+ Chen et al. (2021) 
+ M. Chen, J. Tworek, H. Jun, Q. Yuan, H. P. de Oliveira Pinto, J. Kaplan, H. Edwards, Y. Burda, N. Joseph, G. Brockman, A. Ray, R. Puri, G. Krueger, M. Petrov, H. Khlaaf, G. Sastry, P. Mishkin, B. Chan, S. Gray, N. Ryder, M. Pavlov, A. Power, L. Kaiser, M. Bavarian, C. Winter, P. Tillet, F. P. Such, D. Cummings, M. Plappert, F. Chantzis, E. Barnes, A. Herbert-Voss, W. H. Guss, A. Nichol, A. Paino, N. Tezak, J. Tang, I. Babuschkin, S. Balaji, S. Jain, W. Saunders, C. Hesse, A. N. Carr, J. Leike, J. Achiam, V. Misra, E. Morikawa, A. Radford, M. Knight, M. Brundage, M. Murati, K. Mayer, P. Welinder, B. McGrew, D. Amodei, S. McCandlish, I. Sutskever, and W. Zaremba 
+ 
+ Evaluating large language models trained on code .
+ 
+ External Links: 2107.03374 ,
+ Link 
+ 
+ Cited by: 1st item .
+ 
+
+ Chen et al. (2026b) 
+ Y. Chen, Y. Liu, X. Xu, P. Zhang, M. Beyer, M. Rapp, J. Zhu, and J. Chen 
+ 
+ TetraJet-v2: accurate NVFP4 training for large language models with oscillation suppression and outlier control .
+ 
+ External Links: 2510.27527 ,
+ Link 
+ 
+ Cited by: §1 .
+ 
+
+ Cobbe et al. (2021) 
+ K. Cobbe, V. Kosaraju, M. Bavarian, M. Chen, H. Jun, L. Kaiser, M. Plappert, J. Tworek, J. Hilton, R. Nakano, C. Hesse, and J. Schulman 
+ 
+ Training verifiers to solve math word problems .
+ 
+ External Links: 2110.14168 ,
+ Link 
+ 
+ Cited by: 1st item .
+ 
+
+ Courbariaux et al. (2016) 
+ M. Courbariaux, Y. Bengio, and J. David 
+ 
+ BinaryConnect: training deep neural networks with binary weights during propagations .
+ 
+ External Links: 1511.00363 ,
+ Link 
+ 
+ Cited by: §1 .
+ 
+
+ DeepSeek-AI (2024) 
+ DeepSeek-AI 
+ 
+ DeepSeek-V3 technical report .
+ 
+ arXiv preprint arXiv:2412.19437 .
+ 
+ Cited by: §6 .
+ 
+
+ Dettmers et al. (2022) 
+ T. Dettmers, M. Lewis, Y. Belkada, and L. Zettlemoyer 
+ 
+ LLM.int8(): 8-bit matrix multiplication for transformers at scale .
+ 
+ In Advances in Neural Information Processing Systems ,
+ 
+ Cited by: §6 .
+ 
+
+ Dettmers et al. (2024) 
+ T. Dettmers, R. Svirschevski, V. Egiazarian, D. Kuznedelev, E. Frantar, S. Ashkboos, A. Borzunov, T. Hoefler, and D. Alistarh 
+ 
+ SpQR: a sparse-quantized representation for near-lossless LLM weight compression .
+ 
+ In International Conference on Learning Representations ,
+ 
+ Cited by: §6 .
+ 
+
+ Diao et al. (2025) 
+ S. Diao, Y. Yang, Y. Fu, X. Dong, D. Su, M. Kliegl, Z. Chen, P. Belcak, Y. Suhara, H. Yin, M. Patwary, Y. (. Lin, J. Kautz, and P. Molchanov 
+ 
+ Nemotron-CLIMB: clustering-based iterative data mixture bootstrapping for language model pre-training .
+ 
+ In Advances in Neural Information Processing Systems ,
+ 
+ External Links: Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ Dong et al. (2020) 
+ Z. Dong, Z. Yao, D. Arfeen, A. Gholami, M. Mahoney, and K. Keutzer 
+ 
+ HAWQ-V2: hessian aware trace-weighted quantization of neural networks .
+ 
+ In Advances in Neural Information Processing Systems ,
+ 
+ External Links: Link 
+ 
+ Cited by: §6 .
+ 
+
+ Dong et al. (2019) 
+ Z. Dong, Z. Yao, A. Gholami, M. W. Mahoney, and K. Keutzer 
+ 
+ HAWQ: Hessian AWare Quantization of neural networks with mixed-precision .
+ 
+ In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) ,
+ 
+ Cited by: §6 .
+ 
+
+ Frantar and Alistarh (2022) 
+ E. Frantar and D. Alistarh 
+ 
+ SPDY: accurate pruning with speedup guarantees .
+ 
+ In International Conference on Machine Learning ,
+ 
+ Cited by: §6 .
+ 
+
+ Frantar et al. (2023) 
+ E. Frantar, S. Ashkboos, T. Hoefler, and D. Alistarh 
+ 
+ GPTQ: accurate post-training quantization for generative pre-trained transformers .
+ 
+ In International Conference on Learning Representations ,
+ 
+ Cited by: §6 .
+ 
+
+ Frantar et al. (2022) 
+ E. Frantar, S. P. Singh, and D. Alistarh 
+ 
+ Optimal brain compression: a framework for accurate post-training quantization and pruning .
+ 
+ In Advances in Neural Information Processing Systems ,
+ 
+ Cited by: §6 .
+ 
+
+ Gao et al. (2023) 
+ L. Gao, J. Tow, B. Abbasi, S. Biderman, S. Black, A. DiPofi, C. Foster, L. Golding, J. Hsu, A. Le Noac’h, H. Li, K. McDonell, N. Muennighoff, C. Ociepa, J. Phang, L. Reynolds, H. Schoelkopf, A. Skowron, L. Sutawika, E. Tang, A. Thite, B. Wang, K. Wang, and A. Zou 
+ 
+ A framework for few-shot language model evaluation .
+ 
+ Zenodo .
+ 
+ External Links: Document ,
+ Link 
+ 
+ Cited by: §I.1 .
+ 
+
+ Gish and Pierce (1968) 
+ H. Gish and J. Pierce 
+ 
+ Asymptotically efficient quantizing .
+ 
+ IEEE Transactions on Information Theory 14 ( 5 ), pp. 676–683 .
+ 
+ Cited by: Appendix B .
+ 
+
+ He et al. (2018) 
+ Y. He, J. Lin, Z. Liu, H. Wang, L. Li, and S. Han 
+ 
+ AMC: AutoML for model compression and acceleration on mobile devices .
+ 
+ In European Conference on Computer Vision (ECCV) ,
+ 
+ Cited by: §6 .
+ 
+
+ Helcig and Alistarh (2026) 
+ M. Helcig and D. Alistarh 
+ 
+ Model compression with exact budget constraints via Riemannian manifolds .
+ 
+ External Links: 2605.00649 ,
+ Link 
+ 
+ Cited by: §6 .
+ 
+
+ Helcig et al. (2026) 
+ M. Helcig, E. Kurtic, and D. Alistarh 
+ 
+ Statistically-lossless quantization of large language models .
+ 
+ External Links: 2605.02404 ,
+ Link 
+ 
+ Cited by: §6 .
+ 
+
+ Hu et al. (2024) 
+ S. Hu, Y. Tu, X. Han, C. He, G. Cui, X. Long, Z. Zheng, Y. Fang, Y. Huang, W. Zhao, X. Zhang, Z. L. Thai, K. Zhang, C. Wang, Y. Yao, C. Zhao, J. Zhou, J. Cai, Z. Zhai, N. Ding, C. Jia, G. Zeng, D. Li, Z. Liu, and M. Sun 
+ 
+ MiniCPM: unveiling the potential of small language models with scalable training strategies .
+ 
+ External Links: 2404.06395 ,
+ Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ Hu et al. (2025) 
+ Y. Hu, W. Huang, Z. Liang, C. Chen, J. Zhang, J. Zhu, and J. Chen 
+ 
+ Identifying sensitive weights via post-quantization integral .
+ 
+ External Links: 2503.01901 ,
+ Link 
+ 
+ Cited by: §6 .
+ 
+
+ Huang et al. (2025) 
+ W. Huang, H. Qin, Y. Liu, Y. Li, Q. Liu, X. Liu, L. Benini, M. Magno, S. Zhang, and X. Qi 
+ 
+ SliM-LLM: salience-driven mixed-precision quantization for large language models .
+ 
+ In International Conference on Machine Learning ,
+ 
+ Cited by: §6 .
+ 
+
+ Hutchinson (1990) 
+ M.F. Hutchinson 
+ 
+ A stochastic estimator of the trace of the influence matrix for laplacian smoothing splines .
+ 
+ Communications in Statistics - Simulation and Computation 18 , pp. 1059–1076 .
+ 
+ External Links: Document 
+ 
+ Cited by: §3 .
+ 
+
+ Jacob et al. (2018) 
+ B. Jacob, S. Kligys, B. Chen, M. Zhu, M. Tang, A. Howard, H. Adam, and D. Kalenichenko 
+ 
+ Quantization and training of neural networks for efficient integer-arithmetic-only inference .
+ 
+ In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR) ,
+ 
+ Cited by: §1 .
+ 
+
+ Jordan et al. (2024) 
+ K. Jordan, Y. Jin, V. Boza, J. You, F. Cesista, L. Newhouse, and J. Bernstein 
+ 
+ Muon: an optimizer for hidden layers in neural networks .
+ 
+ External Links: Link 
+ 
+ Cited by: Appendix D ,
+ §4.1 .
+ 
+
+ Kim et al. (2024) 
+ S. Kim, C. Hooper, A. Gholami, Z. Dong, X. Li, S. Shen, M. W. Mahoney, and K. Keutzer 
+ 
+ SqueezeLLM: dense-and-sparse quantization .
+ 
+ In International Conference on Machine Learning ,
+ 
+ Cited by: §6 .
+ 
+
+ Kingma and Ba (2017) 
+ D. P. Kingma and J. Ba 
+ 
+ Adam: a method for stochastic optimization .
+ 
+ External Links: 1412.6980 ,
+ Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ Kwiatkowski et al. (2019) 
+ T. Kwiatkowski, J. Palomaki, O. Redfield, M. Collins, A. Parikh, C. Alberti, D. Epstein, I. Polosukhin, J. Devlin, K. Lee, K. Toutanova, L. Jones, M. Kelcey, M. Chang, A. M. Dai, J. Uszkoreit, Q. Le, and S. Petrov 
+ 
+ Natural questions: a benchmark for question answering research .
+ 
+ Transactions of the Association for Computational Linguistics 7 , pp. 452–466 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: 1st item .
+ 
+
+ Lambert et al. (2025) 
+ N. Lambert, J. Morrison, V. Pyatkin, S. Huang, H. Ivison, F. Brahman, L. J. V. Miranda, A. Liu, N. Dziri, S. Lyu, Y. Gu, S. Malik, V. Graf, J. D. Hwang, J. Yang, R. L. Bras, O. Tafjord, C. Wilhelm, L. Soldaini, N. A. Smith, Y. Wang, P. Dasigi, and H. Hajishirzi 
+ 
+ Tulu 3: pushing frontiers in open language model post-training .
+ 
+ External Links: 2411.15124 ,
+ Link 
+ 
+ Cited by: Appendix D ,
+ §4.4 .
+ 
+
+ Lin et al. (2022) 
+ S. Lin, J. Hilton, and O. Evans 
+ 
+ TruthfulQA: measuring how models mimic human falsehoods .
+ 
+ In Proceedings of the 60th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , S. Muresan, P. Nakov, and A. Villavicencio (Eds.) ,
+ 
+ Dublin, Ireland , pp. 3214–3252 .
+ 
+ External Links: Link ,
+ Document 
+ 
+ Cited by: 1st item .
+ 
+
+ Liu et al. (2025a) 
+ J. Liu, J. Su, X. Yao, Z. Jiang, G. Lai, Y. Du, Y. Qin, W. Xu, E. Lu, J. Yan, Y. Chen, H. Zheng, Y. Liu, S. Liu, B. Yin, W. He, H. Zhu, Y. Wang, J. Wang, M. Dong, Z. Zhang, Y. Kang, H. Zhang, X. Xu, Y. Zhang, Y. Wu, X. Zhou, and Z. Yang 
+ 
+ Muon is scalable for LLM training .
+ 
+ External Links: 2502.16982 ,
+ Link 
+ 
+ Cited by: Appendix D .
+ 
+
+ Liu et al. (2025b) 
+ Z. Liu, C. Zhao, H. Huang, S. Chen, J. Zhang, J. Zhao, S. Roy, L. Jin, Y. Xiong, Y. Shi, L. Xiao, Y. Tian, B. Soran, R. Krishnamoorthi, T. Blankevoort, and V. Chandra 
+ 
+ ParetoQ: improving scaling laws in extremely low-bit llm quantization .
+ 
+ External Links: 2502.02631 ,
+ Link 
+ 
+ Cited by: §2 .
+ 
+
+ Loshchilov and Hutter (2019) 
+ I. Loshchilov and F. Hutter 
+ 
+ Decoupled weight decay regularization .
+ 
+ External Links: 1711.05101 ,
+ Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ Malinovskii et al. (2025) 
+ V. Malinovskii, A. Panferov, I. Ilin, H. Guo, P. Richtárik, and D. Alistarh 
+ 
+ HIGGS: pushing the limits of large language model quantization via the linearity theorem .
+ 
+ In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) ,
+ 
+ External Links: Link 
+ 
+ Cited by: Appendix A ,
+ §1 ,
+ §1 ,
+ §3 ,
+ §6 .
+ 
+
+ NVIDIA et al. (2026) 
+ NVIDIA, F. Abecassis, A. Agrusa, D. Ahn, J. Alben, S. Alborghetti, M. Andersch, S. Arayandi, A. Bjorlin, A. Blakeman, E. Briones, I. Buck, B. Catanzaro, M. Chang, J. Choi, M. Chrzanowski, E. Chung, V. Cui, S. Dai, B. D. Rouhani, C. del Mundo, D. Donia, B. Eryilmaz, H. Estela, A. Goel, O. Goncharov, Y. Guvvala, R. Hesse, R. Hewett, H. Hum, U. Kapasi, B. Khailany, M. Khona, N. Knight, A. Kondratenko, R. Krashinsky, B. Lanir, S. Layton, M. Lightstone, D. Lo, P. Micikevicius, A. Mishra, T. Moon, D. Narayanan, C. Ni, A. Paithankar, S. Pasumarthi, A. Patel, M. Patwary, A. Poojary, G. Prasad, S. Priyadarshi, Y. Qin, X. Ren, O. Rybakov, C. Sakr, S. Satheesh, S. Sergienko, P. Shamis, K. Shankar, N. Sharma, M. Shoeybi, M. Siu, M. Smelyanskiy, D. Stosic, D. Stosic, B. Su, F. Sun, N. Tajbakhsh, S. Thomas, P. Tredak, E. Tsykunov, G. Vaithilingam, A. Vavre, R. Venkatesan, R. Waleffe, Q. Wan, H. Wang, M. Wang, L. Wei, H. Wu, E. Wu, K. Wyss, N. Xu, J. Xue, C. Yang, Y. Zhai, R. Zhang, J. Zhu, and Z. Zhu 
+ 
+ Pretraining large language models with NVFP4 .
+ 
+ External Links: 2509.25149 ,
+ Link 
+ 
+ Cited by: Figure 1 ,
+ §1 ,
+ §1 ,
+ §1 ,
+ §4.1 ,
+ §6 .
+ 
+
+ Olmo: et al. (2026) 
+ T. Olmo:, A. Ettinger, A. Bertsch, B. Kuehl, D. Graham, D. Heineman, D. Groeneveld, F. Brahman, F. Timbers, H. Ivison, J. Morrison, J. Poznanski, K. Lo, L. Soldaini, M. Jordan, M. Chen, M. Noukhovitch, N. Lambert, P. Walsh, P. Dasigi, R. Berry, S. Malik, S. Shah, S. Geng, S. Arora, S. Gupta, T. Anderson, T. Xiao, T. Murray, T. Romero, V. Graf, A. Asai, A. Bhagia, A. Wettig, A. Liu, A. Rangapur, C. Anastasiades, C. Huang, D. Schwenk, H. Trivedi, I. Magnusson, J. Lochner, J. Liu, L. J. V. Miranda, M. Sap, M. Morgan, M. Schmitz, M. Guerquin, M. Wilson, R. Huff, R. L. Bras, R. Xin, R. Shao, S. Skjonsberg, S. Z. Shen, S. S. Li, T. Wilde, V. Pyatkin, W. Merrill, Y. Chang, Y. Gu, Z. Zeng, A. Sabharwal, L. Zettlemoyer, P. W. Koh, A. Farhadi, N. A. Smith, and H. Hajishirzi 
+ 
+ Olmo 3 .
+ 
+ External Links: 2512.13961 ,
+ Link 
+ 
+ Cited by: Figure 13 .
+ 
+
+ OLMo: et al. (2025) 
+ T. OLMo:, P. Walsh, L. Soldaini, D. Groeneveld, K. Lo, S. Arora, A. Bhagia, Y. Gu, S. Huang, M. Jordan, N. Lambert, D. Schwenk, O. Tafjord, T. Anderson, D. Atkinson, F. Brahman, C. Clark, P. Dasigi, N. Dziri, A. Ettinger, M. Guerquin, D. Heineman, H. Ivison, P. W. Koh, J. Liu, S. Malik, W. Merrill, L. J. V. Miranda, J. Morrison, T. Murray, C. Nam, J. Poznanski, V. Pyatkin, A. Rangapur, M. Schmitz, S. Skjonsberg, D. Wadden, C. Wilhelm, M. Wilson, L. Zettlemoyer, A. Farhadi, N. A. Smith, and H. Hajishirzi 
+ 
+ 2 olmo 2 furious .
+ 
+ External Links: 2501.00656 ,
+ Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ Pan et al. (2026) 
+ Y. Pan, Y. Yang, H. Yang, and S. Mahlke 
+ 
+ SNIP: an adaptive mixed precision framework for subbyte large language model training .
+ 
+ External Links: 2602.01410 ,
+ Document ,
+ Link 
+ 
+ Cited by: Appendix E ,
+ Appendix G ,
+ Figure 1 ,
+ §1 ,
+ §1 ,
+ §3 ,
+ §4.1 ,
+ §4.2 ,
+ §4.3 ,
+ 6(a) ,
+ §6 .
+ 
+
+ Panferov et al. (2026) 
+ A. Panferov, E. Schultheis, S. Tabesh, and D. Alistarh 
+ 
+ Quartet II: accurate LLM pre-training in NVFP4 by improved unbiased gradient estimation .
+ 
+ External Links: 2601.22813 ,
+ Link 
+ 
+ Cited by: Appendix D ,
+ §4.1 .
+ 
+
+ Pisinger (1995) 
+ D. Pisinger 
+ 
+ A minimal algorithm for the multiple-choice knapsack problem .
+ 
+ European Journal of Operational Research 83 ( 2 ), pp. 394–410 .
+ 
+ Cited by: §3 .
+ 
+
+ Rouhani et al. (2023) 
+ B. D. Rouhani, R. Zhao, A. More, M. Hall, A. Khodamoradi, S. Deng, D. Choudhary, M. Cornea, E. Dellinger, K. Denolf, S. Dusan, V. Elango, M. Golub, A. Heinecke, P. James-Roxby, D. Jani, G. Kolhe, M. Langhammer, A. Li, L. Melnick, M. Mesmakhosroshahi, A. Rodriguez, M. Schulte, R. Shafipour, L. Shao, M. Siu, P. Dubey, P. Micikevicius, M. Naumov, C. Verrilli, R. Wittig, D. Burger, and E. Chung 
+ 
+ Microscaling data formats for deep learning .
+ 
+ External Links: 2310.10537 ,
+ Link 
+ 
+ Cited by: §1 .
+ 
+
+ Schaefer et al. (2023) 
+ C. J. Schaefer, N. Lambert-Shirzad, X. Zhang, C. Chou, T. Jablin, J. Li, E. Guo, C. Stanton, S. Joshi, and Y. E. Wang 
+ 
+ Augmenting hessians with inter-layer dependencies for mixed-precision post-training quantization .
+ 
+ External Links: 2306.04879 ,
+ Link 
+ 
+ Cited by: §6 .
+ 
+
+ Sieberling et al. (2025) 
+ O. Sieberling, D. Kuznedelev, E. Kurtic, and D. Alistarh 
+ 
+ EvoPress: accurate dynamic model compression via evolutionary search .
+ 
+ In International Conference on Machine Learning ,
+ 
+ Cited by: §6 .
+ 
+
+ Su et al. (2023) 
+ J. Su, Y. Lu, S. Pan, A. Murtadha, B. Wen, and Y. Liu 
+ 
+ RoFormer: enhanced transformer with rotary position embedding .
+ 
+ External Links: 2104.09864 ,
+ Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ Team (2025) 
+ Q. Team 
+ 
+ Qwen3 technical report .
+ 
+ External Links: 2505.09388 ,
+ Link 
+ 
+ Cited by: §4.4 .
+ 
+
+ Uhlich et al. (2020) 
+ S. Uhlich, L. Mauch, F. Cardinaux, K. Yoshiyama, J. A. Garcia, S. Tiedemann, T. Kemp, and A. Nakamura 
+ 
+ Mixed precision DNNs: all you need is a good parametrization .
+ 
+ In International Conference on Learning Representations ,
+ 
+ Cited by: §6 .
+ 
+
+ van Baalen et al. (2020) 
+ M. van Baalen, C. Louizos, M. Nagel, R. A. Amjad, Y. Wang, T. Blankevoort, and M. Welling 
+ 
+ Bayesian bits: unifying quantization and pruning .
+ 
+ In Advances in Neural Information Processing Systems ,
+ 
+ Cited by: §6 .
+ 
+
+ Vaswani et al. (2017) 
+ A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, and I. Polosukhin 
+ 
+ Attention is all you need .
+ 
+ In Advances in Neural Information Processing Systems , I. Guyon, U. V. Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (Eds.) ,
+ 
+ Vol. 30 , pp.  .
+ 
+ External Links: Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ von Werra et al. (2020) 
+ L. von Werra, Y. Belkada, L. Tunstall, E. Beeching, T. Thrush, N. Lambert, S. Huang, K. Rasul, and Q. Gallouédec 
+ 
+ TRL: Transformers Reinforcement Learning .
+ 
+ Note: https://github.com/huggingface/trl 
+ 
+ External Links: Link 
+ 
+ Cited by: Appendix D .
+ 
+
+ Wang et al. (2019) 
+ K. Wang, Z. Liu, Y. Lin, J. Lin, and S. Han 
+ 
+ HAQ: hardware-aware automated quantization with mixed precision .
+ 
+ In IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) ,
+ 
+ Cited by: §6 .
+ 
+
+ Wu et al. (2018) 
+ B. Wu, Y. Wang, P. Zhang, Y. Tian, P. Vajda, and K. Keutzer 
+ 
+ Mixed precision quantization of ConvNets via differentiable neural architecture search .
+ 
+ arXiv preprint arXiv:1812.00090 .
+ 
+ Cited by: §6 ,
+ §6 .
+ 
+
+ Xiao et al. (2023) 
+ G. Xiao, J. Lin, M. Seznec, H. Wu, J. Demouth, and S. Han 
+ 
+ SmoothQuant: accurate and efficient post-training quantization for large language models .
+ 
+ In International Conference on Machine Learning ,
+ 
+ Cited by: §6 .
+ 
+
+ Yang et al. (2025) 
+ A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu 
+ 
+ Qwen3 technical report .
+ 
+ External Links: 2505.09388 ,
+ Link 
+ 
+ Cited by: Appendix D ,
+ §4.1 .
+ 
+
+ Yao et al. (2021) 
+ Z. Yao, Z. Dong, Z. Zheng, A. Gholami, J. Yu, E. Tan, L. Wang, Q. Huang, Y. Wang, M. W. Mahoney, and K. Keutzer 
+ 
+ HAWQ-V3: dyadic neural network quantization .
+ 
+ In International Conference on Machine Learning ,
+ 
+ Cited by: §6 .
+ 
+
+ Zhang and Sennrich (2019) 
+ B. Zhang and R. Sennrich 
+ 
+ Root mean square layer normalization .
+ 
+ External Links: 1910.07467 ,
+ Link 
+ 
+ Cited by: §4.1 .
+ 
+
+ Zhou et al. (2023) 
+ J. Zhou, T. Lu, S. Mishra, S. Brahma, S. Basu, Y. Luan, D. Zhou, and L. Hou 
+ 
+ Instruction-following evaluation for large language models .
+ 
+ External Links: 2311.07911 ,
+ Link 
+ 
+ Cited by: 1st item .
+ 
+
+ 
+
+ 
+
+ 
+ Appendix A Modeling loss under quantization noise
+
+ 
+ Lemma A.1 (Expected loss under zero-mean quantization noise) . 
+
+ 
+ Let i = 1 , … , n i=1,\dots,n index model layers and W = ( W 1 , … , W n ) W=(W_{1},\ldots,W_{n}) denote the set of full-precision model parameters.
+Let w i = vec ⁡ ( W i ) ∈ ℝ d i w_{i}=\operatorname{vec}(W_{i})\in\mathbb{R}^{d_{i}} be vectorized form of W i W_{i} .
+Assume that in a neighborhood
+of W W , L ⁡ ( W ) L(W) is twice continuously differentiable and that its Hessian is Lipschitz. 
+
+ 
+ Let δ ​ w i := vec ⁡ ( δ ​ W i ) \delta w_{i}:=\operatorname{vec}(\delta W_{i}) be random perturbations with finite second and third moments satisfying 
+
+ 
+
+ 
+ 
+ 𝔼 ⁡ [ δ ​ w i ] = 0 , 𝔼 ⁡ [ δ ​ w i ​ δ ​ w i ⊤ ] = Σ i , \mathbb{E}[\delta w_{i}]=0,\qquad\mathbb{E}[\delta w_{i}\delta w_{i}^{\top}]=\Sigma_{i}, 
+ 
+ (7) 
+ 
+ 
+ and assume that perturbations of different layers are uncorrelated, 
+
+ 
+
+ 
+ 
+ 𝔼 ⁡ [ δ ​ w i ​ δ ​ w j ⊤ ] = 0 , i ≠ j . \mathbb{E}[\delta w_{i}\delta w_{j}^{\top}]=0,\qquad i\neq j. 
+ 
+ (8) 
+ 
+ 
+ Then, for sufficiently small perturbations, 
+
+ 
+
+ 
+ 
+ 𝔼 ⁡ [ L ⁡ ( W + δ ​ W ) − L ⁡ ( W ) ] = 1 2 ​ ∑ i = 1 n Tr ( H ii ​ Σ i ) + O ⁡ ( 𝔼 ​ ‖ δ ​ W ‖ 3 ) , \mathbb{E}\!\left[L(W+\delta W)-L(W)\right]=\frac{1}{2}\sum_{i=1}^{n}\Tr\!\left(H_{ii}\Sigma_{i}\right)+O\!\left(\mathbb{E}\|\delta W\|^{3}\right), 
+ 
+ (9) 
+ 
+ 
+ where H i ​ j := ∂ 2 L ⁡ ( W ) ∂ w i ​ ∂ w j ∈ ℝ d i × d j \displaystyle H_{ij}:=\frac{\partial^{2}L(W)}{\partial w_{i}\,\partial w_{j}}\in\mathbb{R}^{d_{i}\times d_{j}} denotes the ( i , j ) (i,j) block of the Hessian. 
+
+ 
+ Proof.
+
+ 
+ A second-order Taylor expansion of L L around W W gives 
+
+ 
+ 
+ 
+ 
+ L ⁡ ( W + δ ​ W ) − L ⁡ ( W ) \displaystyle L(W+\delta W)-L(W) 
+ = ∑ i ⟨ ∇ w i L ​ ( W ) , δ ​ w i ⟩ + 1 2 ​ ∑ i , j δ ​ w i ⊤ ​ H i ​ j ​ δ ​ w j + R 3 ​ ( δ ​ W ) . \displaystyle=\sum_{i}\left\langle\nabla_{w_{i}}L(W),\delta w_{i}\right\rangle+\frac{1}{2}\sum_{i,j}\delta w_{i}^{\top}H_{ij}\delta w_{j}+R_{3}(\delta W). 
+ 
+ (10) 
+ 
+ 
+ Since the Hessian is locally Lipschitz, there exists
+a constant C > 0 C>0 , independent of δ ​ W \delta W , such that
+ | R 3 ​ ( δ ​ W ) | ≤ C ​ ‖ δ ​ W ‖ 3 . |R_{3}(\delta W)|\leq C\|\delta W\|^{3}. 
+Consequently, 
+
+ 
+
+ 
+ 
+ | 𝔼 ⁡ [ R 3 ​ ( δ ​ W ) ] | ≤ C ​ 𝔼 ​ ‖ δ ​ W ‖ 3 . \left|\mathbb{E}[R_{3}(\delta W)]\right|\leq C\,\mathbb{E}\|\delta W\|^{3}. 
+ 
+ (11) 
+ 
+ 
+ Taking expectations in Eq. ( 10 ), the first-order
+term vanishes since 𝔼 ⁡ [ δ ​ w i ] = 0 \mathbb{E}[\delta w_{i}]=0 .
+By Eq. ( 8 ) second order term gives 
+
+ 
+
+ 
+ 
+ 𝔼 ⁡ [ δ ​ w i ⊤ ​ H i ​ j ​ δ ​ w j ] = Tr ( H ij ​ 𝔼 ​ [ δ ​ w j ​ δ ​ w i ⊤ ] ) = { Tr ( H ii Σ i )  for  i = j , 0 ​  for  ​ i ≠ j . \mathbb{E}\!\left[\delta w_{i}^{\top}H_{ij}\delta w_{j}\right]=\Tr\!\left(H_{ij}\mathbb{E}[\delta w_{j}\delta w_{i}^{\top}]\right)=\begin{cases}\Tr(H_{ii}\Sigma_{i})\text{ for }i=j,\\
+0\text{ for }i\neq j.\end{cases} 
+ 
+ (12) 
+ 
+ 
+ Substituting these identities into Eq. ( 10 )
+gives Eq. ( 9 ).
+∎ 
+
+ 
+ Next we consider two specific noise models.
+
+ 
+ Case 1: Isotropic quantization noise.
+
+ 
+ Suppose that the quantization perturbation of layer i i is modeled as
+isotropic zero-mean noise,
+
+ 
+
+ 
+ 
+ 𝔼 ⁡ [ δ ​ w i ] = 0 , 𝔼 ⁡ [ δ ​ w i ​ δ ​ w i ⊤ ] = Σ i = σ i 2 ​ I . \mathbb{E}[\delta w_{i}]=0,\qquad\mathbb{E}[\delta w_{i}\delta w_{i}^{\top}]=\Sigma_{i}=\sigma_{i}^{2}\operatorname{I}. 
+ 
+ (13) 
+ 
+ 
+ Then Lemma  A.1 gives
+
+ 
+
+ 
+ 
+ 𝔼 [ L ( W + δ W ) − L ( W ) ] = 1 2 ∑ i Tr ( H ii ) σ i 2 + O ( 𝔼 ∥ δ W ∥ 3 ) . \mathbb{E}\!\left[L(W+\delta W)-L(W)\right]=\frac{1}{2}\sum_{i}\Tr(H_{ii})\,\sigma_{i}^{2}+O\!\left(\mathbb{E}\|\delta W\|^{3}\right). 
+ 
+ (14) 
+ 
+ 
+ By definition,
+
+ 
+
+ 
+ 
+ MSE ( W i + δ W i , W i ) := 1 d i 𝔼 ∥ δ w i ∥ 2 2 = 1 d i Tr ( σ i 2 I ) = σ i 2 . \operatorname{MSE}(W_{i}+\delta W_{i},W_{i}):=\frac{1}{d_{i}}\mathbb{E}\|\delta w_{i}\|_{2}^{2}=\frac{1}{d_{i}}\Tr(\sigma_{i}^{2}I)=\sigma_{i}^{2}. 
+ 
+ (15) 
+ 
+ 
+ Therefore, defining α i iso := 1 2 Tr ( H ii ) \displaystyle\alpha_{i}^{\mathrm{iso}}:=\frac{1}{2}\Tr(H_{ii}) 
+we obtain
+
+ 
+
+ 
+ 
+ 𝔼 ⁡ [ L ⁡ ( W + δ ​ W ) − L ⁡ ( W ) ] = ∑ i α i iso ​ MSE ⁡ ( W i + δ ​ W i , W i ) + O ⁡ ( 𝔼 ​ ‖ δ ​ W ‖ 3 ) . \mathbb{E}\!\left[L(W+\delta W)-L(W)\right]=\sum_{i}\alpha_{i}^{\mathrm{iso}}\,\operatorname{MSE}(W_{i}+\delta W_{i},W_{i})+O\!\left(\mathbb{E}\|\delta W\|^{3}\right). 
+ 
+ (16) 
+ 
+ 
+
+ 
+ Case 2: Floating-point quantization noise.
+
+ 
+ For floating-point formats, the magnitude of the quantization error
+is proportional to the magnitude of the weight.
+We therefore consider the multiplicative perturbation model
+
+ 
+
+ 
+ 
+ δ ​ w i = diag ⁡ ( w i ) ​ ν i = w i ⊙ ν i , \delta w_{i}=\operatorname{diag}(w_{i})\nu_{i}=w_{i}\odot\nu_{i}, 
+ 
+ (17) 
+ 
+ 
+ where the entries of ν i \nu_{i} are i.i.d. with
+ 𝔼 ⁡ [ ν i ] = 0 , 𝔼 ⁡ [ ν i ​ ν i ⊤ ] = σ i 2 ​ I \mathbb{E}[\nu_{i}]=0,\quad\mathbb{E}[\nu_{i}\nu_{i}^{\top}]=\sigma_{i}^{2}I , similarly to Chen et al. (2026a) .
+
+ 
+ The covariance of the resulting perturbation is
+
+ 
+
+ 
+ 
+ Σ i \displaystyle\Sigma_{i} 
+ = 𝔼 ⁡ [ δ ​ w i ​ δ ​ w i ⊤ ] = diag ⁡ ( w i ) ​ 𝔼 ​ [ ν i ​ ν i ⊤ ] ​ diag ⁡ ( w i ) = σ i 2 ​ diag ⁡ ( w i 2 ) . \displaystyle=\mathbb{E}[\delta w_{i}\delta w_{i}^{\top}]=\operatorname{diag}(w_{i})\mathbb{E}[\nu_{i}\nu_{i}^{\top}]\operatorname{diag}(w_{i})=\sigma_{i}^{2}\operatorname{diag}(w_{i}^{2}). 
+ 
+ (18) 
+ 
+ 
+ Lemma  A.1 yields
+
+ 
+
+ 
+ 
+ 𝔼 [ L ( W + δ W ) − L ( W ) ] = 1 2 ∑ i σ i 2 Tr ( H ii diag ( w i 2 ) ) + O ( 𝔼 ∥ δ W ∥ 3 ) . \mathbb{E}\!\left[L(W+\delta W)-L(W)\right]=\frac{1}{2}\sum_{i}\sigma_{i}^{2}\Tr\!\left(H_{ii}\operatorname{diag}(w_{i}^{2})\right)+O\!\left(\mathbb{E}\|\delta W\|^{3}\right). 
+ 
+ (19) 
+ 
+ 
+ The mean squared error is MSE ⁡ ( W i + δ ​ W i , W i ) = 1 d i ​ 𝔼 ​ ‖ δ ​ w i ‖ 2 2 = σ i 2 d i ​ ‖ w i ‖ 2 2 \displaystyle\operatorname{MSE}(W_{i}+\delta W_{i},W_{i})=\frac{1}{d_{i}}\mathbb{E}\|\delta w_{i}\|_{2}^{2}=\frac{\sigma_{i}^{2}}{d_{i}}\|w_{i}\|_{2}^{2} .
+
+ 
+ Thus, assuming ‖ w i ‖ 2 > 0 \|w_{i}\|_{2}>0 , we define α i FP := d i 2 ​ ‖ w i ‖ 2 2 Tr ( H ii diag ( w i 2 ) ) \displaystyle\alpha_{i}^{\mathrm{FP}}:=\frac{d_{i}}{2\|w_{i}\|_{2}^{2}}\Tr\!\left(H_{ii}\operatorname{diag}(w_{i}^{2})\right) ,
+and in order to again express the expected loss change as
+
+ 
+
+ 
+ 
+ 𝔼 ⁡ [ L ⁡ ( W + δ ​ W ) − L ⁡ ( W ) ] = ∑ i α i FP ​ MSE ⁡ ( W i + δ ​ W i , W i ) + O ⁡ ( 𝔼 ​ ‖ δ ​ W ‖ 3 ) . \mathbb{E}\!\left[L(W+\delta W)-L(W)\right]=\sum_{i}\alpha_{i}^{\mathrm{FP}}\,\operatorname{MSE}(W_{i}+\delta W_{i},W_{i})+O\!\left(\mathbb{E}\|\delta W\|^{3}\right). 
+ 
+ (20) 
+ 
+ 
+ Notice that
+ Tr ( H ii ​ diag ⁡ ( w i 2 ) ) = ∑ k = 1 d i ( H ii ) kk ​ w i , k 2 , \Tr\!\left(H_{ii}\operatorname{diag}(w_{i}^{2})\right)=\sum_{k=1}^{d_{i}}(H_{ii})_{kk}w_{i,k}^{2}, 
+so the corresponding sensitivity α i FP \alpha_{i}^{\mathrm{FP}} is diagonal curvature weighted by squared magnitude of the weights.
+
+ 
+ Effect of error normalization.
+
+ 
+ For the floating-point quantization noise, alternatively, one could define
+
+ 
+
+ 
+ 
+ ε i := 𝔼 ​ ‖ δ ​ w i ‖ 2 ‖ w i ‖ 2 , α i := d i Tr ( H ii diag ( w i 2 ) ) \displaystyle\varepsilon_{i}:=\frac{\mathbb{E}||\delta w_{i}||^{2}}{||w_{i}||^{2}},\;\alpha_{i}:=d_{i}\Tr(H_{ii}\operatorname{diag}(w_{i}^{2})) 
+ 
+ (21) 
+ 
+ 
+ and obtain an expression similar to Eq.  20 : 𝔼 ⁡ [ L ⁡ ( W + δ ​ W ) − L ⁡ ( W ) ] ≈ ∑ i α i ​ ε i \mathbb{E}\!\left[L(W+\delta W)-L(W)\right]\approx\sum_{i}\alpha_{i}\,\varepsilon_{i} .
+We additionally investigated whether this alternative choice of normalization affects the performance of our method.
+
+ 
+ In particular, we compared both the weight MSE, ε i = ‖ δ ​ W i ‖ F 2 d i \varepsilon_{i}=\displaystyle\frac{\|\delta W_{i}\|_{F}^{2}}{d_{i}} ,
+and the relative squared error ε i ′ = ‖ δ ​ W i ‖ F 2 ‖ W i ‖ F 2 \displaystyle\varepsilon^{\prime}_{i}=\frac{\|\delta W_{i}\|_{F}^{2}}{\|W_{i}\|_{F}^{2}} following  Malinovskii et al. (2025) . In both cases α i \alpha_{i} were computed folowing the procedure in Alg.  1 .
+
+ 
+ We find that the relative normalization ε i ′ \varepsilon_{i}^{\prime} gives consistently better final models for models trained with Muon, see Table  3 . For AdamW the two choices are within noise for both 350M and 800M models.
+
+ 
+ 
+ 
+ 
+ 
+ 
+ AdamW 
+ Muon 
+
+ 
+ Model 
+ Budget 
+ ε = MSE \varepsilon=\operatorname{MSE} 
+ ε ′ = ‖ δ ​ W i ‖ F 2 ‖ W i ‖ F 2 \varepsilon^{\prime}=\frac{\|\delta W_{i}\|_{F}^{2}}{\|W_{i}\|_{F}^{2}} 
+ Δ \Delta 
+ ε = MSE \varepsilon=\operatorname{MSE} 
+ ε ′ = ‖ δ ​ W i ‖ F 2 ‖ W i ‖ F 2 \varepsilon^{\prime}=\frac{\|\delta W_{i}\|_{F}^{2}}{\|W_{i}\|_{F}^{2}} 
+ Δ \Delta 
+
+ 
+ 350M 
+ 6.0 
+ 2.8598 ± \pm .0014 
+ 2.8600 ± \pm .0003 
+ + 0.0002 +0.0002 
+ 2.8434 ± \pm .0018 
+ 2.8392 ± \pm .0014 
+ − 0.0041 -0.0041 
+
+ 
+ 800M 
+ 5.0 
+ 2.6122 
+ 2.6124 
+ + 0.0002 +0.0002 
+ 2.6105 
+ 2.6090 
+ − 0.0015 -0.0015 
+
+ 
+ 
+ 6.0 
+ 2.6071 
+ 2.6087 
+ + 0.0016 +0.0016 
+ 2.6080 
+ 2.6022 
+ − 0.0058 -0.0058 
+
+ 
+ 
+ Table 3: Final test loss of Q-PACE mixed-precision runs with the error measured as absolute MSE vs. relative to the weight norm;
+ Δ = L ⁡ ( ε ′ ) − L ⁡ ( ε ) \Delta=L(\varepsilon^{\prime})-L(\varepsilon) . 
+ 
+ 
+ Throughout the paper, we use MSE as the general notation for the error term in loss approximation and note that Muon benefits from normalizing by the squared weight norm.
+
+ 
+ Appendix B MSE Estimation: Analytic vs Measured
+
+ 
+ The estimate MSE ^ \widehat{\operatorname{MSE}} can be obtained empirically by measuring the statistics of the actual weight tensors’ quantization error.
+In practice, however, we rely on the efficient analytic approximation,
+ MSE ^ ​ ( Q ⁡ ( W i ) , W i ) ∝ 4 − b i \widehat{\operatorname{MSE}}(Q(W_{i}),W_{i})\propto 4^{-b_{i}} , based on the following analysis.
+
+ 
+ For any bitwidth b b (except BF16 , where no quantization is required),
+assume quantization with a signed uniform b b -bit grid. Then, the quantization
+error of a value x ∈ [ − ξ , ξ ) x\in[-\xi,\xi) is
+
+ 
+
+ 
+ 
+ δ ​ x = q ⁡ ( x ) − x for q ⁡ ( x ) = s ​ clip ⁡ ( round ⁡ ( x / s ) , − 2 b − 1 , 2 b − 1 − 1 ) , \delta x=q(x)-x\qquad\text{for}\qquad q(x)=s\,\operatorname{clip}\bigl(\operatorname{round}(x/s),-2^{b-1},2^{b-1}-1\bigr), 
+ 
+ (22) 
+ 
+ 
+ with scale parameter s = 2 − ( b − 1 ) ​ ξ s=2^{-(b-1)}\xi , i.e. there are 2 b 2^{b} quantization intervals of size s s .
+Assuming that values are distributed approximately uniformly within each quantization interval, the
+rounding error has variance s 2 / 12 s^{2}/12   ( Bennett, 1948 ) .
+Consequently, a natural estimate for the MSE \operatorname{MSE} is
+
+ 
+
+ 
+ 
+ 𝔼 ​ ‖ δ ​ X ‖ 2 ∝ 4 − b , \mathbb{E}\|\delta X\|^{2}\propto 4^{-b}, 
+ 
+ (23) 
+ 
+ 
+ recovering the expressions of high-resolution quantization   ( Gish and Pierce, 1968 ) . Note that the exact constants of proportionality are not important in our application, since they
+will be absorbed automatically in the estimate of α i \alpha_{i} .
+
+ 
+ Employing a single error curve for NVFP4, MXFP6, MXFP8, and BF16 format constitutes a simplifying assumption,
+as these formats differ in element grid, block size, and scale representation.
+However, preliminary experiments using the measured relative weight error for each tier did not improve
+the allocation over Eq. ( 23 ), so we adopt the modeled curve throughout this study.
+
+ 
+ 
+ 
+ 
+ Model 
+ Budget 
+ Error 
+ Final test loss 
+ Improvement over FP4 
+
+ 
+ 
+ 
+ 350M AdamW 
+ 6.33 
+ Analytic 
+ 2.8598 ± 0.0014 2.8598_{\pm 0.0014} 
+ 0.527 ± 0.049 % 0.527_{\pm 0.049}\,\% 
+
+ 
+ Measured 
+ 2.8598 ± 0.0017 2.8598_{\pm 0.0017} 
+ 0.527 ± 0.060 % 0.527_{\pm 0.060}\,\% 
+
+ 
+ 800M AdamW 
+ 5.39 
+ Analytic 
+ 2.6081 \mathbf{2.6081} 
+ 0.298 % \mathbf{0.298}\,\% 
+
+ 
+ Measured 
+ 2.6095 2.6095 
+ 0.242 % 0.242\,\% 
+
+ 
+ 
+ Table 4: Q-PACE with the analytic vs the measured quantization error for MSE estimation in Eq. ( 5 ) model. 
+ 
+
+ 
+ Appendix C On loss linearity vs. forward-pass error
+
+ 
+ Table  5 extends the analysis presented in Figure  2 to all budget cells. Restricting the mixed tiers to the forward pass has minimal impact on the recovered share for any method, and Q-PACE achieves the highest performance in every cell.
+Figure  7 evaluates each model’s final allocation using the sensitivity-weighted weight error ∑ l α l ​ e l \sum_{l}\alpha_{l}e_{l} rather than the activation NMSE. The sensitivities α l \alpha_{l} are refitted on the model’s final weights to reflect the loss increase under weight noise.
+Across both experimental settings and model sizes, the loss increase resulting from quantization, L − L bf16 L-L_{\mathrm{bf16}} , exhibits a linear relationship with this error. This holds whether e l e_{l} is modeled as 4 − b l 4^{-b_{l}} or measured directly on the quantized weights ( r ≥ 0.97 r\geq 0.97 ).
+When using the modeled error, the fitted slope approaches one. In contrast, with the measured error, the slope is approximately one half.
+
+ 
+ 
+ 
+ 
+ (a) 350M, analytical error e l = 4 − b l e_{l}=4^{-b_{l}} . 
+ 
+ 
+ 
+ 
+ (b) 350M, measured error e l ​ ( b l ) e_{l}(b_{l}) . 
+ 
+ 
+ 
+ 
+ (c) 500M, analytical error e l = 4 − b l e_{l}=4^{-b_{l}} . 
+ 
+ 
+ 
+ 
+ (d) 500M, measured error e l ​ ( b l ) e_{l}(b_{l}) . 
+ 
+ 
+ 
+
+ Figure 7: Loss increase from quantization, L − L bf16 L-L_{\mathrm{bf16}} (test loss minus that of the same weights in BF16), against the sensitivity-weighted weight error ∑ l α l ​ e l \sum_{l}\alpha_{l}e_{l} of each model’s final allocation, with α l \alpha_{l} refitted on its final weights. Left: fwd + bwd mixed; right: fwd mixed, bwd FP4. 
+ 
+ 
+ Table 5: Pretraining loss and recovered share of the NVFP4-to-MXFP8 gap (rec.) per budget cell when the tiers set both passes and when they set the forward only (FP4 backward everywhere; each setting against its own MXFP8 run). 
+ 
+ 
+ 
+ 
+ 
+ fwd mixed + bwd mixed 
+ fwd mixed, bwd fp4 
+
+ 
+ Budget 
+ Method 
+ loss 
+ rec. 
+ loss 
+ rec. 
+
+ 
+ 350M: uniform NVFP4 2.8864; uniform MXFP8 2.8480 (fwd mixed + bwd mixed), 2.8545 (fwd mixed, bwd fp4) 
+
+ 
+ 5 { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+ Q-PACE 
+ 2.8677 \mathbf{2.8677} 
+ 𝟒𝟗 % \mathbf{49\%} 
+ 2.8703 \mathbf{2.8703} 
+ 𝟓𝟎 % \mathbf{50\%} 
+
+ 
+ 
+ SNIP 
+ 2.8724 
+ 37% 
+ 2.8735 
+ 41% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.8700 
+ 43% 
+ 2.8728 
+ 43% 
+
+ 
+ 
+ NVIDIA 
+ 2.8839 
+ 6% 
+ 2.8848 
+ 5% 
+
+ 
+ 5.5 { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+ Q-PACE 
+ 2.8581 \mathbf{2.8581} 
+ 𝟕𝟒 % \mathbf{74\%} 
+ 2.8621 \mathbf{2.8621} 
+ 𝟕𝟔 % \mathbf{76\%} 
+
+ 
+ 
+ SNIP 
+ 2.8668 
+ 51% 
+ 2.8689 
+ 55% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.8604 
+ 68% 
+ 2.8643 
+ 69% 
+
+ 
+ 
+ NVIDIA 
+ 2.8805 
+ 15% 
+ 2.8818 
+ 15% 
+
+ 
+ 6.5 { 4 , 8 , 16 } \{4,8,16\} 
+ Q-PACE 
+ 2.8575 \mathbf{2.8575} 
+ 𝟕𝟓 % \mathbf{75\%} 
+ 2.8627 \mathbf{2.8627} 
+ 𝟕𝟒 % \mathbf{74\%} 
+
+ 
+ 
+ SNIP 
+ 2.8638 
+ 59% 
+ 2.8667 
+ 62% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.8613 
+ 65% 
+ 2.8648 
+ 68% 
+
+ 
+ 
+ NVIDIA 
+ 2.8756 
+ 28% 
+ 2.8786 
+ 25% 
+
+ 
+ 6.5 { 4 , 16 } \{4,16\} 
+ Q-PACE 
+ 2.8697 \mathbf{2.8697} 
+ 𝟒𝟑 % \mathbf{43\%} 
+ 2.8718 \mathbf{2.8718} 
+ 𝟒𝟔 % \mathbf{46\%} 
+
+ 
+ 
+ SNIP 
+ 2.8737 
+ 33% 
+ 2.8749 
+ 36% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.8715 
+ 39% 
+ 2.8736 
+ 40% 
+
+ 
+ 
+ NVIDIA 
+ 2.8756 
+ 28% 
+ 2.8786 
+ 25% 
+
+ 
+ 500M: uniform NVFP4 2.6926; uniform MXFP8 2.6565 (fwd mixed + bwd mixed), 2.6634 (fwd mixed, bwd fp4) 
+
+ 
+ 5 { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+ Q-PACE 
+ 2.6727 \mathbf{2.6727} 
+ 𝟓𝟓 % \mathbf{55\%} 
+ 2.6765 \mathbf{2.6765} 
+ 𝟓𝟓 % \mathbf{55\%} 
+
+ 
+ 
+ SNIP 
+ 2.6781 
+ 40% 
+ 2.6796 
+ 45% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.6746 
+ 50% 
+ 2.6777 
+ 51% 
+
+ 
+ 
+ NVIDIA 
+ 2.6920 
+ 2% 
+ 2.6921 
+ 2% 
+
+ 
+ 5.5 { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+ Q-PACE 
+ 2.6636 \mathbf{2.6636} 
+ 𝟖𝟎 % \mathbf{80\%} 
+ 2.6688 \mathbf{2.6688} 
+ 𝟖𝟐 % \mathbf{82\%} 
+
+ 
+ 
+ SNIP 
+ 2.6729 
+ 54% 
+ 2.6759 
+ 57% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.6652 
+ 76% 
+ 2.6694 
+ 80% 
+
+ 
+ 
+ NVIDIA 
+ 2.6876 
+ 14% 
+ 2.6896 
+ 10% 
+
+ 
+ 6.5 { 4 , 8 , 16 } \{4,8,16\} 
+ Q-PACE 
+ 2.6635 \mathbf{2.6635} 
+ 𝟖𝟏 % \mathbf{81\%} 
+ 2.6684 \mathbf{2.6684} 
+ 𝟖𝟑 % \mathbf{83\%} 
+
+ 
+ 
+ SNIP 
+ 2.6715 
+ 58% 
+ 2.6744 
+ 62% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.6669 
+ 71% 
+ 2.6717 
+ 72% 
+
+ 
+ 
+ NVIDIA 
+ 2.6833 
+ 26% 
+ 2.6859 
+ 23% 
+
+ 
+ 6.5 { 4 , 16 } \{4,16\} 
+ Q-PACE 
+ 2.6754 \mathbf{2.6754} 
+ 𝟒𝟖 % \mathbf{48\%} 
+ 2.6786 \mathbf{2.6786} 
+ 𝟒𝟖 % \mathbf{48\%} 
+
+ 
+ 
+ SNIP 
+ 2.6797 
+ 36% 
+ 2.6809 
+ 40% 
+
+ 
+ 
+ SNIP (w-g-only) 
+ 2.6783 
+ 40% 
+ 2.6794 
+ 45% 
+
+ 
+ 
+ NVIDIA 
+ 2.6833 
+ 26% 
+ 2.6859 
+ 23% 
+
+ 
+ 
+ 
+
+ 
+ Appendix D Training Setup
+
+ 
+ Pretraining.
+
+ 
+ The pretraining process employs a 32,000-token TokenMonster vocabulary, untied embeddings (tied in the 800M model), and Rotary Position Embedding (RoPE) with θ = 10 4 \theta=10^{4} .
+Following RoPE, queries and keys are normalized, and a learned temperature parameter is applied to each attention head.
+Each attention and multilayer perceptron (MLP) branch undergoes RMS normalization prior to residual addition, and a final RMSNorm is applied before the output head.
+Table  6 provides a summary of each model training configuration.
+The 350M, 500M, and 4B models are trained with Muon on the weight matrices of the transformer blocks and AdamW on all other parameters.
+The Muon optimizer utilizes a momentum of 0.95 and scales each orthogonalized m × n m\times n update by 0.2 ​ max ⁡ ( m , n ) 0.2\sqrt{\max(m,n)} . The AdamW optimizer employs β = ( 0.9 , 0.95 ) \beta=(0.9,0.95) and ϵ = 10 − 6 \epsilon=10^{-6} ( Jordan et al., 2024 ; Liu et al., 2025a ) .
+The 800M model is trained with AdamW alone, with β = ( 0.9 , 0.95 ) \beta=(0.9,0.95) , ϵ = 10 − 8 \epsilon=10^{-8} , and a weight decay of 0.1 on every parameter, including the embeddings.
+
+ 
+ Table 6: Pretraining configurations. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 350M 
+ 
+ 
+ 
+ 500M 
+ 
+ 
+ 
+ 800M 
+ 
+ 
+ 
+ 4B 
+ 
+
+ 
+ 
+ 
+ 
+ 
+ blocks / heads / GQA ratio (KV heads) 
+ 
+ 
+ 
+ 11 / 12 / 4 (3) 
+ 
+ 
+ 
+ 17 / 12 / 3 (4) 
+ 
+ 
+ 
+ 17 / 16 / 4 (4) 
+ 
+ 
+ 
+ 28 / 28 / 4 (7) 
+ 
+
+ 
+ 
+ 
+ hidden / head dim 
+ 
+ 
+ 
+ 1536 / 128 
+ 
+ 
+ 
+ 1536 / 128 
+ 
+ 
+ 
+ 2048 / 128 
+ 
+ 
+ 
+ 3584 / 128 
+ 
+
+ 
+ 
+ 
+ parameters (total / non-embedding) 
+ 
+ 
+ 
+ 370.8M / 272.5M 
+ 
+ 
+ 
+ 526.2M / 427.9M 
+ 
+ 
+ 
+ 814.3M / 748.8M 
+ 
+ 
+ 
+ 4.006B / 3.777B 
+ 
+
+ 
+ 
+ 
+ switchable linears 
+ 
+ 
+ 
+ 66 
+ 
+ 
+ 
+ 102 
+ 
+ 
+ 
+ 102 
+ 
+ 
+ 
+ 168 
+ 
+
+ 
+ 
+ 
+ context 
+ 
+ 
+ 
+ 1024 
+ 
+ 
+ 
+ 1024 
+ 
+ 
+ 
+ 1024 
+ 
+ 
+ 
+ 4096 
+ 
+
+ 
+ 
+ 
+ global batch (seqs / tokens) 
+ 
+ 
+ 
+ 512 / 524k 
+ 
+ 
+ 
+ 512 / 524k 
+ 
+ 
+ 
+ 1024 / 1.05M 
+ 
+ 
+ 
+ 256 / 1.05M 
+ 
+
+ 
+ 
+ 
+ steps / tokens 
+ 
+ 
+ 
+ 30k / 15.7B 
+ 
+ 
+ 
+ 140k / 73.4B 
+ 
+ 
+ 
+ 76.3k / 80.0B 
+ 
+ 
+ 
+ 100k / 104.9B 
+ 
+
+ 
+ 
+ 
+ optimizer 
+ 
+ 
+ 
+ Muon + AdamW 
+ 
+ 
+ 
+ Muon + AdamW 
+ 
+ 
+ 
+ AdamW 
+ 
+ 
+ 
+ Muon + AdamW 
+ 
+
+ 
+ 
+ 
+ master weights 
+ 
+ 
+ 
+ fp32 
+ 
+ 
+ 
+ fp32 
+ 
+ 
+ 
+ fp32 
+ 
+ 
+ 
+ fp32 
+ 
+
+ 
+ 
+ 
+ peak LR / weight decay 
+ 
+ 
+ 
+ 6 × 10 − 3 6{\times}10^{-3} / 0.01 
+ 
+ 
+ 
+ 6 × 10 − 3 6{\times}10^{-3} / 0.01 
+ 
+ 
+ 
+ 7.5 × 10 − 4 7.5{\times}10^{-4} / 0.1 
+ 
+ 
+ 
+ 2 × 10 − 3 2{\times}10^{-3} / 0.02 
+ 
+
+ 
+ 
+ 
+ embedding weight decay 
+ 
+ 
+ 
+ 0 
+ 
+ 
+ 
+ 0 
+ 
+ 
+ 
+ 0.1 
+ 
+ 
+ 
+ 0 
+ 
+
+ 
+ 
+ 
+ schedule 
+ 
+ 
+ 
+ WSD, cooldown 25k → \to 30k 
+ 
+ 
+ 
+ WSD 5%/20% 
+ 
+ 
+ 
+ WSD 5%/20% 
+ 
+ 
+ 
+ warmup 2000, cooldown 20000 
+ 
+
+ 
+ 
+ 
+ recalibration period 
+ 
+ 
+ 
+ 4,000 
+ 
+ 
+ 
+ 10,000 
+ 
+ 
+ 
+ 2,000 
+ 
+ 
+ 
+ 10,000 
+ 
+
+ 
+ 
+ 
+ seeds 
+ 
+ 
+ 
+ 3 
+ 
+ 
+ 
+ 1 (mixed) / 3 (uniform) 
+ 
+ 
+ 
+ 1 
+ 
+ 
+ 
+ 1 
+ 
+
+ 
+ 
+ 
+
+ 
+ Supervised-Fine-tuning (SFT).
+
+ 
+ Qwen3-4B-Base ( Yang et al., 2025 ) , which includes 252 switchable projections, is fine-tuned on 10% of the Tülu-3 dataset ( Lambert et al., 2025 ) using TRL ( von Werra et al., 2020 ) .
+The Fused AdamW optimizer is configured with a learning rate of 5 × 10 − 6 5\times 10^{-6} , no weight decay, a linear-decay learning-rate scheduler with 3% warmup, and gradient clipping set to 1.0.
+Each epoch consists of 706 steps, with a global batch size of 128, a maximum sequence length of 4096, and training conducted in BF16 precision.
+The chat template includes an empty thinking block, and the loss function is computed using only assistant tokens. SFT recalibrates every 128 steps, resulting in five allocations over 706 steps. Reallocation is disabled during the final pretraining step, ensuring that each run concludes under an allocation it has previously trained on. Each calibration step samples a new batch from the reserved calibration split.
+
+ 
+ Numerics and hardware.
+
+ 
+ MXFP8 employs E4M3 values with 32-element E8M0 scales, round-to-nearest (RTN) rounding, and a ceiling scale rule. MXFP6 utilizes E2M3 with RTN for the forward pass and stochastic rounding (SR) for the backward pass. NVFP4 adopts the Quartet II path, which incorporates randomized Hadamard transforms and its unbiased backward estimator ( Panferov et al., 2026 ) . In this implementation, MXFP6 values are represented exactly in E4M3 and processed through the MXFP8 GEMM path. Consequently, the 6-bit tier evaluates 6-bit numerics without assessing a native 6-bit execution path. All experiments are conducted on NVIDIA B200 GPUs, which natively support low-bit data formats.
+
+ 
+
+ 
+ Appendix E SNIP Weight-grad-only
+
+ 
+ SNIP  ( Pan et al., 2026 ) provides a first-order alternative to our method. Let G l G_{l} be the full-precision gradient of layer l l on the calibration batch and let δ ​ W l ( b ) = q b ​ ( W l ) − W l \delta W_{l}^{(b)}=q_{b}(W_{l})-W_{l} be its measured quantization error at tier b b . We use
+
+ 
+
+ 
+ 
+ q l , b = ‖ G l ‖ F ​ ‖ δ ​ W l ( b ) ‖ F d l , q_{l,b}=\frac{\|G_{l}\|_{F}\|\delta W_{l}^{(b)}\|_{F}}{\sqrt{d_{l}}}, 
+ 
+ (24) 
+ 
+ 
+ which bounds the magnitude of the first-order loss change up to the stated normalization. The same budgeted solver minimizes the selected scores. The original SNIP framework also includes activation- and optimizer-propagated backward terms. We observed that using only Eq.  24 outperforms the full pipeline. Therefore, we added it to some of the experiments for comparison and call it SNIP weight-grad-only.
+
+ 
+ Appendix F Q-PACE hyperparameter ablation
+
+ 
+ Here we evaluate how the performance of Q-PACE depends on the two
+main hyperparameters: the number of noise levels m m used to estimate each layer sensitivity, and the size of the calibration dataset | 𝒟 | |\mathcal{D}| .
+
+ 
+ Figure  8 reports the final test-loss
+improvement for 350M model over uniform FP4 training for different combinations of
+ m m and | 𝒟 | |\mathcal{D}| . Using only a single perturbation and a single
+calibration sequence leads to the least accurate allocation. Increasing
+either the number of noise levels or the amount of calibration data
+improves the resulting allocation, but the gains quickly saturate.
+
+ 
+ This indicates that Q-PACE does not require a highly accurate
+curvature estimate to identify useful relative differences in
+layer sensitivity. A modest number of perturbations ( m ≥ 4 ) (m\geq 4) and calibration
+examples | 𝒟 | ≥ 64 |\mathcal{D}|\geq 64 is already sufficient to obtain effective precision
+allocations. This robustness to calibration
+hyperparameters allows us to keep the computational overhead small
+during training.
+
+ 
+ Figure 8: Test loss gain over uniform FP4 for 350M model over the number of noise levels m m per layer and calibration sequences | 𝒟 | |\mathcal{D}| . Performance
+improves over the smallest calibration setting (1,1) and then remains
+relatively stable across a broad range of m m and | 𝒟 | |\mathcal{D}| ,
+indicating diminishing returns from additional calibration compute. 
+ 
+
+ 
+ Appendix G Alternative sensitivity models
+
+ 
+ Q-PACE is primary sensitivity model. We additionally compare against several alternative approximations.
+
+ 
+ Q-PACE inversed.
+
+ 
+ Alternatively to Q-PACE model, one can consider a symmetric linear approximation relative to the loss of uniformly FP4 quantized model:
+
+ 
+
+ 
+ 
+ L ⁡ ( W , B ) = L f ​ p ​ 4 − ∑ i α i ​ 1 d i ​ ‖ δ ​ W i ‖ F 2 , L(W,B)=L_{fp4}-\sum_{i}\alpha_{i}\frac{1}{d_{i}}||\delta W_{i}||^{2}_{F}, 
+ 
+ (25) 
+ 
+ 
+
+ 
+ here Δ ​ W i = 0 \Delta W_{i}=0 for quantized weights, and the sum effectively covers the set of non-quantized weights. L f ​ p ​ 4 = L ⁡ ( W , ( b i = f ​ p ​ 4 ) ) L_{fp4}=L(W,(b_{i}=fp4)) is the loss evaluated on fully quantized model weights.
+
+ 
+ Generally, we want to assign each linear layer a scalar value to measure the "sensitivity" of a particular layer, that is, how much the loss would change if the layer were quantized while keeping the remaining layers fixed.
+
+ 
+ 
+
+ 
+ 
+ L ⁡ ( W , B ) = ∑ i f ⁡ ( α i ) + L b ​ f ​ 16 . L(W,B)=\sum_{i}f(\alpha_{i})+L_{bf16}. 
+ 
+ (26) 
+ 
+ 
+
+ 
+ First-order Taylor sensitivity.
+
+ 
+ By keeping only the linear term, one can obtain the first-order approximation, which relates to the quality metric used by ( Pan et al., 2026 ) .
+
+ 
+ 
+
+ 
+ 
+ α i = ⟨ ∇ W i , Δ ​ W i ⟩ , L ⁡ ( W , B ) = ∑ i α i + L b ​ f ​ 16 . \alpha_{i}=\langle\nabla_{W_{i}},\Delta W_{i}\rangle,\;\;\;L(W,B)=\sum_{i}\alpha_{i}+L_{bf16}. 
+ 
+ (27) 
+ 
+ 
+
+ 
+ Cosine similarity.
+
+ 
+ 
+
+ 
+ 
+ α i = 1 − cos ⁡ ( W i , Q ⁡ ( W i ) ) = 1 − ⟨ W i , Q ⁡ ( W i ) ⟩ ‖ W i ‖ F ​ ‖ Q ⁡ ( W i ) ‖ F . \alpha_{i}=1-\cos(W_{i},Q(W_{i}))=1-\frac{\langle W_{i},Q(W_{i})\rangle}{||W_{i}||_{F}||Q(W_{i})||_{F}}. 
+ 
+ (28) 
+ 
+ 
+
+ 
+ Q-PACE-Quadratic model.
+
+ 
+ Q-PACE formulation considers only independent effects of each layer. It can be extended to include pair-wise interactions between layers:
+
+ 
+ 
+
+ 
+ 
+ L ⁡ ( W , B ) = ∑ i f ⁡ ( α i ) + ∑ i ≠ j g ⁡ ( γ i ​ j ) + L b ​ f ​ 16 . L(W,B)=\sum_{i}f(\alpha_{i})+\sum_{i\neq j}g(\gamma_{ij})+L_{bf16}. 
+ 
+ (29) 
+ 
+ 
+
+ 
+ 
+
+ 
+ 
+ L ⁡ ( W , B ) = ∑ k α k ​ ‖ Δ ​ W k ‖ F 2 ‖ W k ‖ F 2 + ∑ k ≠ j γ k ​ j ​ ‖ Δ ​ W k ‖ F ​ ‖ Δ ​ W j ‖ F ‖ W k ‖ F ​ ‖ W j ‖ F + L b ​ f ​ 16 . L(W,B)=\sum_{k}\alpha_{k}\frac{||\Delta W_{k}||^{2}_{F}}{||W_{k}||^{2}_{F}}+\sum_{k\neq j}\gamma_{kj}\frac{||\Delta W_{k}||_{F}||\Delta W_{j}||_{F}}{||W_{k}||_{F}||W_{j}||_{F}}+L_{bf16}. 
+ 
+ (30) 
+ 
+ 
+ where { k } \{k\} is the set of quantized weights.
+
+ 
+ In Table  7 , we report the test loss results for 350M-parameter model runs using the alternative strategies described above. All evaluated strategies improve over the FP4 baseline, although the magnitude of the improvement varies. The best results are obtained by the inversed Q-PACE variant and the default Q-PACE, which achieve equal improvements within error interval. Variants based on measured weight error, gradient MSE, and the quadratic Q-PACE perform similarly, yielding improvements between 0.472 % 0.472\% and 0.491 % 0.491\% . In contrast, cosine similarity, first-order Taylor, and NVIDIA provide smaller gains over FP4.
+
+ 
+ Overall, these results show that the performance of Q-PACE is robust across several alternative formulations, while the default Q-PACE formulation remains the strongest variant.
+
+ 
+ Table 7: Test loss results for 350M model trained on 18B tokens with budget 6.5 bit/parameter and choices 4,16. Average and std error over 3 random seeds. 
+ 
+ 
+ 
+ Method 
+ Final validation loss 
+ Improvement over FP4 
+
+ 
+ 
+ 
+ Q-PACE inversed 
+ 2.8551 ± 0.0010 2.8551_{\pm 0.0010} 
+ 0.554 ± 0.038 % 0.554_{\pm 0.038}\,\% 
+
+ 
+ Q-PACE 
+ 2.8554 ± 0.0011 2.8554_{\pm 0.0011} 
+ 0.544 ± 0.037 % 0.544_{\pm 0.037}\,\% 
+
+ 
+ Q-PACE: measured MSE( W W ) 
+ 2.8569 ± 0.0021 2.8569_{\pm 0.0021} 
+ 0.491 ± 0.061 % 0.491_{\pm 0.061}\,\% 
+
+ 
+ Q-PACE: MSE( W grad W_{\text{grad}} ) 
+ 2.8570 ± 0.0005 2.8570_{\pm 0.0005} 
+ 0.488 ± 0.031 % 0.488_{\pm 0.031}\,\% 
+
+ 
+ Quadratic Q-PACE 
+ 2.8575 ± 0.0018 2.8575_{\pm 0.0018} 
+ 0.472 ± 0.050 % 0.472_{\pm 0.050}\,\% 
+
+ 
+ Q-PACE: weights + activations MSE 
+ 2.8581 ± 0.0010 2.8581_{\pm 0.0010} 
+ 0.450 ± 0.048 % 0.450_{\pm 0.048}\,\% 
+
+ 
+ Cosine sim. 
+ 2.8593 ± 0.0039 2.8593_{\pm 0.0039} 
+ 0.410 ± 0.138 % 0.410_{\pm 0.138}\,\% 
+
+ 
+ First-order Taylor 
+ 2.8628 ± 0.0015 2.8628_{\pm 0.0015} 
+ 0.280 ± 0.044 % 0.280_{\pm 0.044}\,\% 
+
+ 
+ NVIDIA 
+ 2.8641 ± 0.0012 2.8641_{\pm 0.0012} 
+ 0.240 ± 0.046 % 0.240_{\pm 0.046}\,\% 
+
+ 
+ FP4 
+ 2.8710 ± 0.0004 2.8710_{\pm 0.0004} 
+ 0.00 0.00 
+
+ 
+ 
+ 
+
+ 
+ Appendix H Additional sensitivity analysis
+
+ 
+ We report additional sensitivity results in this section for the 800M model. These results complement the analysis in the main text by showing how the sensitivity profile varies across layer types, model depth, and training time.
+
+ 
+ Figure 9: Share of different layer types promoted to BF16 over the training duration. 
+ 
+ 
+ Figure  9 shows the fraction of each layer type assigned
+to BF16 throughout training. The allocations produced by Q-PACE are highly
+non-uniform across layer types and evolve over the course of training. In
+particular, the V projections are consistently assigned high precision, while
+the fractions of K and O projections with high precision vary. In contrast, SNIP keeps nearly all K and V projections in BF16 for
+most of training, while the NVIDIA baseline induces a static
+allocation across layer types.
+
+ 
+ This illustrates that Q-PACE adapts its
+precision allocation over training time.
+
+ 
+ Figure 10: Relative sensitivity by layer type over training for the 800M model.
+Values are averaged across layers of the same type at each calibration
+point. Q-PACE assigns the largest relative sensitivity to the MLP
+projections, whereas SNIP places comparatively greater sensitivity on
+K projections. 
+ 
+ 
+ To better understand these allocations, Figure  10 
+shows the corresponding relative sensitivity scores aggregated by layer type.
+For Q-PACE, the MLP projections exhibit the largest relative sensitivities,
+whereas attention projections, in particular Q and K, are substantially less
+sensitive on average. SNIP produces a different ordering, assigning
+higher relative sensitivity to attention projections and lower sensitivity to
+the MLP projections. The sensitivity profiles are comparatively stable after
+the early stages of training.
+
+ 
+ This difference helps explain why the two methods can produce substantially
+different mixed-precision allocations despite operating under the same global
+precision budget.
+
+ 
+ Figure 11: Relative sensitivity over training for the 800M model. 
+ 
+ 
+ Sensitivity is also strongly structured by model depth.
+Figure  11 shows the sensitivity α i \alpha_{i} normalized by the average sensitivity at that training point. For Q-PACE, later blocks are generally more sensitive, with the final block standing out throughout most of training.
+After an initial transition, this pattern becomes remarkably stable. SNIP exhibits a qualitatively different depth profile, with higher relative sensitivity concentrated toward earlier blocks and decreasing toward the end of the network. These results further show that quantization sensitivity cannot be described only by layer type or only by depth: Q-PACE captures a structured combination of both factors that remains largely stable over long portions of training.
+
+ 
+ Figure 12: Bitwidth allocations throughout training for 800M model at budget 5.5 bits/parameter with bit choices 4,16. 
+ 
+ 
+ Figure 13: Layer-wise sensitivity heatmap for Olmo-3-7B  ( Olmo: et al., 2026 ) during training. Lighter color corresponds to higher sensitivity α \alpha . 
+ 
+ 
+
+ 
+ Appendix I Budget trade-off, sensitivity, and allocations
+
+ 
+ This section presents the figures supporting the grid and 4B results. Figure  14 displays each allocation on the budget vs. loss plots. At both pretraining sizes and during SFT, Q-PACE achieves greater improvement over uniform NVFP4 than both SNIP variants and NVIDIA at a comparable bit count. The subsequent figures illustrate the distribution of precision. Sensitivity is normalized at each calibration, allowing for comparison over time but not across estimators (Figures  15 and  16 ). During pretraining, Q-PACE concentrates its score on the MLP up-projections, whereas SNIP distributes it evenly across projection types. In SFT, the score for Q-PACE shifts to the MLP down-projections. The allocations correspond to these scores and exhibit minimal change after the initial recalibration (Figures  17 to  20 ). Figures  21 to  24 provide a parallel analysis for the 4B runs across all 168 switchable layers.
+
+ 
+ Figure 14: Loss improvement over uniform NVFP4 against the realized bits per weight of the trained allocation, for pretraining at 350M and 500M and for SFT. 
+ 
+ 
+ Figure 15: Normalized sensitivity of Q-PACE and SNIP at budget 6.5 on { 4 , 8 , 16 } \{4,8,16\} at 350M and 500M. Type shares over the calibrations, depth shares, and the final type-by-block map. 
+ 
+ 
+ Figure 16: SFT training loss and gradient norm (mean of three seeds) and the normalized sensitivity by projection type of Q-PACE and SNIP at budget 6.5 on { 4 , 8 , 16 } \{4,8,16\} . 
+ 
+ 
+ Figure 17: 500M allocations of Q-PACE and SNIP at budget 6.5 on { 4 , 8 , 16 } \{4,8,16\} over training. Parameter share per format and bits per weight by projection type. 
+ 
+ 
+ Figure 18: Final 350M allocations of Q-PACE and SNIP for every budget and menu. 
+ 
+ 
+ Figure 19: Final 500M allocations of Q-PACE and SNIP for every budget and menu. 
+ 
+ 
+ Figure 20: Final SFT allocations of Q-PACE and SNIP for every budget and menu. Qwen3 has three MLP projections per block. 
+ 
+ 
+ 
+ 
+ 
+ (a) Q-PACE 
+ 
+ 
+ 
+ 
+ (b) SNIP 
+ 
+
+ Figure 21: 4B normalized sensitivity at budget 6.5 on { 4 , 16 } \{4,16\} . Type shares over the calibrations, depth shares, and the latest type-by-block map. 
+ 
+ 
+ 
+ 
+ 
+ (a) Q-PACE 
+ 
+ 
+ 
+ (b) SNIP 
+ 
+
+ Figure 22: 4B sensitivity of all 168 layers across the calibrations at budget 6.5 on { 4 , 16 } \{4,16\} . Colors are clipped at the 99th percentile, on separate scales for the two estimators. 
+ 
+ 
+ 
+ 
+ 
+ (a) Final allocations 
+ 
+ 
+ 
+ 
+ (b) Allocation dynamics 
+ 
+
+ Figure 23: 4B final allocations and their dynamics. Parameter share per format and bits per weight by projection type. 
+ 
+ 
+ Figure 24: Final sensitivity (logarithmic color scale) and format of all 168 switchable layers in the four 4B Q-PACE runs. 
+ 
+ 
+
+ 
+ I.1 Downstream task scores
+
+ 
+ Accuracies are reported as percentages at the trained allocation and are averaged over three random seeds. The downstream mean presented in Table  2 represents the average performance across 24 distinct tasks, with Natural Questions counted once. All tasks are evaluated in a zero-shot setting, except for GSM8K, which is assessed using an eight-shot chain-of-thought approach. Evaluation is conducted using the LM Evaluation Harness ( Gao et al., 2023 ) .
+
+ 
+ 
+ • 
+ 
+ Generation and instruction following (Table  8 ): GSM8K ( Cobbe et al., 2021 ) , exact match; IFEval ( Zhou et al., 2023 ) , strict prompt-level accuracy; HumanEval ( Chen et al., 2021 ) , pass@1; Natural Questions ( Kwiatkowski et al., 2019 ) , exact match; TruthfulQA ( Lin et al., 2022 ) , MC2 accuracy.
+
+ • 
+ 
+ Knowledge and likelihood (Table  9 ): ARC-Challenge, ARC-Easy, HellaSwag, PIQA, WinoGrande, LAMBADA, and MMLU, accuracy.
+
+ • 
+ 
+ Probe tasks (Table  10 ): BoolQ, COPA, RACE, ASDiv, and CommonsenseQA, accuracy; LogiQA, SAT-Math, SciQ, OpenBookQA, AQuA-RAT, LSAT-AR, and LSAT-LR, length-normalized accuracy; Natural Questions, exact match.
+
+ 
+
+ 
+ Table 8: SFT generative and instruction benchmarks (accuracy %, mean ± \pm seed standard deviation over three seeds). 
+ 
+ 
+ 
+ 
+ run 
+ GSM8K 
+ IFEval 
+ HumanEval 
+ NQ 
+ TQA 
+
+ 
+ uniform references 
+
+ 
+ uniform NVFP4 
+ 80.6 ± 1.4 80.6_{\pm 1.4} 
+ 30.6 ± 0.8 30.6_{\pm 0.8} 
+ 69.1 ± 2.9 69.1_{\pm 2.9} 
+ 8.7 ± 0.4 8.7_{\pm 0.4} 
+ 51.2 ± 0.7 51.2_{\pm 0.7} 
+
+ 
+ uniform MXFP8 
+ 84.2 ± 0.3 84.2_{\pm 0.3} 
+ 34.3 ± 1.1 34.3_{\pm 1.1} 
+ 75.8 ± 0.9 75.8_{\pm 0.9} 
+ 11.2 ± 0.7 11.2_{\pm 0.7} 
+ 52.6 ± 0.1 52.6_{\pm 0.1} 
+
+ 
+ budget 5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 81.0 ± 0.9 81.0_{\pm 0.9} 
+ 28.0 ± 1.7 28.0_{\pm 1.7} 
+ 71.3 ± 2.7 71.3_{\pm 2.7} 
+ 9.2 ± 0.5 9.2_{\pm 0.5} 
+ 51.2 ± 0.2 \mathbf{51.2}_{\pm 0.2} 
+
+ 
+ Q-PACE 
+ 81.1 ± 0.7 81.1_{\pm 0.7} 
+ 33.0 ± 2.2 33.0_{\pm 2.2} 
+ 72.8 ± 3.1 \mathbf{72.8}_{\pm 3.1} 
+ 8.9 ± 0.6 8.9_{\pm 0.6} 
+ 49.9 ± 0.6 49.9_{\pm 0.6} 
+
+ 
+ SNIP 
+ 81.0 ± 0.9 81.0_{\pm 0.9} 
+ 33.8 ± 0.7 \mathbf{33.8}_{\pm 0.7} 
+ 71.1 ± 2.7 71.1_{\pm 2.7} 
+ 9.3 ± 0.4 9.3_{\pm 0.4} 
+ 50.0 ± 0.3 50.0_{\pm 0.3} 
+
+ 
+ budget 5.5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 80.5 ± 0.5 80.5_{\pm 0.5} 
+ 30.2 ± 0.9 30.2_{\pm 0.9} 
+ 69.5 ± 1.1 69.5_{\pm 1.1} 
+ 9.2 ± 0.4 9.2_{\pm 0.4} 
+ 50.8 ± 0.4 \mathbf{50.8}_{\pm 0.4} 
+
+ 
+ Q-PACE 
+ 84.3 ± 0.8 \mathbf{84.3}_{\pm 0.8} 
+ 32.2 ± 0.7 32.2_{\pm 0.7} 
+ 73.6 ± 1.3 \mathbf{73.6}_{\pm 1.3} 
+ 10.0 ± 0.7 10.0_{\pm 0.7} 
+ 50.6 ± 1.0 50.6_{\pm 1.0} 
+
+ 
+ SNIP 
+ 83.5 ± 1.2 83.5_{\pm 1.2} 
+ 33.9 ± 0.3 33.9_{\pm 0.3} 
+ 70.7 ± 1.2 70.7_{\pm 1.2} 
+ 9.4 ± 0.5 9.4_{\pm 0.5} 
+ 50.8 ± 0.5 50.8_{\pm 0.5} 
+
+ 
+ budget 6.5, menu { 4 , 8 , 16 } \{4,8,16\} 
+
+ 
+ NVIDIA 
+ 78.1 ± 1.0 78.1_{\pm 1.0} 
+ 28.0 ± 1.1 28.0_{\pm 1.1} 
+ 71.3 ± 1.1 71.3_{\pm 1.1} 
+ 9.7 ± 0.2 9.7_{\pm 0.2} 
+ 50.7 ± 0.2 50.7_{\pm 0.2} 
+
+ 
+ Q-PACE 
+ 84.4 ± 0.9 \mathbf{84.4}_{\pm 0.9} 
+ 32.3 ± 1.7 32.3_{\pm 1.7} 
+ 73.4 ± 0.9 73.4_{\pm 0.9} 
+ 10.0 ± 0.6 \mathbf{10.0}_{\pm 0.6} 
+ 51.1 ± 0.6 \mathbf{51.1}_{\pm 0.6} 
+
+ 
+ SNIP 
+ 83.1 ± 0.8 83.1_{\pm 0.8} 
+ 33.1 ± 0.8 \mathbf{33.1}_{\pm 0.8} 
+ 73.6 ± 0.4 \mathbf{73.6}_{\pm 0.4} 
+ 8.2 ± 0.3 8.2_{\pm 0.3} 
+ 51.0 ± 0.4 51.0_{\pm 0.4} 
+
+ 
+ budget 6.5, menu { 4 , 16 } \{4,16\} 
+
+ 
+ NVIDIA 
+ 78.1 ± 1.0 78.1_{\pm 1.0} 
+ 28.0 ± 1.1 28.0_{\pm 1.1} 
+ 71.3 ± 1.1 71.3_{\pm 1.1} 
+ 9.7 ± 0.2 \mathbf{9.7}_{\pm 0.2} 
+ 50.7 ± 0.2 \mathbf{50.7}_{\pm 0.2} 
+
+ 
+ Q-PACE 
+ 79.6 ± 0.9 79.6_{\pm 0.9} 
+ 33.3 ± 1.1 33.3_{\pm 1.1} 
+ 72.6 ± 1.2 72.6_{\pm 1.2} 
+ 8.8 ± 0.7 8.8_{\pm 0.7} 
+ 50.2 ± 0.6 50.2_{\pm 0.6} 
+
+ 
+ SNIP 
+ 80.0 ± 0.6 80.0_{\pm 0.6} 
+ 33.1 ± 0.4 33.1_{\pm 0.4} 
+ 72.4 ± 1.3 72.4_{\pm 1.3} 
+ 9.3 ± 0.5 9.3_{\pm 0.5} 
+ 50.2 ± 0.3 50.2_{\pm 0.3} 
+
+ 
+ 
+ 
+
+ 
+ 
+ Table 9: SFT knowledge/likelihood tasks (accuracy %, mean ± \pm seed standard deviation over three seeds). 
+ 
+ 
+ 
+ 
+ run 
+ ARC-c 
+ ARC-e 
+ HellaSw 
+ PIQA 
+ Wino 
+ LAMBADA 
+ MMLU 
+
+ 
+ uniform references 
+
+ 
+ uniform NVFP4 
+ 44.9 ± 0.6 44.9_{\pm 0.6} 
+ 74.6 ± 0.3 74.6_{\pm 0.3} 
+ 53.8 ± 0.1 53.8_{\pm 0.1} 
+ 76.1 ± 0.4 76.1_{\pm 0.4} 
+ 67.6 ± 0.8 67.6_{\pm 0.8} 
+ 66.3 ± 0.2 66.3_{\pm 0.2} 
+ 68.7 ± 0.1 68.7_{\pm 0.1} 
+
+ 
+ uniform MXFP8 
+ 47.0 ± 0.2 47.0_{\pm 0.2} 
+ 78.4 ± 0.1 78.4_{\pm 0.1} 
+ 54.6 ± 0.0 54.6_{\pm 0.0} 
+ 78.0 ± 0.1 78.0_{\pm 0.1} 
+ 70.7 ± 0.6 70.7_{\pm 0.6} 
+ 68.6 ± 0.1 68.6_{\pm 0.1} 
+ 71.1 ± 0.1 71.1_{\pm 0.1} 
+
+ 
+ budget 5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 44.6 ± 0.5 44.6_{\pm 0.5} 
+ 74.6 ± 0.7 74.6_{\pm 0.7} 
+ 53.7 ± 0.2 53.7_{\pm 0.2} 
+ 76.1 ± 0.3 76.1_{\pm 0.3} 
+ 67.9 ± 1.2 67.9_{\pm 1.2} 
+ 67.0 ± 0.2 67.0_{\pm 0.2} 
+ 68.8 ± 0.1 68.8_{\pm 0.1} 
+
+ 
+ Q-PACE 
+ 46.3 ± 0.7 46.3_{\pm 0.7} 
+ 76.9 ± 0.1 76.9_{\pm 0.1} 
+ 53.9 ± 0.1 53.9_{\pm 0.1} 
+ 76.3 ± 0.3 76.3_{\pm 0.3} 
+ 68.4 ± 0.2 68.4_{\pm 0.2} 
+ 67.2 ± 0.2 \mathbf{67.2}_{\pm 0.2} 
+ 69.5 ± 0.1 69.5_{\pm 0.1} 
+
+ 
+ SNIP 
+ 47.0 ± 0.8 \mathbf{47.0}_{\pm 0.8} 
+ 77.1 ± 0.6 \mathbf{77.1}_{\pm 0.6} 
+ 54.0 ± 0.1 \mathbf{54.0}_{\pm 0.1} 
+ 76.7 ± 0.4 \mathbf{76.7}_{\pm 0.4} 
+ 68.3 ± 0.7 68.3_{\pm 0.7} 
+ 65.8 ± 0.3 65.8_{\pm 0.3} 
+ 69.9 ± 0.1 69.9_{\pm 0.1} 
+
+ 
+ budget 5.5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 45.6 ± 0.8 45.6_{\pm 0.8} 
+ 75.4 ± 0.6 75.4_{\pm 0.6} 
+ 53.6 ± 0.1 53.6_{\pm 0.1} 
+ 76.2 ± 0.3 76.2_{\pm 0.3} 
+ 67.4 ± 0.6 67.4_{\pm 0.6} 
+ 67.3 ± 0.3 67.3_{\pm 0.3} 
+ 68.7 ± 0.2 68.7_{\pm 0.2} 
+
+ 
+ Q-PACE 
+ 46.8 ± 0.6 \mathbf{46.8}_{\pm 0.6} 
+ 77.1 ± 1.0 77.1_{\pm 1.0} 
+ 54.2 ± 0.0 54.2_{\pm 0.0} 
+ 77.0 ± 0.1 77.0_{\pm 0.1} 
+ 68.9 ± 0.7 68.9_{\pm 0.7} 
+ 67.9 ± 0.2 \mathbf{67.9}_{\pm 0.2} 
+ 70.1 ± 0.1 70.1_{\pm 0.1} 
+
+ 
+ SNIP 
+ 46.2 ± 0.5 46.2_{\pm 0.5} 
+ 77.5 ± 0.4 77.5_{\pm 0.4} 
+ 54.2 ± 0.0 54.2_{\pm 0.0} 
+ 77.2 ± 0.3 \mathbf{77.2}_{\pm 0.3} 
+ 69.1 ± 0.3 \mathbf{69.1}_{\pm 0.3} 
+ 67.4 ± 0.3 67.4_{\pm 0.3} 
+ 70.5 ± 0.1 \mathbf{70.5}_{\pm 0.1} 
+
+ 
+ budget 6.5, menu { 4 , 8 , 16 } \{4,8,16\} 
+
+ 
+ NVIDIA 
+ 44.8 ± 0.2 44.8_{\pm 0.2} 
+ 74.6 ± 0.6 74.6_{\pm 0.6} 
+ 53.8 ± 0.1 53.8_{\pm 0.1} 
+ 76.6 ± 0.3 76.6_{\pm 0.3} 
+ 68.5 ± 1.5 68.5_{\pm 1.5} 
+ 67.2 ± 0.2 67.2_{\pm 0.2} 
+ 68.9 ± 0.1 68.9_{\pm 0.1} 
+
+ 
+ Q-PACE 
+ 47.0 ± 0.2 47.0_{\pm 0.2} 
+ 77.3 ± 0.5 77.3_{\pm 0.5} 
+ 54.1 ± 0.1 54.1_{\pm 0.1} 
+ 77.1 ± 0.1 \mathbf{77.1}_{\pm 0.1} 
+ 68.8 ± 0.7 68.8_{\pm 0.7} 
+ 68.0 ± 0.2 \mathbf{68.0}_{\pm 0.2} 
+ 70.0 ± 0.0 70.0_{\pm 0.0} 
+
+ 
+ SNIP 
+ 46.5 ± 0.3 46.5_{\pm 0.3} 
+ 76.7 ± 0.2 76.7_{\pm 0.2} 
+ 54.3 ± 0.2 \mathbf{54.3}_{\pm 0.2} 
+ 76.6 ± 0.2 76.6_{\pm 0.2} 
+ 68.9 ± 0.7 68.9_{\pm 0.7} 
+ 67.6 ± 0.0 67.6_{\pm 0.0} 
+ 70.4 ± 0.3 \mathbf{70.4}_{\pm 0.3} 
+
+ 
+ budget 6.5, menu { 4 , 16 } \{4,16\} 
+
+ 
+ NVIDIA 
+ 44.8 ± 0.2 44.8_{\pm 0.2} 
+ 74.6 ± 0.6 74.6_{\pm 0.6} 
+ 53.8 ± 0.1 53.8_{\pm 0.1} 
+ 76.6 ± 0.3 76.6_{\pm 0.3} 
+ 68.5 ± 1.5 68.5_{\pm 1.5} 
+ 67.2 ± 0.2 67.2_{\pm 0.2} 
+ 68.9 ± 0.1 68.9_{\pm 0.1} 
+
+ 
+ Q-PACE 
+ 46.4 ± 0.6 46.4_{\pm 0.6} 
+ 76.5 ± 1.0 76.5_{\pm 1.0} 
+ 53.9 ± 0.0 53.9_{\pm 0.0} 
+ 76.9 ± 0.3 \mathbf{76.9}_{\pm 0.3} 
+ 69.0 ± 0.4 \mathbf{69.0}_{\pm 0.4} 
+ 67.0 ± 0.1 67.0_{\pm 0.1} 
+ 69.7 ± 0.2 69.7_{\pm 0.2} 
+
+ 
+ SNIP 
+ 47.3 ± 0.8 \mathbf{47.3}_{\pm 0.8} 
+ 77.3 ± 0.2 \mathbf{77.3}_{\pm 0.2} 
+ 54.0 ± 0.2 54.0_{\pm 0.2} 
+ 76.5 ± 0.3 76.5_{\pm 0.3} 
+ 67.8 ± 0.6 67.8_{\pm 0.6} 
+ 67.0 ± 0.1 67.0_{\pm 0.1} 
+ 70.1 ± 0.2 \mathbf{70.1}_{\pm 0.2} 
+
+ 
+ 
+ 
+
+ 
+ 
+
+ Table 10: SFT probe tasks (accuracy %, mean ± \pm seed standard deviation over three seeds). 
+ 
+ 
+ 
+ 
+ run 
+ BoolQ 
+ Copa 
+ RACE 
+ LogiQA 
+ ASDiv 
+ SAT-Math 
+ NQ 
+
+ 
+ uniform references 
+
+ 
+ uniform NVFP4 
+ 77.1 ± 0.2 77.1_{\pm 0.2} 
+ 84.0 ± 1.7 84.0_{\pm 1.7} 
+ 39.5 ± 0.7 39.5_{\pm 0.7} 
+ 40.2 ± 0.7 40.2_{\pm 0.7} 
+ 27.9 ± 0.2 27.9_{\pm 0.2} 
+ 43.6 ± 2.0 43.6_{\pm 2.0} 
+ 8.7 ± 0.4 8.7_{\pm 0.4} 
+
+ 
+ uniform MXFP8 
+ 81.2 ± 0.3 81.2_{\pm 0.3} 
+ 83.0 ± 0.0 83.0_{\pm 0.0} 
+ 40.5 ± 0.1 40.5_{\pm 0.1} 
+ 42.8 ± 0.6 42.8_{\pm 0.6} 
+ 26.6 ± 0.5 26.6_{\pm 0.5} 
+ 48.5 ± 2.1 48.5_{\pm 2.1} 
+ 11.2 ± 0.7 11.2_{\pm 0.7} 
+
+ 
+ budget 5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 79.3 ± 0.4 79.3_{\pm 0.4} 
+ 83.7 ± 0.6 83.7_{\pm 0.6} 
+ 40.4 ± 0.9 \mathbf{40.4}_{\pm 0.9} 
+ 39.6 ± 0.8 39.6_{\pm 0.8} 
+ 27.4 ± 0.9 27.4_{\pm 0.9} 
+ 42.7 ± 1.4 42.7_{\pm 1.4} 
+ 9.2 ± 0.5 9.2_{\pm 0.5} 
+
+ 
+ Q-PACE 
+ 81.9 ± 0.6 \mathbf{81.9}_{\pm 0.6} 
+ 83.7 ± 3.1 83.7_{\pm 3.1} 
+ 40.1 ± 0.9 40.1_{\pm 0.9} 
+ 41.0 ± 0.8 41.0_{\pm 0.8} 
+ 28.5 ± 1.0 28.5_{\pm 1.0} 
+ 45.8 ± 1.3 45.8_{\pm 1.3} 
+ 8.9 ± 0.6 8.9_{\pm 0.6} 
+
+ 
+ SNIP 
+ 80.6 ± 0.5 80.6_{\pm 0.5} 
+ 83.7 ± 1.2 83.7_{\pm 1.2} 
+ 39.5 ± 0.5 39.5_{\pm 0.5} 
+ 42.3 ± 1.7 \mathbf{42.3}_{\pm 1.7} 
+ 31.9 ± 1.1 \mathbf{31.9}_{\pm 1.1} 
+ 46.1 ± 2.7 \mathbf{46.1}_{\pm 2.7} 
+ 9.3 ± 0.4 9.3_{\pm 0.4} 
+
+ 
+ budget 5.5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 79.0 ± 0.5 79.0_{\pm 0.5} 
+ 84.3 ± 2.1 84.3_{\pm 2.1} 
+ 40.5 ± 0.4 \mathbf{40.5}_{\pm 0.4} 
+ 40.8 ± 0.8 40.8_{\pm 0.8} 
+ 26.6 ± 0.9 26.6_{\pm 0.9} 
+ 43.5 ± 1.1 43.5_{\pm 1.1} 
+ 9.2 ± 0.4 9.2_{\pm 0.4} 
+
+ 
+ Q-PACE 
+ 82.2 ± 0.5 \mathbf{82.2}_{\pm 0.5} 
+ 84.0 ± 2.6 84.0_{\pm 2.6} 
+ 40.4 ± 0.1 40.4_{\pm 0.1} 
+ 42.0 ± 0.2 \mathbf{42.0}_{\pm 0.2} 
+ 32.6 ± 1.8 32.6_{\pm 1.8} 
+ 46.2 ± 2.1 46.2_{\pm 2.1} 
+ 10.0 ± 0.7 10.0_{\pm 0.7} 
+
+ 
+ SNIP 
+ 80.0 ± 0.2 80.0_{\pm 0.2} 
+ 86.7 ± 2.1 \mathbf{86.7}_{\pm 2.1} 
+ 40.3 ± 0.2 40.3_{\pm 0.2} 
+ 40.6 ± 0.2 40.6_{\pm 0.2} 
+ 31.7 ± 0.1 31.7_{\pm 0.1} 
+ 48.8 ± 2.3 \mathbf{48.8}_{\pm 2.3} 
+ 9.4 ± 0.5 9.4_{\pm 0.5} 
+
+ 
+ budget 6.5, menu { 4 , 8 , 16 } \{4,8,16\} 
+
+ 
+ NVIDIA 
+ 79.2 ± 0.8 79.2_{\pm 0.8} 
+ 85.0 ± 1.0 \mathbf{85.0}_{\pm 1.0} 
+ 39.6 ± 0.4 39.6_{\pm 0.4} 
+ 39.6 ± 1.9 39.6_{\pm 1.9} 
+ 25.7 ± 0.7 25.7_{\pm 0.7} 
+ 43.2 ± 2.1 43.2_{\pm 2.1} 
+ 9.7 ± 0.2 9.7_{\pm 0.2} 
+
+ 
+ Q-PACE 
+ 82.0 ± 0.9 \mathbf{82.0}_{\pm 0.9} 
+ 84.3 ± 0.6 84.3_{\pm 0.6} 
+ 40.4 ± 0.3 40.4_{\pm 0.3} 
+ 40.3 ± 1.5 40.3_{\pm 1.5} 
+ 31.2 ± 2.0 31.2_{\pm 2.0} 
+ 45.6 ± 4.4 45.6_{\pm 4.4} 
+ 10.0 ± 0.6 \mathbf{10.0}_{\pm 0.6} 
+
+ 
+ SNIP 
+ 79.3 ± 0.5 79.3_{\pm 0.5} 
+ 84.0 ± 1.0 84.0_{\pm 1.0} 
+ 39.8 ± 0.2 39.8_{\pm 0.2} 
+ 41.6 ± 1.6 41.6_{\pm 1.6} 
+ 33.1 ± 1.1 \mathbf{33.1}_{\pm 1.1} 
+ 48.9 ± 0.9 \mathbf{48.9}_{\pm 0.9} 
+ 8.2 ± 0.3 8.2_{\pm 0.3} 
+
+ 
+ budget 6.5, menu { 4 , 16 } \{4,16\} 
+
+ 
+ NVIDIA 
+ 79.2 ± 0.8 79.2_{\pm 0.8} 
+ 85.0 ± 1.0 \mathbf{85.0}_{\pm 1.0} 
+ 39.6 ± 0.4 39.6_{\pm 0.4} 
+ 39.6 ± 1.9 39.6_{\pm 1.9} 
+ 25.7 ± 0.7 25.7_{\pm 0.7} 
+ 43.2 ± 2.1 43.2_{\pm 2.1} 
+ 9.7 ± 0.2 \mathbf{9.7}_{\pm 0.2} 
+
+ 
+ Q-PACE 
+ 80.1 ± 0.4 80.1_{\pm 0.4} 
+ 83.7 ± 1.2 83.7_{\pm 1.2} 
+ 40.1 ± 0.6 40.1_{\pm 0.6} 
+ 41.0 ± 0.9 \mathbf{41.0}_{\pm 0.9} 
+ 29.3 ± 1.5 29.3_{\pm 1.5} 
+ 45.2 ± 2.2 45.2_{\pm 2.2} 
+ 8.8 ± 0.7 8.8_{\pm 0.7} 
+
+ 
+ SNIP 
+ 80.6 ± 0.2 80.6_{\pm 0.2} 
+ 84.3 ± 2.5 84.3_{\pm 2.5} 
+ 40.7 ± 0.6 \mathbf{40.7}_{\pm 0.6} 
+ 40.3 ± 1.3 40.3_{\pm 1.3} 
+ 33.8 ± 0.9 \mathbf{33.8}_{\pm 0.9} 
+ 45.2 ± 1.6 45.2_{\pm 1.6} 
+ 9.3 ± 0.5 9.3_{\pm 0.5} 
+
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ run 
+ SciQ 
+ OBQA 
+ CSQA 
+ AQuA 
+ LSAT-ar 
+ LSAT-lr 
+
+ 
+ uniform references 
+
+ 
+ uniform NVFP4 
+ 94.2 ± 0.4 94.2_{\pm 0.4} 
+ 41.2 ± 0.9 41.2_{\pm 0.9} 
+ 79.2 ± 0.8 79.2_{\pm 0.8} 
+ 39.5 ± 1.6 39.5_{\pm 1.6} 
+ 18.0 ± 1.8 18.0_{\pm 1.8} 
+ 43.1 ± 1.2 43.1_{\pm 1.2} 
+
+ 
+ uniform MXFP8 
+ 94.5 ± 0.2 94.5_{\pm 0.2} 
+ 40.3 ± 0.6 40.3_{\pm 0.6} 
+ 82.1 ± 0.5 82.1_{\pm 0.5} 
+ 40.6 ± 2.2 40.6_{\pm 2.2} 
+ 19.4 ± 0.5 19.4_{\pm 0.5} 
+ 48.6 ± 0.2 48.6_{\pm 0.2} 
+
+ 
+ budget 5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 94.4 ± 0.1 94.4_{\pm 0.1} 
+ 40.7 ± 0.3 40.7_{\pm 0.3} 
+ 79.0 ± 0.6 79.0_{\pm 0.6} 
+ 39.8 ± 1.7 \mathbf{39.8}_{\pm 1.7} 
+ 21.2 ± 1.8 \mathbf{21.2}_{\pm 1.8} 
+ 39.8 ± 0.9 39.8_{\pm 0.9} 
+
+ 
+ Q-PACE 
+ 94.6 ± 0.2 94.6_{\pm 0.2} 
+ 40.7 ± 0.7 40.7_{\pm 0.7} 
+ 79.9 ± 0.8 \mathbf{79.9}_{\pm 0.8} 
+ 36.7 ± 2.0 36.7_{\pm 2.0} 
+ 20.6 ± 3.1 20.6_{\pm 3.1} 
+ 43.8 ± 1.6 43.8_{\pm 1.6} 
+
+ 
+ SNIP 
+ 94.7 ± 0.3 \mathbf{94.7}_{\pm 0.3} 
+ 41.8 ± 0.2 \mathbf{41.8}_{\pm 0.2} 
+ 79.8 ± 0.2 79.8_{\pm 0.2} 
+ 38.2 ± 1.6 38.2_{\pm 1.6} 
+ 21.0 ± 0.9 21.0_{\pm 0.9} 
+ 44.4 ± 0.8 \mathbf{44.4}_{\pm 0.8} 
+
+ 
+ budget 5.5, menu { 4 , 6 , 8 , 16 } \{4,6,8,16\} 
+
+ 
+ NVIDIA 
+ 94.4 ± 0.1 94.4_{\pm 0.1} 
+ 41.2 ± 0.7 \mathbf{41.2}_{\pm 0.7} 
+ 78.7 ± 0.3 78.7_{\pm 0.3} 
+ 38.7 ± 2.8 38.7_{\pm 2.8} 
+ 18.0 ± 1.6 18.0_{\pm 1.6} 
+ 39.7 ± 1.0 39.7_{\pm 1.0} 
+
+ 
+ Q-PACE 
+ 94.7 ± 0.1 \mathbf{94.7}_{\pm 0.1} 
+ 40.5 ± 0.3 40.5_{\pm 0.3} 
+ 79.6 ± 0.6 79.6_{\pm 0.6} 
+ 38.5 ± 0.6 38.5_{\pm 0.6} 
+ 19.3 ± 3.3 \mathbf{19.3}_{\pm 3.3} 
+ 42.4 ± 1.6 42.4_{\pm 1.6} 
+
+ 
+ SNIP 
+ 94.3 ± 0.2 94.3_{\pm 0.2} 
+ 41.0 ± 0.3 41.0_{\pm 0.3} 
+ 80.1 ± 0.4 80.1_{\pm 0.4} 
+ 37.5 ± 1.8 37.5_{\pm 1.8} 
+ 17.8 ± 1.2 17.8_{\pm 1.2} 
+ 44.2 ± 3.1 \mathbf{44.2}_{\pm 3.1} 
+
+ 
+ budget 6.5, menu { 4 , 8 , 16 } \{4,8,16\} 
+
+ 
+ NVIDIA 
+ 94.4 ± 0.5 94.4_{\pm 0.5} 
+ 40.3 ± 0.2 40.3_{\pm 0.2} 
+ 78.1 ± 0.6 78.1_{\pm 0.6} 
+ 38.7 ± 0.8 38.7_{\pm 0.8} 
+ 18.6 ± 0.7 18.6_{\pm 0.7} 
+ 40.4 ± 0.4 40.4_{\pm 0.4} 
+
+ 
+ Q-PACE 
+ 94.9 ± 0.3 \mathbf{94.9}_{\pm 0.3} 
+ 40.9 ± 0.3 40.9_{\pm 0.3} 
+ 79.7 ± 0.2 79.7_{\pm 0.2} 
+ 38.1 ± 1.3 38.1_{\pm 1.3} 
+ 19.4 ± 0.7 19.4_{\pm 0.7} 
+ 44.9 ± 1.2 44.9_{\pm 1.2} 
+
+ 
+ SNIP 
+ 94.2 ± 0.2 94.2_{\pm 0.2} 
+ 41.4 ± 0.5 \mathbf{41.4}_{\pm 0.5} 
+ 80.6 ± 1.0 \mathbf{80.6}_{\pm 1.0} 
+ 41.1 ± 1.8 \mathbf{41.1}_{\pm 1.8} 
+ 21.2 ± 1.5 \mathbf{21.2}_{\pm 1.5} 
+ 46.0 ± 0.8 \mathbf{46.0}_{\pm 0.8} 
+
+ 
+ budget 6.5, menu { 4 , 16 } \{4,16\} 
+
+ 
+ NVIDIA 
+ 94.4 ± 0.5 94.4_{\pm 0.5} 
+ 40.3 ± 0.2 40.3_{\pm 0.2} 
+ 78.1 ± 0.6 78.1_{\pm 0.6} 
+ 38.7 ± 0.8 38.7_{\pm 0.8} 
+ 18.6 ± 0.7 18.6_{\pm 0.7} 
+ 40.4 ± 0.4 40.4_{\pm 0.4} 
+
+ 
+ Q-PACE 
+ 94.5 ± 0.2 94.5_{\pm 0.2} 
+ 40.7 ± 1.0 40.7_{\pm 1.0} 
+ 79.7 ± 0.6 79.7_{\pm 0.6} 
+ 37.8 ± 3.1 37.8_{\pm 3.1} 
+ 20.9 ± 0.9 20.9_{\pm 0.9} 
+ 43.5 ± 0.4 \mathbf{43.5}_{\pm 0.4} 
+
+ 
+ SNIP 
+ 94.7 ± 0.2 94.7_{\pm 0.2} 
+ 41.0 ± 1.6 41.0_{\pm 1.6} 
+ 80.1 ± 0.8 \mathbf{80.1}_{\pm 0.8} 
+ 36.9 ± 0.9 36.9_{\pm 0.9} 
+ 19.6 ± 2.6 19.6_{\pm 2.6} 
+ 43.0 ± 0.8 43.0_{\pm 0.8} 
+
+ 
+ 
+
+ 
+
+ 
+
+ 
+ 
+ Experimental support, please
+ view the build logs 
+ for errors. Generated by
+ 
+ 
+ L
+ A 
+ T
+ E 
+ 
+ xml 
+ 
+ .
+ 
+
+ 
+ Instructions for reporting errors
+
+ We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+ support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+ methods listed below:
+
+ 
+ Click the "Report Issue" ( 
+ 
+ ) button, located in the page header.
+
+ 
+ Tip: You can select the relevant text first, to include it in your report.
+
+ Our team has already identified the following issues . We appreciate your time reviewing and reporting rendering errors we
+ may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+ should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+ all.
+
+ Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion , and welcome developer contributions .
+
+ 
+
+ 
+ 
+ 
+ 
+ We gratefully acknowledge support from our major funders ,
+ member institutions , ,
+ and all contributors.
+ 
+
+ 
+ About &middot; 
+ Help &middot; 
+ Contact &middot; 
+ Subscribe &middot; 
+ Copyright &middot; 
+ Privacy &middot; 
+ Accessibility &middot; 
+ Operational Status (opens in new tab) 
+ 
+ 
+
+ 
+
+ 
+ 
+ 
+ 
+ 
+ 
+
+ 
+ 
