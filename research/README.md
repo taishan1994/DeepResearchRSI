@@ -28,6 +28,7 @@ research/<slug>/
 | [rsi-inference](./rsi-inference/REPORT.md) | 推理优化中的递归自我改进：反馈强度才是主坐标（2024-01 ～ 2026-11，45 篇核心 + 12 旁证） | **57 来源 / 74 证据 / 12 主张（11 高置信）/ 0 争议** |
 | [rsi-serving](./rsi-serving/REPORT.md) | 推理优化的递归自我改进：端到端层的判定问题（2025-03 ～ 2026-11，15 篇核心 + 8 旁证） | **23 来源 / 60 证据 / 12 主张（12 高置信）/ 0 争议** |
 | [rsi-quant](./rsi-quant/REPORT.md) | 模型量化的递归自我改进：判据的不可迁移性（2025-01 ～ 2026-11，17 篇核心 + 17 旁证） | **34 来源 / 64 证据 / 12 主张（12 高置信）/ 0 争议** |
+| [agent-serving-bench](./agent-serving-bench/REPORT.md) | 当 agent 去设计推理服务系统：ServerBench 及其谱系（2025-02 ～ 2026-11，6 篇核心 + 8 旁证） | **14 来源 / 60 证据 / 12 主张（12 高置信）/ 0 争议** |
 | [specpilot](./specpilot/REPORT.md) | SpecPilot 论文与源码审计：把「改进了没有」变成脚本能算的量（arXiv 2611.02501 + 仓库 @78c42af） | **3 来源 / 81 证据 / 33 主张（29 高置信）/ 1 争议** |
 | [pro6000se-dsv41](./pro6000se-dsv41/REPORT.md) | RTX PRO 6000 Server Edition 部署 DeepSeek-V4.1-Flash：几张卡、什么栈、多快 | **26 来源 / 138 证据 / 48 主张（43 高置信）/ 0 争议** |
 
