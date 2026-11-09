@@ -12,6 +12,14 @@
 全文论证在 [paper/PAPER.md](./paper/PAPER.md)。四条结论各自对应的主张：
 
 1. 只有 kernel 层的循环真正闭合，因为只有这一层的正确性与性能判据都能被程序廉价判定[c-object-kernel][c-object-serving]。
+   > ⚠️ **这条结论已被后来的一个基准削弱。** 见
+   > [rsi-inference-bench](../rsi-inference-bench/REPORT.md)：Apple 的
+   > RSI-Inference Bench 在**服务层**放了一个二元判据（新模型能不能被引擎
+   > 服务起来），10 道 day-0 题全部按 pass/fail 打分，由独立 verifier
+   > 重建引擎后实测。也就是说「只有 kernel 层判据可被廉价判定」这一说法
+   > 不成立——服务层也有，而且已经被做成了基准。
+   > 该篇进一步指出：这条基准的天花板是「一半的题有人过、另一半全场零」，
+   > 卡住的原因更可能是环境而非能力。
 2. 反馈强度是解释改进率的主坐标：同一模型换更严的测量会从 1.43 倍掉到 0.88 倍[c-feedback-ladder]。
 3. 增益的数字不可直接比较（1.07x 到 9.29x），代价结构却高度一致（21% 想、79% 跑）[c-gain][c-cost]。
 4. 回报曲线先陡后平，且增益主要来自脚手架而非权重，故当前是「有累积性的自动优化」而非 RSI[c-plateau][c-moat]。
@@ -192,3 +200,18 @@ locator 标 `abstract` 而非 `fulltext#...`，让「这条证据有多硬」可
   固定模型与预算，只切换 L1–L4 四级反馈。本文没有条件做，故只提出轴，不提出公式。
 - 服务层的闭环证据比 kernel 层稀薄一个量级。本文因此把它写成「半闭合」，
   而不是给出与 kernel 层对称的结论。
+  > 📌 **部分已由后续工作补上**：[rsi-inference-bench](../rsi-inference-bench/REPORT.md)
+  > 收了 Apple 的 RSI-Inference Bench（37 题，day-0 / 优化 / 回归三赛道）
+  > 以及这一族从 MLE-bench 到 RSI-Dojo 的四代谱系。它给出的是本文缺的那一半：
+  > 服务层确实存在可批量执行的二元判据。但它也说明该判据有天花板——
+  > 15 个 agent × 10 题共 412 次尝试只有 23 次全通过。
+  > 故本文「半闭合」的措辞仍然成立，只是原因要改：不是判据不存在，
+  > 是判据只覆盖「起不起来」而不覆盖「改得对不对」。
+
+---
+
+## 校验结果
+
+`sources=57, evidence=74, claims=12, claims_high=11, claims_disputed=0, trace_events=11, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0`
+
+由 `python scripts/validate_research.py research/rsi-inference` 现算；E1 可校验 74 条、无法校验 0 条。

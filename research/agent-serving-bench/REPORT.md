@@ -109,7 +109,7 @@ ServerBench 自己的跨档位反号（一档 2.84、另一档 0.98）也支持�
 
 | 检查 | 结果 |
 |---|---|
-| `validate_research.py` | sources=14 evidence=60 claims=12 e1_checked=60 e1_unverifiable=0，C1/C3/R2 全 0 |
+| `validate_research.py` | sources=14, evidence=60, claims=12, claims_high=12, claims_disputed=0, trace_events=14, c3_violations=0, subquestions=6, r2_violations=0, c1_violations=0（e1_checked=60、e1_unverifiable=0） |
 | `audit_paper.py` | 4 图 6 表，3 条数值回溯全通过 |
 | `check_paper.py` | FAIL 0 / WARN 0（I1–I5） |
 | `check_latex.py` | FAIL 0 / WARN 0（X1–X6），7 页 |
@@ -122,6 +122,13 @@ ServerBench 自己的跨档位反号（一档 2.84、另一档 0.98）也支持�
 3. **没有自跑实验**，全部数字二手。
 4. **ServerBench 自身的局限**：负载只来自一个 coding-trace 来源，三档部署、闭循环回放，跨架构与跨加速器的泛化性它自己也声明了限制。
 5. **没有回答"这条线多久能到 RSI"**：语料里没人给时间线。
+
+> 📌 **相关归档**：[rsi-inference-bench](../rsi-inference-bench/REPORT.md) 处理的是
+> 另一类装置——不是「让 agent 造整套服务系统」，而是「给 agent 一个真实引擎
+> 和 1~8 张卡，判它能不能把新模型服务起来 / 优化到多少 / 修掉一个回归」。
+> 两篇互补：本篇问「agent 造的系统好不好」，那篇问「谁判它做成了」。
+> 那篇的核心发现可以直接接到本篇的第 5 章——它的验证也是**独立 verifier 重建
+> 引擎后实测**，与本篇「验证器而非生成器是瓶颈」同构。
 
 ## 6　文件
 
