@@ -521,7 +521,7 @@ DistServe（2401.09670）等**奠基论文一篇都没进来**——它们的标
 ## 8. 校验状态
 
 ```
-validate     [OK]  sources=70, evidence=78, claims=9, claims_high=8, claims_disputed=0, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0,
+validate     [OK]  sources=70, evidence=92, claims=11, claims_high=10, claims_disputed=0, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0,
                    claims_disputed=0, c3_violations=0, subquestions=5,
                    r2_violations=0, c1_violations=0, sku_unspecified=0,
                    s1_with_tz=63, d1_documents=61,

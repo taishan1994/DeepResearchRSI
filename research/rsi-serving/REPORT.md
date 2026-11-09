@@ -157,3 +157,11 @@ pd-disagg 19 页 0 FAIL（3 个 WARN 是图引用次数，与 L6 无关）。
 | `paper/PAPER.md` | 论文正文 |
 | `paper/latex/main.pdf` | 排版结果（8 页） |
 | `run.json` | 14 条 trace |
+
+---
+
+## 校验结果
+
+`sources=23, evidence=60, claims=12, claims_high=12, claims_disputed=0, trace_events=14, c3_violations=0, subquestions=6, r2_violations=0, c1_violations=0`
+
+由 `python scripts/validate_research.py research/rsi-serving` 现算；E1 可校验 60 条、无法校验 0 条。

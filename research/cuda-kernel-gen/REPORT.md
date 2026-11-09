@@ -88,4 +88,4 @@ PYTHONPATH=D:/github/DeepResearchRSI/packages/schemas/python \
   python -m deepresearchrsi.validate D:/github/DeepResearchRSI/research/cuda-kernel-gen
 ```
 
-**当前校验结果**：sources=0, evidence=0, claims=0, claims_high=0
+**当前校验结果**：sources=36, evidence=19, claims=19, claims_high=15, claims_disputed=0, trace_events=21, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0

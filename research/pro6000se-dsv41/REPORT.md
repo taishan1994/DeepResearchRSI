@@ -567,3 +567,11 @@ python scripts/check_paper.py research/pro6000se-dsv41/paper
 15. Qovery. *Self-Hosting DeepSeek V4.1-Flash: The Exact GPU Setup You Need*. 2026-10-30. <https://www.qovery.com/blog/self-host-deepseek-v4-1-flash-gpu-setup-own-cloud>
 16. Artificial Analysis. *Inference Serving Configurations*. <https://artificialanalysis.ai/hardware-inference-stack/configs>
 17. 腾讯云开发者社区. *DeepSeek V4.1 Flash 部署完整指南*（抓取失败，仅登记）. 2026-09-10. <https://cloud.tencent.cn/developer/article/2740943>
+
+---
+
+## 校验结果
+
+`sources=26, evidence=138, claims=48, claims_high=43, claims_disputed=0, trace_events=26, c3_violations=0, subquestions=7, r2_violations=0, c1_violations=0`
+
+由 `python scripts/validate_research.py research/pro6000se-dsv41` 现算；E1 可校验 138 条、无法校验 0 条。

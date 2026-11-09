@@ -483,4 +483,4 @@ research/specpilot/
 
 校验行（机器可读，勿手改）：
 
-(sources=3, evidence=81, claims=33, claims_high=29, claims_disputed=1, c1_violations=0, e1_unverifiable=0)
+(sources=3, evidence=81, claims=33, claims_high=29, claims_disputed=1, c3_violations=0, subquestions=7, r2_violations=0, c1_violations=0, e1_unverifiable=0)

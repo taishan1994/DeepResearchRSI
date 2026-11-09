@@ -141,4 +141,4 @@ research/kernel-agent/
 
 校验行（机器可读，勿手改）：
 
-(sources=35, evidence=39, claims=9, claims_high=5, claims_disputed=0, c1_violations=0, e1_unverifiable=0)
+(sources=35, evidence=39, claims=9, claims_high=5, claims_disputed=0, c3_violations=0, subquestions=5, r2_violations=0, c1_violations=0, e1_unverifiable=0)

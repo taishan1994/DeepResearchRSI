@@ -366,3 +366,11 @@ E1 的落地方式：`build_archive.py` 在写 CSV **之前**逐条校验 quote 
 ## 附录 B　纳入的 61 篇
 
 见 `sources.csv`（`notes` 列标了 `layer=`）。分层口径见 `codebook.py` 的文档串。
+
+---
+
+## 校验结果
+
+`sources=53, evidence=63, claims=48, claims_high=25, claims_disputed=0, trace_events=8, c3_violations=0, subquestions=6, r2_violations=0, c1_violations=0`
+
+由 `python scripts/validate_research.py research/rsi-model-training` 现算；E1 可校验 63 条、无法校验 0 条。

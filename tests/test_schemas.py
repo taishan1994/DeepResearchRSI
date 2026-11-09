@@ -299,10 +299,18 @@ def test_docs_quote_real_counts() -> None:
                 out[kind] = sum(1 for _ in _csv.DictReader(fh))
         return out
 
-    # 只匹配 research/README.md 里那种带 slug 的表格行：
-    #   | [slug](./slug/REPORT.md) | 主题 | **N 来源 / N 证据 / N 主张…** |
+    # 只匹配带 slug 的表格行，两种相对路径都要认：
+    #   research/README.md: | [slug](./slug/REPORT.md) | 主题 | **N 来源 / …** |
+    #   顶层 README.md:     | [slug](./research/slug/REPORT.md) | 主题 | **N 来源 / …** |
+    #
+    # ⚠️ 原先只写了 `./slug/REPORT.md` 一种。顶层 README 用的是
+    #    `./research/slug/REPORT.md`，于是整份文件**一行都没匹配上**，
+    #    落进下面的兜底分支，拿 rsi-model-training 的「53 来源」去和
+    #    rtx-pro-6000 的 447 比，报出一个假的漂移。
+    #    修正则，不是改文档——文档数字是对的。
     row_re = _re.compile(
-        r"^\|\s*\[(?P<slug>[a-z0-9-]+)\]\(\./(?P=slug)/REPORT\.md\)\s*\|"
+        r"^\|\s*\[(?P<slug>[a-z0-9-]+)\]"
+        r"\(\./(?:research/)?(?P=slug)/REPORT\.md\)\s*\|"
         r"\s*(?P<topic>[^|]*)\|(?P<scale>[^|]*)\|",
         _re.MULTILINE,
     )
@@ -327,7 +335,8 @@ def test_docs_quote_real_counts() -> None:
                 assert got == want, (
                     f"{rel}: 行 [{m.group('slug')}] 声明 {got} {kind}，实际 {want}"
                 )
-        # 退路：文件里若完全没有 slug 表格行，才用旧的全文扫描（单归档场景）
+        # 退路：文件里若完全没有 slug 表格行，才用旧的全文扫描（单归档场景）。
+        # 只在**整份文件**没有任何可配对行时启用——否则匹配失败会伪装成漂移。
         if not matched_any and "rtx-pro-6000" in text:
             actual = counts("rtx-pro-6000")
             if actual:

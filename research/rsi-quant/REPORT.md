@@ -165,3 +165,11 @@ LaTeXML 会把网页导航（"Report Issue Back to Abstract"、"Contents Reading
 | `paper/PAPER.md` | 论文正文 |
 | `paper/latex/main.pdf` | 排版结果（8 页） |
 | `run.json` | 14 条 trace |
+
+---
+
+## 校验结果
+
+`sources=34, evidence=64, claims=12, claims_high=12, claims_disputed=0, trace_events=14, c3_violations=0, subquestions=6, r2_violations=0, c1_violations=0`
+
+由 `python scripts/validate_research.py research/rsi-quant` 现算；E1 可校验 64 条、无法校验 0 条。
