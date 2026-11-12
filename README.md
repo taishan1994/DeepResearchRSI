@@ -65,6 +65,7 @@ python tests/test_schemas.py
 | [rsi-model-training](./research/rsi-model-training/REPORT.md) | 模型训练中的递归自我改进（RSI）：外部锚点的迁移与证据边界 | **53 来源 / 63 证据 / 48 主张（25 高置信）/ 0 争议**，61 篇编码 + 10 页 LaTeX 论文 |
 | [pro6000se-dsv41](./research/pro6000se-dsv41/REPORT.md) | RTX PRO 6000 Blackwell **Server Edition** 部署 DeepSeek-V4.1-Flash | **26 来源 / 138 证据 / 48 主张（43 高置信）/ 0 争议**，15 页 LaTeX 论文 |
 | [rsi-inference-bench](./research/rsi-inference-bench/REPORT.md) | RSI-Inference Bench 与 ML 工程基准这一族：判据的形状决定循环闭不闭 | **22 来源 / 62 证据 / 15 主张（13 高置信）/ 0 争议**，9 章 LaTeX 论文 |
+| [rsi-infra-feedback](./research/rsi-infra-feedback/REPORT.md) | RSI 优化推理系统：从「更多反馈」到「可执行反馈」的谱系、判据与证据强度 | **29 来源 / 52 证据 / 28 主张（28 高置信）/ 0 争议**，10 章 11 页 LaTeX 论文（8 图 4 表） |
 
 > 📄 **论文**：`research/rtx-pro-6000/paper/` 下有一份 11 页综述
 > [PAPER.pdf](./research/rtx-pro-6000/paper/PAPER.pdf)

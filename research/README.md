@@ -33,6 +33,7 @@ research/<slug>/
 | [pro6000se-dsv41](./pro6000se-dsv41/REPORT.md) | RTX PRO 6000 Server Edition 部署 DeepSeek-V4.1-Flash：几张卡、什么栈、多快 | **26 来源 / 138 证据 / 48 主张（43 高置信）/ 0 争议** |
 | [multi-platform-publish](./multi-platform-publish/REPORT.md) | 一键多平台发布：工具、机制与边界（知乎/公众号/小红书，2022 ～ 2026-11） | **13 来源 / 54 证据 / 26 主张（17 高置信）/ 1 争议** |
 | [rsi-inference-bench](./rsi-inference-bench/REPORT.md) | RSI-Inference Bench 与 ML 工程基准这一族：判据的形状决定循环闭不闭（2024-10 ～ 2026-11，14 份仓库原文 + 8 篇谱系论文） | **22 来源 / 62 证据 / 15 主张（13 高置信）/ 0 争议** |
+| [rsi-infra-feedback](./rsi-infra-feedback/REPORT.md) | RSI 优化推理系统：从「更多反馈」到「可执行反馈」的谱系、判据与证据强度（2024-06 ～ 2026-11，锚点为智谱 GLM 推理基建自优化报告） | **29 来源 / 52 证据 / 28 主张（28 高置信）/ 0 争议** |
 
 ## 新建任务
 
