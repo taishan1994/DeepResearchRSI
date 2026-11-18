@@ -1,0 +1,2367 @@
+CodeReel: Accelerating Code-to-Video Agents with Exact Frame Reuse and Blocking-Aware Scheduling
+Skip to main content
+Title:
+Content selection saved. Describe the issue below:
+Description:
+License: CC BY 4.0
+arXiv:2611.22967v1 [cs.MM] 17 Nov 2026
+CodeReel: Accelerating Code-to-Video Agents with Exact Frame Reuse and Blocking-Aware Scheduling
+Junyi Shen
+Affiliation: National University of Singapore , Singapore , Singapore
+email: j1shen@comp.nus.edu.sg
+and
+Yao Lu
+Affiliation: National University of Singapore , Singapore , Singapore
+email: luyao@comp.nus.edu.sg
+Abstract.
+Coding agents make videos by writing and refining programs in a build–inspect–edit loop. A finished film costs a
+median of $2.85 in model calls and 11 minutes, over a third of that time in builds that block the agent.
+We find that much of this time is avoidable, for two reasons. First, 37.5% of the frames of a session’s later films were drawn before, many shifted in time or inside an
+edited scene. Second, half of the builds stop at a check, where the agent needs only the verdict, but which builds stop is unknown until the checks finish.
+We present CodeReel, a training-free execution layer behind agents’ existing commands.
+Exact frame reuse keys each frame by its drawing commands, regardless of its position in time, and reuses each
+frame whose key recurs.
+Blocking-aware scheduling runs the checks first and starts the render alongside them, at idle priority, unless
+the session’s recent builds make a pass unlikely. Scheduling spends CPU to answer sooner and reuse returns it; exact keys let later versions use frames rendered for a failed one as the agent thinks.
+We introduce EditLoop, a benchmark of replayable agent sessions whose films are checked against renders from
+scratch.
+On it, CodeReel cuts the agent’s wait by 36.3% against Rebuild, a warm pipeline with parallel
+rendering, and by 57.9% against Sequential, today’s step-by-step pipeline. On time-shifting edits its reuse renders 43.9%, close to the 43.0% whose pixels are new, while Manim-style
+caching renders 99.8%. With real agents, the median wait per build is 0.62 × \times
+Rebuild’s in Claude Code, on topics never used in development, and 0.67 × \times in Codex CLI. The gain holds
+for five models and two frameworks.
+1. Introduction
+a How a code-to-video agent works Agent User change requests voice layout checks render encode edits errors, 51.8% of builds film one build: the agent waits 25.5 s (median) 1 2 b One edit, from version 11 to version 13 of a film  reused in place identical  reused, moved shifted 0.2 s  new + gate, gallery v11 v13 6% 39% 55% c The build of version 13 Rebuild checks render all 2,701 frames verdict 7 s film 21 s CodeReel 1,496 new frames verdict 2 s film 13 s, 0.65 × \times 1 2 0 10 20 s
+Figure 1. Code-to-video agents and CodeReel. (a) The agent edits its program and calls a build, which returns errors
+if a check fails and a film otherwise. CodeReel adds blocking-aware scheduling at the checks (1) and exact frame reuse at the
+render (2). (b) One edit: frames of version 13 that version 11 drew at the same time (reused in place), at another
+time (reused, moved) or not at all (new), with the changes boxed; the bar gives each class’s share of its frames. (c) The build of version 13 under
+Rebuild and CodeReel.
+Coding agents such as Claude Code ( Anthropic, 2026a ) and Codex CLI ( OpenAI, 2026a ) produce videos by writing
+programs ( Chen et al., 2026b ; Ku et al., 2025 ; Liu et al., 2025b ; Li et al., 2026b ; Lin, 2026 ; Chen et al., 2026c ) . To make an explainer film, the agent writes scene scripts, a narration timeline and assets, and then refines them in a loop ( Fig. 1 a). In each round it builds the program, inspects the errors or the film, and revises the sources. Some revisions fix its own defects, such as text over subjects or captions out of sync with the speech ( Chen et al., 2026b ; Li et al., 2026b ; Lin, 2026 ) ; others answer its user’s change requests. Each build is a tool call the agent waits for. A build runs four steps in sequence, as current pipelines run theirs ( Chen et al., 2026b ; Ku et al., 2025 ) : it synthesizes the narration’s voice, lays out the timeline, checks the whole film and, if the checks pass, renders every frame. It returns a verdict, pass or fail, with the film on a pass and the errors on a fail. In 123 recorded
+sessions of Claude Code, a finished film takes a median of 10 builds and costs $2.85 in model calls and 11 minutes. The builds take over a third of that time,
+each blocking the agent for a median of 25.5 s.
+We find that much of this wait is avoidable ( Sec. 2 ). The first cause is redundancy: 37.5% of the frames of a session’s later films were drawn by an earlier version, yet they are rendered again. The second is a
+scheduling mismatch: 51.8% of builds stop at a check before any film is made. The agent waits for the verdict or the film depending on an outcome known only when the checks finish, yet the pipeline runs every build in one fixed order.
+Challenges.
+Redundancy. An agent revises a film incrementally, so the frames an edit does not touch recur: 30.2% of later films’ frames at the same time in the previous film and 6.5% at another time ( Fig. 1 b and Fig. 3 b). Three kinds of edit make recurring frames hard to identify before rendering. First, an edit to a file that scenes
+share changes only some frames of the scenes that read it. But a script draws a whole scene from one clock, with no call, node or layer boundary inside it. Caches keyed by an animation call as in Manim ( The Manim Community Developers, 2026 ) , a scene ( Fourier, 2026 ) , a node or layer ( Foundry, 2018 ; Adobe, 2026 ; The Chromium Authors, 2026 ) or a
+file ( Mokhov et al., 2018 ; Curtsinger and Barowy, 2022 ) therefore redraw those scenes whole. Second, a narration edit moves every later scene. An incremental renderer such as kamishibai keys a frame by its index ( kamishibai, 2026 ) and so misses frames that did not change. Third, many edits change little of a frame, such as a few words of a caption. Approximate reuse, as in training-free diffusion caches ( Ma et al., 2024 ; Liu et al., 2025c ; Kahatapitiya et al., 2025 ; Lyu et al., 2025 ) and in edit-time methods that recompute only the edited regions ( Li et al., 2022 ; Nitzan et al., 2024 ; Yu et al., 2024 ) , reuses results whose inputs or features change little. But 32.6% of the changed frames keep an SSIM ( Wang et al., 2004 ) above 0.99 to the frame they replace, so it can keep a stale frame that still shows the old words.
+Scheduling mismatch. A failing build
+should give every core to its checks, and a passing one should start its render at once. The checks and the render
+both process the whole film on the same cores, so a render alongside the checks slows the verdict, and one after them
+delays the film. The machine is idle while the agent thinks, but the version to build next is not yet written. Pipelines fix the order that completes the film ( Chen et al., 2026b ; Ku et al., 2025 ) , schedulers for agents schedule around tool calls ( Kim et al., 2024 ; Xu et al., 2024 ; Ye et al., 2026 ; Zhang et al., 2026 ) , and test prioritization
+reorders the tests of a suite ( Rothermel et al., 2001 ; Prado Lima and Vergilio, 2022 ) . None orders the work inside a build by what the agent is blocked on.
+Our approach.
+We present CodeReel, a training-free, model-agnostic execution layer behind the commands agents already call, built on
+two observations. First, video programs draw each frame from its time alone ( Remotion, 2026a ) , so the commands a frame issues
+determine its pixels. Evaluating them costs 2.7 ms of CPU, against 81 ms per frame for a full render. Exact frame reuse therefore keys a frame by its drawing commands, regardless of its position in time, and reuses every frame whose key was rendered before. Second, a build call is synchronous, so the agent is blocked on the verdict until the checks
+return, on the film once they pass, and on nothing once the build has answered. Blocking-aware scheduling runs the
+checks first and in parallel, and decides from the session’s history and the machine’s cores whether to render alongside them. In the agent’s think time it works ahead, rendering a failed version’s frames, since a stored frame serves any later
+version that draws it. Neither technique changes the verdict or the film of a build from scratch.
+On recorded sessions replayed on 32 cores, CodeReel cuts the agent’s wait by 36.3% against Rebuild, a pipeline with warm processes and
+workers sized to the machine ( Fig. 1 c shows one build). Against Sequential, that pipeline run step by step as today’s agents run theirs ( Chen et al., 2026b ; Ku et al., 2025 ) , the cut is 57.9%. CodeReel answers failing builds in 0.39 × \times Rebuild’s time. Most of the reduction comes from scheduling, which spends CPU to answer sooner; reuse renders 34.9% fewer frames, returns that CPU and helps most where cores are scarce. Real agents wait less as well,
+with a median wait per build of 0.62 × \times Rebuild’s in Claude Code, on topics never used in development,
+and 0.67 × \times in Codex CLI.
+Of the reuse schemes without stale frames, CodeReel renders the fewest frames. On time-shifting edits it renders 43.9%, close to the 43.0% whose pixels are new, while Manim-style caching ( The Manim Community Developers, 2026 ) renders
+99.8%. On programs of another video framework, Remotion ( Remotion, 2026b ) , the agent waits
+0.51 × \times as long under CodeReel as under Remotion’s own renderer ( Sec. 4 ).
+We contribute:
+•
+EditLoop : a benchmark of replayable agent sessions, every delivered film checked against a render from
+scratch ( Sec. 2 ).
+•
+Exact frame reuse : frames keyed by their drawing commands, shift-invariant, with cheaper tests first, returning the CPU that scheduling spends ( Sec. 3.2 ).
+•
+Blocking-aware scheduling : a build ordered by what the agent is blocked on, spending CPU to answer sooner, with work ahead in its think time that exact keys let later versions keep ( Sec. 3.3 ).
+•
+CodeReel : a general execution layer that existing coding agents use unmodified, across video frameworks
+( Sec. 3 ).
+2. The EditLoop benchmark
+diffusion admissions binary search product film door lock radio rundown DNS lookup canal lock name step order text color arrow color valve state wording font timing old new
+Figure 2. Films of EditLoop and their edits. Top: eight real-track films, by topic (6 to 22
+builds each). Bottom: eight edits, the old frame above the new one and what changed between them; similarity-based
+reuse keeps the old frame (SSIM above 0.98), while CodeReel renders the new one.
+Evaluating an execution layer for code-to-video agents needs a record of what agents did, in a form any system can
+replay. Code-to-video benchmarks grade the film ( Chen et al., 2026b ; Chen et al., 2026c ) , a video-editing benchmark adds the
+agent’s runtime and cost ( Gupta et al., 2026 ) , and traces of coding agents record tool durations or turn lengths to benchmark LLM serving ( Zhu et al., 2026 ; Pan et al., 2026 ; Lau et al., 2026 ) . None keeps each program version with the tool calls that built it.
+EditLoop keeps both, so every system can replay the same calls in order, and it checks every delivered film against a render from scratch. We release the sessions with the replayer and its correctness gate.
+2.1. Sessions and tracks
+A session records one agent making one film: every version it committed, every tool call in order with its
+timing and outcome, the agent’s think time before each call, and the class of edit each build follows.
+The real track has 123 sessions of Claude Code ( Anthropic, 2026a ) with Claude Opus 5.5 ( Anthropic, 2026b ) making
+explainer films with cv.js, our Canvas 2D ( WHATWG, 2026 ) runtime ( Fig. 2 ): 1,525 versions, 2,078 tool calls and 1,314 builds. Its films run 52 to 146 s between the 10th and 90th percentiles and are narrated in Chinese and English. Of its builds, 39.0% follow edits of new or removed files,
+26.1% of narration lines, 12.6% of one scene’s script and 20.4% of shared
+scripts or data. It holds every session
+recorded over two weeks that built at least two versions. A scripted user issued every change request. Of the sessions, 60 are on
+topics that GPT-6.1 ( OpenAI, 2026b ) wrote for EditLoop, each with three rounds of change
+requests that build on one another.
+The real track is split by topic: the 33 sessions on topics used to tune any parameter
+form the development split, and the other 90, on 72 topics that include all of GPT-6.1’s, the test split.
+Timing replays one session from each of 70 topics, drawn with a fixed seed. The reuse study takes the 355 pairs of adjacent delivered versions of 88 test-split sessions.
+The model track has 20 sessions of Claude Sonnet 5.5 and Haiku 5.5 ( Anthropic, 2026b ) on 10 test topics. The
+Remotion track brings a second framework, Remotion ( Remotion, 2026b ) , with synthetic edits whose classes and think times follow the real track’s:
+150 versions in 6 sessions.
+2.2. Protocol and metrics
+Replay is closed-loop ( Schroeder et al., 2006 ) : a system executes a session’s recorded calls in order, each after the previous one has answered, either at once or after the recorded think time. Caches start cold in every session.
+Correctness gate. EditLoop requires the from-scratch consistency of incremental computation ( Hammer et al., 2015 ) , and reports a system’s times only if every build keeps it. A build must return the verdict of a build from scratch and no error that the latter does not report, and every frame of every delivered film must equal a render of that version from scratch (supplementary material).
+Metrics. Renderers are compared by render time ( kamishibai, 2026 ) , which misses what blocks the agent. We therefore measure the wait , from a build’s call until the build answers the agent: at the verdict when it fails, after the film when it passes.
+2.3. Where the time goes
+0 50% 100% 123 sessions, by their think-time share share of time failing builds delivering builds other tools think time median tool share 37.7% a 0 50% 100% 291 later films, by their new share share of frames reused in place reused, moved new b
+Figure 3. Where the time and the frames go on the real track. (a) Each session’s time. (b) Each later film’s
+frames: an earlier film drew them at the same time, at another time, or not at all.
+Agent Blocking-aware scheduling verdict voice, layout, checks ∥ \parallel lint normal film render, encode idle → \to normal ahead a failed version’s frames background one ledger of cores and memory for all agents build errors film Exact frame reuse Static impact Values read Frame key 2.7 ms Render 81 ms frame store kept found new
+Figure 4. CodeReel. The agent’s synchronous build call enters the scheduler ( Alg. 1 ), which runs the
+verdict’s operations first, the film’s alongside or after them, and a failed version’s frames while the agent thinks.
+Every render passes the reuse cascade, cheapest test first: static impact sends the frames an edit can reach to the
+frame key, values read keeps the keys of the others, and only frames with new keys or no key are rendered, the keyed
+ones into the frame store. Costs are CPU time per frame, including sound and encoding for the render, and per build for static impact.
+The real track yields three findings ( Fig. 3 ).
+F1: builds take over a third of a session.
+In the median session, tool calls take 37.7% of the time and builds alone 37.0%. Builds take a median of 25.5 s and think times 8.0 s.
+F2: half of the builds fail.
+51.8% of builds stop at a check, for text over subjects, clipped text, captions out of sync or lint
+errors. In these builds the agent waits only for the verdict; in the others, the render waits for the checks.
+F3: later films repeat 37.5% of their frames, unevenly.
+Over the 291 films after a session’s first in the timed test sessions,
+37.5% of the frames repeat, command for command, a frame an earlier film drew. Of all frames, 30.2% repeat at the
+same time in the previous film, 6.5% at another time in it, and 0.8% only in an older film. Of these films, 37.8% are over nine
+tenths new and 11.7% under a tenth.
+Exact reuse removes what F3 repeats; blocking-aware scheduling puts F2’s checks first, overlaps the
+render with them unless a pass is unlikely, and works in F1’s think time.
+3. Method
+CodeReel reduces the agent’s wait in two complementary ways, one per observation of Sec. 1 ( Fig. 4 ): exact reuse across versions removes work and frees CPU, and blocking-aware scheduling spends it on what the agent waits for.
+3.1. Model
+Video programs.
+A video program P P defines a film F P F_{P} , one frame F P ​ ( t ) F_{P}(t) at each time t t of a frame grid. It draws each frame onto a canvas, or lays it out as a page, from t t , its source files and the assets they load. CodeReel relies on the frame contract Remotion states
+for its programs ( Remotion, 2026a ) : F P ​ ( t ) F_{P}(t) depends on nothing else, not on randomness, earlier frames or wall-clock time. The runtime and the checks catch programs that break it (supplementary material).
+Builds.
+As build systems model a build ( Mokhov et al., 2018 ) , a build of P P is a directed acyclic graph G P G_{P} of CPU
+operations, each serving a consumer. The verdict 𝖵 \mathsf{V} needs each changed narration line voiced, the timeline laid out, the film checked at sampled times and the sources linted. The film 𝖥 \mathsf{F} needs every frame and the sound rendered, the sound’s levels checked and each segment encoded. A later version is the consumer of frames rendered ahead. The verdict o P ∈ { pass , fail } o_{P}\in\{\mathrm{pass},\mathrm{fail}\} is known at T 𝖵 T_{\mathsf{V}} , when its checks
+finish. A failing build answers with its errors at T 𝖵 T_{\mathsf{V}} . A passing one answers at T 𝖥 ≥ T 𝖵 T_{\mathsf{F}}\geq T_{\mathsf{V}} , once its film and the checks that need the film have finished, with the film or those checks’ errors. With times measured from the call and [ ⋅ ] [\cdot] the indicator, the agent waits
+(1)
+W P = T 𝖵 [ o P = fail ] + T 𝖥 [ o P = pass ] . W_{P}=T_{\mathsf{V}}\,[o_{P}=\mathrm{fail}]+T_{\mathsf{F}}\,[o_{P}=\mathrm{pass}].
+Problem.
+A session builds versions P 1 , … , P n P_{1},\dots,P_{n} , each given what the builds before it computed. The goal is to minimize the
+expected total wait 𝔼 ⁡ [ ∑ i W P i ] \mathbb{E}\bigl[\sum_{i}W_{P_{i}}\bigr] over the outcomes, each unknown when its build starts.
+Exactness asks for the verdict
+of a build of P i P_{i} from scratch and, when it passes, for its film, frame by frame. Capacity asks that the
+operations running at once fit the machine’s cores and memory, which other agents may share (supplementary material). CodeReel removes from G P i G_{P_{i}} the operations already computed, shortening T 𝖵 T_{\mathsf{V}} and T 𝖥 T_{\mathsf{F}}
+( Sec. 3.2 ), and orders the rest by consumer ( Sec. 3.3 ).
+3.2. Exact reuse across versions
+Reuse must decide, without rendering a frame, whether its pixels can differ from those of a frame rendered before.
+Following the first observation, CodeReel keys each frame by its drawing commands. Each part that draws the
+frame at time t t of P P , a scene’s drawing or an overlay such as subtitles, records the commands it issues through the
+runtime’s supported interfaces, with their arguments and drawing state; images and fonts enter by their bytes. The frame’s key is
+(2)
+κ P ​ ( t ) = h ⁡ ( σ P ​ ( t ) , ν ⁡ ( a 1 ) , … , ν ⁡ ( a m ) ) , \kappa_{P}(t)=h\bigl(\sigma_{P}(t),\nu(a_{1}),\dots,\nu(a_{m})\bigr),
+where σ P ​ ( t ) \sigma_{P}(t) holds the frame’s structural inputs, such as its size, fonts and the order of its parts,
+a 1 , … , a m a_{1},\dots,a_{m} are the commands in drawing order, ν \nu is their normalization to the rasterizer and h h is a hash.
+Like the keys of build systems ( Mokhov et al., 2018 ) and compositors ( Foundry, 2018 ) , a key is sound if equal keys
+imply equal outputs, so every reused output is exact, and tight if equal outputs get equal keys, so no output is computed twice.
+Property 1 (Soundness).
+For a frame drawn under the frame contract through supported interfaces, on one renderer configuration whose rasterizer draws a frame from its commands alone, with ν \nu merging no two commands that the rasterizer draws differently and h h collision-free: if its key equals
+that of a frame rendered before, its pixels equal that frame’s.
+A frame drawn through an unsupported interface gets no key and is rendered every time. 98.6% of the frames are keyed, and Sec. 4.4 reports the audit of every key.
+Normalizing keys to the rasterizer.
+If a key changes while the pixels do not, the frame is rendered needlessly; if it stays while they change, a stale
+frame is shown. The normalization ν \nu therefore rewrites only the commands whose rasterization we characterized. For example, the rasterizer places text at a baseline snapped to whole device pixels, so such text enters the key with the snapped baseline. Every other number enters a key exactly.
+Following frames through time.
+A narration edit changes one line’s duration and moves every later scene, so a cache looked up by time or frame
+index ( kamishibai, 2026 ) misses every frame of a moved scene, although none changed. The video framework Fourier follows whole layers that
+move ( Fourier, 2026 ) . κ \kappa is shift-invariant , since it holds no absolute time: scenes draw from their local time and
+start on whole frames. A scene that the next version P ′ P^{\prime} moves Δ \Delta frames later, its other inputs unchanged, therefore issues at t + Δ t+\Delta the
+commands it issued at t t , and κ P ′ ​ ( t + Δ ) = κ P ​ ( t ) \kappa_{P^{\prime}}(t+\Delta)=\kappa_{P}(t) for a frame whose other parts do the same.
+The cascade.
+Evaluating κ \kappa for every frame would still cost a pass over the program, while the frames an edit cannot reach need
+no new key, so cheaper tests come first ( Fig. 4 , right). Static impact works like a build system’s file
+dependencies ( Mokhov et al., 2018 ; Curtsinger and Barowy, 2022 ) : a scene’s script draws only inside the scene’s time window, so the frames
+inside the windows Ω \Omega that the changed scripts reach go to evaluation. Values read tracks dependencies as
+they are used, as incremental computation does ( Hammer et al., 2014 ) : the runtime records hashes of the values each
+frame read, such as the timeline, the style or an asset entry. A frame outside Ω \Omega keeps its key when they are
+unchanged, so editing one style entry sends to evaluation only the frames that read it. Such a frame issues the same commands as before, so its kept key equals κ P ​ ( t ) \kappa_{P}(t) (Property S1 of the supplementary material). For the remaining frames, evaluating κ \kappa runs
+the drawing code and records its commands, as browsers and UI toolkits keep display lists ( The Chromium Authors, 2026 ; Flutter, 2026 ) , without capturing
+the frame.
+What is reused.
+A frame store holds the rendered frames by key, per renderer configuration: a build takes from it every frame whose key it holds and renders
+the rest, each missing key once. The film’s encoded segments, which hold pictures only, are reused by their frames’ keys, and the checks’ results wherever static impact and values read keep a key.
+Another framework.
+The key and the store carry over to any runtime that exposes what each frame draws and keeps the frame contract: in
+Remotion ( Remotion, 2026b ) this is the laid-out page, its elements with their computed styles and resources by content,
+and frames with new keys go to its own renderer.
+3.3. Blocking-aware scheduling
+The usual pipeline runs every operation at one priority, in the order that completes the
+film ( Chen et al., 2026b ; Ku et al., 2025 ) . Following the second observation, CodeReel schedules each
+operation by the consumer that waits for its output: the operations the verdict needs run first, those only the film
+needs run alongside them when that pays off, and work no one waits for yet runs in the agent’s think time. Each operation also takes its
+consumer’s share of the processor. The verdict’s operations ( Alg. 1 ,
+lines 5 and 7 ), and the film’s once the agent waits for it ( line 12 ), run at normal priority. A render started early ( line 6 ) runs at idle priority, which gets only the
+processor time the others leave. Work ahead A A runs in the background, at low priority, until the next build
+starts ( line 3 ) or blocking work needs memory, and keeps the frames it stored.
+In Alg. 1 , Voice , Layout , Check and Lint are the verdict’s operations of
+Sec. 3.1 , and Λ \Lambda is the layout the checks and the render read. The operator ∥ \parallel runs two operations at once, o o and ℰ \mathcal{E} are the verdict and the errors, and FilmCheck runs the checks that need the film F P F_{P} . Render ​ ( P , Λ , π ) \textsc{Render}(P,\Lambda,\pi) starts rendering P P in priority class π \pi and returns its handle H H .
+Algorithm 1 One build of version P P on c c cores ( Sec. 3.3 ).
+1:
+P P , p ^ \hat{p} , θ c \theta_{c} ; work ahead A A
+2:
+the answer to the agent
+3:
+stop A A ; H ← ∅ H\leftarrow\emptyset
+4:
+e ← [ p ^ > θ c ] e\leftarrow[\hat{p}>\theta_{c}] ⊳ \triangleright early render
+5:
+Λ ← Layout ​ ( Voice ​ ( P ) ) \Lambda\leftarrow\textsc{Layout}(\textsc{Voice}(P))
+6:
+if e e then H ← Render ​ ( P , Λ , idle ) H\leftarrow\textsc{Render}(P,\Lambda,\mathrm{idle}) ⊳ \triangleright asynchronous
+7:
+( o , ℰ ) ← Check ​ ( P , Λ ) | Lint ​ ( P ) (o,\mathcal{E})\leftarrow\textsc{Check}(P,\Lambda)\parallel\textsc{Lint}(P)
+8:
+if o = fail o=\mathrm{fail} then
+9:
+answer ( o , ℰ ) (o,\mathcal{E}) ; cancel H H
+10:
+A ← Render ​ ( P , Λ , background ) A\leftarrow\textsc{Render}(P,\Lambda,\mathrm{background}) ⊳ \triangleright work ahead
+11:
+else
+12:
+if e e then promote H H else H ← Render ​ ( P , Λ , normal ) H\leftarrow\textsc{Render}(P,\Lambda,\mathrm{normal})
+13:
+wait for H H ; answer F P F_{P} , or the errors of FilmCheck ​ ( F P ) \textsc{FilmCheck}(F_{P})
+Within a build: the verdict first.
+On half of the builds the agent waits only for the verdict, whose checks cover the whole film. CodeReel runs the checks
+first and in parallel, with the lint alongside them. Its fast checks leave out what a verdict does not need: the checks that read a frame’s texts and images sample frames as a key is evaluated, by running the drawing code without capturing pixels, and they map drawn objects to source lines only after the verdict. With few cores, a build also fails fast , as in
+test prioritization ( Rothermel et al., 2001 ; Prado Lima and Vergilio, 2022 ) : the checks that seldom fail run only once the others found
+no error, and the build answers at its first errors.
+Within a build: the render as a bet.
+Starting the render alongside the checks is a bet on the outcome, like the sandboxes that agent serving
+prewarms ( Zhang et al., 2026 ) . It saves render time when the version passes and slows the checks in either case, so it pays when the expected saving
+exceeds the delay. At idle priority, the render slows the checks by a fraction d d and keeps a share s s of its speed, and the bet pays when the version passes with probability above θ c = d / ( s ⁡ ( 1 + d ) ) \theta_{c}=d/\bigl(s(1+d)\bigr)
+(supplementary material). Idle priority keeps the bet cheap, with a measured θ c \theta_{c} of 0.25 on 8 cores and 0.21 on 32. 4 takes the bet when
+p ^ > θ c \hat{p}>\theta_{c} , where p ^ \hat{p} is the pass rate of the session’s last five builds of the same kind, with the development split’s as prior. A session’s first build, which rarely passes,
+thus renders after its verdict, and later builds render early ( Fig. 1 c), 88.9% of builds on
+32 cores and 87.6% on 8.
+Across the agent’s think time.
+The machine would be idle while the agent reads a failed build’s errors; serving systems use such windows too ( Xia et al., 2026 ) . The build therefore answers at its verdict, cancels any render started early
+( line 9 ) but keeps the frames it stored. It then renders the rest of the failed version’s frames into the frame store
+as work ahead ( line 10 ), until the next build stops it. By Sec. 3.2 , a stored frame is
+exact for any later version that draws it.
+4. Experiments
+4.1. Experimental setup
+Frameworks and hardware.
+Every system renders the same programs at 1080p and 30 frames per second: cv.js programs, written for our Canvas 2D runtime and run in headless Chromium, and Remotion ( Remotion, 2026b ) programs, written in React. The machines are 32, 8 or 4 of one server’s cores, with 2 GB of memory per core. 32 cores are abundant, since a render starts fewer workers than there
+are cores; 8 are constrained, since a render can use more workers than cores; and 4 are saturated, since frame capture
+alone fills them. Every system renders on the CPU (supplementary material).
+Baselines.
+For the wait, Rebuild is CodeReel without exact reuse and blocking-aware scheduling: one priority for every
+operation, the checks in a single browser page with the lint after them, no fast checks or failing fast, and the render
+after the checks. It keeps every other mechanism, such as warm browser pages, a resident voice process and workers sized to the machine. Sequential runs a
+build’s steps one after another on the same runtime, with cold browser pages, a cold voice process and eight render
+workers, as code-to-video agents run theirs ( Chen et al., 2026b ; Ku et al., 2025 ) .
+For reuse, we implement on the same films the schemes that tools and caches use. Scene windows re-render the time windows of the scenes whose files changed, and read sets re-render the frames whose files or read values changed. Kamishibai-style fingerprints ( kamishibai, 2026 ) are typical , over a part’s file and timing, or careful , adding every shared script and the whole timeline. Manim-style per-call caching keys each scene whole, by its files and the values it reads, as Manim keys each animation call ( The Manim Community Developers, 2026 ) . Complete keys reuse whole scenes or narration lines when all their frames’ keys recur. The similarity rule reuses a frame as approximate caches do ( Liu et al., 2025c ; Agarwal et al., 2024 ) , on frame thumbnails.
+Protocol.
+EditLoop’s test split is replayed as in Sec. 2 , each session once per system, back to back on the same cores in alternating order. Replays run without think time, which only work ahead uses ( Sec. 4.3 ). The primary
+estimate is the ratio of total waits over builds b b , ∑ b W b / ∑ b W b R \sum_{b}W_{b}/\sum_{b}W^{\mathrm{R}}_{b} with W b R W^{\mathrm{R}}_{b} the wait under Rebuild; 95% intervals come from 2,000 bootstrap resamples of topics ( Efron, 1979 ) . We registered the protocol before any formal run, with three claims: no
+stale frame, a ratio below one on 8 and on 32 cores (Holm-corrected ( Holm, 1979 ) , one-sided 2.5%), and a shorter median
+wait per build for real agents.
+4.2. Comparison with existing systems
+Table 1. CodeReel against existing systems by workload. A block’s first row gives the mean wait, CPU-seconds and
+frames per build and the peak memory; the other rows are relative to it. Exact counts the delivered films equal to a render
+from scratch (–: an external renderer, which renders each version from scratch).
+System
+Wait
+CPU
+Memory
+Frames
+Exact
+EditLoop’s real track (Canvas 2D, 32 cores; 70 topics)
+Sequential ( Chen et al., 2026b ; Ku et al., 2025 )
+23.2 s
+143 s
+4.3 GB
+1,399
+363/363
+Rebuild
+0.66
+1.17
+1.83
+1.00
+363/363
+CodeReel
+0.42
+0.95
+1.70
+0.65
+363/363
+EditLoop’s Remotion track (React, 8 cores; synthetic edits)
+Remotion renderer ( Remotion, 2026b )
+11.9 s
+91 s
+2.2 GB
+1,003
+–
+HyperFrames ( HyperFrames, 2026 )
+0.96
+0.59
+0.93
+1.00
+–
+CodeReel
+0.51
+0.20
+0.88
+0.06
+150/150
+kamishibai’s edit benchmark ( kamishibai, 2026 ) (React, 8 cores)
+Remotion renderer ( Remotion, 2026b )
+25.4 s
+104 s
+2.3 GB
+2,580
+–
+HyperFrames ( HyperFrames, 2026 )
+1.52
+1.50
+0.87
+1.00
+–
+kamishibai, full ( kamishibai, 2026 )
+1.42
+1.14
+0.58
+1.00
+–
+kamishibai, incremental ( kamishibai, 2026 )
+0.80
+0.48
+1.43
+0.25
+15/15
+CodeReel
+0.66
+0.51
+0.76
+0.25
+15/15
+Table 1 shows that CodeReel answers soonest on every workload. Each external system runs as shipped, on the programs written for it, with as many render workers as CodeReel. On EditLoop’s real track, relative to Sequential, the agent waits 0.42 × \times as long under CodeReel, which uses less CPU, and 0.66 × \times as long under Rebuild, which uses more. Figure 5 gives the wait in seconds. CodeReel answers
+95.4% of the builds sooner than Rebuild does. On the Remotion track, replayed on 8 cores, the agent waits
+0.51 × \times as long under CodeReel as under Remotion’s own renderer ( Remotion, 2026b ) , with 5.6% of the frames rendered. Under HyperFrames ( HyperFrames, 2026 ) , an HTML video framework for agents that renders each version from scratch, the agent waits 0.96 × \times as long on the programs ported to it. On kamishibai’s own benchmark ( kamishibai, 2026 ) , five edits of its reel after a
+first render, CodeReel takes 0.82 × \times the time of kamishibai run incrementally, which renders the
+frames whose fingerprint changed.
+0 5 10 15 0 50% 100% 7.1 2.6 time to verdict (s) share of builds Sequential Rebuild CodeReel 0 20 40 60 35.5 15.5 time to film (s)
+Figure 5. The agent’s wait per build on 32 cores , as the share of builds answered within a time, over the
+339 builds that end at the verdict and the 363 that deliver a film; dots, the
+medians (s).
+4.3. Wait across machines and agents
+Table 2. Wait, frames and CPU relative to Rebuild. CodeReel by machine, Rebuild with one mechanism on 32 and 8 cores,
+and CodeReel without one on 32 cores, in a second replay whose first row is the full system.
+Setting
+Wait
+Failed
+Film
+Frames
+CPU
+CodeReel by machine
+32 cores
+0.64
+0.39
+0.71
+0.65
+0.81
+32 cores, think time
+0.59
+0.41
+0.65
+0.49
+0.92
+8 cores
+0.67
+0.43
+0.71
+0.66
+0.76
+8 cores, think time
+0.60
+0.43
+0.63
+0.53
+0.86
+4 cores
+0.75
+0.46
+0.79
+0.63
+0.72
+Rebuild with one mechanism
+32 cores, reuse
+0.94
+0.97
+0.94
+0.66
+0.81
+32 cores, verdict first
+0.69
+0.49
+0.75
+1.00
+1.12
+32 cores, fast checks
+0.82
+0.58
+0.89
+1.00
+0.98
+8 cores, reuse
+0.86
+0.96
+0.84
+0.66
+0.82
+8 cores, verdict first
+0.86
+0.60
+0.90
+1.00
+1.05
+8 cores, fast checks
+0.88
+0.57
+0.94
+1.00
+0.96
+CodeReel without one mechanism, on 32 cores
+every mechanism
+0.62
+0.38
+0.69
+0.65
+0.77
+without reuse
+0.65
+0.38
+0.73
+1.00
+0.98
+without verdict first
+0.76
+0.56
+0.82
+0.65
+0.77
+without fast checks
+0.65
+0.47
+0.69
+0.64
+0.87
+never rendering early
+0.66
+0.37
+0.73
+0.65
+0.74
+Under CodeReel the agent waits less than under Rebuild on every machine, for every model and in both harnesses,
+Claude Code and Codex CLI, on failing and on delivering builds (Failed and Film in Tab. 2 ).
+The registered tests on 32 and 8 cores replay the 70 timed topics, and the run on 4 cores replays
+20 of them. On 32 cores,
+the main setting, the agent waits 0.64 × \times as long (95% CI 0.61–0.66):
+0.39 × \times on failing builds and 0.71 × \times on builds that deliver a film. CodeReel renders 34.9% fewer frames and, over all builds, returns the verdict in 0.35 × \times the time. On 8 cores the agent
+waits 0.67 × \times as long (CI 0.64–0.69), and on 4 cores 0.75 × \times (CI 0.70–0.80). Both registered tests pass, and every build passes the correctness gate. On the 24 live sessions of Sec. 4.5 on topics never used in development, the agent waits 0.60 × \times as long on 32 cores and 0.66 × \times on 8.
+With the other models and harnesses, Claude Sonnet and Haiku from the model track, DeepSeek V4 ( DeepSeek-AI, 2026 ) in Claude Code and GPT-6.1 in Codex CLI, the agent waits 0.54–0.62 × \times as long on 32 cores, each interval
+below one.
+0 0.5 1 0 0.5 1 a frames rendered wait, relative to Rebuild Opus 5.5 Opus 5.5 † Sonnet 5.5 Haiku 5.5 DeepSeek V4 † Codex CLI † 0 0.5 1 0 0.5 1 CodeReel b frames with new pixels frames rendered Manim-style
+Figure 6. The gain across sessions and edits. (a) Wait against frames rendered, both relative to Rebuild, per session (gray)
+and per agent (colored; † \dagger : each agent’s first session on nine topics); solid, the per-session fit; dashed, y = x y=x . (b)
+Frames rendered against frames with new pixels, per adjacent pair, CodeReel and Manim-style caching ( The Manim Community Developers, 2026 ) ; points
+below the dashed line, pixel truth, reuse stale frames.
+Across sessions.
+The agent waits less in sessions that render fewer frames again ( Fig. 6 a): on the least-squares line,
+wait = 0.38 + 0.37 ⋅ frames \text{wait}=0.38+0.37\cdot\text{frames} , both relative to Rebuild. Section 4.6 separates what
+reuse and scheduling each contribute.
+Think time and work ahead.
+Replayed with the recorded think time, work ahead shortens the wait further, to 0.60 × \times Rebuild’s
+on 8 cores and 0.59 × \times on 32 ( Tab. 2 ). On 8 cores that is 0.90 × \times the wait without work ahead.
+Shared machines.
+A machine is one budget for all its agents: CodeReel keeps a ledger of its cores and memory and sizes each render to what
+is left, blocking work first, so every agent gets its films where uncoordinated renders outgrow the machine
+(supplementary material).
+4.4. Exactness and tightness of reuse
+Table 3. Frames rendered by each reuse scheme on the test split’s adjacent versions and on time-shifting
+narration edits (cv.js). Exact: no stale frame; similarity: a frame reused when its
+gray thumbnail differs from the previous version’s by less than 0.1 on average; pixel truth: the frames
+whose pixels are new.
+Adjacent
+Time-shifting
+Method
+Exact
+versions
+edits
+Scene windows
+× \times
+90.3%
+100.0%
+Read sets
+× \times
+83.8%
+53.2%
+Kamishibai-style, typical ( kamishibai, 2026 )
+× \times
+63.5%
+54.0%
+Kamishibai-style, careful
+× \times
+89.0%
+99.8%
+Manim-style ( The Manim Community Developers, 2026 )
+× \times
+88.0%
+99.8%
+Similarity, threshold 0.1 ( Liu et al., 2025c )
+× \times
+59.7%
+–
+Per scene, complete keys
+✓ \checkmark
+80.2%
+81.1%
+Per line, complete keys
+✓ \checkmark
+71.1%
+64.5%
+CodeReel
+✓ \checkmark
+63.2%
+43.9%
+Pixel truth
+✓ \checkmark
+60.2%
+43.0%
+Over the 1,023,902 frames of the reuse study’s 355 pairs, CodeReel reuses no frame whose pixels changed and
+renders 63.2% of the frames, 1.05 × \times those whose pixels are new. Every other scheme renders more or reuses stale frames ( Tab. 3 ). The similarity rule of
+Tab. 3 leaves
+7.0% of all frames stale. These frames miss the agent’s edit ( Fig. 2 , bottom) at a median SSIM of 0.999 to the correct frame (supplementary material). No frame CodeReel reuses is
+stale, here or in 2,000 random edits, and an audit of every key against a lossless capture of its frame
+finds no key that stands for two pictures (supplementary material).
+The cost of each edit.
+On 85.6% of pairs, CodeReel stays within 5 points of the share of frames whose pixels are new
+( Fig. 6 b), while Manim-style caching renders whole
+scenes.
+Time-shifting edits.
+In 32 narration edits to four cv.js films ( Tab. 3 ,
+right), CodeReel renders 43.9% of their frames, against 43.0% whose
+pixels are new, and reuses no stale frame. Read sets reuse 7,228 stale frames. Remotion films give similar results (supplementary material).
+4.5. Real agents in the loop
+Table 4. Real agents on 8 cores , CodeReel relative to Rebuild (geometric means over pairs; Faults: CodeReel minus
+Rebuild, every 95% interval including zero).
+Agent
+Pairs
+Wait
+Film
+Total
+Builds
+Time
+Faults
+Claude Code, untouched
+14
+0.62
+0.76
+0.69
+0.93
+0.83
+− - 0.29
+Claude Code, all
+26
+0.59
+0.73
+0.70
+1.01
+0.84
+− - 0.42
+Codex CLI
+12
+0.67
+0.58
+0.68
+0.98
+0.83
+− - 0.58
+Under CodeReel, both agents wait less per build ( Tab. 4 ). Each agent runs with the same model, topics and
+scripted user under Rebuild and under CodeReel. Claude Code runs with Claude Opus 5.5 in 26 pairs of sessions on 16 topics, six of them from Code2Video’s benchmark ( Chen et al., 2026b ) ; Codex CLI runs with GPT-6.1 on those six topics, twice each. Each pair’s ratio compares the two sessions’ median wait per build (Wait) and per delivering build (Film), total
+wait (Total), builds and wall-clock time (Time). Faults is the difference in the number of defects that Claude
+Opus 5.5 ( Anthropic, 2026b ) , blind to the system, lists in the final film. On the 14 untouched pairs, on topics never used in development, the registered median wait per build drops to 0.62 × \times (CI 0.43–0.82) and the total wait to
+0.69 × \times . Through Codex CLI, the wait per build drops to 0.67 × \times (CI
+0.52–0.79) and the total to 0.68 × \times . A session ends sooner as well (Time). The films’ faults do not differ, and every final film CodeReel delivered equals a render from scratch.
+4.6. Ablation study
+As Tab. 2 shows, most of the reduction on 32 cores comes from scheduling, which spends CPU to answer sooner, while reuse cuts frames, returns that CPU and helps most where cores are scarce. Added alone to Rebuild, reuse renders 34.3% fewer frames and
+shortens the wait to 0.94 × \times on 32 cores but 0.86 × \times on 8, where rendering fills the machine. The verdict first alone, with the checks in parallel and the render alongside them, shortens it to
+0.69 × \times on 32 cores with 1.12 × \times the CPU. Removing any one mechanism from CodeReel lengthens the wait, most of all the verdict first (to 1.22 × \times ). Without reuse the CPU rises to
+1.27 × \times .
+5. Related work
+Code-to-video agents. Agents write Manim, web or slide programs refined in a render
+loop ( Chen et al., 2026b ; Ku et al., 2025 ; Li et al., 2026b ; Lin, 2026 ; Zhu et al., 2025 ) , check animations in that
+loop ( Ma and Agrawala, 2025 ; Liu et al., 2025a ) , drive simulators ( Bai et al., 2026 ) or mix programs with generative models ( Liu et al., 2025b ) . None reuses
+more than its framework’s per-call cache, and none targets the agent’s wait.
+Reuse. Training-free caches ( Ma et al., 2024 ; Liu et al., 2025c ; Liu et al., 2025d ) , edit-time methods ( Li et al., 2022 ; Nitzan et al., 2024 ; Liu et al., 2026a ) , render caches ( Walter et al., 1999 ; Nehab et al., 2007 ) and video networks
+that skip unchanged regions ( Habibian et al., 2021 ; Parger et al., 2022 ; Dutson et al., 2023 ) approximate the full computation. Production tools,
+browsers and UI frameworks cache or skip by node, layer, object or component ( Foundry, 2018 ; Adobe, 2026 ; The Chromium Authors, 2026 ; Flutter, 2026 ; React, 2026 ; Jetpack Compose, 2026 ) . Closest to us, Manim keys animation
+calls by their inputs ( The Manim Community Developers, 2026 ) , kamishibai fingerprints a frame’s page at the same index ( kamishibai, 2026 ) ,
+HyperFrames repeats frames its timeline predicts static ( HyperFrames, 2026 ) , and Fourier fingerprints scenes and layers,
+also after a layer moves in time ( Fourier, 2026 ) . Browsers and UI toolkits keep drawing commands as display lists within one page’s lifetime ( The Chromium Authors, 2026 ; Flutter, 2026 ) ; CodeReel keys whole frames by their evaluated commands, so frames of imperative code with one clock are found in any version at any time ( Tab. 3 ). Like build systems and their content-addressed caches ( Mokhov et al., 2018 ; Curtsinger and Barowy, 2022 ; Bazel, 2026 ; Hammer et al., 2014 ) , it is consistent with a build from scratch, but it keys what a program draws instead of what it reads.
+Scheduling around agents. Test prioritization runs likely failures
+first ( Rothermel et al., 2001 ; Prado Lima and Vergilio, 2022 ) , and agent systems schedule around tool
+calls ( Kim et al., 2024 ; Xu et al., 2024 ; Ye et al., 2026 ; Xia et al., 2026 ; Liu et al., 2026b ; Zhang et al., 2026 ; Zheng et al., 2026 ) . CodeReel schedules within a
+build by what the agent is blocked on, and the frames it renders ahead need no rollback.
+6. Limitations and conclusion
+CodeReel shortens a code-to-video agent’s wait by exact frame reuse, which removes repeated work, and blocking-aware scheduling, which spends the CPU it frees on what the agent waits for; neither changes the film a build delivers. On EditLoop, the wait falls by 36.3% against Rebuild and
+57.9% against Sequential, and the gain holds across models, harnesses and frameworks.
+Our scope is 2D video programs whose drawing a runtime can record. Frames of 3D scenes are
+rendered exactly but never reused, footage from generative models lies outside the scope, and an edit that changes most
+frames gains mostly from scheduling. Exact reuse for 3D and GPU rendering, and agents that plan their edits around what
+can be reused, are directions for future research.
+LLM usage statement
+LLM coding agents are the subject of this study: EditLoop records their sessions, and Sec. 4.5 runs them
+live. GPT-6.1 wrote sixty of EditLoop’s topics, and Claude Opus 5.5 scored the real agents’ films blind to the system. A
+coding agent helped implement the system and the experiment scripts, ran experiments under the authors’ direction and
+drafted parts of the text from the authors’ notes. The authors checked every result and reference, revised all text and
+take full responsibility for the content; no LLM is an author.
+References
+Adobe (2026)
+Adobe. 2026.
+Memory and Storage in After Effects.
+https://helpx.adobe.com/after-effects/desktop/memory-storage-performance/memory-and-storage/memory-storage1.html .
+Section “The global performance cache”; accessed 2026-10-27.
+Agarwal et al . (2024)
+Shubham Agarwal, Subrata
+Mitra, Sarthak Chakraborty, Srikrishna
+Karanam, Koyel Mukherjee, and
+Shiv Kumar Saini. 2024.
+Approximate Caching for Efficiently Serving
+Text-to-Image Diffusion Models. In USENIX
+Symposium on Networked Systems Design and Implementation (NSDI) .
+1173–1189.
+Anthropic (2026a)
+Anthropic.
+2026a.
+Claude Code.
+https://code.claude.com/docs .
+Accessed 2026-11-10.
+Anthropic (2026b)
+Anthropic.
+2026b.
+Models overview.
+https://platform.claude.com/docs/en/models/overview .
+Accessed 2026-11-10.
+Bai et al . (2026)
+Xiangyu Bai, He Liang,
+Bishoy Galoaa, Utsav Nandi,
+Shayda Moezzi, Yuhang He, and
+Sarah Ostadabbas. 2026.
+MoReGen: Multi-Agent Motion-Reasoning Engine for
+Code-based Text-to-Video Synthesis. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR) .
+Bazel (2026)
+Bazel 2026.
+Remote Caching.
+Bazel documentation,
+https://bazel.build/remote/caching .
+Accessed 2026-11-16.
+BuildBuddy (2026)
+BuildBuddy 2026.
+RBE Setup.
+BuildBuddy documentation,
+https://www.buildbuddy.io/docs/rbe-setup/ .
+Accessed 2026-10-27.
+Chen et al . (2026a)
+Junhao Chen, Kejun Gao,
+Yuehan Cui, Mingze Sun,
+Mingjin Chen, Shaohui Wang,
+Xiaoxiao Long, Fei Ma,
+Qi Tian, Hao Zhao, and
+Ruqi Huang. 2026a.
+LottieGPT: Tokenizing Vector Animation for
+Autoregressive Generation. In IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR) .
+Chen et al . (2026b)
+Yanzhe Chen,
+Kevin Qinghong Lin, and Mike Zheng
+Shou. 2026b.
+Code2Video: A Code-centric Paradigm for
+Educational Video Creation. In International
+Conference on Machine Learning (ICML) (Proceedings
+of Machine Learning Research, Vol. 306) .
+15370–15396.
+Chen et al . (2026c)
+Zhenghan Chen, Zekai
+Shao, Xin Lin, Leting Cheng, and
+Siming Chen. 2026c.
+Code2Video-Compass: A Comprehensive Benchmark for
+General-Purpose Code-Based Video Generation across T2V, I2V, and V2V.
+arXiv:2610.28416.
+Curtsinger and Barowy (2022)
+Charlie Curtsinger and
+Daniel W. Barowy. 2022.
+Riker: Always-Correct and Fast Incremental Builds
+from Simple Specifications. In USENIX Annual
+Technical Conference (ATC) . 885–898.
+DeepSeek-AI (2026)
+DeepSeek-AI.
+2026.
+DeepSeek-V4: Towards Highly Efficient Million-Token
+Context Intelligence.
+Technical report.
+Dutson et al . (2023)
+Matthew Dutson, Yin Li,
+and Mohit Gupta. 2023.
+Eventful Transformers: Leveraging Temporal
+Redundancy in Vision Transformers. In IEEE/CVF
+International Conference on Computer Vision (ICCV) .
+16911–16923.
+doi: 10.1109/iccv51070.2023.01551
+Efron (1979)
+Bradley Efron.
+1979.
+Bootstrap Methods: Another Look at the Jackknife.
+The Annals of Statistics
+7, 1 (1979),
+1–26.
+doi: 10.1214/aos/1176344552
+Flutter (2026)
+Flutter 2026.
+RenderRepaintBoundary and
+SceneBuilder.addRetained.
+Flutter API reference,
+https://api.flutter.dev .
+Accessed 2026-10-27.
+Foundry (2018)
+Foundry.
+2018.
+Op Hashing & Caching.
+NDK Developers Guide,
+https://learn.foundry.com/nuke/developers/112/ndkdevguide/advanced/hashing.html .
+Accessed 2026-10-27.
+Fourier (2026)
+Fourier 2026.
+Fourier: A Video Framework for AI Agents and
+Developers.
+https://github.com/VoidFunOfficial/fourier .
+Render engine 5.0.0 (commit 86f6a5f); accessed 2026-10-27.
+Ge et al . (2025)
+Jiaxin Ge, Zora Zhiruo
+Wang, Xuhui Zhou, Yi-Hao Peng,
+Sanjay Subramanian, Qinyue Tan,
+Maarten Sap, Alane Suhr,
+Daniel Fried, Graham Neubig, and
+Trevor Darrell. 2025.
+AutoPresent: Designing Structured Visuals from
+Scratch. In IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR) . 2902–2911.
+doi: 10.1109/cvpr52734.2025.00276
+Gu et al . (2025)
+Yunqi Gu, Ian Huang,
+Jihyeon Je, Guandao Yang, and
+Leonidas Guibas. 2025.
+BlenderGym: Benchmarking Foundational Model
+Systems for Graphics Editing. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR) .
+18574–18583.
+doi: 10.1109/cvpr52734.2025.01731
+Gupta et al . (2026)
+Gunin Gupta, Nirmit
+Arora, and Pavan Kalyan Tankala.
+2026.
+Timeline-Bench: Evaluating Agents on Realistic
+Video-Editing Tasks, from Raw Footage to Final Cut.
+arXiv:2609.35143.
+Habibian et al . (2021)
+Amirhossein Habibian,
+Davide Abati, Taco S. Cohen, and
+Babak Ehteshami Bejnordi. 2021.
+Skip-Convolutions for Efficient Video Processing.
+In IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR) . 2695–2704.
+doi: 10.1109/cvpr46437.2021.00272
+Hammer et al . (2015)
+Matthew A. Hammer, Jana
+Dunfield, Kyle Headley, Nicholas Labich,
+Jeffrey S. Foster, Michael Hicks, and
+David Van Horn. 2015.
+Incremental Computation with Names. In
+Proceedings of the ACM SIGPLAN International
+Conference on Object-Oriented Programming, Systems, Languages, and
+Applications (OOPSLA) . 748–766.
+doi: 10.1145/2814270.2814305
+Hammer et al . (2014)
+Matthew A. Hammer,
+Yit Phang Khoo, Michael Hicks, and
+Jeffrey S. Foster. 2014.
+Adapton: Composable, Demand-Driven Incremental
+Computation. In Proceedings of the 35th ACM
+SIGPLAN Conference on Programming Language Design and Implementation
+(PLDI) . 156–166.
+doi: 10.1145/2594291.2594324
+Holm (1979)
+Sture Holm.
+1979.
+A Simple Sequentially Rejective Multiple Test
+Procedure.
+Scandinavian Journal of Statistics
+6, 2 (1979),
+65–70.
+Huang et al . (2024)
+Ian Huang, Guandao Yang,
+and Leonidas Guibas. 2024.
+BlenderAlchemy: Editing 3D Graphics with
+Vision-Language Models. In European Conference on
+Computer Vision (ECCV) . 297–314.
+doi: 10.1007/978-3-031-73024-5_18
+HyperFrames (2026)
+HyperFrames 2026.
+HyperFrames: Write HTML, Render Video, Built for
+Agents.
+https://github.com/heygen-com/hyperframes .
+Engine 0.8.150; accessed 2026-10-27.
+Jetpack Compose (2026)
+Jetpack Compose 2026.
+Lifecycle of Composables.
+Android Developers,
+https://developer.android.com/develop/ui/compose/lifecycle .
+Accessed 2026-11-16.
+Kahatapitiya et al . (2025)
+Kumara Kahatapitiya,
+Haozhe Liu, Sen He, Ding
+Liu, Menglin Jia, Chenyang Zhang,
+Michael S. Ryoo, and Tian Xie.
+2025.
+Adaptive Caching for Faster Video Generation with
+Diffusion Transformers. In IEEE/CVF International
+Conference on Computer Vision (ICCV) . 15240–15252.
+doi: 10.1109/iccv51701.2025.01414
+kamishibai (2026)
+kamishibai 2026.
+kamishibai: Turn Any Web Page into a Video.
+https://github.com/reearth/kamishibai .
+Version 0.13.0 (npm package, its edit benchmark run as shipped);
+accessed 2026-11-07.
+Kim et al . (2024)
+Sehoon Kim, Suhong Moon,
+Ryan Tabrizi, Nicholas Lee,
+Michael W. Mahoney, Kurt Keutzer, and
+Amir Gholami. 2024.
+An LLM Compiler for Parallel Function Calling.
+In International Conference on Machine Learning
+(ICML) . 24370–24391.
+Kodaira et al . (2025)
+Akio Kodaira, Chenfeng
+Xu, Toshiki Hazama, Takanori Yoshimoto,
+Kohei Ohno, Shogo Mitsuhori,
+Soichi Sugano, Hanying Cho,
+Zhijian Liu, Masayoshi Tomizuka, and
+Kurt Keutzer. 2025.
+StreamDiffusion: A Pipeline-level Solution for
+Real-Time Interactive Generation. In IEEE/CVF
+International Conference on Computer Vision (ICCV) .
+12371–12380.
+doi: 10.1109/iccv51701.2025.01150
+Ku et al . (2025)
+Max Ku, Cheuk Hei Chong,
+Jonathan Leung, Krish Shah,
+Alvin Yu, and Wenhu Chen.
+2025.
+TheoremExplainAgent: Towards Video-based
+Multimodal Explanations for LLM Theorem Understanding. In
+Annual Meeting of the Association for Computational
+Linguistics (ACL) . 6663–6684.
+doi: 10.18653/v1/2025.acl-long.332
+Lau et al . (2026)
+Cheuk Hang Lau, Zeyu Cao,
+Kevin Wong Cheuk Yin, Yao Lai,
+Haoran Wu, Nicholas D. Lane,
+Robert D. Mullins, Ilia Shumailov, and
+Yiren Zhao. 2026.
+AgentPerfBench: A Benchmarking and Evaluation Suite
+for Inference Performance of Agentic LLMs.
+arXiv:2609.34683.
+Li et al . (2022)
+Muyang Li, Ji Lin,
+Chenlin Meng, Stefano Ermon,
+Song Han, and Jun-Yan Zhu.
+2022.
+Efficient Spatially Sparse Inference for
+Conditional GANs and Diffusion Models. In
+Advances in Neural Information Processing Systems
+(NeurIPS) .
+doi: 10.52202/068431-2092
+Li et al . (2026a)
+Peizheng Li, Xin Ai,
+Hanyuan Liu, Qiange Wang, and
+Yanfeng Zhang. 2026a.
+RegionCache: Semantic-Aware Region Reuse for
+Efficient Multi-Turn Image Generation. In
+International Joint Conference on Artificial
+Intelligence (IJCAI) . 1342–1350.
+doi: 10.24963/ijcai.2026/150
+Li et al . (2026b)
+Yuejia Li, Ke He,
+Junheng Li, Shutong Chen,
+Jingkang Xia, Zhiyue Su,
+Junchi Zhang, and Mang Ye.
+2026b.
+See Before You Code: Learning Visual Priors for
+Spatially Aware Educational Animation Generation.
+arXiv:2605.15585.
+Lin (2026)
+Wei Lin. 2026.
+Reels-RSI: Program-Level Self-Improvement for
+Code-Rendered Explainer Videos.
+arXiv:2610.14495.
+Liu et al . (2025c)
+Feng Liu, Shiwei Zhang,
+Xiaofeng Wang, Yujie Wei,
+Haonan Qiu, Yuzhong Zhao,
+Yingya Zhang, Qixiang Ye, and
+Fang Wan. 2025c.
+Timestep Embedding Tells: It’s Time to Cache for
+Video Diffusion Model. In IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR) .
+7353–7363.
+doi: 10.1109/cvpr52734.2025.00689
+Liu et al . (2025b)
+Jingwei Liu, Ling Yang,
+Hao Luo, Fan Wang,
+Hongyan Li, and Mengdi Wang.
+2025b.
+Preacher: Paper-to-Video Agentic System. In
+IEEE/CVF International Conference on Computer
+Vision (ICCV) . 17129–17139.
+doi: 10.1109/iccv51701.2025.01591
+Liu et al . (2025d)
+Jiacheng Liu, Chang Zou,
+Yuanhuiyi Lyu, Junjie Chen, and
+Linfeng Zhang. 2025d.
+From Reusing to Forecasting: Accelerating Diffusion
+Models with TaylorSeers. In IEEE/CVF
+International Conference on Computer Vision (ICCV) .
+15853–15863.
+doi: 10.1109/iccv51701.2025.01471
+Liu et al . (2026a)
+Tianyi Liu, Ye Lu,
+Linfeng Zhang, Chen Cai,
+Jianjun Gao, Yi Wang,
+Kim-Hui Yap, and Lap-Pui Chau.
+2026a.
+Accelerating Diffusion-based Video Editing via
+Heterogeneous Caching: Beyond Full Computing at Sampled Denoising Timestep.
+In IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR) . 35800–35809.
+Liu et al . (2025a)
+Vivian Liu, Rubaiat Habib
+Kazi, Li-Yi Wei, Matthew Fisher,
+Timothy Langlois, Seth Walker, and
+Lydia Chilton. 2025a.
+LogoMotion: Visually-Grounded Code Synthesis for
+Creating and Editing Animation. In Proceedings of
+the CHI Conference on Human Factors in Computing Systems .
+doi: 10.1145/3706598.3714155
+Liu et al . (2026b)
+Yipeng Liu, Yingqiang
+Zhang, Feifei Li, and Huanchen Zhang.
+2026b.
+Ask the Tool, Don’t Guess: Agent Tool Calls Hold
+Their Progress, and the Serving System Should Read It.
+arXiv:2609.18849.
+Long et al . (2026)
+Do Xuan Long, Xingchen
+Wan, Hootan Nakhost, Chen-Yu Lee,
+Tomas Pfister, and Sercan Ö. Arik.
+2026.
+VISTA: A Test-Time Self-Improving Video
+Generation Agent. In IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR) .
+6021–6032.
+Lyu et al . (2025)
+Zhengyao Lyu, Chenyang
+Si, Junhao Song, Zhenyu Yang,
+Yu Qiao, Ziwei Liu, and
+Kwan-Yee K. Wong. 2025.
+FasterCache: Training-Free Video Diffusion Model
+Acceleration with High Quality. In International
+Conference on Learning Representations (ICLR) .
+Ma and Agrawala (2025)
+Jiaju Ma and Maneesh
+Agrawala. 2025.
+MoVer: Motion Verification for Motion Graphics
+Animations.
+ACM Transactions on Graphics
+44, 4 (2025).
+doi: 10.1145/3731209
+Ma et al . (2024)
+Xinyin Ma, Gongfan Fang,
+and Xinchao Wang. 2024.
+DeepCache: Accelerating Diffusion Models for
+Free. In IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR) . 15762–15772.
+doi: 10.1109/cvpr52733.2024.01492
+Mokhov et al . (2018)
+Andrey Mokhov, Neil
+Mitchell, and Simon Peyton Jones.
+2018.
+Build Systems à la Carte.
+Proceedings of the ACM on Programming
+Languages 2, ICFP
+(2018), 79:1–79:29.
+doi: 10.1145/3236774
+Nehab et al . (2007)
+Diego Nehab, Pedro V.
+Sander, Jason Lawrence, Natalya
+Tatarchuk, and John R. Isidoro.
+2007.
+Accelerating Real-Time Shading with Reverse
+Reprojection Caching. In Graphics Hardware .
+25–35.
+doi: 10.2312/eggh/eggh07/025-036
+Nitzan et al . (2024)
+Yotam Nitzan, Zongze Wu,
+Richard Zhang, Eli Shechtman,
+Daniel Cohen-Or, Taesung Park, and
+Michaël Gharbi. 2024.
+Lazy Diffusion Transformer for Interactive Image
+Editing. In European Conference on Computer Vision
+(ECCV) .
+doi: 10.1007/978-3-031-72691-0_4
+OpenAI (2026a)
+OpenAI.
+2026a.
+Codex CLI.
+https://developers.openai.com/codex/cli .
+Accessed 2026-11-10.
+OpenAI (2026b)
+OpenAI.
+2026b.
+Models.
+https://developers.openai.com/api/docs/models .
+Accessed 2026-11-10.
+Pan et al . (2026)
+Zaifeng Pan, Michael
+Wang, Chris Wu, Zhengding Hu,
+Xinwei Qiang, Zhongkai Yu, and
+Yufei Ding. 2026.
+AgentReplay: Token-Wise Trace Replay Is Essential
+for Fair Serving System Performance Benchmarking.
+arXiv:2609.32283.
+Papamarkou et al . (2026)
+Theodore Papamarkou,
+Vladislav Smirnov, Viktor Mazanov,
+Artem Vazhentsev, Preslav Nakov,
+Timothy Baldwin, and Artem Shelmanov.
+2026.
+Bayesian Control for Coding Agents.
+arXiv:2606.24453.
+Parger et al . (2022)
+Mathias Parger, Chengcheng
+Tang, Christopher D. Twigg, Cem Keskin,
+Robert Wang, and Markus Steinberger.
+2022.
+DeltaCNN: End-to-End CNN Inference of Sparse
+Frame Differences in Videos. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR) .
+12497–12506.
+doi: 10.1109/cvpr52688.2022.01217
+Prado Lima and Vergilio (2022)
+Jackson A. Prado Lima and
+Silvia Regina Vergilio. 2022.
+A Multi-Armed Bandit Approach for Test Case
+Prioritization in Continuous Integration Environments.
+IEEE Transactions on Software Engineering
+48, 2 (2022),
+453–465.
+doi: 10.1109/tse.2020.2992428
+React (2026)
+React 2026.
+memo.
+React API reference,
+https://react.dev/reference/react/memo .
+Accessed 2026-11-16.
+Remotion (2026a)
+Remotion 2026a.
+Flickering.
+Remotion documentation,
+https://www.remotion.dev/docs/flickering .
+Accessed 2026-10-27.
+Remotion (2026b)
+Remotion 2026b.
+Remotion: Make Videos Programmatically.
+https://www.remotion.dev .
+Version 4.0.538; accessed 2026-10-27.
+Rothermel et al . (2001)
+Gregg Rothermel, Roland H.
+Untch, Chengyun Chu, and Mary Jean
+Harrold. 2001.
+Prioritizing Test Cases for Regression Testing.
+IEEE Transactions on Software Engineering
+27, 10 (2001),
+929–948.
+doi: 10.1109/32.962562
+Schroeder et al . (2006)
+Bianca Schroeder, Adam
+Wierman, and Mor Harchol-Balter.
+2006.
+Open Versus Closed: A Cautionary Tale. In
+Proceedings of the 3rd USENIX Symposium on
+Networked Systems Design and Implementation (NSDI) .
+239–252.
+The Chromium Authors (2026)
+The Chromium Authors.
+2026.
+Paint Result Caching, Blink Paint README.
+https://chromium.googlesource.com/chromium/src/+/main/third_party/blink/renderer/core/paint/README.md .
+Commit 64574fa; accessed 2026-10-27.
+The Manim Community Developers (2026)
+The Manim Community Developers.
+2026.
+Manim – Mathematical Animation Framework.
+https://www.manim.community .
+Community Edition v0.22.0 (commit a6d5cc0); accessed 2026-10-27.
+Walter et al . (1999)
+Bruce Walter, George
+Drettakis, and Steven Parker.
+1999.
+Interactive Rendering using the Render Cache. In
+Rendering Techniques (Eurographics Workshop on
+Rendering) . 19–30.
+doi: 10.1007/978-3-7091-6809-7_3
+Wang et al . (2004)
+Zhou Wang, Alan C. Bovik,
+Hamid R. Sheikh, and Eero P.
+Simoncelli. 2004.
+Image Quality Assessment: From Error Visibility to
+Structural Similarity.
+IEEE Transactions on Image Processing
+13, 4 (2004),
+600–612.
+doi: 10.1109/TIP.2003.819861
+WHATWG (2026)
+WHATWG. 2026.
+HTML Living Standard: The canvas element.
+https://html.spec.whatwg.org/multipage/canvas.html .
+Accessed 2026-11-10.
+Wimbauer et al . (2024)
+Felix Wimbauer, Bichen
+Wu, Edgar Schoenfeld, Xiaoliang Dai,
+Ji Hou, Zijian He,
+Artsiom Sanakoyeu, Peizhao Zhang,
+Sam Tsai, Jonas Kohler,
+Christian Rupprecht, Daniel Cremers,
+Peter Vajda, and Jialiang Wang.
+2024.
+Cache Me if You Can: Accelerating Diffusion Models
+through Block Caching. In IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR) .
+6211–6220.
+doi: 10.1109/cvpr52733.2024.00594
+Xia et al . (2026)
+Tian Xia, Yi Xu,
+Hanchen Li, Zhifei Li,
+Xiaokun Chen, Hao Kang,
+Yifan Qiao, and Ion Stoica.
+2026.
+Idleness is Relative: Exploiting Tool-Call Idle
+Windows for Offloading in Agentic Systems with MORI.
+arXiv:2606.00866.
+Xu et al . (2024)
+Yechen Xu, Xinhao Kong,
+Tingjun Chen, and Danyang Zhuo.
+2024.
+Conveyor: Efficient Tool-aware LLM Serving with
+Tool Partial Execution.
+arXiv:2406.00059.
+Yang et al . (2025)
+Mingyan Yang, Guanjie
+Wang, Manqi Luo, Yifei Liu,
+Chen Chen, Han Zhao, Yu
+Feng, Quan Chen, and Minyi Guo.
+2025.
+Justitia: Fair and Efficient Scheduling of
+Task-parallel LLM Agents with Selective Pampering.
+arXiv:2510.17015.
+Ye et al . (2026)
+Naimeng Ye, Arnav Ahuja,
+Georgios Liargkovas, Yunan Lu,
+Kostis Kaffes, and Tianyi Peng.
+2026.
+Speculative Actions: A Lossless Framework for
+Faster AI Agents. In International Conference on
+Learning Representations (ICLR) .
+Yu et al . (2024)
+Zihao Yu, Haoyang Li,
+Fangcheng Fu, Xupeng Miao, and
+Bin Cui. 2024.
+Accelerating Text-to-Image Editing via
+Cache-Enabled Sparse Diffusion Inference. In AAAI
+Conference on Artificial Intelligence . 16605–16613.
+doi: 10.1609/aaai.v38i15.29599
+Zhang et al . (2025)
+Yunzhi Zhang, Zizhang Li,
+Matt Zhou, Shangzhe Wu, and
+Jiajun Wu. 2025.
+The Scene Language: Representing Scenes with
+Programs, Words, and Embeddings. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR) .
+doi: 10.1109/cvpr52734.2025.02293
+Zhang et al . (2026)
+Yihui Zhang, Tianyu Wo,
+Jinghao Wang, Xiaoyang Sun,
+Menghao Zhang, Cangzhou Yuan,
+Li Li, Chunming Hu,
+Albert Y. Zomaya, and Renyu Yang.
+2026.
+SpecBox: Speculative Sandbox Scheduling for
+Efficient LLM Agent Serving.
+arXiv:2607.23933.
+Zhao et al . (2025)
+Xuanlei Zhao, Xiaolong
+Jin, Kai Wang, and Yang You.
+2025.
+Real-Time Video Generation with Pyramid Attention
+Broadcast. In International Conference on Learning
+Representations (ICLR) .
+Zheng et al . (2026)
+Yusheng Zheng, Jiakun
+Fan, Quanzhi Fu, Yiwei Yang,
+Wei Zhang, and Andi Quinn.
+2026.
+AgentCgroup: Understanding and Controlling OS
+Resources of AI Agents.
+arXiv:2602.09345.
+Zhu et al . (2026)
+Kan Zhu, Mathew Jacob,
+Chenxi Ma, Yi Pan,
+Stephanie Wang, Arvind Krishnamurthy,
+and Baris Kasikci. 2026.
+TraceLab: Characterizing Coding Agent Workloads for
+LLM Serving.
+arXiv:2606.30560.
+Zhu et al . (2025)
+Zeyu Zhu, Kevin Qinghong
+Lin, and Mike Zheng Shou.
+2025.
+Paper2Video: Automatic Video Generation from
+Scientific Papers.
+arXiv:2510.05096.
+Supplementary Material
+Appendix S1 EditLoop in detail
+A session records one agent making one film: every version it committed, every tool call in order with its
+timing and outcome, the agent’s think time before each call, and the class of edit each build follows.
+The real track has 123 sessions of Claude Code ( Anthropic, 2026a ) with Claude Opus 5.5 ( Anthropic, 2026b ) making
+explainer films with cv.js, our Canvas 2D ( WHATWG, 2026 ) runtime ( Fig. 2 ). These sessions hold
+1,525 versions, 2,078 tool calls and 1,314 builds. Their films last
+52 to 146 s between the 10th and 90th percentiles and are narrated in Chinese and
+English. Of the track’s builds, 39.0% follow edits that add or remove files, 26.1%
+follow edits of narration lines, 12.6% follow edits of one scene’s script and 20.4%
+follow edits of shared scripts or data. The track holds every session recorded over two weeks that built at least two
+versions. A scripted user issued every change request. Of these sessions, 60 are on
+held-out topics, which GPT-6.1 ( OpenAI, 2026b ) wrote for EditLoop. Each held-out
+topic has three rounds of change requests that build on one another.
+The model track has 20 sessions of Claude Sonnet 5.5 and Haiku 5.5 ( Anthropic, 2026b ) on 10 test topics. The
+Remotion track brings a second framework, Remotion ( Remotion, 2026b ) , with synthetic edits. For each of two films
+we wrote and each of three random seeds, a generator applies 24 edits in turn. The generator draws each edit’s class and
+the think time before each build from those of the real track. This gives 150 versions in
+6 sessions. The real track is split by topic. The 33 sessions on topics used to tune
+any parameter form the development split. The other 90 sessions, on 72 topics that
+include all of GPT-6.1’s, form the test split. Section 4 reports results on the test split. The timed replays take one session from each of 70 topics, drawn with a fixed seed. The reuse study takes the 355
+pairs of adjacent delivered versions of 88 test-split sessions.
+Format.
+A session directory holds four entries. session.json gives the track, framework, topic, date, narration
+language, film length, the agent’s model and harness, the machine profile, the framework’s commit, counts, edit classes,
+the voice pool and what was scrubbed. manifest.jsonl gives each version’s files by content hash.
+calls.jsonl gives, per call, the tool, the agent’s arguments with the project path abstracted, the version the
+call saw, the call’s start, recorded duration and exit, a build’s verdict time and edit class, and the think time
+before the call. objects/ holds the file contents by hash. A call’s version is the version committed within
+2 s of the call’s start or, if there is none, the newest version before the call.
+Held-out topics.
+GPT-6.1 wrote the held-out topics of the 60 sessions in five kinds (concepts, data,
+systems, teaching, products) and two languages. Each topic has three rounds of stacked change requests: a local change,
+a global change, and a mixed change that takes something back.
+Replay is closed-loop ( Schroeder et al., 2006 ) . A system executes a session’s calls in order, each call after
+the previous one has answered, either at once or after the recorded think time. The system’s caches start cold and
+persist across versions but not across sessions.
+Correctness gate. Approximate reuse is judged by image similarity ( Liu et al., 2025c ) . EditLoop instead
+requires the answers of a build from scratch before any time counts, which is the from-scratch consistency of
+incremental computation ( Hammer et al., 2015 ) . A build must pass or fail as the build from scratch does, and it must
+report no error that the build from scratch does not report. Every captured frame of every delivered film must equal
+the frame that a render of that version from scratch captures. The sound must match within the tolerances given below.
+Metrics. Renderers are compared by render time ( kamishibai, 2026 ) , which misses what blocks the
+agent. The wait therefore runs from a build’s call until the build answers the agent. A build that fails a check
+answers at the verdict, and a build that delivers answers after the film and its checks. We also report the time to
+verdict, frames rendered, CPU-seconds and peak memory.
+The correctness gate in full.
+The reference for a verdict is a build from scratch. When both a system and this reference ran every check, the two
+verdicts must hold the same errors, each given by its check, element and time. Every frame that a system captures for a
+delivered film is compared with one reference shared by all systems, the frames of a render from scratch with no cache
+and no key. The encoded film must hold every captured frame. It must also decode as the same system’s render from an
+empty cache on as many cores decodes, since the encoder’s output follows the segments that the system cuts and the
+cores it has. The sound is compared with that of the render from scratch. It must have the same tracks and channels,
+lengths within a frame, and loudness within 0.5 LU overall and within 1 dB in its 20-ms envelope.
+The checks.
+A build’s verdict comes from machine checks of the film and a lint of its sources ( Tab. S1 ). Most checks
+read what a frame draws, its texts with their boxes and its image draws. They sample the film every 40 ms, and the
+overlap check samples it every 0.5 s. Three checks read the pixels of sampled frames. Two checks read the sound and the
+encoded film and therefore need the film. A passing build runs these two after its render ( FilmCheck in
+Alg. 1 ). An error stops the build, and a warning is returned with the film. Across versions, a check keeps
+its record at a sampled time under the cascade’s first two tests, that is, when no changed script reaches that time and
+the values read by the frame at that time are unchanged. After a change to any other file, the checks take every record
+again.
+Table S1. The checks behind a verdict, by what each reads.
+Check
+Reports
+A frame’s texts and image draws
+Overlap
+text over a subject, another text or a subtitle, outside the safe area, or cut by the frame edge
+Reading
+text on screen for less time than reading it takes
+Timing
+text shown more than 0.5 s before the narration says it
+Subtitles
+a subtitle over a picture without a box
+Cuts
+a picture still moving at a cut, or filling the frame for under 1 s
+Resolution
+an image drawn larger than its resolution supports
+Data
+bars out of proportion to their labels, numbers absent from the data files
+Pixels of sampled frames
+Frames
+blank, dark or blown-out frames, every 0.5 s
+Style
+a scene’s frame far from the style’s colors
+Determinism
+a scene’s frame that differs when rendered again in another order
+The sound and the film
+Ducking
+music not lowered under the voice
+File
+loudness, true peak, black frames
+The sources
+Timeline
+cues or subtitles outside the film, locked items changed
+Lint
+the project’s conventions for storyboard, assets, style and scenes
+Baselines in detail.
+Input hash re-renders every frame of a version that changed. Scene windows re-render the frames inside the old and
+new windows of every scene whose file changed. When a file that no scene owns changed, they re-render every frame. Read
+sets re-render a frame when the files of the parts it draws or the set of parts it draws changed, or when it read a
+value that changed. Kamishibai-style fingerprints follow the hand-written tokens of the incremental renderer
+kamishibai ( kamishibai, 2026 ) . Typical fingerprints key a part by its file, its own start and end and the local time.
+Careful fingerprints add every shared script and the whole timeline. The animation engine Manim ( The Manim Community Developers, 2026 ) keys an
+animation call by hashing the call’s arguments and the scene’s objects as they stand. Manim-style per-call caching keys
+a scene in the same way, by its file, the shared scripts, its length, every value its frames read and every value its
+script read at load, such as a scene’s start or a line’s timing. It does not key a scene by where the scene sits, and
+it keys the subtitles also by the shared scripts that style them. We checked this cache against Manim CE itself on four
+kinds of edit. Complete keys cut the film into scenes or into narration lines and reuse a unit whole when the same
+sequence of frame keys was rendered before anywhere in the film. They are therefore exact and follow units in time.
+They bound what a cache of whole scenes or lines with complete keys could reuse. The similarity rule reuses a frame as
+training-free caches reuse features between similar denoising steps ( Liu et al., 2025c ) . It renders every frame at a
+quarter of its size and shrinks the frame to a 32 × 18 32\times 18 gray thumbnail. It reuses the previous version’s frame at
+the same time when the mean absolute difference of the two thumbnails’ gray levels (0–255) is below a threshold, which
+we sweep from 0.1 to 8. HyperFrames ( HyperFrames, 2026 ) , an HTML video framework for agents, renders ports of the
+Remotion track’s versions, each port at 1080p with as many frames as Remotion’s own render.
+What the scrub keeps.
+Every replaced file becomes a placeholder of the same size or length, chosen by the original’s content hash. The
+same original therefore always becomes the same placeholder, and the scrub keeps which frames change between versions.
+A font is kept when its license allows. Otherwise a substitute font holds every character the narration uses. Voices
+become tones over the samples where speech was, so the narration’s cut points and the timeline are unchanged.
+Speech-recognition caches are re-keyed. All numbers in the paper are computed on the scrubbed sessions, which are the
+ones released.
+Statistics.
+Table S2. The three tracks of EditLoop: sessions, versions, tool calls and builds; films, builds and the agent’s think time before
+a call in seconds, median [10th, 90th percentile]; the share of builds by edit class. Models: Claude Sonnet 5.5 and
+Haiku 5.5.
+Real
+Models
+Synthetic
+Sessions
+123
+20
+6
+Versions
+1,525
+215
+150
+Tool calls
+2,078
+289
+150
+Builds
+1,314
+188
+150
+Calls per session
+16.9
+14.4
+25.0
+Chinese / English
+69 / 54
+16 / 4
+0 / 6
+Film (s)
+80.8 [52.0, 145.8]
+79.1 [56.7, 177.8]
+31.9 [24.5, 40.4]
+Build (s)
+25.5 [3.1, 63.6]
+14.8 [2.1, 49.6]
+–
+Think time (s)
+8.0 [0.0, 87.5]
+15.3 [0.0, 119.2]
+12.8 [4.7, 105.3]
+Builds per session
+10 [5, 16]
+–
+–
+Rounds per session
+4 [3, 7]
+–
+–
+Model cost per session ($)
+2.85 [1.73, 6.45]
+–
+–
+Edit class: new or removed files
+39.0%
+41.1%
+33.3%
+Edit class: narration lines
+26.1%
+23.2%
+27.1%
+Edit class: one scene’s script
+12.6%
+16.1%
+20.1%
+Edit class: shared scripts or data
+20.4%
+18.4%
+15.2%
+Edit class: a style script
+0.3%
+0.6%
+0.0%
+Edit class: no change
+1.6%
+0.6%
+4.2%
+The Remotion track’s edit classes differ from the real track’s by 0.11 in total variation, and its
+think times differ from the real track’s by 0.06 in the Kolmogorov–Smirnov statistic ( Tab. S2 ). Table S5 gives the Remotion track’s wait by how much of a film a build changes.
+Rules.
+Replays are closed-loop. Caches start cold and are never shared across sessions or replays. A system’s timings count only if every call passes the gate. We built the system and set its parameters on the development split. The early render’s
+control group and rule, the fast checks, the page’s part of the key and the place of the key evaluation were designed
+with the test split’s replays in view. The data come with a key trace, which gives every frame’s key and read values
+for each rendered version, renumbered within the session. They also come with an OpenTelemetry export, with one
+invoke_agent span per session and one execute_tool span per call. A datasheet and Croissant metadata
+describe the data.
+Appendix S2 Why the keys are sound, and what is audited
+The guarantee.
+On one renderer configuration (runtime, browser, rasterizer, frame size), if a frame’s key equals a key rendered before,
+its pixels equal the pixels rendered under that key, provided that (i) the frame’s drawing is deterministic, (ii) the key holds the frame’s
+structural inputs (the page, the set of registered parts and their order),
+(iii) every part used only the supported interfaces below, and (iv) the rasterizer draws the normalized commands as the
+normalization rules below characterize it. This is Property 3.2 with each of its provisos spelled out.
+A part that uses an interface outside the table below is unkeyed for that frame and always rendered.
+How each interface enters a key (Canvas 2D).
+Each part draws its share of the frame at time t t in its function render(t) .
+Interface
+Key
+Drawing calls ( fillRect , fill , stroke , clip , fillText , drawImage , putImageData , …)
+method, arguments, and a snapshot of the state at the call
+State ( save / restore , transforms, alpha, compositing, filter, font, text alignment, line styles, dashes, shadows, smoothing)
+a state stack kept in call order, snapshot at each drawing call
+Paths and Path2D
+the command sequence with its transforms, keyed when filled, stroked or clipped
+Gradients and patterns
+construction arguments and every color stop up to use; pattern source by content and its transform
+Images, fonts, data files
+content hash of the asset
+Off-screen canvases as sources
+the hash of their command sequence since creation or the last whole overwrite
+getImageData , putImageData
+the written bytes
+Commands that set state but never draw
+dropped at the part’s end (no pixels)
+Unregistered image URLs, video sources, WebGL canvases as sources, off-screen canvases changed outside render(t) , resizing a canvas mid-frame
+not keyed: the part is rendered
+DOM outside the canvas, WebGL / three.js, post-processing
+global inputs
+Determinism.
+Reads of Math.random , Date.now and performance.now inside render(t) are recorded. The
+checks render one frame of every scene twice, in different orders, with the unmodified runtime. They compare the two
+renders’ keys, or their full-size pixels for unkeyed frames. The checks report the recorded reads as defects.
+Normalization rules.
+The rasterizer draws text from its glyph atlas at a baseline snapped to whole device pixels, so such text is keyed
+by the snapped baseline. The drawing itself is unchanged, and the key follows the rasterizer. This snapping applies to
+text drawn by fillText without a width limit, under an axis-aligned transform with positive scales and no
+filter or shadow, at a glyph size of at most 256 device pixels, the atlas’s limit, and with a device baseline at least
+0.02 pixels from a rounding boundary. Any other text enters a key with its coordinates as given. In a sweep over fonts,
+sizes, equal and unequal scales, all baselines, fill and stroke, color, alpha, spacing and the atlas edge, every such
+key stands for one picture.
+An off-screen canvas or layer forgets its pixel history when it is overwritten whole from a clean state, by a
+whole-canvas clearRect or putImageData or by an opaque fillRect under the identity
+transform. The canvas’s hash then restarts with its drawing state. Any other drawing keeps the history in the hash.
+Chromium keeps a raster state per 2D canvas that follows what the canvas drew before, and resizing the canvas to zero
+and back clears this state. Every canvas (the main one, the caption layer and every other layer) is therefore resized
+to zero and back before each captured frame. Three renders of a version then agree frame for frame. A frame evaluated
+only for its key is drawn on contexts reset in place. It is drawn in full when its drawing reads pixels back or when
+the page holds a context other than 2D. The 2D canvas is rasterized in software at full scale. On Remotion pages, what
+a frame draws is the laid-out page, with its elements under their computed styles and its resources by content. An
+element that cannot be visible, with opacity zero, is keyed by its box alone. Text on these pages is drawn in
+grayscale, since with subpixel text a frame’s pixels depend on what the page drew before.
+The cascade in full.
+Algorithm S1 gives the keys and the film of a version. The algorithm’s levels are the stages of Fig. 4 .
+Static impact is level 1, values read is level 2, the frame key is level 3 and the render is level 4.
+Let T P T_{P} be the frame times of P P . Let Q Q be the last key pass in the same configuration, the last version
+whose keys were computed, with key k t Q k^{Q}_{t} and read set R t R_{t} for each frame t t . Let D = P ⊖ Q D=P\ominus Q be the files that
+changed. With no Q Q , every key is evaluated. A scene’s script draws only inside the scene’s time window. Let Ω \Omega
+be the union of the windows ω \omega , widened by one frame, that the parts reached by the changed scripts have in Q Q
+and in P P ( line 4 ). A frame outside Ω \Omega therefore keeps its key if no value it read changed
+( line 5 ). While rendering, the runtime records through a read probe the values R t R_{t} that each frame reads, such
+as the timeline, the style, a part’s configuration or an asset entry. The runtime then compares their hashes
+η P ​ ( R t ) \eta_{P}(R_{t}) and η Q ​ ( R t ) \eta_{Q}(R_{t}) , so editing one entry of the style invalidates only the frames that read that entry.
+Values read at load time are recorded per script rather than per frame. A script whose load-time values changed starts
+the reach as a changed script does, so the windows of the parts that this script reaches join Ω \Omega . A change that
+no part owns, such as a data file read whole, the page or the runtime, reaches every frame. The film’s length counts as
+a value read by the frames that use it. Level 2 cannot apply when P P loads other resources than Q Q or when a value
+read at load has no known reader. Then no key is kept, and every frame goes to level 3. Let K K be the frames that keep
+their keys. Before these keys are used, up to four frames U ⁡ ( K ) U(K) drawn at random from K K are evaluated afresh. A fresh
+key that differs from the kept one sends every frame to level 3 ( line 6 ). Appendix S2 states when a kept
+key is the key that level 3 would compute. The audit tests this property on the film at hand. In the runs we report,
+5,736 key passes kept 1,114,094 keys, and each kept key passed both tests.
+Algorithm S1 Keys and film of a version P P (symbols in Appendix S2 ).
+1:
+P P ; last key pass Q Q with keys k Q k^{Q} , read sets R R ; stores of frames 𝒞 \mathcal{C} , segments 𝒮 \mathcal{S} , films ℱ \mathcal{F}
+2:
+film F P F_{P}
+3:
+if P ∈ ℱ P\in\mathcal{F} then return ℱ ⁡ [ P ] \mathcal{F}[P]
+4:
+Ω ← ω Q ​ ( D ) ∪ ω P ​ ( D ) \Omega\leftarrow\omega_{Q}(D)\cup\omega_{P}(D) , D = P ⊖ Q D=P\ominus Q ⊳ \triangleright level 1
+5:
+K ← { t ∉ Ω : k t Q ≠ ⊥ , η P ( R t ) = η Q ( R t ) } K\leftarrow\{t\notin\Omega:k^{Q}_{t}\neq\bot,\ \eta_{P}(R_{t})=\eta_{Q}(R_{t})\} ⊳ \triangleright level 2
+6:
+if ∃ t ∈ U ⁡ ( K ) : κ P ​ ( t ) ≠ k t Q \exists\,t\in U(K):\kappa_{P}(t)\neq k^{Q}_{t} then K ← ∅ K\leftarrow\emptyset
+7:
+k t ← k t Q k_{t}\leftarrow k^{Q}_{t} if t ∈ K t\in K else κ P ​ ( t ) \kappa_{P}(t) , t ∈ T P t\in T_{P} ⊳ \triangleright level 3
+8:
+for s ∈ Seg ⁡ ( P ) s\in\mathrm{Seg}(P) do ⊳ \triangleright level 4
+9:
+if k s ∈ 𝒮 k_{s}\in\mathcal{S} then F s ← 𝒮 ⁡ [ k s ] F_{s}\leftarrow\mathcal{S}[k_{s}] ; continue
+10:
+I t ← 𝒞 ⁡ [ k t ] I_{t}\leftarrow\mathcal{C}[k_{t}] if k t ∈ 𝒞 k_{t}\in\mathcal{C} else ρ P ​ ( t ) \rho_{P}(t) , kept in 𝒞 \mathcal{C} if k t ≠ ⊥ k_{t}\neq\bot ; t ∈ s t\in s
+11:
+F s ← enc ⁡ ( I s ) F_{s}\leftarrow\mathrm{enc}(I_{s}) , kept in 𝒮 \mathcal{S} if ⊥ ∉ k s \bot\notin k_{s}
+12:
+return ℱ ⁡ [ P ] ← F s 1 ​ ‖ ⋯ ‖ ​ F s m \mathcal{F}[P]\leftarrow F_{s_{1}}\|\cdots\|F_{s_{m}}
+The remaining frames get the key κ P ​ ( t ) \kappa_{P}(t) of the commands they issue ( line 7 ), evaluated without
+capturing the frame. A frame that draws through an interface outside the supported set gets no key, written ⊥ \bot .
+Every part that draws the frame, such as a scene, an overlay or a caption, records the drawing commands it issues. Each
+command is recorded as its method, its arguments and the drawing state, which holds the transform, styles, font, clip
+and compositing. Images and fonts enter the key by their bytes in the version’s immutable store. Gradients and
+off-screen canvases enter by their content, and the page around the canvas enters by its elements and styles.
+The key hashes the parts in drawing order. Outputs are stored per renderer configuration.
+On a recorded film of 1,885 frames, the key pass costs 2.7 ms of CPU per frame, against
+81 ms for a full render with sound and encoding. Levels 1–2 skip even the key evaluation for the
+frames they keep. In the runs of Sec. 4 , the key pass takes a median of 1.0 s per film
+on 8 cores and 0.6 s on 32. That is 4.3% of a render’s time on 8 cores and
+5.2% on 32, and 4.0% of a film’s wait on 8 cores and 4.1% on 32.
+Property S1 (Kept keys).
+Let Q Q , on the configuration and frame rate of P P , hold k t Q = κ Q ​ ( t ) k^{Q}_{t}=\kappa_{Q}(t) . If t ∉ Ω t\notin\Omega and
+η P ​ ( R t ) = η Q ​ ( R t ) \eta_{P}(R_{t})=\eta_{Q}(R_{t}) , then κ P ​ ( t ) = k t Q \kappa_{P}(t)=k^{Q}_{t} , provided the assumptions of Property 3.2 hold, each
+part is attributed to the script that registers it, a script affects frames outside its parts’ windows (an overlay’s
+window is the film) only through the names it declares, and the probed data (the timeline, the style, asset entries)
+reach a part only through reads the probe records: the part’s own while drawing and its scripts’ at load.
+Why a kept key is the level-3 key.
+Every key of Q Q was evaluated or kept under Appendix S2 , so by induction k t Q = κ Q ​ ( t ) k^{Q}_{t}=\kappa_{Q}(t) . On one
+configuration, κ ⁡ ( t ) \kappa(t) hashes the frame’s size, background, fonts, page and camera, then each drawing part’s name,
+z-order and commands in order. Each part starts from a reset drawing state, so by Property 3.2 ’s
+determinism its commands are a function of its code, window, t t , load-time values, reads while drawing and assets. A
+scene draws only inside its window. Ω \Omega holds the windows, in Q Q and P P , of the parts of every script reached
+through declared names from a changed script. A script counts as changed when its code or its load-time reads changed,
+and a data script when its values changed. Ω \Omega holds every frame if a reached script registers an overlay or
+writes into shared state. By the third proviso, no changed script affects a frame t ∉ Ω t\notin\Omega , so the same parts
+draw in the same order, with the same code, windows, load-time values, fonts, page and camera. By the fourth proviso,
+data reach these parts only through those load-time values and through R t R_{t} , which holds their reads while drawing,
+the frame size and the background, and η P ​ ( R t ) = η Q ​ ( R t ) \eta_{P}(R_{t})=\eta_{Q}(R_{t}) . The page, style sheets and font files belong to the
+configuration. A changed asset file either comes with changed entries that its readers read or sends every frame to
+level 3. Equal inputs give equal commands, so κ P ​ ( t ) = k t Q \kappa_{P}(t)=k^{Q}_{t} . Read sets ( Tab. 3 ) tie a frame to its
+reads while drawing and to its scene’s file. They miss a change through code that the frame calls in another scene’s
+file, and they miss a changed value read at load, such as a scene’s start, so they reuse stale frames. Of the
+9,704 stale frames they reuse on the adjacent versions of Tab. 3 , 95.2% lie
+in the windows that the changed scripts reach. The other 4.8% lie in the windows reached from a
+script whose values read at load changed. All of them lie in Ω \Omega , so levels 1–2 refuse every one.
+Table S3 lists what enforces each condition. Over 1,998,204 frames of 355
+pairs, the key audit finds every kept key equal to its fresh evaluation ( Sec. 4.4 ).
+Table S3. What enforces each condition of Appendix S2 ; “level 3” sends every frame to be evaluated.
+Condition
+How it is enforced
+k t Q = κ Q ​ ( t ) k^{Q}_{t}=\kappa_{Q}(t)
+⊥ \bot is never kept; keys are taken after the loads a draw asked for; a kept key carries its read
+set forward, and every kept key passed both levels (induction over key passes)
+Configuration, frame grid
+one index per runtime, browser, fonts, page, size, scale and the renderer’s frame rate; a
+size or background set by a script is read by every frame
+Same parts, names, order
+Ω \Omega holds, in Q Q and P P ( ± 1 \pm 1 frame), the windows of every part a reached script
+registers; an overlay reached, two parts of one name, or a script added or removed: level 3
+Code
+reach follows the names a script declares or binds (declarations at any depth, implicit globals, members of the
+global object under any of its names, string property names); a computed global access reaches every name; a write into
+shared state or the page: level 3
+Values read at load
+recorded per script, cues included; a script whose values changed starts the reach
+Values read while drawing
+the timeline, the style, cues, asset entries, sound durations, the film’s length, the
+registration, size and background are probed per frame, raw reads and property queries included; an opaque value or a
+write while drawing: no key
+Start state
+every canvas reset before each frame, each part drawn between a save and a restore, an inherited path or
+an off-screen canvas drawn twice: no key; Math.random , Date.now , performance.now while
+drawing: no key
+Fonts, page, camera
+faces by their bytes, the page by its elements and styles after each frame, the camera’s value:
+all in the key; their files in the index
+Assets
+by the hash of the bytes decoded; a file changed without its registry entry: level 3
+Changes no part owns
+the page, style sheets, fonts, runtime and browser in the index; a data file read whole: level 3
+Level 4 renders the film (lines 8 – 11 ). The film is cut into segments Seg ⁡ ( P ) \mathrm{Seg}(P) at
+scene starts and every second after each scene start. A segment s s whose sequence of keys k s k_{s} was encoded before is
+copied from the segment store 𝒮 \mathcal{S} . The other segments are encoded ( enc \mathrm{enc} ) from their frames I t I_{t} ,
+each taken from the frame store 𝒞 \mathcal{C} by its key or rasterized ( ρ P \rho_{P} ). Unkeyed frames and the segments
+holding them are never stored. A version built before returns its film whole from the film store ℱ \mathcal{F}
+( line 3 ). Segments hold pictures only. The narration is voiced again for the lines that changed, and the sound
+is mixed for every version and muxed with the segments. A segment whose keys are unchanged is therefore copied under a
+new narration. Work ahead runs the same render without sound and writes no film.
+Property S2 (Fewest captures).
+Given the outputs stored so far, none evicted, Alg. S1 captures one frame for each distinct key of P P that has
+no stored output, and every unkeyed frame; no cache holding the same outputs that reuses a frame only under an equal key
+captures fewer.
+A frame whose key is already being captured waits for that capture, so each missing key is captured once.
+What is reused.
+A frame store holds the rendered frames by key, per renderer configuration. A build takes from the store every
+frame whose key the store holds and renders the rest, each missing key once. The film is cut into segments at scene
+starts and every second after each scene start, so a moved scene keeps its segments. A segment whose keys were encoded
+before is copied, and a version built before returns its film whole. The checks reuse their results through the
+cascade’s first two tests.
+Appendix S3 Scheduling details
+Mechanisms and when each is used.
+The checks’ text sweep samples the film every 40 ms, and their frame checks sample it every 0.5 s. Within a build,
+the sweep runs over k k browser pages in parallel (par), with k = 8 k=8 on 32 cores or more and k = max ⁡ ( 2 , min ⁡ ( 4 , c − 4 ) ) k=\max(2,\min(4,c-4)) on
+c c cores below 32. The parallel sweep is used on c ≥ 6 c\geq 6 cores without a software-only rasterizer. The source lint runs
+alongside the checks (dag). The fast checks (vp) draw a sampled frame on reset contexts, as the evaluation of a key
+does, instead of on a new canvas. They draw a frame whose code reads pixels back in full. The fast checks also keep the
+source map, which maps drawn objects to source lines, off the verdict’s path. A check without errors returns at once,
+and a check with errors scans the frames its errors name for their source lines. After the verdict, a separate process
+at the lowest priority rebuilds the map. The early render (opt) starts alongside the checks on pages of its own, in a
+control group of its own marked idle. A passing verdict gives the group a normal share and the first claim on memory. A
+failing verdict kills the group whole. A failure known from the files before the verdict, such as a stale narration
+text or a lint error, stops the early render at once. The early render starts when p ^ > θ c \hat{p}>\theta_{c}
+( Eq. S1 ), with p ^ = ( a + 4 ​ m ) / ( n + 4 ) \hat{p}=(a+4m)/(n+4) . Here n n counts the session’s last five builds of the same kind of edit,
+narration changed or not, or the last five of any kind while that kind has fewer than two. The count a a holds those
+among them whose checks passed. The rate m m is the development split’s pass rate, 1 / 33 1/33 before a session’s first build
+and 186 / 360 186/360 after it. The threshold θ c \theta_{c} is interpolated in log 2 ⁡ c \log_{2}c between the machines of
+Tab. S4 and held at the ends of that range. A session’s first build thus never starts the render early.
+A later build always does on 4, 32 and 64 cores, and on 8 cores unless the five builds counted all failed. The capture
+workers evaluate the keys, each worker for its own segments, instead of a pass before the capture (kw). On machines
+below 16 cores, builds fail fast (ff). The data, style, determinism and timeline checks, which seldom fail, then run
+only once the other checks found no error that stops the build. Operations run at the priorities of their consumers
+(pri), which are normal priority, the idle group and nice 19. Within a render, the audio chain runs alongside the frames
+(aud), capture pages open early (pre), each worker encodes a segment while it shoots the next (enc), and the workers
+are sized to the machine (wk). Rebuild uses every mechanism that applies on the machine except par, dag, vp, opt, kw,
+ff and pri. It reuses only a whole film whose version did not change. A shared execution service with warm pages serves
+its callers in turn. Renders get no fixed share of the cores.
+Within a build: the verdict first.
+On half of the builds the agent waits only for the verdict, whose checks sweep the whole film. CodeReel runs the checks
+first and in parallel. Their sweep is cut by time over several browser pages, and the lint runs alongside the sweep.
+The fast checks of CodeReel also leave out what a verdict does not need. The checks that read what a frame draws,
+not its pixels, draw their samples as the evaluation of a key does ( Sec. 3.2 ). The map from drawn objects to
+source lines is built after the verdict. Where cores are scarce and the checks that seldom fail would delay the
+verdict, a build also fails fast, as in test prioritization ( Rothermel et al., 2001 ; Prado Lima and Vergilio, 2022 ) . The checks that
+seldom fail then run only once the others found no error, and the build answers at the first errors that stop it.
+Within a build: the render as a bet.
+Starting the render alongside the checks is a bet on the outcome, like the sandboxes that agent serving
+prewarms ( Zhang et al., 2026 ) . The early render saves render time when the version passes and slows the checks in either
+case. At idle priority, the render slows the checks by a fraction d d through the memory, kernel and I/O they share,
+and it keeps a share s s of its own speed. The bet therefore pays when the version passes with probability above
+θ c = d / ( s ⁡ ( 1 + d ) ) \theta_{c}=d/\bigl(s(1+d)\bigr) ( Appendix S3 ). Idle priority keeps the bet cheap. The measured θ c \theta_{c} is
+0.25 on 8 cores and 0.21 on 32. 4 takes the bet when p ^ > θ c \hat{p}>\theta_{c} , where
+p ^ \hat{p} estimates that probability from the session’s last builds. A session’s first build, which rarely passes, thus
+waits for its verdict, and later builds render early ( Fig. 1 c). The render starts early in
+88.9% of all builds on 32 cores and in 87.6% on 8.
+The verdict first, argued.
+Starting the render alongside the checks delays the verdict by δ \delta whatever the outcome. The version passes with
+probability p p , and when it passes, the early start saves g g of the render’s own time. The expected waits with the
+render started early and after the verdict therefore differ by
+(S1)
+𝔼 ⁡ [ W P early ] − 𝔼 ⁡ [ W P after ] = δ − p ​ g , \mathbb{E}[W_{P}^{\mathrm{early}}]-\mathbb{E}[W_{P}^{\mathrm{after}}]=\delta-p\,g,
+and starting early pays when p ​ g > δ p\,g>\delta . The following property holds in this model.
+Property S3 (Verdict first).
+On c c cores where operations preempt at no cost, fit in memory and interfere only by taking cores, running the
+verdict’s operations at strict priority finishes the verdict when the same order of those operations finishes it with
+nothing else running, and starting the film’s operations on the cores it leaves idle, instead of after it, delays
+neither the verdict nor the film, whose frames are captured independently; then δ = 0 \delta=0 , and starting early never
+lengthens the wait.
+The verdict’s operations get every core they can use whatever else runs, so they run as they would alone. Film work
+done before the verdict only shortens what is left of the film after the verdict, since no frame waits for another. By
+the same argument, work ahead in the think time costs the next build nothing in this model, and it saves the next
+build every rendered frame that the next version draws.
+On a real machine, the checks also share memory, kernel and I/O with a capture running alongside them. While both run,
+the checks advance at 1 / ( 1 + d ) 1/(1+d) of their speed alone, and the render advances at a share s s of its own speed. Each
+second of overlap therefore delays the verdict by d / ( 1 + d ) d/(1+d) seconds and saves s s seconds of the render, however long
+either runs. Hence δ / g = d / ( s ⁡ ( 1 + d ) ) \delta/g=d/(s(1+d)) , and by Eq. S1 starting early pays when p > θ c = d / ( s ⁡ ( 1 + d ) ) p>\theta_{c}=d/(s(1+d)) .
+With the render in the idle group, d = 0.10 d=0.10 and s = 0.36 s=0.36 give θ c = 0.25 \theta_{c}=0.25 on
+8 cores, and d = 0.22 d=0.22 and s = 0.85 s=0.85 give θ c = 0.21 \theta_{c}=0.21 on 32
+( Tab. S4 ).
+After a pass, a render started early runs at normal priority and first in the memory queue. The checks that need the
+film ( FilmCheck ) run after the render.
+Across agents sharing a machine.
+Under the capacity constraint, the builds of all agents on a machine draw cores and memory from one ledger sized from
+measured footprints. Agent serving similarly shares servers among agents ( Yang et al., 2025 ) and meters resources per
+tool call ( Zheng et al., 2026 ) . A render’s workers follow what the render is granted, and work ahead yields when blocking
+work cannot fit. The ledger’s entries follow the memory admission below.
+Memory admission.
+A render asks a ledger, kept per memory budget, for the memory of its plan. This memory is estimated from
+measurements on this machine: 0.4 GB plus 0.9 GB per capture worker at 1080p, 5 MB per second of film for the audio
+chain alongside the frames, and 0.15 GB per warm page held by the execution service. The workers are first capped by
+the cores the render may use and then sized by the memory granted. The audio runs alongside the frames only if it fits
+in the grant. When the grant falls short of the plan, the render first drops the audio’s overlap and then workers.
+Pages without the GPU.
+Chromium gives every browser a GPU process. With the NVIDIA driver, these processes wait on a lock of the driver that
+all of them share, whatever cores or GPU they use. On a 29 s film at 1080p, three renders at once each
+took 1.49 × \times as long as one render alone. A film whose code never asks for WebGL is shown with the GPU
+off ( --disable-gpu --disable-software-rasterizer ), so no process opens the driver. Its Canvas 2D is rasterized
+on the CPU at full size either way, so the frames are the same (8,425 frames of four films).
+No render then waits on the lock. A render takes 9.1 s instead of 15.5 s, and three
+renders at once each take 1.03 × \times as long as one. Every system in Sec. 4 runs this
+way, and the mode is part of every cache of pixels. A film counts as one that may use WebGL when its code mentions
+WebGL anywhere. Such a film is drawn by SwiftShader, which runs the GPU interfaces on the CPU, with the Vulkan loader
+shown only SwiftShader’s driver, so no process opens the graphics device either. Its 2D canvases are rasterized on the
+CPU as in every other film, since on SwiftShader’s GPU path a canvas’s pixels depend on what the page drew before. Two
+renders from scratch of one version then agree frame for frame. WebGL frames are never keyed and are always rendered
+afresh. On the adjacent versions of a test session that draws with WebGL, every frame equals a render from scratch.
+Interference.
+A capture running alongside the checks shares the cores and the node’s memory, kernel and I/O with them.
+Table S4 gives what this sharing costs with the capture in the idle control group, on machines of 4 to
+64 cores. It compares the time of the checks and lint of one build of a development film with their time alone, and the
+capture’s frame rate with its rate alone. Each value is the mean of five repetitions. With the capture niced to 10 inside the build’s own group instead, d d is 0.43 on 8 cores and θ c \theta_{c} rises to 0.67.
+Table S4. The early render alongside the checks: the checks’ slowdown d d , the share s s of its rate the render keeps and
+the threshold θ c \theta_{c} of Eq. S1 .
+Cores
+d d
+s s
+θ c \theta_{c}
+4
+0.02
+0.14
+0.14
+8
+0.10
+0.36
+0.25
+16
+0.21
+0.61
+0.28
+32
+0.22
+0.85
+0.21
+64
+0.13
+0.88
+0.13
+Co-location conditions.
+All conditions run inside one scope that sets the machine’s cores, a CPU quota and a memory cap without swap. The
+scope’s memory events, its kills, are kept. Uncoordinated execution has no priority classes and no ledger, and it runs
+one executor per session. Niced renders add the priority classes of Sec. 3.3 and nothing else. One control
+group per call runs like uncoordinated execution but puts every call in a control group of its own at equal weight.
+Each session’s executor gets a control group of its own for its daemons. CodeReel has one ledger of the cores and memory,
+the priority classes, and one executor for all sessions, which serves its callers in turn.
+Sessions arrive at fixed offsets. Each session replays its calls closed-loop with a quarter of its recorded think time.
+Each run takes eight cores of the upper hyperthread half of one socket, whose siblings our jobs leave unused.
+Appendix S4 Registration and the machine
+Frameworks and hardware.
+Every system renders the same programs at 1080p and 30 frames per second. These are cv.js programs, written for our
+Canvas 2D runtime and run in headless Chromium, and Remotion ( Remotion, 2026b ) programs, written in React. The machines
+are 32, 8 or 4 of one server’s cores, with 2 GB of memory per core. 32 cores are abundant, since a render starts fewer
+workers than there are cores. 8 cores, a laptop’s size, are constrained, since a render can use more workers than
+cores. 4 cores are saturated, since frame capture alone fills them. Each session runs in its own control group on an
+AMD EPYC 9755 machine. Every system renders on the CPU, for the reasons given under Pages without the GPU
+( Appendix S3 ).
+Registration.
+We registered the protocol before any formal run. It fixes the split, the machines, the gate and every test. The
+tests on 8 and 32 cores form the primary family under Holm’s procedure ( Holm, 1979 ) .
+The registered decisions are these. Exactness holds if every pair, at least 1,800 random edits and the 32 narration
+edits are exported and every frame of their incremental renders equals a render from scratch. For 8 and 32 cores, the
+upper end of each ratio’s interval must lie below one, one-sided at 2.5% for the family under Holm’s correction. No
+resample’s ratio reaches one. The largest of the 2,000 resampled ratios is 0.68 on 32
+cores and 0.72 on 8. For real agents, the measure is the geometric mean over pairs of the ratio of
+within-session median waits per build. It is taken on the 14 pairs whose topics development never touched, with all 26
+pairs as a secondary analysis. The films’ quality is reported as paired differences. Per build, the agent’s wait under
+CodeReel relative to its wait under Rebuild on the same build has a median of 0.56 × \times on 32 cores (95%
+CI 0.53–0.59) and 0.52 × \times on 8 (CI 0.50–0.56). Table 2 gives the ratios of
+total waits.
+The machine.
+The machine has 512 hardware threads on two sockets. Timed replays ran in lanes of disjoint cores on the upper
+hyperthread half of one socket, whose siblings our jobs left unused. Both systems of a session ran back to back in one
+lane. The scaling runs of Fig. S1 ran one replay at a time.
+Appendix S5 More results
+S5.1. Comparison with existing systems
+The size of an edit.
+On EditLoop’s Remotion track, the gain follows how much of a film a build changes ( Tab. S5 ). We group the
+builds of three repeats by the share of the film’s frames that CodeReel renders. The agent waits 0.35 × \times
+as long under CodeReel as under Remotion’s renderer when CodeReel renders no frame, 0.46 × \times when CodeReel renders under 5%, 0.56 × \times when it renders 5 to 20% and 0.92 × \times when it renders 20%
+or more (CI 0.89–0.96, resampling the sessions).
+Table S5. The Remotion track’s wait under CodeReel relative to Remotion’s renderer, by the share of the film’s frames a build
+renders; builds count the three repeats, and intervals resample sessions, each with its three repeats.
+Frames rendered
+Builds
+Sessions
+Wait
+None
+162
+6
+0.35
+Under 5%
+162
+6
+0.46
+5–20%
+78
+6
+0.56
+20% or more
+48
+6
+0.92
+An agent’s Remotion sessions.
+The gain on Remotion holds for an agent’s own edits. Claude Code with Claude Opus 5.5 made 12
+films in Remotion, each through three rounds of stacked change requests. These sessions hold 58
+versions, 65 builds and 64 delivered films. Replayed three times on 8 cores, the
+agent waits 0.67 × \times as long under CodeReel as under Remotion’s renderer (CI 0.52–0.80,
+resampling sessions, each with its three repeats). On builds that deliver a film, the agent waits
+0.67 × \times as long. CodeReel uses 0.69 × \times the CPU of Remotion’s renderer and renders
+48.6% of the frames. Of the 192 films the three replays deliver,
+175 equal a render from scratch frame for frame. The others belong to one session, whose film
+Remotion’s renderer draws differently from run to run.
+S5.2. Wait across machines and agents
+Other models’ sessions.
+The recorded sessions of the other models differ from Claude Opus 5.5’s in how often a build fails and in how much of
+a film a version changes. These are the quantities on which the two parts act. On the same ten test topics, a check
+stops 53.1% of Sonnet’s builds, 57.0% of Haiku’s builds and 61.2% of Opus’s
+builds. The median share of a later film’s frames that no earlier version drew is 83.4% for Sonnet,
+70.7% for Haiku and 78.6% for Opus. The ratios of Tab. 2 follow that mix. They are
+0.54–0.62 × \times for the sessions of other models and harnesses and
+0.38 × \times for Opus 5.5 on the † \dagger topics, nine topics on which each agent ran its first
+session. The parts’ own ratios on failing builds and on builds that deliver a film follow the mix as well (the last
+block of Tab. 2 ). In Opus 5.5’s † \dagger sessions, which render a third of the frames, the agent waits
+least ( Fig. 6 ). Six of the † \dagger topics are development topics.
+Table S6 gives the wait under CodeReel by machine and by agent, with its intervals ( † \dagger : each agent’s
+first session on nine topics).
+Table S6. The first two blocks of Tab. 2 with 95% intervals (2,000 resamples of topics), topics and builds.
+Setting
+Topics
+Builds
+Wait
+Failed
+Film
+Frames
+32 cores
+70
+702
+0.64 [0.61, 0.66]
+0.39 [0.36, 0.42]
+0.71 [0.68, 0.74]
+0.65
+32 cores, think time
+70
+702
+0.59 [0.58, 0.61]
+0.41 [0.38, 0.44]
+0.65 [0.63, 0.67]
+0.49
+8 cores
+70
+702
+0.67 [0.64, 0.69]
+0.43 [0.40, 0.45]
+0.71 [0.68, 0.74]
+0.66
+8 cores, think time
+70
+702
+0.60 [0.58, 0.63]
+0.43 [0.40, 0.46]
+0.63 [0.61, 0.66]
+0.53
+4 cores
+20
+197
+0.75 [0.70, 0.80]
+0.46 [0.42, 0.50]
+0.79 [0.72, 0.85]
+0.63
+32 cores, Sonnet 5.5
+10
+81
+0.62 [0.55, 0.73]
+0.47 [0.40, 0.57]
+0.66 [0.59, 0.79]
+0.62
+32 cores, Haiku 5.5
+10
+107
+0.54 [0.51, 0.60]
+0.46 [0.39, 0.58]
+0.57 [0.54, 0.61]
+0.63
+32 cores, DeepSeek V4 †
+9
+95
+0.56 [0.50, 0.62]
+0.35 [0.29, 0.42]
+0.67 [0.60, 0.74]
+0.69
+32 cores, Codex CLI †
+9
+46
+0.54 [0.37, 0.77]
+0.27 [0.20, 0.60]
+0.63 [0.48, 0.80]
+0.83
+32 cores, Opus 5.5 †
+9
+96
+0.38 [0.28, 0.50]
+0.32 [0.27, 0.41]
+0.40 [0.28, 0.53]
+0.33
+Sensitivity.
+Table S7 splits the wait of Tab. 2 by the edit a build follows and by its place in its session.
+Every class of edit gains. On 32 cores, the ratio runs from 0.62 × \times after an edit of one scene’s
+script, which static impact confines to that scene’s window, to 0.68 × \times after an edit of a data file,
+which more frames read. The two rare classes gain as well. The ratio is 0.55 × \times after an edit of the
+style and 0.29 × \times for a build of an unchanged version, whose film both systems return whole. A
+session’s first build has an empty cache, and on it the agent waits 0.56 × \times as long, through the
+verdict first alone. From a session’s sixth build on, the agent waits 0.64 × \times as long. On builds
+that deliver a film, the ratio holds across film lengths. By thirds of length on 32 cores, it is 0.71
+in the shortest third, 0.71 in the middle third and 0.71 in the longest.
+For builds that fail a check, the gain grows with the length, from 0.48 × \times in the shortest
+third to 0.31 × \times in the longest. Over these thirds, Rebuild’s checks take
+4.2 to 7.3 s, while the checks under CodeReel, which reuse their results,
+take 1.2 s in the longest third.
+Table S7. The wait under CodeReel relative to Rebuild by the edit a build follows and by its place in its session
+(ratios of total waits).
+Builds
+n n
+32 cores
+8 cores
+First of a session (cache empty)
+70
+0.56
+0.60
+After an edit of
+one scene’s script
+47
+0.62
+0.64
+narration lines
+171
+0.66
+0.66
+files added or removed
+277
+0.62
+0.66
+a shared script
+74
+0.66
+0.72
+a data file
+52
+0.68
+0.76
+the style
+4
+0.55
+0.61
+nothing (built again)
+7
+0.29
+0.19
+By place in the session
+second
+70
+0.55
+0.66
+third to fifth
+204
+0.67
+0.72
+sixth and later
+358
+0.64
+0.65
+Every build
+702
+0.64
+0.67
+What drives the gain, within runs.
+In the run of the last block of Tab. 2 , a session’s change in wait follows the frames it saves. The
+slope is 0.37 (CI 0.27–0.48) from Rebuild to reuse alone and 0.40
+(CI 0.30–0.51) from the verdict first alone to CodeReel. With the verdict first off or on, this is the
+slope of Fig. 6 . Per stage ( Tab. S8 ), reuse alone cuts both the checks, which reuse their samples, and
+the capture. Reuse alone cuts the capture to 0.87 × \times Rebuild’s time while rendering
+34.3% fewer frames. The verdict first alone cuts the checks to 0.59 × \times .
+CodeReel cuts the checks to 0.26 × \times and the capture to 0.91 × \times .
+Table S8. The wait, the frames rendered and the time per stage in the run of the last block of Tab. 2 :
+Rebuild’s amounts per build, then each arm relative to them. A stage’s time sums the wall-clock time of its operations,
+which can overlap. The keys’ time is given as a share of Rebuild’s capture time.
+Rebuild with one mechanism
+Stage
+Rebuild (per build)
+Sequential
+reuse
+verdict first
+fast checks
+CodeReel
+Wait
+15.4 s
+1.51
+0.94
+0.69
+0.82
+0.64
+Frames
+1,399
+1.00
+0.66
+1.00
+1.00
+0.65
+Checks
+10.8 s
+0.78
+0.89
+0.59
+0.38
+0.26
+Keys (of capture)
+–
+0
+0.05
+0
+0
+0.06
+Capture
+7.1 s
+1.25
+0.87
+1.07
+1.06
+0.91
+One mechanism removed.
+Every mechanism carries part of the gain. On 32 cores, over 70 topics, the agent waits
+1.22 × \times as long under CodeReel without the verdict first as under CodeReel (CI 1.19–1.26).
+Without the fast checks, the agent waits 1.04 × \times as long (CI 1.02–1.06). Without reuse, it
+waits 1.05 × \times as long (CI 1.01–1.09), with 1.27 × \times the CPU. This
+last arm is the scheduling part alone, and under it the agent waits 0.65 × \times as long as under
+Rebuild (CI 0.64–0.67).
+Across sessions.
+The agent waits less in sessions that render fewer frames again ( Fig. 6 a). The least-squares line is
+wait = 0.38 + 0.37 ⋅ frames \text{wait}=0.38+0.37\cdot\text{frames} , with both quantities relative to Rebuild (slope 95%
+CI 0.30–0.44). The ablation separates what reuse and scheduling each contribute.
+Opus 5.5’s sessions on the agents’ nine topics ( † \dagger ), whose edits keep the most frames, gain most. The gain is
+there from a session’s first build, whose frame store is empty, on 32 and on 8 cores ( Tab. S7 ).
+CPU allocation.
+4 (4) 8 (8) 16 (13) 32 (13) 0 0 20 20 40 40 cores (median render workers) wait per build (s) Rebuild CodeReel
+Figure S1. Mean wait per build against the session’s cores, Rebuild and CodeReel; bars are 95% intervals over topics.
+With 4 to 32 cores on 20 topics ( Fig. S1 ), the render’s workers follow the cores until
+the rule that sizes them by the film’s length caps them, at 13 workers on these films. The cores beyond serve the
+checks and the encoders. The wait under both systems still falls from 16 to 32 cores. The advantage of CodeReel grows with
+the cores. The agent waits 0.75 × \times as long under CodeReel as under Rebuild on 4 cores,
+0.66 × \times on 8, 0.64 × \times on 16 and 0.62 × \times on 32, as the verdict first
+spends on the checks the CPU that reuse frees. On the 70 timed topics of Tab. 2 , the agent
+waits 0.64 × \times as long under CodeReel as under Rebuild on 16 cores (CI 0.61–0.68).
+Think time and work ahead.
+Work ahead in the agent’s think time shortens the wait further. Replayed with the recorded think time, the
+agent waits 0.60 × \times as long under CodeReel as under Rebuild on 8 cores (CI
+0.58–0.63) and 0.59 × \times on 32 (CI 0.58–0.61). On 8 cores, this wait is
+0.90 × \times the wait with work ahead off (CI 0.88–0.93). With work ahead, builds render
+19.0% fewer frames, and the wait for films falls by 10.7%.
+Starting the render early.
+We measure the early render on 32 cores, over 70 topics, in a four-arm run with every film gated
+(1,452 / 1,452). In this run, the rule starts the render early on 88.9% of the builds, and the
+render keeps 0.85 × \times its speed alongside the checks. When the render never starts early, the agent
+waits 1.07 × \times as long as under CodeReel (CI 1.03–1.10), and 1.08 × \times as
+long on builds that deliver a film (CI 1.04–1.13). CodeReel speeds up its key evaluation in two ways, by
+drawing on contexts reset in place and by evaluating keys in the capture workers instead of in a pass before the
+capture. Without these two speed-ups, the agent waits 1.07 × \times as long as under the full CodeReel on these
+topics (CI 1.03–1.10), and 0.66 × \times as long as under Rebuild (CI
+0.63–0.69).
+Co-located agents.
+2 4 8 0 50% 100% agents k k on one 8-core machine films delivered CodeReel cgroup per call niced renders uncoordinated
+Figure S2. Films delivered with k k agents sharing one 8-core machine.
+We run k k agents on one machine of 8 cores with 16 GB, in 5 runs per k k , each of which draws
+the k k sessions and their order at random ( Fig. S2 ). Whether an agent gets its films depends on memory.
+Under uncoordinated execution, the agents’ renders together outgrow the machine. At k = 4 k=4 and 8 8 , the kernel’s OOM
+killer ended 10 of 10 uncoordinated runs and 9 of 10 runs with niced renders. One control
+group per call ( Zheng et al., 2026 ) keeps the runs alive by killing calls instead, with 1,938 kills at
+k = 4 k=4 and 8 8 , and 238 films are lost. Under CodeReel, with one ledger of the machine’s cores and memory
+and one shared executor ( Appendix S3 ), every run delivers every film that the recording delivered. These
+374 films each pass the gate, and no call is killed. From k = 4 k=4 , only CodeReel delivers every film
+( Fig. S2 ).
+S5.3. Exactness and tightness of reuse
+Over the 1,023,902 frames of the reuse study’s 355 pairs, CodeReel reuses no frame whose pixels
+changed and renders close to the frames whose pixels are new. Every other scheme renders more or reuses stale frames
+( Tab. 3 ). CodeReel renders 63.2% of the frames, which is 1.05 × \times the frames
+whose pixels are new. Complete keys on whole scenes and on narration lines are exact as well. Complete keys on whole
+scenes, which bound what per-call and per-scene caches ( The Manim Community Developers, 2026 ; Fourier, 2026 ) can reuse, render 80.2%
+of the frames, and complete keys on narration lines render 71.1%. Of the frames an edit changes,
+32.6% keep an SSIM above 0.99 to the frame they replace, and 8.1% keep an
+SSIM above 0.999. The similarity rule of Tab. 3 therefore leaves 7.0% of all frames
+stale. These frames miss the agent’s edit ( Fig. 2 , bottom) at a median SSIM of 0.999 to the
+correct frame (see the similarity rule, below). No frame CodeReel reuses is stale, here or in 2,000 random
+edits. A key audit checks every key against a lossless capture of its frame, over 2,164,167 frames, of which
+98.6% are keyed. No key stands for two pictures, and every kept key audited equals its fresh
+evaluation.
+Stale frames per scheme.
+Table S9 extends Tab. 3 with the frames that each scheme reuses although their pixels changed,
+and with the input hash scheme.
+Table S9. Frames rendered and stale frames per reuse scheme, on the test split’s adjacent versions and on time-shifting
+narration edits (cv.js).
+Adjacent versions
+Time-shifting edits
+Method
+Rendered
+Stale
+Rendered
+Stale
+Re-render all, input hash
+100.0%
+0
+100.0%
+0
+Scene windows
+90.3%
+22,563
+100.0%
+0
+Read sets
+83.8%
+9,704
+53.2%
+7,228
+Kamishibai-style, typical ( kamishibai, 2026 )
+63.5%
+131,408
+54.0%
+6,121
+Kamishibai-style, careful
+89.0%
+15,305
+99.8%
+0
+Manim-style ( The Manim Community Developers, 2026 )
+88.0%
+3,642
+99.8%
+0
+Similarity, threshold 0.1 ( Liu et al., 2025c )
+59.7%
+71,329
+–
+–
+Per scene, complete keys
+80.2%
+0
+81.1%
+0
+Per line, complete keys
+71.1%
+0
+64.5%
+0
+CodeReel
+63.2%
+0
+43.9%
+0
+Pixel truth
+60.2%
+0
+43.0%
+0
+Evidence.
+We compare incremental renders with renders from scratch, frame by frame, on 2,000 random edits of seven
+kinds on four films (style 379, timeline 376, num 373, draw 257, neutral 255, color 180, text 180). Every edit rendered, and every frame of every edit equals the render from
+scratch. The same holds over the adjacent versions of the test split ( Tab. 3 ).
+Exports.
+Every one of the 355 pairs and every random edit was exported and compared frame by frame. All
+1,023,902 frames of the pairs, reused or rendered, equal a render from scratch.
+The similarity rule.
+At the threshold of Tab. 3 , the similarity rule leaves 7.0% of all frames stale. Its
+stale frames look right to image metrics, at a median PSNR of 41.2 dB and a median SSIM of
+0.999, because an agent often changes a few words. In one example, a caption was rewritten from “the weak
+machine is about 4 × \times slower” to “the weak machine is about 4 × \times slower than the strong machine”
+(translated from Chinese), and the frame the rule keeps has an SSIM of 0.993 to the correct frame.
+Whatever the rule, many of the frames an edit changes stay near the frames they replace. Of the frames that differ
+from the previous version’s frame at the same time, 32.6% have an SSIM above 0.99 to that frame and
+8.1% have one above 0.999, and the median SSIM is 0.971. A rule that
+reused every frame above 0.99 would leave 21.0% of all frames stale. The shares are measured on
+thirty changed frames drawn from each pair of Tab. 3 , rendered in both versions and weighted by the pair’s
+changed frames.
+Table S10 gives the similarity rule at thresholds below that of Tab. 3 , on 23 pairs of
+the test split drawn at random. The smallest mean difference that two different 32 × 18 32\times 18 thumbnails can have is
+1 / 576 1/576 . At 0.001, below that value, the rule reuses a frame only when its thumbnail is identical to the
+previous version’s. A stricter threshold makes the rule render more frames and reuse fewer stale ones. At the strictest
+threshold, the rule renders 66.7% of the frames, more than the 57.2% whose pixels
+changed, and still reuses 14 stale frames in 4 pairs. Matching each frame to
+the nearest thumbnail of the previous version lets the rule reuse a frame moved in time. At the strictest threshold,
+this matching reuses 1,804 stale frames in 17 pairs. Two frames with the same
+thumbnail can differ, so no threshold on the thumbnail makes the rule exact.
+Table S10. The similarity rule at stricter thresholds, on 23 random pairs: frames rendered and stale
+frames (pairs with one), reusing the previous version’s frame at the same time or the one with the nearest thumbnail.
+Same time
+Nearest
+Threshold
+Rendered
+Stale
+Rendered
+Stale
+Pixels changed
+57.2%
+0
+47.7%
+0
+0.1
+51.1%
+4,146 (14)
+39.4%
+15,216 (18)
+0.05
+52.6%
+3,441 (12)
+41.2%
+14,175 (18)
+0.01
+62.9%
+108 (7)
+57.4%
+6,648 (18)
+0.001
+66.7%
+14 (4)
+69.6%
+1,804 (17)
+Time-shifting edits.
+CodeReel reuses the frames that a time-shifting edit moves. Such a move defeats reuse by time and by scene window. On
+32 narration edits to four cv.js films ( Tab. 3 , right), CodeReel renders
+43.9% of their frames, against 43.0% whose pixels are new, and reuses no stale
+frame. Read sets render more and reuse 7,228 stale frames. On two Remotion films with eight such
+edits each, 120 distinct pictures are new. CodeReel renders 128 frames there, and a cache
+looked up by time renders 2,373.
+Manim CE’s own cache.
+On one scene of eight animation calls, Manim CE’s cache re-renders every frame of each call an edit reaches. This is
+the granularity of Manim-style per-call caching in Tab. 3 . Manim CE re-renders from 16 of 106 frames after a
+caption edit to every frame after a change to the text every call draws, and it shows no stale frame.
+The stale frames of Manim-style per-call caching lie in scenes whose own files did not change but which call drawing
+code from another scene’s changed file. A per-call key over a call’s own file, the shared scripts and its data cannot
+see that code, which immediate-mode programs run every frame. Manim instead hashes the objects themselves.
+The cost of each edit.
+On 85.6% of the pairs, CodeReel renders within 5 percentage points of the frames whose pixels are
+new, with a median excess of 0.1 points ( Fig. 6 b). Edit-time
+methods ( Nitzan et al., 2024 ; Li et al., 2022 ) aim for such a cost, close to what the edit changes. Manim-style per-call caching
+renders every frame of each call an edit reaches.
+S5.4. Real agents in the loop
+Real-agent runs.
+Every session ran on 8 cores with cv.js programs and the scripted user of the registered protocol. The scripted user
+asks for each round’s changes and accepts the film. Claude Code ran Claude Opus 5.5, and Codex CLI ran GPT-6.1. The
+Wait and Film ratios of Tab. 4 are geometric means over pairs of per-session medians. The table’s Total column gives each pair’s ratio of total waits, the measure of the replays. Replayed under the
+protocol of Sec. 4 , the sessions that Claude Code recorded live on topics never used in development
+show the same gain. The agent waits 0.60 × \times as long as under Rebuild on 32 cores and
+0.66 × \times on 8.
+Film quality of the real-agent pairs.
+Under the registered scoring protocol, Claude Opus judges the delivered films and lists the faults of each session’s
+final film. We report the paired differences, CodeReel minus Rebuild. On the 14 pairs whose topics
+development never touched, the final films’ faults change by − - 0.29 (95% CI
+− - 1.64 to 0.69). For the 12 pairs through Codex CLI, the faults change by
+− - 0.58. The judge sees each film’s contact sheets, last frame, narration text and audio levels under a
+name drawn from a content hash, so the judge does not know which system built the film. Claude Code’s 26 pairs are ten
+topics run twice and six topics of Code2Video’s benchmark ( Chen et al., 2026b ) run once. Codex CLI’s pairs are those six
+topics run twice. The two sessions of each pair ran back to back on the same cores, in an order that alternates between
+repetitions. Every interval resamples topics with all their pairs. Each final film that a build under CodeReel delivered
+was rendered again from scratch with the session’s own code, and the two films decode to the same frames.
+S5.5. Ablation study
+The two parts shorten the wait in different ways. For the last block of Tab. 2 , we replay Rebuild with
+one mechanism at a time on 32 and 8 cores over 70 topics, without think time. Reuse removes work. Added
+alone, reuse renders 34.3% fewer frames with 0.81 × \times the CPU. The agent then
+waits 0.94 × \times as long on 32 cores and 0.86 × \times on 8, where rendering fills the
+machine. The verdict first, which runs the checks in parallel and the render alongside them, spends CPU to shorten the wait. With
+the verdict first alone, the agent waits 0.69 × \times as long on 32 cores and 0.86 × \times on
+8. On failing builds, it waits 0.49 × \times as long on 32 cores and 0.60 × \times on
+8. The verdict first alone uses 1.12 × \times the CPU on 32 cores and 1.05 × \times on 8.
+With every mechanism, the agent waits 0.64 × \times as long under CodeReel on 32 cores and
+0.67 × \times on 8, and CodeReel uses 0.81 × \times the CPU on 32 cores and
+0.76 × \times on 8. Reuse thus returns the CPU that the verdict first spends. With the fast checks alone,
+the agent waits 0.82 × \times as long on 32 cores and 0.88 × \times on 8. Starting the render
+early adds to the gain of the verdict first. When the render never starts early, the agent waits
+1.07 × \times as long as under CodeReel on 32 cores (CI 1.03–1.10). Without static impact, CodeReel evaluates 1.22 × \times as many keys, and without values read, it evaluates
+1.24 × \times as many (see the parts of reuse, below).
+The parts of reuse.
+We turn one part of reuse off at a time on 50 pairs of Tab. 3 . With static impact or values
+read off, the same frames are rendered. The keys evaluated rise to 1.22 × \times with static impact
+off and to 1.24 × \times with values read off. Text-baseline snapping saves 534
+unchanged frames. Keys that hold a frame’s position in time cost 1.11 × \times the frames on
+narration edits. We also time CodeReel with one part off at a time on four topics, with every film gated
+(18/18). Relative to the full CodeReel, the agent waits 1.08 × \times as long with static impact off,
+1.03 × \times with values read off and 1.04 × \times with text-baseline snapping off.
+Appendix S6 Related work in full
+Code-to-video agents and benchmarks.
+Agents make explanatory videos by writing Manim, web or slide programs and refining them with a renderer in the
+loop ( Chen et al., 2026b ; Ku et al., 2025 ; Li et al., 2026b ; Lin, 2026 ; Zhu et al., 2025 ) . Agents also drive physics simulators and
+renderers through code ( Bai et al., 2026 ) , mix programs with generative models ( Liu et al., 2025b ) , and program slides and 3D
+scenes in the same loop ( Ge et al., 2025 ; Huang et al., 2024 ; Gu et al., 2025 ) . VISTA ( Long et al., 2026 ) refines generated videos,
+LottieGPT generates vector animations as tokens ( Chen et al., 2026a ) , and the Scene Language represents scenes as
+programs ( Zhang et al., 2025 ) .
+These works improve what the agent writes and how its output is judged, and some measure tokens and
+time ( Chen et al., 2026b ; Li et al., 2026b ) . None goes beyond its framework’s per-call cache or targets the latency of a verdict.
+Benchmarks grade the result, and some also grade cost or trajectories ( Gu et al., 2025 ; Chen et al., 2026c ; Gupta et al., 2026 ) .
+Code2Video-Compass ( Chen et al., 2026c ) , on the same web and Remotion stack, generates a video in one call. Agent traces
+record tool latencies ( Zhu et al., 2026 ) and are replayed to benchmark serving ( Pan et al., 2026 ; Lau et al., 2026 ) .
+EditLoop’s replay instead executes the calls.
+Reuse.
+Training-free caches reuse or forecast features between denoising
+steps ( Ma et al., 2024 ; Wimbauer et al., 2024 ; Zhao et al., 2025 ; Lyu et al., 2025 ; Liu et al., 2025c ; Kahatapitiya et al., 2025 ; Liu et al., 2025d ) . Edit-time methods compute on the edited
+region ( Li et al., 2022 ; Nitzan et al., 2024 ; Yu et al., 2024 ; Liu et al., 2026a ) or reuse unchanged regions across editing turns ( Li et al., 2026a ) .
+Serving, graphics and video models skip or reproject work for similar inputs, frames or
+pixels ( Kodaira et al., 2025 ; Agarwal et al., 2024 ; Walter et al., 1999 ; Nehab et al., 2007 ; Habibian et al., 2021 ; Parger et al., 2022 ; Dutson et al., 2023 ) . All of these methods let
+their output differ from the full computation’s.
+Production tools and UI toolkits reuse operator outputs, frames and display lists ( Foundry, 2018 ; Adobe, 2026 ; The Chromium Authors, 2026 ; Flutter, 2026 ) .
+Closest to us, Manim keys each animation call by its inputs ( The Manim Community Developers, 2026 ) . Kamishibai fingerprints each frame’s page and
+reuses the previous run’s frame at the same index ( kamishibai, 2026 ) . HyperFrames repeats the frames that its timeline
+predicts to be static within one render ( HyperFrames, 2026 ) . Fourier, a video framework built for agents, fingerprints
+sources, assets and timing to reuse unchanged scenes, layers and speech, also after a layer moves in
+time ( Fourier, 2026 ) .
+CodeReel keys a frame by its evaluated drawing commands, normalized to the rasterizer, so frames of imperative code with
+one global clock and no call or layer boundaries are found again in any version, at any time. Like build
+systems ( Mokhov et al., 2018 ; Curtsinger and Barowy, 2022 ) and incremental computation ( Hammer et al., 2014 ; Hammer et al., 2015 ) , CodeReel keeps
+its results consistent with a build from scratch. Its keys, however, come from what a program draws and not from the
+files the program reads.
+Scheduling around agents.
+Test prioritization runs likely failures first ( Rothermel et al., 2001 ; Prado Lima and Vergilio, 2022 ) . Agent controllers weigh cheap
+diagnostics against costly verification ( Papamarkou et al., 2026 ) . Agent serving places KV caches around tool
+calls ( Xia et al., 2026 ; Liu et al., 2026b ) , shares GPU servers among agents ( Yang et al., 2025 ) , prewarms sandboxes ( Zhang et al., 2026 ) and
+controls CPU and memory per tool call by declared intent ( Zheng et al., 2026 ) . Agent systems also run independent tool
+calls in parallel ( Kim et al., 2024 ) and start a tool while the model is still decoding ( Xu et al., 2024 ) . Speculative
+agent systems guess the agent’s next action and keep a guess only when the guess matches the action
+taken ( Ye et al., 2026 ) . Build services schedule by a priority that users set ( BuildBuddy, 2026 ) .
+CodeReel schedules the operations of a video build by what the agent is blocked on, within the build and across the agent’s
+think time. It admits the work of agents sharing a machine against one ledger of the machine’s cores and memory. The
+work ahead of CodeReel needs no rollback, since a frame stored under its key is exact for any later version that draws it.

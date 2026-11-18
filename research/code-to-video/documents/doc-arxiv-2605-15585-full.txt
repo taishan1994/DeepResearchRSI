@@ -1,0 +1,902 @@
+See Before You Code: Learning Visual Priors for Spatially Aware Educational Animation Generation
+Skip to main content
+Title:
+Content selection saved. Describe the issue below:
+Description:
+License: CC BY 4.0
+arXiv:2605.15585v1 [cs.AI] 15 May 2026
+See Before You Code: Learning Visual Priors for Spatially Aware Educational Animation Generation
+Yuejia Li
+† † thanks: Equal contribution: Yuejia Li and Ke He.
+Affiliation: Wuhan University
+Ke He 1 1 footnotemark:
+1
+Affiliation: Wuhan University
+Junheng Li
+Affiliation: Wuhan University
+Shutong Chen
+Affiliation: University of Chinese Academy of Sciences
+Jingkang Xia
+Affiliation: Wuhan University
+Zhiyue Su
+Affiliation: Wuhan University
+Junchi Zhang
+Affiliation: Wuhan University
+Mang Ye
+† † thanks: Corresponding author: Mang Ye ( yenang@whu.edu.cn ).
+Affiliation: Wuhan University
+Abstract
+Large language models can generate executable code for educational animations, but the resulting renders often exhibit visual defects, including element overlap, misalignment, and broken animation continuity. These defects cannot be reliably detected from the code alone and become apparent only after execution. We formalize this problem as render-feedback-aware constrained code generation: given a natural language specification, the model must generate executable code whose rendered output satisfies structured quality criteria that can be evaluated only after rendering. To address this problem, we introduce OmniManim , a render-feedback-aware educational animation generation framework built around a shared scene state, explicit visual planning, structured post-render diagnostics, and localized repair. Within OmniManim, the Vision Agent is a task-specific visual planning module: it predicts sparse keyframe layouts with coarse-to-fine bounding-box denoising and optimizes an interpolation-aware objective to reduce intermediate-frame failures induced by downstream animation interpolation. We further construct two datasets, ManimLayout-1K and EduRequire-500 , and provide a reproducible evaluation protocol covering executability, instructional quality, visual quality, and efficiency. On EduRequire-500, OmniManim improves measured render quality over both single-model baselines and existing multi-agent frameworks. Systematic ablation studies further verify that explicit visual planning, especially its coarse spatial prior, bounding-box refinement, and interpolation-aware optimization, is central to these gains.
+1 Introduction
+The demand for high-quality educational animations far exceeds the capacity of manual production. End-to-end video models such as Sora ( Ho et al., 2022 ; Singer et al., 2023 ; Blattmann et al., 2023 ; Kondratyuk et al., 2023 ; Bar-Tal et al., 2024 ) achieve impressive visual fidelity but function as black-box generators with limited control over symbolic content, logical structure, and compositional precision—properties that are essential in educational settings. Recent studies therefore turn to code-centric generation , in which large language models (LLMs) produce executable Manim scripts rather than pixel-level videos ( Chen et al., 2025 ; Wang et al., 2026 ; Ku et al., 2025 ) , enabling deterministic rendering, precise control, and editable outputs; benchmarks such as ManimBench ( Rammuni Silva et al., 2026 ) and ManiBench ( Oli, 2026 ) further formalize execution-level evaluation in this paradigm.
+Figure 1: Common render-time failure modes in LLM-generated educational animations. Although the generated code is executable, the rendered outputs still exhibit viewport overflow, element overlap, remnant content from previous frames, and scale mismatch. These defects are difficult to detect from code alone and motivate our render-feedback-aware formulation.
+However, executable correctness does not imply render quality . As illustrated in Figure 1 , LLM-generated Manim code routinely produces animations with overlapping elements, occlusion, text overflow, uneven spacing, and visually cluttered layouts—defects that are not reliably identifiable from source code alone and only become evident after rendering. The underlying difficulty is that code generation for educational animation requires both symbolic reasoning and fine-grained spatial layout planning; LLMs are effective at the former but unreliable at the latter. Multi-agent designs do not resolve this gap, since layout decisions are still delegated to language models without explicit grounding in the rendered 2D scene. Post-render critique and VLM-based assessment can flag visible defects, but natural-language feedback is difficult to translate into precise coordinate adjustments.
+We address these limitations with OmniManim, a render-feedback-aware educational animation generation framework. The key insight is that educational animation failures are not only code-level errors, but also render-time spatial and temporal failures: two keyframes that are individually valid can still produce overlap, occlusion, or relation violations once downstream animation interpolates the frames in between. OmniManim therefore separates visual planning from code synthesis through a task-specific Vision Agent . Rather than treating layout generation as a standalone target, the Vision Agent provides explicit sparse keyframe plans for Manim code generation, using coarse-to-fine bounding-box denoising and an interpolation-aware objective as implementation tools. With layout planning exposed as an intermediate representation, the LLM focuses on generating executable code that is structurally correct and semantically faithful to the input specification. OmniManim further incorporates a structured render-feedback loop based on deterministic computer vision analysis, enabling iterative refinement under explicit visual quality constraints. We formalize this setting as render-feedback-aware constrained code generation , where the goal is to generate executable code whose rendered output satisfies structured post-render quality criteria that can be evaluated only after rendering.
+Our contributions are as follows:
+•
+We identify spatial layout failure as a fundamental bottleneck in LLM-based animation code generation, persistent even under multi-agent architectures, and formalize the task as render-feedback-aware constrained code generation .
+•
+We propose OmniManim , a render-feedback-aware system scaffold that maintains a shared scene state, separates semantic parsing, visual layout planning, code generation, and local repair, and uses structured render diagnostics to guide refinement.
+•
+We design the Vision Agent as a task-specific visual planning module for Manim animations: it predicts sparse keyframe layouts with coarse-to-fine bounding-box denoising and applies an interpolation-aware objective for downstream animation interpolation.
+•
+We construct two new datasets— ManimLayout-1K (training) and EduRequire-500 (evaluation)—together with a reproducible evaluation protocol covering visual, instructional, and efficiency metrics, and describe the intended release policy for these research artifacts.
+•
+Extensive experiments on EduRequire-500 show that OmniManim outperforms single-model and multi-agent baselines on layout-related metrics, and ablations identify the Vision Agent and its interpolation-aware objective as key drivers of the gains.
+2 Related Work
+Code-Centric Educational Visualization.
+LLM-driven code generation for visual content spans multiple frameworks. In the Manim ecosystem, Code2Video ( Chen et al., 2025 ) proposes a three-agent pipeline, TheoremExplainAgent ( Ku et al., 2025 ) targets theorem explanations, and TeachMaster ( Wang et al., 2026 ) orchestrates multi-agent collaboration for curriculum-ready videos; ManimBench ( Rammuni Silva et al., 2026 ) and ManiBench ( Oli, 2026 ) provide evaluation benchmarks. Beyond Manim, DeTikZify ( Belouadi et al., 2024 ) synthesizes scientific figures as TikZ programs from sketches, DiagrammerGPT ( Zala et al., 2024 ) uses LLM-planned layouts to generate open-domain diagrams across platforms, and EduVisAgent ( Ji et al., 2025 ) produces pedagogical visualizations through specialized agent collaboration. These works validate the code-centric paradigm across different output modalities but predominantly evaluate execution success or high-level semantics, without addressing spatial layout failures in temporal animations. This gap motivates OmniManim: a render-feedback-aware system that explicitly inserts Vision-Agent layout planning between semantic parsing and code synthesis.
+Multi-Agent Systems and Iterative Refinement.
+ChatDev ( Qian et al., 2024 ) and MetaGPT ( Hong et al., 2024 ) decompose software development into specialized agent roles, while AutoGen ( Wu et al., 2023 ) provides flexible multi-agent coordination. For iterative refinement, Self-Debugging ( Chen et al., 2023 ) , Reflexion ( Shinn et al., 2023 ) , Self-Refine ( Madaan et al., 2023 ) , and ReAct ( Yao et al., 2023 ) use execution traces, self-feedback, or tool interaction to guide corrections, and MatplotAgent ( Yang et al., 2024 ) employs VLM-based visual verification. Toolformer ( Schick et al., 2023 ) further shows that language models can learn to invoke external tools, and prompting strategies such as chain-of-thought and self-consistency improve reasoning reliability ( Wei et al., 2022 ; Wang et al., 2023 ) . However, existing frameworks do not incorporate rendering-aware spatial constraints. OmniManim extends multi-agent coordination with a shared scene state, a dedicated Vision Agent, and structured render diagnostics, enabling optimization over rendered artifacts rather than code-level properties alone.
+Layout Generation.
+Automatic layout generation has been studied with adversarial, variational, attention-based, and diffusion-based models. LayoutGAN ( Li et al., 2019 ) and LayoutVAE ( Jyothi et al., 2019 ) generate structured visual layouts from semantic inputs, while LayoutTransformer ( Gupta et al., 2021 ) models layout elements with self-attention. Diffusion models ( Ho et al., 2020 ; Song et al., 2021b ; Nichol and Dhariwal, 2021 ; Song et al., 2021a ) and related flow-based formulations ( Lipman et al., 2023 ; Liu et al., 2023b ) provide a general denoising framework for generative modeling. In layout generation, LayoutDM ( Inoue et al., 2023 ) applies discrete diffusion to controllable layout synthesis, LayoutDiffusion ( Zheng et al., 2023a ) uses layout-conditioned diffusion for layout-to-image generation, graphic-layout diffusion methods further improve document-like layout synthesis ( Zhang et al., 2023 ) , and transformer-based variants ( Chai et al., 2023 ) explore conditional layout generation. LACE ( Chen et al., 2024 ) incorporates aesthetic constraints into diffusion-based layout generation. These methods provide useful tools for arranging static, single-frame visual elements, but they do not directly produce executable animation code or account for object lifecycles, temporal scheduling, and post-render interpolation failures. We therefore use denoising-based layout modeling as an internal visual planning component within a render-feedback-aware code generation framework, rather than positioning static layout generation as our target task.
+3 Methodology
+3.1 Problem Formulation
+Given a natural-language teaching requirement r r , our goal is to generate executable animation code c c whose rendered output is both instructionally correct and visually valid. Directly mapping language to code is difficult because execution correctness does not guarantee render quality. We therefore introduce an intermediate structured scene state s s and decompose the generation process into a scene parser and a code generator:
+h : ℛ → 𝒮 , g : 𝒮 → 𝒞 , f = g ∘ h . h:\mathcal{R}\rightarrow\mathcal{S},\qquad g:\mathcal{S}\rightarrow\mathcal{C},\qquad f=g\circ h.
+Here, h h converts the input requirement into a structured scene specification, and g g generates executable code conditioned on this specification. The scene state explicitly represents the information needed for downstream generation, including scene objects, semantic relations, pedagogical roles, temporal plans, and layout variables. Under this formulation, the task is treated as constrained code synthesis over a shared structured state rather than unconstrained text-to-code generation.
+3.2 Agentic Framework Overview
+Figure 2: Overview of OmniManim. The system maintains a shared scene state across four coupled agents: Scene Agent, Vision Agent, Code Agent, and Repair Agent. The Vision Agent predicts keyframe layouts, the Code Agent converts them into executable Manim code, and the Repair Agent uses render diagnostics to refine the result.
+Figure 2 shows the overall framework. OmniManim is organized around a Shared Scene State , which serves as the communication interface across agents. Instead of exchanging only natural-language messages, the agents read from and write to a common structured representation, which makes the generation process explicit, editable, and repairable.
+At the object level, each scene element is represented by its identity, type, content, pedagogical role, layout, temporal schedule, generated code block, and verification status. The initial scene state contains an object set, a relation set, pedagogical annotations, and coarse temporal plans. Based on this state, the system proceeds in four stages. First, the Scene Agent parses the requirement into a normalized scene schema containing objects, relations, pedagogical roles, and temporal cues. Second, the Vision Agent predicts coarse-to-fine bounding-box layouts for sparse keyframes under interpolation-aware constraints. Third, the Code Agent maps the optimized layouts and temporal plan into executable Manim code. Fourth, the Repair Agent renders the program, computes structured diagnostics for overlap, relation violation, boundary overflow, and compilation failure, and routes feedback for local correction instead of regenerating the full script. This shared-state collaboration enables structured refinement under explicit visual constraints. Additional agent-level details are provided in the supplementary material.
+3.3 Vision Agent
+The Vision Agent is a task-specific visual planning module within OmniManim. Its role is not to serve as a general-purpose layout generator, but to provide explicit keyframe-level spatial plans for Manim code generation. This distinction is important because educational animation generation differs from static graphic layout: two adjacent keyframes may each be individually valid, while the interpolated intermediate frames can still exhibit overlap, occlusion, or relation violations. The modeling insight is to take denoising-based layout modeling, which is typically applied to static element arrangements, and apply it over sparse animation keyframes so that layout prediction becomes temporal planning rather than independent frame placement.
+Let 𝐁 = { b i ( k ) } \mathbf{B}=\{b_{i}^{(k)}\} denote the normalized bounding boxes of all objects across sparse keyframes, where each b i ( k ) b_{i}^{(k)} contains the center coordinates, width, and height of object i i at keyframe k k . The Vision Agent follows a coarse-to-fine design. It first encodes the scene state into object-level tokens and predicts a coarse spatial prior 𝐏 ∈ [ 0 , 1 ] 4 × 32 × 32 \mathbf{P}\in[0,1]^{4\times 32\times 32} , where the four channels correspond to major semantic regions such as title, figure, equation, and annotation areas. This prior captures the global organization of the scene and provides stable anchors for downstream refinement.
+Starting from noisy boxes 𝐛 t \mathbf{b}^{t} , the model then performs iterative denoising ( Ho et al., 2020 ; Song et al., 2021b ; Nichol and Dhariwal, 2021 ; Song et al., 2021a ; Lipman et al., 2023 ; Liu et al., 2023b ) in normalized bounding-box space. At each step, the denoiser predicts a box-level update conditioned on the current boxes, object tokens, and spatial prior:
+𝐯 ^ t = Δ θ ​ ( 𝐛 t , 𝐎 , 𝐏 , t ) , 𝐛 t − 1 = clamp ⁡ ( 𝐛 t − 1 T d ​ 𝐯 ^ t ,  0 ,  1 ) . \hat{\mathbf{v}}^{t}=\Delta_{\theta}(\mathbf{b}^{t},\mathbf{O},\mathbf{P},t),\qquad\mathbf{b}^{t-1}=\mathrm{clamp}\!\left(\mathbf{b}^{t}-\frac{1}{T_{d}}\hat{\mathbf{v}}^{t},\,0,\,1\right).
+This formulation is more suitable than single-pass box regression because educational layouts are strongly relation-dependent: the placement of each object must be resolved jointly with the others. During training, the denoising target is parameterized as a velocity-style update from noisy boxes to clean layouts, while the refined boxes are further supervised by box regression, overlap, relation, and boundary constraints.
+To make the layout model animation-aware, we further introduce an interpolation-aware keyframe constraint. Given two adjacent keyframes k k and k + 1 k+1 , we approximate the downstream animation interpolation by an operator Π ⁡ ( ⋅ ) \Pi(\cdot) and sample a set of intermediate time steps u ∈ 𝒰 u\in\mathcal{U} . This yields interpolated boxes b ~ i ( k → k + 1 ) ​ ( u ) \tilde{b}_{i}^{(k\rightarrow k+1)}(u) between the two keyframes. We then penalize object pairs that remain valid at the endpoints but collide during interpolation:
+ℒ interp = ∑ k = 1 K − 1 ∑ u ∈ 𝒰 ∑ i ≠ j max ⁡ ( 0 , IoU ⁡ ( b ~ i ​ ( u ) , b ~ j ​ ( u ) ) − τ coll ) . \mathcal{L}_{\mathrm{interp}}=\sum_{k=1}^{K-1}\sum_{u\in\mathcal{U}}\sum_{i\neq j}\max\!\Big(0,\,\mathrm{IoU}\big(\tilde{b}_{i}(u),\tilde{b}_{j}(u)\big)-\tau_{\mathrm{coll}}\Big).
+This term encourages the model to generate sparse keyframes whose induced intermediate frames remain visually safe, rather than optimizing each keyframe independently as in static layout generation.
+The final training objective combines denoising accuracy with spatial validity at both the keyframe level and the interpolation level:
+ℒ = ℒ diff + λ 1 ​ ℒ box + λ 2 ​ ℒ coll + λ 3 ​ ℒ rel + λ 4 ​ ℒ bound + λ 5 ​ ℒ interp . \mathcal{L}=\mathcal{L}_{\mathrm{diff}}+\lambda_{1}\mathcal{L}_{\mathrm{box}}+\lambda_{2}\mathcal{L}_{\mathrm{coll}}+\lambda_{3}\mathcal{L}_{\mathrm{rel}}+\lambda_{4}\mathcal{L}_{\mathrm{bound}}+\lambda_{5}\mathcal{L}_{\mathrm{interp}}.
+Here, ℒ diff \mathcal{L}_{\mathrm{diff}} is the denoising loss, ℒ box \mathcal{L}_{\mathrm{box}} is the box regression loss, and the remaining terms enforce overlap avoidance, relation consistency, boundary validity, and interpolation safety. In this way, the Vision Agent optimizes sparse keyframe layouts under downstream animation constraints, making it suitable for executable educational animation generation rather than static page layout synthesis. Additional Vision Agent details are provided in the supplementary material.
+4 Dataset and Evaluation Protocol
+To support our experimental pipeline, we construct two new complementary, disjoint datasets specifically for this work. ManimLayout-1K is a training corpus that we curate from open-source Manim code repositories on GitHub and community tutorial sites whose terms allow research use; we filter for rendering correctness and visual quality to retain 1,000 educational Manim source animations, and then automatically extract structured scene–layout pairs at the keyframe level, yielding 22,579 samples for model development. Each extracted sample pairs a structured scene graph with per-object normalized bounding boxes. EduRequire-500 is a held-out evaluation benchmark that is independently authored by domain experts rather than derived from the ManimLayout-1K sources, spanning diverse school and university subjects, task types, and complexity levels. Both datasets are introduced in this work; full construction details, record schemas, annotation procedures, split policy, and source-provenance safeguards are provided in the supplementary material.
+4.1 Generation Protocol
+Given EduRequire-500, we compare OmniManim against representative single-model and multi-agent baselines.
+Single-Model Baselines.
+We evaluate five direct-generation baselines: OpenAI GPT-5.4 ( gpt-5.4 , accessed in April 2026), Moonshot Kimi K2.5 ( kimi-k2.5 , accessed in April 2026), Google Gemini 3.1 Pro Preview ( gemini-3.1-pro-preview , accessed in April 2026), MiniMax-M2.7 ( minimax-m2.7 , accessed in April 2026), and Qwen3-14B (local checkpoint name, accessed in April 2026). Each model receives the same standardized prompt and is executed in the same generation and rendering environment (Python 3.12, Manim 0.19.0).
+Multi-Agent Baselines.
+We also evaluate Code2Video as a representative multi-agent baseline with role-separated planning, coding, and verification modules. For a controlled comparison, we instantiate Code2Video with the same base language models used by the corresponding OmniManim variants, namely GPT-5.4 and Gemini 3.1 Pro Preview.
+Execution and Aggregation.
+Each requirement is executed five times per method, and we report the mean across runs. All methods are allowed at most one repair round after the initial generation.
+4.2 Evaluation Protocol
+We evaluate generated animations with a two-level protocol. The main comparison spans executability, instructional quality, visual quality, and efficiency. CV-based metrics measure overlap, layout quality, animation continuity, and visual consistency from rendered frames. Following common VLM-as-judge protocols ( OpenAI, 2023 ; Liu et al., 2023a ; Zheng et al., 2023b ; Liu et al., 2023c ) , we use Claude Opus 4.6 as the vision-language evaluator in a multi-stage protocol to evaluate content accuracy, pedagogical clarity, and engagement, with auxiliary overlap review and visual coverage checks used as supporting diagnostics. Full algorithmic details are provided in the supplementary material. Table 1 summarizes the metrics used in the main comparison.
+Table 1: Definition of the main evaluation metrics
+Group
+Abbrev.
+Metric
+What it measures
+Exec.
+R@1
+render@1
+Rendering success on the first attempt.
+Exec.
+R@F
+render@final
+Rendering success after iterative repair.
+Instr.
+CA
+Content Accuracy
+Whether the generated animation correctly addresses the instructional requirement.
+Instr.
+PC
+Pedagogical Clarity
+Clarity, coherence, and instructional organization of the generated animation.
+Instr.
+EN
+Engagement
+Degree to which the output maintains viewer interest and supports effective presentation.
+Visual
+OV
+Overlap
+Degree of spatial non-overlap between visual elements; higher is better.
+Visual
+LQ
+Layout Quality
+Quality of spatial organization and adherence to layout constraints.
+Visual
+AC
+Animation Continuity
+Smoothness and temporal coherence of animation transitions.
+Visual
+VC
+Visual Consistency
+Stability of visual appearance and rendering state across frames.
+Eff.
+Tok
+Token Usage
+Total number of tokens consumed during generation.
+Eff.
+Time
+End-to-End Time
+Total wall-clock time required for generation and repair.
+5 Experiments
+5.1 Comparison with Existing Models and Agent Architectures
+Following the generation protocol described in Section 4 , Table 2 reports the main comparison results across all baselines and OmniManim on EduRequire-500.
+Table 2: Main comparison results on our EduRequire-500 benchmark. Higher is better except for Tok and Time. See Table 1 for metric definitions. Subscripts on multi-agent methods indicate the base language model used within the pipeline.
+Method
+Exec. ↑ \uparrow
+Instr. ↑ \uparrow
+Visual ↑ \uparrow
+Eff.
+R@1
+R@F
+CA
+PC
+EN
+OV
+LQ
+AC
+VC
+Tok ↓ \downarrow
+Time ↓ \downarrow
+GPT-5.4
+0.812
+0.934
+0.612
+0.642
+0.597
+0.628
+0.778
+0.764
+0.748
+56328
+108s
+Kimi K2.5
+0.761
+0.892
+0.548
+0.571
+0.528
+0.512
+0.808
+0.798
+0.768
+51234
+109s
+Gemini 3.1 Pro Preview
+0.796
+0.918
+0.584
+0.598
+0.551
+0.578
+0.768
+0.742
+0.782
+64215
+133s
+MiniMax-M2.7
+0.718
+0.856
+0.512
+0.552
+0.508
+0.458
+0.628
+0.618
+0.658
+47186
+116s
+Qwen3-14B
+0.174
+0.356
+0.296
+0.184
+0.151
+0.108
+0.164
+0.172
+0.204
+28714
+56s
+Code2Video GPT-5.4 {}_{\text{GPT-5.4}} ( Chen et al., 2025 )
+0.841
+0.923
+0.724
+0.712
+0.541
+0.598
+0.742
+0.784
+0.748
+69532
+148s
+Code2Video Gemini 3.1 Pro Preview {}_{\text{Gemini 3.1 Pro Preview}} ( Chen et al., 2025 )
+0.812
+0.901
+0.748
+0.734
+0.558
+0.584
+0.758
+0.764
+0.782
+68200
+142s
+OmniManim GPT-5.4 {}_{\text{GPT-5.4}}
+0.907
+0.986
+0.836
+0.730
+0.868
+0.763
+0.931
+0.802
+0.762
+73279
+72s
+OmniManim Gemini 3.1 Pro Preview {}_{\text{Gemini 3.1 Pro Preview}}
+0.884
+0.972
+0.852
+0.748
+0.852
+0.778
+0.942
+0.818
+0.781
+74800
+78s
+OmniManim achieves the strongest performance on the targeted render and layout-related metrics in Table 2 , with its clearest advantages on rendering success and overlap/layout quality. These gains support the central design of OmniManim: a render-feedback-aware system in which the Vision Agent supplies animation-aware layout plans before code synthesis, while structured diagnostics guide local repair after rendering. Code2Video ( Chen et al., 2025 ) remains the strongest non-Omni multi-agent baseline but trails OmniManim on the main visual metrics, while direct single-model baselines show uneven strengths across visual dimensions. OmniManim consumes more tokens because of its multi-stage planning, verification, and repair pipeline, yet its wall-clock time remains competitive because Vision-Agent inference and LLM generation are partially parallelized.
+Figure 3 provides a qualitative comparison with Code2Video across diverse educational animation tasks, showing that the gains in Table 2 are reflected in more coherent spatial organization and clearer structural relations.
+Figure 3: Qualitative comparison between OmniManim and Code2Video on diverse educational animation tasks. Top: OmniManim produces more coherent spatial organization and preserves clearer structural relations across different subjects. Bottom: Code2Video often generates locally plausible frames but suffers from fragmented layouts, misalignment, and missing or weakened relational structures, as highlighted in red.
+5.2 Human Evaluation
+To complement the automated protocol, we conduct a human study on a stratified 60-task subset of EduRequire-500, with 20 undergraduate raters from four universities covering nine academic disciplines. Each rater evaluates 12 tasks. For each task, the outputs of OmniManim, GPT-5.4, and Code2Video are scored independently by four raters on seven quality dimensions using a 0–100 scale. Full recruitment, rubric, supervision, compensation, consent, and analysis details are provided in the supplementary material.
+Table 3 shows that OmniManim receives consistently higher human scores than Code2Video on the layout-related dimensions, with large gains on OV ( + 32.1 +32.1 , p < 10 − 5 p<10^{-5} ) and LQ ( + 21.4 +21.4 , p < 10 − 5 p<10^{-5} ), as well as a higher overall score ( 81.0 81.0 vs. 68.4 68.4 , Δ = + 12.6 \Delta=+12.6 , p < 10 − 5 p<10^{-5} ). Compared with GPT-5.4, OmniManim also improves EN ( + 12.5 +12.5 , p < 10 − 3 p<10^{-3} ), OV ( + 16.4 +16.4 , p = 0.003 p=0.003 ), LQ ( + 8.3 +8.3 , p = 0.041 p=0.041 ), and the overall score ( 81.0 81.0 vs. 76.0 76.0 , Δ = + 5.0 \Delta=+5.0 , p = 0.009 p=0.009 ). These human judgments are directionally consistent with the automatic results in Table 2 , especially on the spatial quality dimensions, and provide additional evidence that explicit visual grounding improves instructional presentation and spatial organization in rendered animations beyond multi-agent coordination alone.
+This pattern also matches the intended role of the Vision Agent: the largest human gains appear on overlap avoidance and layout organization, while temporal and visual-consistency scores remain broadly comparable to the strongest baselines. The higher engagement scores are consistent with clearer instructional presentation from cleaner spatial organization, even though the method does not directly optimize for presentation style. Overall, the improvement is concentrated on the spatial failure modes targeted by our method rather than on generic stylistic changes.
+Table 3: Human evaluation on 60 tasks from EduRequire-500. Each task-method pair is rated by four independent raters. Scores are means on a 0–100 scale (higher is better); Δ \Delta denotes OmniManim minus the corresponding baseline after task-level aggregation; p p -values are from paired Wilcoxon signed-rank tests over task-level means ( N = 60 N=60 ). ∗ ∗ ∗ p < 10 − 3 {}^{***}p<10^{-3} , p ∗ ⁣ ∗ < 10 − 2 {}^{**}p<10^{-2} , ∗ p < 0.05 {}^{*}p<0.05 . Full protocol and extended results are provided in the supplementary material.
+GPT-5.4
+Code2Video
+Dimension
+OmniManim
+mean
+Δ \Delta
+p p
+mean
+Δ \Delta
+p p
+CA
+92.9 92.9
+91.8 91.8
++ 1.1 +1.1
+0.128 0.128
+89.7 89.7
++ 3.2 +3.2
+0.032 ∗ 0.032^{*}
+PC
+85.9 85.9
+85.5 85.5
++ 0.5 +0.5
+0.134 0.134
+73.2 73.2
++ 12.7 +12.7
+< 10 − 4 ∗ ∗ ∗ <10^{-4}{}^{***}
+EN
+73.4 73.4
+60.9 60.9
++ 12.5 +12.5
+< 10 − 3 ∗ ∗ ∗ <10^{-3}{}^{***}
+58.5 58.5
++ 14.9 +14.9
+< 10 − 3 ∗ ∗ ∗ <10^{-3}{}^{***}
+OV
+74.1 74.1
+57.8 57.8
++ 16.4 +16.4
+0.003 ∗ ⁣ ∗ 0.003^{**}
+42.0 42.0
++ 32.1 +32.1
+< 10 − 5 ∗ ∗ ∗ <10^{-5}{}^{***}
+LQ
+73.2 73.2
+65.0 65.0
++ 8.3 +8.3
+0.041 ∗ 0.041^{*}
+51.9 51.9
++ 21.4 +21.4
+< 10 − 5 ∗ ∗ ∗ <10^{-5}{}^{***}
+AC
+79.6 79.6
+80.8 80.8
+− 1.2 -1.2
+0.234 0.234
+78.0 78.0
++ 1.6 +1.6
+0.352 0.352
+VC
+87.5 87.5
+89.9 89.9
+− 2.4 -2.4
+0.172 0.172
+85.2 85.2
++ 2.3 +2.3
+0.062 0.062
+Overall (mean of 7)
+81.0 \mathbf{81.0}
+76.0 76.0
++ 5.0 +5.0
+0.009 ∗ ⁣ ∗ 0.009^{**}
+68.4 68.4
++ 12.6 +12.6
+< 10 − 5 ∗ ∗ ∗ <10^{-5}{}^{***}
+5.3 Ablation Study
+5.3.1 Ablation Settings
+We ablate the Vision Agent along three axes: explicit layout modeling, the coarse-to-fine design, and the interpolation-aware objective. We compare five settings: Without Vision Agent uses default placement heuristics; Stage 1 Only keeps the scene encoder and coarse spatial prior; Stage 2 Only keeps coordinate diffusion but removes the learned prior; Full w/o L interp L_{\mathrm{interp}} removes the interpolation-aware objective by setting λ 5 = 0 \lambda_{5}=0 ; and Full Vision Agent uses the complete design.
+All variants are evaluated with the main layout-sensitive metrics, namely Overlap, Layout Quality, Animation Continuity, and Visual Consistency, allowing us to separate architectural gains from interpolation-aware optimization.
+Table 4: Ablation of the Vision Agent and the interpolation-aware objective on EduRequire-500. We report the visual metrics that are directly aligned with the main evaluation. Higher is better for all metrics. Delta values in parentheses indicate changes relative to the full model.
+Setting
+OV ↑ \uparrow
+LQ ↑ \uparrow
+AC ↑ \uparrow
+VC ↑ \uparrow
+Full Vision Agent
+0.763
+0.931
+0.802
+0.762
+Full w/o L interp L_{\mathrm{interp}}
+0.734 (-0.029)
+0.907 (-0.024)
+0.750 (-0.052)
+0.754 (-0.008)
+w/o Vision Agent
+0.491 (-0.272)
+0.614 (-0.317)
+0.576 (-0.226)
+0.648 (-0.114)
+Stage 1 Only
+0.628 (-0.135)
+0.783 (-0.148)
+0.710 (-0.092)
+0.708 (-0.054)
+Stage 2 Only
+0.572 (-0.191)
+0.726 (-0.205)
+0.665 (-0.137)
+0.691 (-0.071)
+5.3.2 Results and Analysis
+Table 4 shows that the Vision Agent is necessary for stable educational layouts: removing it causes the largest drop across all visual metrics and leads to obvious overlap and clutter. Stage 1 Only and Stage 2 Only show that coarse spatial anchoring and fine-grained coordinate refinement are complementary, while Full w/o L interp L_{\mathrm{interp}} confirms the additional benefit of interpolation-aware optimization, especially on AC . Figure 4 qualitatively supports the same trend.
+Figure 4: Qualitative comparison of the ablation variants of the Vision Agent. Top row: predicted object layouts with object-level diagnostics. Bottom row: corresponding rendered frames. From (a) to (e), spatial organization becomes progressively cleaner and more stable as more components and constraints of the full design are included.
+6 Discussion and Broader Impacts
+OmniManim treats rendering as part of the generation loop, producing editable Manim code with explicit Vision-Agent layout plans and render diagnostics for local repair. This can lower authoring costs, support alternative visual explanations, and make layout decisions, code blocks, and repair actions inspectable through a shared scene state. Limitations include Manim-style layouts, short-horizon keyframes, richer typography, camera motion, and long-range narrative planning; use is assistive and final content should be human-reviewed, with further caveats in the supplementary material.
+References
+Bar-Tal et al. (2024)
+O. Bar-Tal, H. Chefer, O. Tov, C. Herrmann, R. Paiss, S. Zada, A. Ephrat, J. Hur, Y. Liu, A. Raj, et al.
+Lumiere: a space-time diffusion model for video generation .
+arXiv preprint arXiv:2401.12945 .
+Cited by: §1 .
+Belouadi et al. (2024)
+J. Belouadi, S. P. Ponzetto, and S. Eger
+DeTikZify: synthesizing graphics programs for scientific figures and sketches with tikz .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: §2 .
+Blattmann et al. (2023)
+A. Blattmann, T. Dockhorn, S. Kulal, D. Mendelevitch, M. Kilian, D. Lorenz, Y. Levi, Z. English, V. Voleti, A. Letts, et al.
+Align your latents: high-resolution video synthesis with latent diffusion models .
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) ,
+Cited by: §1 .
+Chai et al. (2023)
+S. Chai, L. Zhuang, and F. Yan
+LayoutDM: transformer-based diffusion model for layout generation .
+arXiv preprint arXiv:2305.02567 .
+Cited by: §2 .
+Chen et al. (2024)
+J. Chen, R. Zhang, Y. Zhou, R. Jain, Z. Xu, R. Rossi, and C. Chen
+Towards aligned layout generation via diffusion model with aesthetic constraints .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 .
+Chen et al. (2023)
+X. Chen, M. Lin, N. Schärli, and D. Zhou
+Teaching large language models to self-debug .
+arXiv preprint arXiv:2304.05128 .
+Cited by: §2 .
+Chen et al. (2025)
+Y. Chen, K. Q. Lin, and M. Z. Shou
+Code2Video: a code-centric paradigm for educational video generation .
+arXiv preprint arXiv:2510.01174 .
+Cited by: §1 ,
+§2 ,
+§5.1 ,
+Table 2 ,
+Table 2 .
+Gupta et al. (2021)
+K. Gupta, J. Lazarow, A. Achille, L. S. Davis, V. Mahadevan, and A. Shrivastava
+LayoutTransformer: layout generation and completion with self-attention .
+In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) ,
+Cited by: §2 .
+Ho et al. (2022)
+J. Ho, W. Chan, C. Saharia, J. Whang, R. Gao, A. Gritsenko, D. P. Kingma, B. Poole, M. Norouzi, D. J. Fleet, and T. Salimans
+Imagen video: high definition video generation with diffusion models .
+arXiv preprint arXiv:2210.02303 .
+Cited by: §1 .
+Ho et al. (2020)
+J. Ho, A. Jain, and P. Abbeel
+Denoising diffusion probabilistic models .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: §2 ,
+§3.3 .
+Hong et al. (2024)
+S. Hong, M. Zhuge, J. Chen, X. Zheng, Y. Cheng, C. Zhang, J. Wang, Z. Wang, S. K. S. Yau, Z. Lin, et al.
+MetaGPT: meta programming for a multi-agent collaborative framework .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 .
+Inoue et al. (2023)
+N. Inoue, K. Kikuchi, E. Simo-Serra, M. Otani, and K. Yamaguchi
+LayoutDM: discrete diffusion model for controllable layout generation .
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) ,
+Cited by: §2 .
+Ji et al. (2025)
+H. Ji, S. Qiu, S. Xin, S. Han, Z. Chen, H. Wang, D. Zhang, and H. Yao
+From eduvisbench to eduvisagent: a benchmark and multi-agent framework for reasoning-driven pedagogical visualization .
+arXiv preprint arXiv:2505.16832 .
+Cited by: §2 .
+Jyothi et al. (2019)
+A. A. Jyothi, T. Durand, J. He, L. Sigal, and G. Mori
+LayoutVAE: stochastic scene layout generation from a label set .
+In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) ,
+Cited by: §2 .
+Kondratyuk et al. (2023)
+D. Kondratyuk, L. Yu, X. Gu, J. Lezama, J. Huang, R. Hornung, H. Adam, H. Akbari, Y. Alon, et al.
+VideoPoet: a large language model for zero-shot video generation .
+arXiv preprint arXiv:2312.14125 .
+Cited by: §1 .
+Ku et al. (2025)
+M. Ku, T. Chong, J. Leung, K. Shah, A. Yu, and W. Chen
+TheoremExplainAgent: towards multimodal explanations for llm theorem understanding .
+arXiv preprint arXiv:2502.19400 .
+Cited by: §1 ,
+§2 .
+Li et al. (2019)
+J. Li, J. Yang, A. Hertzmann, J. Zhang, and T. Xu
+LayoutGAN: generating graphic layouts with wireframe discriminators .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 .
+Lipman et al. (2023)
+Y. Lipman, R. T. Q. Chen, H. Ben-Hamu, M. Nickel, and M. Le
+Flow matching for generative modeling .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 ,
+§3.3 .
+Liu et al. (2023a)
+H. Liu, C. Li, Q. Wu, and Y. J. Lee
+Visual instruction tuning .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: Appendix D ,
+§4.2 .
+Liu et al. (2023b)
+X. Liu, C. Gong, and Q. Liu
+Flow straight and fast: learning to generate and transfer data with rectified flow .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 ,
+§3.3 .
+Liu et al. (2023c)
+Y. Liu, D. Iter, Y. Xu, S. Wang, R. Xu, and C. Zhu
+G-eval: nlg evaluation using gpt-4 with better human alignment .
+In Proceedings of the Conference on Empirical Methods in Natural Language Processing (EMNLP) ,
+Cited by: Appendix D ,
+§4.2 .
+Madaan et al. (2023)
+A. Madaan, N. Tandon, P. Gupta, S. Hallinan, L. Gao, S. Wiegreffe, U. Alon, N. Dziri, S. Prabhumoye, Y. Yang, et al.
+Self-refine: iterative refinement with self-feedback .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: §2 .
+Nichol and Dhariwal (2021)
+A. Q. Nichol and P. Dhariwal
+Improved denoising diffusion probabilistic models .
+In Proceedings of the International Conference on Machine Learning (ICML) ,
+Cited by: §2 ,
+§3.3 .
+Oli (2026)
+N. Oli
+ManiBench: a benchmark for testing visual-logic drift and syntactic hallucinations in manim code generation .
+arXiv preprint arXiv:2603.13251 .
+Cited by: §1 ,
+§2 .
+OpenAI (2023)
+OpenAI
+GPT-4 technical report .
+arXiv preprint arXiv:2303.08774 .
+Cited by: Appendix D ,
+§4.2 .
+Qian et al. (2024)
+C. Qian, W. Liu, H. Liu, N. Chen, Y. Dang, J. Li, C. Yang, W. Chen, Y. Su, X. Cong, et al.
+ChatDev: communicative agents for software development .
+In Proceedings of the Annual Meeting of the Association for Computational Linguistics (ACL) ,
+Cited by: §2 .
+Rammuni Silva et al. (2026)
+R. S. Rammuni Silva, A. Lotfi, I. K. Ihianle, G. Shahtahmassebi, and J. J. Bird
+Large language model approaches to educational video generation using manim .
+In Advances in Computational Intelligence Systems ,
+pp. 306–317 .
+External Links: Document
+Cited by: §1 ,
+§2 .
+Schick et al. (2023)
+T. Schick, J. Dwivedi-Yu, R. Dessì, R. Raileanu, M. Lomeli, E. Hambro, L. Zettlemoyer, N. Cancedda, and T. Scialom
+Toolformer: language models can teach themselves to use tools .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: §2 .
+Shinn et al. (2023)
+N. Shinn, F. Cassano, A. Gopinath, K. Narasimhan, and S. Yao
+Reflexion: language agents with verbal reinforcement learning .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: §2 .
+Singer et al. (2023)
+U. Singer, A. Polyak, T. Hayes, X. Yin, J. An, S. Zhang, Q. Hu, H. Yang, O. Ashual, O. Gafni, et al.
+Make-a-video: text-to-video generation without text-video data .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §1 .
+Song et al. (2021a)
+J. Song, C. Meng, and S. Ermon
+Denoising diffusion implicit models .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 ,
+§3.3 .
+Song et al. (2021b)
+Y. Song, J. Sohl-Dickstein, D. P. Kingma, A. Kumar, S. Ermon, and B. Poole
+Score-based generative modeling through stochastic differential equations .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 ,
+§3.3 .
+Wang et al. (2023)
+X. Wang, J. Wei, D. Schuurmans, Q. Le, E. Chi, S. Narang, A. Chowdhery, and D. Zhou
+Self-consistency improves chain of thought reasoning in language models .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 .
+Wang et al. (2026)
+Y. Wang, R. Yang, L. Wu, J. Zhang, J. Fan, R. Fu, T. Zhou, H. Li, S. Chen, W. E, and C. Qian
+Generative teaching via code .
+arXiv preprint arXiv:2601.04204 .
+Cited by: §1 ,
+§2 .
+Wei et al. (2022)
+J. Wei, X. Wang, D. Schuurmans, M. Bosma, B. Ichter, F. Xia, E. Chi, Q. Le, and D. Zhou
+Chain-of-thought prompting elicits reasoning in large language models .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: §2 .
+Wu et al. (2023)
+Q. Wu, G. Bansal, J. Zhang, Y. Wu, B. Li, E. Zhu, L. Jiang, X. Zhang, S. Zhang, J. Liu, et al.
+AutoGen: enabling next-gen llm applications via multi-agent conversation .
+arXiv preprint arXiv:2308.08155 .
+Cited by: §2 .
+Yang et al. (2024)
+Z. Yang, Z. Zhou, S. Wang, X. Cong, H. Xu, Y. Yan, Z. Liu, Z. Tan, P. Liu, D. Yu, Z. Liu, X. Shi, and M. Sun
+MatPlotAgent: method and evaluation for llm-based agentic scientific data visualization .
+In Proceedings of the Findings of the Association for Computational Linguistics (Findings of ACL) ,
+Cited by: §2 .
+Yao et al. (2023)
+S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, and Y. Cao
+ReAct: synergizing reasoning and acting in language models .
+In Proceedings of the International Conference on Learning Representations (ICLR) ,
+Cited by: §2 .
+Zala et al. (2024)
+A. Zala, H. Lin, J. Cho, and M. Bansal
+DiagrammerGPT: generating open-domain, open-platform diagrams via llm planning .
+In Proceedings of the Conference on Language Modeling (COLM) ,
+Cited by: §2 .
+Zhang et al. (2023)
+J. Zhang, J. Guo, S. Sun, J. Lou, and D. Zhang
+LayoutDiffusion: improving graphic layout generation by discrete diffusion probabilistic models .
+In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) ,
+Cited by: §2 .
+Zheng et al. (2023a)
+G. Zheng, X. Zhou, X. Li, Z. Qi, Y. Shan, and X. Li
+LayoutDiffusion: controllable diffusion model for layout-to-image generation .
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) ,
+Cited by: §2 .
+Zheng et al. (2023b)
+L. Zheng, W. Chiang, Y. Sheng, S. Zhuang, Z. Wu, Y. Zhuang, Z. Lin, Z. Li, D. Li, E. P. Xing, et al.
+Judging llm-as-a-judge with mt-bench and chatbot arena .
+In Proceedings of the Advances in Neural Information Processing Systems (NeurIPS) ,
+Cited by: Appendix D ,
+§4.2 .
+Appendix A Agent-Level Details
+Table 5: Agent-level roles in OmniManim.
+Agent
+Reads
+Generates
+Role
+Scene Agent
+Teaching requirement, task metadata, and previous scene state
+Object set, relation set, pedagogical roles, and coarse temporal plan
+Converts the natural-language requirement into a structured scene specification.
+Vision Agent
+Scene schema, object attributes, relations, previous layouts, and temporal cues
+Sparse keyframe bounding boxes and layout constraints
+Predicts object-level spatial layouts before code synthesis to reduce overlap, overflow, and clutter.
+Code Agent
+Scene state, predicted layouts, object attributes, and temporal plan
+Executable Manim script, object-level code blocks, and animation schedule
+Converts the structured scene state into executable animation code.
+Repair Agent
+Rendered frames, execution logs, CV diagnostics, and current scene state
+Layout, code, or temporal repair actions
+Routes post-render failures to the corresponding agent for local refinement.
+Scene Agent.
+The Scene Agent parses the input teaching requirement into a structured scene specification. It extracts the instructional topic, required visual objects, semantic relations among objects, pedagogical roles, and coarse temporal ordering. Its output provides a unified semantic basis for the subsequent Vision Agent and Code Agent.
+Vision Agent.
+The Vision Agent predicts sparse keyframe layouts from the structured scene state. It reads object attributes, object relations, previous layouts, and temporal cues, and outputs normalized bounding boxes for objects at each sparse keyframe. Its purpose is to explicitly determine spatial layouts before code synthesis, thereby reducing element overlap, boundary overflow, and interpolation-time conflicts.
+Code Agent.
+The Code Agent translates the scene state and predicted layouts into executable Manim code. It does not freely decide object positions from scratch; instead, it preserves the layouts predicted by the Vision Agent. Each object bounding box is mapped to Manim coordinates and scale parameters, while the temporal plan is converted into object creation, transformation, emphasis, and removal operations.
+Repair Agent.
+The Repair Agent diagnoses rendered outputs and performs local repair. If the system detects object overlap, relation violation, or boundary overflow, the failure is routed to the Vision Agent for layout refinement. If compilation or runtime errors occur, the corresponding code block is routed to the Code Agent for revision. If the failure is caused by temporal ordering or remnant objects, the temporal plan is routed back to the Scene Agent for adjustment. This mechanism avoids regenerating the full script after each failure.
+Appendix B Vision Agent Details
+Object representation.
+Each scene object is represented as an object token containing its object type, textual content, pedagogical role, temporal status, previous-keyframe bounding box, size prior, and relation summary. Object type, pedagogical role, and temporal status are encoded with learnable embeddings. Textual content is encoded and projected into the hidden space. The previous-keyframe bounding box and size prior are encoded by two-layer MLPs, and the relation summary is obtained from relation-type embeddings and neighboring objects. The fused representation is projected to a hidden dimension of 256 256 .
+Table 6: Implementation configuration of the Vision Agent.
+Component
+Configuration
+Object token dimension
+256 256
+Categorical fields
+Learnable embeddings for object type, pedagogical role, and temporal status
+Text encoding
+Text encoder followed by a linear projection
+Geometry encoding
+Two-layer MLPs for previous-keyframe bounding box and size prior
+Relation encoding
+Aggregation over relation-type embeddings and neighboring objects
+Spatial prior branch
+Predicts 4 × 32 × 32 4\times 32\times 32 semantic-region heatmaps
+Coordinate denoiser
+Transformer-based bounding-box denoiser
+Denoising steps
+T d = 16 T_{d}=16
+Output head
+Four-dimensional bounding-box update ( Δ ​ x , Δ ​ y , Δ ​ w , Δ ​ h ) (\Delta x,\Delta y,\Delta w,\Delta h) per object
+Interpolation constraint.
+For adjacent keyframes k k and k + 1 k+1 , we approximate intermediate object trajectories by linear interpolation in normalized bounding-box space:
+b ~ i ( k → k + 1 ) ​ ( u ) = ( 1 − u ) ​ b i ( k ) + u ​ b i ( k + 1 ) , u ∈ 𝒰 . \tilde{b}_{i}^{(k\rightarrow k+1)}(u)=(1-u)b_{i}^{(k)}+ub_{i}^{(k+1)},\qquad u\in\mathcal{U}.
+We use 𝒰 = { 0.25 , 0.50 , 0.75 } \mathcal{U}=\{0.25,0.50,0.75\} in all experiments. This approximation is used to detect object collisions or occlusions that may arise between two individually valid endpoint keyframes.
+Loss weights.
+We use fixed loss weights in all experiments:
+λ 1 = 2 , λ 2 = 5 , λ 3 = 3 , λ 4 = 3 , λ 5 = 2 . \lambda_{1}=2,\qquad\lambda_{2}=5,\qquad\lambda_{3}=3,\qquad\lambda_{4}=3,\qquad\lambda_{5}=2.
+The five terms correspond to bounding-box regression, collision penalty, relation constraint, boundary constraint, and interpolation-path collision penalty, respectively. The weights are selected on the validation split and kept fixed during testing.
+Bounding-box extraction.
+For each source Manim animation, we render the script into frame sequences and sample sparse keyframes according to object creation, transformation, and removal events. Foreground regions are extracted using alpha masks when available and RGB thresholding otherwise. Candidate object regions are obtained by connected-component analysis and filtered by area and aspect ratio. Components across adjacent keyframes are matched using IoU and center-distance matching. Each retained component is converted into a normalized bounding box ( x , y , w , h ) ∈ [ 0 , 1 ] 4 (x,y,w,h)\in[0,1]^{4} .
+Appendix C Dataset Construction Details
+C.1 ManimLayout-1K
+Training the Vision Agent requires paired examples of scene specifications and ground-truth object layouts. ManimLayout-1K contains 1,000 source educational Manim animations, from which we automatically construct keyframe-level structured records. Each extracted sample contains:
+•
+Scene specification : a scene-level text description ( scene_text ), a list of objects with attributes ( id , type , content , role , status ), explicit inter-object relations (e.g., above , left_of ), and the previous keyframe layout ( prev_layout ) for temporally continuing objects.
+•
+Ground-truth layout : per-object bounding boxes { ( id i , x i , y i , w i , h i ) } i = 1 N \{(\text{id}_{i},x_{i},y_{i},w_{i},h_{i})\}_{i=1}^{N} , where all coordinates are normalized to [ 0 , 1 ] [0,1] . Object ordering is consistent with the scene specification.
+Training data is constructed from high-quality open-source Manim code repositories collected from GitHub and community tutorial sites. We curate 1,000 educational animation scripts covering diverse topics, filter them for rendering correctness and visual quality, and then extract per-keyframe object bounding boxes via automated scene parsing. This process expands the source animations into 22,579 keyframe-level (scene, layout) samples grouped under 2,968 extracted scene identifiers. For each keyframe, we record the scene graph (objects, types, roles, relations) and the rendered spatial layout. Object status labels ( new , keep , move , disappear ) are derived by comparing consecutive keyframes. The two training stages consume this data differently: Stage 1 converts ground-truth bounding boxes into soft Gaussian heatmaps for prior branch supervision, while Stage 2 uses the raw bounding boxes as denoising targets for the coordinate diffusion module.
+Dataset statistics.
+ManimLayout-1K contains 22,579 line-delimited JSON records. Each record contains at least one visual object and one ground-truth bounding box. The number of objects per keyframe ranges from 1 to 159, with a mean of 12.74 and a median of 8. The number of explicit relations per keyframe ranges from 0 to 133, with a mean of 2.28 and a median of 0, reflecting that many layout constraints are implicit in object roles and previous-frame layouts. Across all object instances, the most frequent pedagogical roles are geometric shape, group, equation, title, vector, annotation, container, main figure, coordinate system, and curve. All bounding-box coordinates are normalized to [ 0 , 1 ] [0,1] .
+Source provenance and licensing.
+For ManimLayout-1K, we only retain source animations from repositories or tutorial materials whose licenses or terms allow research use. During collection, we record the source URL, access date, repository commit when available, license identifier, and whether redistribution of the original source code is permitted. Sources with unclear, missing, or incompatible licensing are excluded. To reduce leakage risk, source animations are split at the repository/script level, and EduRequire-500 requirements are independently authored rather than copied or paraphrased from the training sources. To avoid redistributing third-party code unnecessarily, our planned release focuses on derived scene–layout metadata, normalized bounding boxes, split files, and preprocessing scripts rather than republishing original Manim source files. The complete provenance table is maintained for auditability and will be released to the extent permitted by the corresponding licenses and terms of use.
+C.2 EduRequire-500
+Each evaluation instance is a structured record containing:
+•
+ID : A unique identifier for reproducible referencing and cross-system comparison.
+•
+Requirement : A natural language description specifying the desired visual content, including the target concept, expected visual elements, layout constraints, and pedagogical intent (e.g., “Animate the derivation of the quadratic formula with step-by-step equation transformations”).
+•
+Task type : A categorical label describing the pedagogical operation required by the prompt, such as concept explanation, problem solving, mathematical derivation, proof, algorithm design, data analysis, or system analysis.
+•
+Discipline : A categorical label indicating the subject domain (algebra, geometry, calculus, physics, statistics), enabling fine-grained cross-domain analysis.
+All requirements are authored by domain experts from the corresponding subjects, ensuring realistic instructional intent, appropriate difficulty calibration, and subject-specific terminology. The benchmark contains 500 tasks spanning a diverse range of complexity levels, from elementary visual demonstrations to multi-step mathematical derivations, with broad coverage across core school subjects and specialized university-level topics.
+Dataset statistics.
+EduRequire-500 contains 500 JSON records with unique integer IDs from 1 to 500. The benchmark covers 120 subject labels and 16 task types. The most frequent task types are problem solving (129 tasks), concept explanation (118), mathematical derivation (68), algorithm design (65), system analysis (29), system design (19), data analysis (18), proof (14), and literature analysis (13), with the remaining 27 tasks covering translation, reading comprehension, reaction mechanisms, grammar correction, syntax rewriting, protocol analysis, and pathway analysis. Requirement descriptions contain 21.66 words on average, with a median of 22 and a range from 12 to 33 words.
+Task examples and difficulty.
+Table 7 shows representative requirements sampled from EduRequire-500. The expected visual elements are descriptive annotations used to clarify what a Manim animation would naturally need to instantiate; they are not additional input fields given to the generation systems. Difficulty labels are assigned according to a fixed rubric before system evaluation, based on task type, subject level, number of reasoning steps, and expected visual/narrative complexity. They are used only for descriptive analysis and benchmark breakdowns; they are not provided to any generation system during evaluation. Under this rubric, EduRequire-500 contains 132 easy tasks (26.4%), 246 medium tasks (49.2%), and 122 hard tasks (24.4%).
+Table 7: Representative EduRequire-500 task examples. Requirements are taken from the benchmark; visual elements and difficulty labels summarize the expected animation structure for descriptive analysis.
+Task type
+Example requirement
+Expected visual elements
+Difficulty
+Concept explanation
+State Newton’s Third Law of Motion and identify three distinct macroscopic phenomena that physically demonstrate action-reaction pairs.
+paired force arrows, interacting objects, short labels
+Easy
+Problem solving
+Calculate the total flight time, horizontal displacement, and final velocity vector for a projectile launched horizontally from a 1.8m platform at 3m/s.
+coordinate axes, parabolic trajectory, velocity vectors, equations
+Medium
+Mathematical derivation
+Derive the differential form of the continuity equation for a compressible fluid using mass conservation within a control volume.
+control volume, flux arrows, density terms, equation transformations
+Medium
+Proof
+Formulate a rigorous proof of the Law of Cosines using vector dot products within a two-dimensional Cartesian coordinate framework.
+triangle, coordinate axes, vectors, angle labels, algebraic steps
+Medium
+Data analysis
+Analyze an acid-base titration curve for a weak acid and strong base, identifying the buffer region, equivalence point, and appropriate indicator selection.
+titration curve, highlighted regions, labeled points, indicator marker
+Medium
+Literature analysis
+Analyze the strategic use of environmental description to reflect the protagonist’s psychological isolation and societal critique in Lu Xun’s A Madman’s Diary .
+scene panels, character-state labels, environmental motifs, theme arrows
+Medium
+System analysis
+Calculate the inverse Jacobian matrix for a serial manipulator and evaluate the manipulability ellipsoid to identify and resolve kinematic singularities.
+robot arm, joint frames, matrix blocks, ellipsoid, singular state
+Hard
+Experiment Details.
+To ensure reproducibility, we construct the training, validation, and test sets for the Vision Agent using a deterministic grouped split at the source-animation level, so that temporally adjacent keyframes from the same source animation are not assigned to different subsets. After keyframe decomposition, the resulting corpus contains 22,579 samples, of which 17,773, 2,681, and 2,125 are used for training, validation, and testing, respectively. The Vision Agent is trained in two stages. In both stages, we use AdamW with batch size 4 4 , learning rate 1 × 10 − 4 1\times 10^{-4} , weight decay 1 × 10 − 4 1\times 10^{-4} , and 20 20 epochs. The hidden dimension is fixed to 256 256 , and the coordinate denoising module uses 16 16 diffusion steps. During requirement parsing, the Scene Agent follows a fixed structured output template with decoding temperature set to 0.0 0.0 , and is restricted to producing only the necessary fields for scene text, object set, object relations, and previous-layout information; the relation vocabulary is limited to left_of , above , and inside , so that it remains consistent with the subsequent layout optimization and repair process. In the second training stage, the prior branch is kept fixed, and only the scene encoder and diffusion denoiser are updated. At inference time, at most one round of repair is allowed. A layout is accepted as valid only when
+L coll ≤ 0.02 , L rel ≤ 0.15 , L bound ≤ 0.01 . L_{\mathrm{coll}}\leq 0.02,\qquad L_{\mathrm{rel}}\leq 0.15,\qquad L_{\mathrm{bound}}\leq 0.01.
+These thresholds are used consistently for both repair termination and final layout validation.
+Compute resources.
+We train the Vision Agent on 4 NVIDIA GeForce RTX 3090 GPUs with 24 GiB memory each, using an internal server equipped with 8 GPUs in total. The server has an Intel Xeon Gold 6240C CPU at 2.60GHz with 72 CPU threads and 251 GiB RAM. The two-stage training takes approximately 43.5 hours in total, including 1.6 hours for Stage 1 and 41.9 hours for Stage 2. The Vision-Agent training environment uses Python 3.7.6, PyTorch 1.13.0+cu117, and NumPy 1.18.1; end-to-end generation and rendering use the Python 3.12 and Manim 0.19.0 environment described in the main evaluation protocol.
+C.3 Code and Data Release
+For this preprint, we document the data format, annotation conventions, provenance policy, and evaluation protocol in the appendix. A representative data package may be provided separately as ancillary material, containing a subset of ManimLayout-1K and the full EduRequire-500 benchmark together with README and schema documentation. The ManimLayout-1K subset contains derived scene–layout JSONL records and normalized bounding boxes, without redistributing original third-party Manim source code or source identifiers. The EduRequire-500 file contains evaluation requirements and task metadata used by our protocol. These files are intended to make the record format, task diversity, and annotation conventions inspectable.
+To support reproducibility beyond the paper text, we intend to release the main research artifacts subject to the provenance and licensing constraints described above. Specifically, the release is planned to include: (1) the full evaluation toolkit, including the CV-based metric implementation, VLM judging prompts, and result aggregation scripts; (2) the training code for the Vision Agent and the end-to-end OmniManim pipeline; and (3) both datasets introduced in this work, namely ManimLayout-1K and EduRequire-500 , together with data documentation and preprocessing instructions. Dataset release will follow the provenance and licensing policy described above, and we will provide environment specifications and usage instructions so that the reported experiments can be reproduced from the released assets.
+Appendix D VLM Evaluation Details
+Following common VLM-as-judge protocols [ OpenAI, 2023 , Liu et al., 2023a , Zheng et al., 2023b , Liu et al., 2023c ] , we use Claude Opus 4.6 as the vision-language evaluator with deterministic decoding. Evaluation proceeds in three stages, each requiring structured JSON output:
+Stage 2a: Overlap Review.
+For each CV-flagged suspicious segment, we send three keyframes (start, mid, end) along with the CV overlap metrics. The VLM classifies each segment as PASS , FAIL , or INTENTIONAL (e.g., deliberate layering), returning a confidence score and severity rating.
+Stage 2b-1: Task Correctness.
+We send uniformly sampled keyframes from the full video together with the teaching plan and original requirement. The VLM evaluates three dimensions: Content Accuracy (binary pass/fail per example, averaged over the benchmark for reporting), Pedagogical Clarity (0–100, normalized to [ 0 , 1 ] [0,1] ), and Engagement (0–100, normalized to [ 0 , 1 ] [0,1] ).
+Stage 2b-2: Overlap Keyframe Review.
+Uniformly sampled keyframes from the full video are sent to the VLM for per-frame overlap inspection, complementing the CV-based detection with semantic understanding of intentional versus accidental overlap.
+Stage 2b-3: Visual Coverage.
+The VLM checks each section of the teaching plan against the video keyframes to verify that all planned content is visually represented.
+All evaluation prompts are fixed across methods. We verified inter-run consistency by re-evaluating a random 10% subset, observing a mean absolute deviation below 0.03.
+Appendix E CV-Based Metric Computation
+The CV-based metrics are computed from rendered video frames and are designed to capture common visual failures in Manim animations. We uniformly sample rendered frames at 2 fps. The formulas below define per-video scores when a render is available; rendering success itself is reported separately by R@1 and R@F. If CV processing fails for a rendered video, that video is excluded from CV-score aggregation. For each method, the reported CV score is obtained by first computing a score for each valid rendered video and then averaging over repeated executions and benchmark tasks. All scores are clipped to [ 0 , 1 ] [0,1] , and larger values consistently indicate better visual quality.
+Overlap.
+We employ four complementary detection methods, any of which can trigger an overlap flag:
+1.
+HSV mask analysis : Frames are converted to HSV. We extract text masks (low saturation, high value), solid-color masks (high saturation), and dark masks (low value). Inter-frame change pixels are identified where RGB Euclidean distance ≥ 16 \geq 16 . Occlusion is detected as change ∩ \cap dark ∩ \cap previous-solid; text-on-shape overlap as change ∩ \cap text ∩ \cap previous-solid.
+2.
+Bounding-box IoU : Grayscale thresholding (threshold = 30 =30 ) extracts foreground, followed by connected component analysis. For each component pair, IoU ≥ 0.20 \geq 0.20 or overlap ratio ≥ 0.35 \geq 0.35 triggers a detection.
+3.
+Pixel-level foreground overlap : Each connected component is dilated ( 3 × 3 3\times 3 kernel). Pixels covered by ≥ 2 \geq 2 dilated components are counted as overlap pixels.
+4.
+Text-line crossing : Erosion ( 7 × 7 7\times 7 ) separates thick foreground (text) from thin foreground (lines/arrows). Their intersection area is measured.
+For each sampled frame, we record both the size and duration of detected overlap failures. Let p ratio p_{\text{ratio}} denote the mean clipped fraction of foreground pixels that belong to detected overlap regions, p fail p_{\text{fail}} denote the fraction of sampled frames in which at least one overlap detector fires, and p duration p_{\text{duration}} denote the fraction of video duration covered by contiguous overlap-flagged intervals. The final overlap score fuses these three penalties:
+score overlap = max ⁡ ( 0 ,  1.0 − 0.40 ⋅ p ratio − 0.35 ⋅ p fail − 0.25 ⋅ p duration ) . \text{score}_{\text{overlap}}=\max\!\big(0,\;1.0-0.40\cdot p_{\text{ratio}}-0.35\cdot p_{\text{fail}}-0.25\cdot p_{\text{duration}}\big).
+(1)
+By construction, higher values indicate cleaner scenes with fewer overlap failures.
+Layout.
+We use a reference-free grid-based density analysis. Each frame is divided into a 6 × 8 6\times 8 grid. Let ρ t , c \rho_{t,c} be the foreground-pixel density of cell c c in sampled frame t t . A cell is marked as dense when ρ t , c ≥ 0.60 \rho_{t,c}\geq 0.60 , and the video-level dense-cell ratio is
+dense_frame_ratio = 1 T ∑ t = 1 T 1 48 ∑ c = 1 48 𝕀 [ ρ t , c ≥ 0.60 ] . \text{dense\_frame\_ratio}=\frac{1}{T}\sum_{t=1}^{T}\frac{1}{48}\sum_{c=1}^{48}\mathbb{I}[\rho_{t,c}\geq 0.60].
+(2)
+The layout score is:
+score layout = 1.0 − min ⁡ ( 1.0 , dense_frame_ratio /  0.40 ) \text{score}_{\text{layout}}=1.0-\min\!\big(1.0,\;\text{dense\_frame\_ratio}\,/\,0.40\big)
+(3)
+Higher values indicate better spatial organization and less local overcrowding.
+Animation Continuity.
+Rather than optical flow, we use lightweight motion-based metrics: (1) inter-frame motion detection (pixels with RGB distance ≥ 12 \geq 12 ); (2) centroid jitter (standard deviation of foreground centroid positions within each segment); (3) motion discontinuity (energy jumps exceeding 10 × 10\times the median); and (4) flicker events (rapid changes in connected component count). Let p disc p_{\text{disc}} be the fraction of adjacent-frame transitions flagged for discontinuous motion or excessive centroid jitter, and let p flash p_{\text{flash}} be the fraction of transitions flagged for flicker-like component changes. The continuity score is:
+score cont = max ⁡ ( 0 ,  1.0 − 0.6 ⋅ p disc − 0.4 ⋅ p flash ) . \text{score}_{\text{cont}}=\max\!\big(0,\;1.0-0.6\cdot p_{\text{disc}}-0.4\cdot p_{\text{flash}}\big).
+(4)
+Visual Consistency.
+This metric measures frame-to-frame stability of rendered appearance and rendering state, rather than motion smoothness. We combine three event ratios. First, p palette p_{\text{palette}} measures abrupt appearance shifts: for each frame, we compute a 64 × 64 64\times 64 -bin hue-saturation histogram in HSV space, and an adjacent-frame Chi-Square distance ≥ 0.15 \geq 0.15 counts as a palette-shift event. Second, p fg p_{\text{fg}} measures foreground-state jumps: foreground masks are extracted from sampled frames, and adjacent frames are flagged when foreground area or connected-component count changes abruptly. Third, p artifact p_{\text{artifact}} measures rendering artifacts such as near-blank frames, sudden global brightness flashes, or unexpected foreground disappearance. The visual-consistency score is:
+score vis = max ⁡ ( 0 ,  1.0 − 0.40 ​ p palette − 0.30 ​ p fg − 0.30 ​ p artifact ) . \text{score}_{\text{vis}}=\max\!\big(0,\;1.0-0.40\,p_{\text{palette}}-0.30\,p_{\text{fg}}-0.30\,p_{\text{artifact}}\big).
+(5)
+Higher values indicate more stable palette, foreground structure, and rendering state across frames.
+E.1 Metric Scope and Limitations
+The CV metrics are intended to measure recurring render-level failures that are central to our evaluation setting: spatial collision, local overcrowding, unstable motion, and abrupt visual inconsistency. They complement the VLM and human evaluations, but they are not a substitute for expert judgment about pedagogy, factual correctness, or aesthetic style. Reported instructional-presentation and engagement gains should therefore be interpreted within EduRequire-500 and our rating protocol rather than as universal measures of instructional quality. OmniManim is designed around code-centric Manim animations; its behavior in open-domain video generation or highly stylized production settings may differ. The current Vision Agent operates at the object-bounding-box level, which directly supports layout repair but does not fully model typography, fine-grained graphic design, or cinematic effects. Longer-horizon temporal dependencies also remain challenging for extended animations. Finally, the multi-stage planning, visual grounding, and repair pipeline improves reliability at the cost of additional token usage, although the wall-clock overhead is partly offset by parallel execution.
+Appendix F Human Evaluation Details
+This appendix documents the full protocol for the human evaluation
+reported in the main paper.
+F.1 Recruitment
+We recruit 20 undergraduate students enrolled in full-time programs at
+multiple universities.
+The participants collectively cover nine academic disciplines: theoretical and applied mechanics, environmental science,
+automation, computer science, industrial design, cybersecurity,
+materials science, electronic information engineering, and biological
+science. Participants were recruited through open voluntary calls
+within student communities. No participant had prior involvement with
+the development of OmniManim or any of the baseline systems.
+F.2 Task Selection and Assignment
+We select 60 tasks from EduRequire-500 using stratified sampling across
+the nine disciplines. Each task is assigned to four raters whose majors
+are closest to the task’s discipline whenever possible, so that
+participants judge content within their domain of familiarity while
+providing multiple independent assessments per task. Each participant
+evaluates 12 tasks; in total, this yields 240 task-rater assignments.
+For each selected task, each method generates one video. In each
+task-rater assignment, the rater scores the three method outputs
+(OmniManim, GPT-5.4, and Code2Video), yielding 240 individual ratings
+per method per dimension and four independent ratings for each
+task-method pair.
+F.3 Rubric
+For each task, participants are shown the educational requirement,
+watch the three rendered videos in full, and assign a score in
+[ 0,100 ] [0,100] on each of the following seven dimensions (translated from
+the original Chinese instructions):
+•
+CA — 0 = severely off-topic; 100 = fully on-topic .
+•
+PC — 0 = not understandable; 100 = very clear .
+•
+EN — 0 = very dull; 100 = very engaging .
+•
+OV — 0 = severe overlap; 100 = almost no overlap .
+•
+LQ — 0 = chaotic; 100 = well-coordinated .
+•
+AC — 0 = very choppy; 100 = very smooth .
+•
+VC — 0 = highly inconsistent; 100 = fully consistent .
+All dimensions are phrased so that higher scores indicate better
+quality.
+F.4 Presentation and Supervision
+Evaluation sessions are conducted over Tencent Meeting with the
+participant’s screen visible to a supervisor. For each task the
+supervisor shares the educational requirement, the participant watches
+the three rendered videos in full without skipping, and then fills in
+the scoring spreadsheet for all seven dimensions across the three
+videos. The supervisor’s role is limited to confirming that each video
+is watched to completion before scoring; no feedback is provided on
+scores. Participants may re-watch videos before finalizing their
+scores.
+F.5 Blinding and Presentation Order
+Videos are presented with anonymized filenames
+( video_A.mp4 , video_B.mp4 , video_C.mp4 ),
+and the filename-to-method mapping is independently randomized per
+task. Participants are informed that three different systems produced
+the videos but are not told which video corresponds to which system.
+F.6 Compensation
+Each participant received 100 RMB for participation. Compensation was
+paid via mobile transfer after the session, irrespective of the scores
+provided.
+F.7 Consent and Anonymity
+All participation was voluntary. Participants were informed of the
+study purpose, approximate duration, compensation, and their right to
+withdraw at any time without consequence. Scoring records contain no
+personally identifiable information; participants are referred to by
+numerical IDs. The study collects no personal data beyond major and
+institutional affiliation and poses no foreseeable risk; under our
+institutional guidelines such minimal-risk anonymous studies do not
+require formal IRB review. The study adheres to the NeurIPS Code of
+Ethics.
+F.8 Data Handling
+All 20 participants submitted complete scores, yielding 240 task-rater
+records and four independent ratings for each task-method pair. Three
+cells in the VC column contained free-text comments appended to the
+numerical score; comments are preserved for qualitative analysis, and
+the numerical component is extracted for quantitative analysis.
+F.9 Statistical Analysis
+For each task t t , method m m , and dimension d d , the four independent
+rater scores are first averaged into a task-level method score:
+s ¯ t , m , d = 1 4 ​ ∑ r = 1 4 s t , r , m , d . \bar{s}_{t,m,d}=\frac{1}{4}\sum_{r=1}^{4}s_{t,r,m,d}.
+The main human-evaluation table reports means over the 60 task-level scores
+s ¯ t , m , d \bar{s}_{t,m,d} . For pairwise comparisons between methods A A and
+B B , we compute task-level paired differences
+Δ t , d ( A , B ) = s ¯ t , A , d − s ¯ t , B , d , \Delta_{t,d}^{(A,B)}=\bar{s}_{t,A,d}-\bar{s}_{t,B,d},
+where A A denotes OmniManim in the comparisons reported in
+the main human-evaluation table. Paired Wilcoxon signed-rank tests are then
+computed over the 60 matched task-level differences, using the
+wilcox zero-handling convention. 95% confidence intervals on
+mean differences are computed by non-parametric bootstrap over tasks
+with 3,000 resamples. Friedman tests across the three methods are
+computed per dimension using the same task-level means. No correction
+for multiple comparisons is applied; we report raw p p -values and
+encourage readers to consider the full pattern of results. Code to
+reproduce all analyses from the anonymized scoring spreadsheet is
+included in the
+supplementary material.
+F.10 Limitations of the Human Evaluation
+(i) Raters are undergraduate students rather than professional
+educators; expert assessment of instructional presentation remains
+future work. (ii) Although each task receives four independent ratings,
+the study is still limited to 60 tasks and may be underpowered for small
+effects.
+Appendix G Additional Visual Materials
