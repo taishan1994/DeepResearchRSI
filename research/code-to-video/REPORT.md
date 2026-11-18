@@ -165,6 +165,20 @@ document_id 猜文件名」的兜底逻辑，而本归档的虚线/点线差异�
 从 PAPER.md 的「参考文献」章生成，已经含 18 条文献；而 `main.tex` 又 `\input` 了
 `references.tex`。去掉后 9 页、X1 达标。
 
+### 5.8 逐工作的框架图：为什么并置而不单画
+
+用户要求「每一个都说明框架结构」。初版只有 4 张通用框架图（闭环、记忆、真值、失败），
+覆盖了机制类型却没覆盖到工作个体——这是真实缺口，故补 6 张（图 9–14），
+按机制分组、每组并置两个工作。
+
+并置的理由是单画看不出东西：把 ManimTrainer 与 ManimAgent 放在一起，才看得清
+「改权重」与「改记忆」是两条正交路线；把 SceneCraft 与 LogoMotion 放在一起，
+才看得出「先结构」与「先可改」是两种价值取向，而非同一目标下的不同实现。
+
+框架图全部按 method 章节的文字自绘，不转载原图。原因有二：本模型无法读图，
+无法核对嵌入的原图是否与原文一致；且投稿复用他人原图有版权问题。
+代价是示意图只保留拓扑，不保留原图的视觉细节——这一点在正文图注里已声明。
+
 ---
 
 ## 6. 缺口（为什么 stop_reason 是 gap_remaining）
@@ -191,13 +205,13 @@ research/code-to-video/
   documents/              18 篇 arXiv HTML 全文纯文本（34–155 KB）
   paper/
     PAPER.md              10 章 + 摘要 + 参考文献 + 附录 A
-    paper.json            8 图 2 表的声明与 cites
+    paper.json            16 图 2 表的声明与 cites
     make_data.py          data/ 与 tables/ 的生成
-    make_figures.py       4 张实验图 + 4 张框架图
+    make_figures.py       4 张实验图 + 12 张框架图
     data/                 4 个 csv（fig1..fig4）
     tables/               3 个 csv（tab1 主表 / tab2 优缺点 / tab3 口径）
-    figures/              8 张 PNG
-    latex/                main.tex / body.tex / references.tex / main.pdf（9 页）
+    figures/              16 张 PNG
+    latex/                main.tex / body.tex / references.tex / main.pdf（12 页）
 ```
 
 校验状态：
@@ -205,7 +219,7 @@ research/code-to-video/
 | 检查 | 结果 |
 |---|---|
 | `validate_research.py` | 通过：18/35/28，C1 违反 0，E1 校验 35 无不可验证 |
-| `audit_paper.py` | 通过：引用主张 28 个，图 8 张，表 2 张，数值回溯 16 条 |
-| `check_paper.py` | FAIL 0 / WARN 0 |
-| `check_latex.py` | FAIL 0 / WARN 0，9 页，无溢出无缺字 |
+| `audit_paper.py` | 通过：引用主张 28 个，图 16 张，表 2 张，数值回溯 16 条 |
+| `check_paper.py` | FAIL 0 / WARN 0，图编号 1..16 连续 |
+| `check_latex.py` | FAIL 0 / WARN 0，12 页，无溢出无缺字 |
 | `check_layout.py` | FAIL 0 / WARN 1（L7 单词碎片，非问题） |
